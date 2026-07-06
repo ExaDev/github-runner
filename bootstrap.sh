@@ -15,6 +15,12 @@ log() { echo "==> $*"; }
 
 lowercase() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# ---- 0. Load config (must happen before docker compose up, which needs
+# K3S_TOKEN from this file - Compose does not read .env.arc automatically,
+# only a default-named .env, so it must be in the shell environment first) --
+# shellcheck source=/dev/null
+source .env.arc
+
 # ---- 1. Bring up k3s -------------------------------------------------------
 log "Starting k3s..."
 docker compose up -d
@@ -96,10 +102,7 @@ install_org() {
     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 }
 
-# ---- 4. Load config and install each org -----------------------------------
-# shellcheck source=/dev/null
-source .env.arc
-
+# ---- 4. Install each org ---------------------------------------------------
 if [ -z "${EXADEV_APP_INSTALLATION_ID:-}" ]; then
   log "Resolving ExaDev App installation ID..."
   EXADEV_APP_INSTALLATION_ID=$(resolve_installation_id "$EXADEV_APP_ID" "$EXADEV_APP_PRIVATE_KEY_PATH" "ExaDev")
