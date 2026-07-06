@@ -1,0 +1,32 @@
+name: build-runner-image
+
+# Builds and pushes the custom ARC runner pod image. Runs on GitHub-hosted
+# ubuntu-latest deliberately - building the runner fleet's own image on the
+# runner fleet itself would be circular.
+on:
+  push:
+    branches: [main]
+    paths: [Dockerfile, .github/workflows/build-runner-image.yml]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: ghcr.io/exadev/github-runner:latest

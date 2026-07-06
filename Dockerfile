@@ -1,33 +1,29 @@
-FROM catthehacker/ubuntu:act-latest
+# Custom ARC runner pod image. Based on the official actions-runner image
+# (not catthehacker/ubuntu:act-latest, which was the old myoung34-based
+# design's base) - ARC's gha-runner-scale-set chart supplies its own
+# registration/entrypoint flow, so this only needs to layer ExaDev's actual
+# toolchain requirements on top, never touch the base image's runner
+# user/workdir setup, and never set its own ENTRYPOINT/CMD - the Helm
+# chart's pod template supplies `command: ["/home/runner/run.sh"]` itself.
+FROM ghcr.io/actions/actions-runner:latest
 
-ARG TARGETPLATFORM=linux/arm64
+USER root
 ENV DEBIAN_FRONTEND=noninteractive
-ENV AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        gosu jq curl openssl ca-certificates \
-        gcc-11 g++-11 \
-        unzip \
+        gcc-11 g++-11 unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Bun (JS runtime), installed system-wide
 RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
 
-RUN groupadd -f docker \
-    && useradd -m -s /bin/bash -G docker,sudo runner \
-    && mkdir -p /opt/hostedtoolcache /_work /actions-runner
+# GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /actions-runner
-COPY install_actions.sh .
-RUN chmod +x install_actions.sh \
-    && GH_RUNNER_VERSION=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name | ltrimstr("v")') \
-    && ./install_actions.sh "${GH_RUNNER_VERSION}" "${TARGETPLATFORM}" \
-    && rm install_actions.sh \
-    && chown -R runner:runner /_work /actions-runner /opt/hostedtoolcache
-
-COPY token.sh entrypoint.sh app_token.sh /
-RUN chmod +x /token.sh /entrypoint.sh /app_token.sh
-
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["./bin/Runner.Listener", "run", "--startuptype", "service"]
+USER runner

@@ -1,4 +1,6 @@
 .env.*
 !.env.*.example
 *.pem
+secrets/
+kubeconfig/
 .DS_Store

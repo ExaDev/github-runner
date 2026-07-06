@@ -1,49 +1,53 @@
 # ExaDev GitHub Actions Runner
 
-Self-hosted GitHub Actions runner for the ExaDev org, running natively on Apple Silicon (arm64) via Docker Compose. It aims to approximate GitHub's hosted `ubuntu-latest` runner as closely as practical, rather than reimplementing runner registration from scratch.
+Self-hosted GitHub Actions runner fleet for the ExaDev org, running on Apple Silicon (arm64) via GitHub's own [Actions Runner Controller](https://github.com/actions/actions-runner-controller) (ARC) on a single-node Kubernetes cluster. ARC gives genuinely ephemeral, autoscaling runners natively - no custom scripts for either concern.
 
 **This repo is unrelated to `~/github-runner` on this same machine.** That directory is an earlier, deprecated attempt and is broken; nothing here reuses its code, config, or containers. Do not look there for context on this setup.
 
-## Fidelity tradeoff
+## Why Kubernetes/ARC instead of a plain Docker Compose fleet
 
-GitHub's real `ubuntu-latest` image is VM-shaped: it depends on systemd and a full boot sequence, and GitHub's own [runner-images](https://github.com/actions/runner-images) maintainers have said it cannot be faithfully containerized. Rather than fight that, this repo runs jobs inside [`catthehacker/ubuntu:act-latest`](https://github.com/catthehacker/docker_images), the [nektos/act](https://github.com/nektos/act) project's arm64-native approximation of the hosted image (roughly 500MB).
+An earlier version of this repo ran a fixed number of long-lived containers via Docker Compose, cycling the GitHub runner *registration* between jobs (`EPHEMERAL=true`) but never resetting the container's own filesystem. Two real problems followed from that:
 
-The alternative, `catthehacker/ubuntu:full-latest`, is a much closer software match to the real hosted image but is amd64-only and roughly 75GB, which on Apple Silicon means running everything under emulation. For day-to-day CI that tradeoff isn't worth it, so `act-latest` is the default here. If a workflow needs something only `full-latest` provides, that's a deliberate exception to make per-workflow, not the baseline.
+1. **No true ephemerality.** Build artifacts, `node_modules`, and Playwright browser caches accumulated indefinitely across jobs inside the same container, filling the host's entire Docker disk allocation.
+2. **No autoscaling.** A fixed replica count meant real queueing whenever more jobs were in flight than there were replicas, with no way to burst beyond it.
 
-Runner registration itself, org scoping, GitHub App installation-token refresh, and ephemeral re-registration, is vendored from [myoung34/docker-github-actions-runner](https://github.com/myoung34/docker-github-actions-runner) rather than reimplemented here. That project already solves the fiddly parts of talking to GitHub's runner API correctly; this repo just wraps it in an image and compose setup tuned for arm64 and for ExaDev.
+ARC's `gha-runner-scale-set` is ephemeral by design (one fresh pod per job, deleted after) and autoscales on queue depth - both problems solved by the tool itself, not by anything bespoke here. It needs a real Kubernetes cluster to run in, but [k3s ships an official Docker image](https://hub.docker.com/r/rancher/k3s) that runs the whole control plane + kubelet inside one privileged container - a well-established "cluster in a box" pattern. That's what makes the whole setup **exactly one service in `docker-compose.yml`**, portable to any machine with Docker (plus `helm`/`kubectl` on the host to drive it) - no Colima-specific flags, no separately-installed `kind`/`k3d` CLI.
+
+The custom runner toolchain (GCC 11/G++ for C++20, Bun, the `gh` CLI) carries over from the previous design, rebased onto ARC's own [`actions/actions-runner`](https://github.com/actions/runner/pkgs/container/actions-runner) base image instead of `catthehacker/ubuntu:act-latest` - ARC's runner pods use their own registration flow, so the previous design's vendored [myoung34/docker-github-actions-runner](https://github.com/myoung34/docker-github-actions-runner) scripts (registration, GitHub App JWT signing, ephemeral re-registration) are no longer needed at all.
 
 ## Setup
 
-1. **Create a GitHub App** on the ExaDev org with **Self-hosted runners: read & write** permission, and install it on the org.
-2. **Configure the environment.** Copy `.env.exadev.example` to `.env.exadev` and fill in:
-   - `APP_ID` - the GitHub App's ID
-   - `APP_PRIVATE_KEY` - the App's PEM private key
-   - `APP_LOGIN=ExaDev`
-3. **Build the image.**
+1. **Create a GitHub App** on the ExaDev org with **Self-hosted runners: read & write** permission, and install it on the org (the same App from the previous design can be reused).
+2. **Configure the environment.** Copy `.env.arc.example` to `.env.arc` and fill in:
+   - `K3S_TOKEN` - any random string (`openssl rand -hex 32`), used only for node-join auth inside the cluster
+   - `EXADEV_APP_ID`, `EXADEV_APP_PRIVATE_KEY_PATH` (a PEM file path, e.g. under `./secrets/`, already gitignored)
+   - `EXADEV_APP_INSTALLATION_ID` - optional; `bootstrap.sh` resolves it automatically from the App ID and key if left blank
+   - `GHCR_PULL_USERNAME`, `GHCR_PULL_TOKEN` - a GHCR personal access token (`read:packages`) to pull the private runner image
+3. **Build and push the runner image** (via `.github/workflows/build-runner-image.yml`, runs on GitHub-hosted `ubuntu-latest` - building the fleet's own image on the fleet itself would be circular) or build it locally for testing: `docker build -t ghcr.io/exadev/github-runner:latest .`
+4. **Bootstrap everything**:
    ```bash
-   docker compose build
+   ./bootstrap.sh
    ```
-4. **Start runners.**
-   ```bash
-   docker compose up -d --scale exadev=2
-   ```
-   Adjust the replica count to however many concurrent runners you want registered.
+   This starts k3s, waits for it to be ready, installs the ARC controller, resolves the App installation ID if needed, creates the GitHub App and GHCR pull secrets, and installs the ExaDev runner scale set. Safe to rerun any time - e.g. after rotating the App's private key.
 
 ## Adding another org
 
-The Dockerfile and image are org-agnostic; everything org-specific lives in the env file and the compose service block. To register runners for a second org:
+The controller install is shared (it watches all namespaces by default). Adding a second org is additive, not a change to anything existing:
 
-1. Copy `.env.exadev.example` to `.env.<neworg>` and fill in that org's App credentials.
-2. Add a new service block to `docker-compose.yml` for `<neworg>`, pointing it at `.env.<neworg>` via `env_file`.
-3. Start it:
-   ```bash
-   docker compose up -d <neworg>
-   ```
+1. Copy `.env.arc.example` to `.env.<neworg>` and fill in that org's App credentials.
+2. Add a `values/<neworg>-runners-values.yaml` (copy `values/exadev-runners-values.yaml` as a starting point).
+3. Add an `install_org` call for `<neworg>` at the bottom of `bootstrap.sh`, sourcing `.env.<neworg>`.
 
-No changes to the Dockerfile, the existing ExaDev service, or any other org's config are needed.
+No changes to the Dockerfile, the controller install, or any other org's release are needed.
 
 ## Verification
 
-After `docker compose up`, confirm the runners registered under the org's **Settings > Actions > Runners**. Each should show as online with labels `self-hosted`, `linux`, `arm64`, `act-latest`, `node-b`.
+```bash
+kubectl get nodes                              # one Ready node
+kubectl get pods -n actions-runner-controller  # controller pod Running
+kubectl get pods -n arc-runners-exadev          # listener pod Running - zero runner pods when idle is expected, not a bug
+```
 
-Runners are started with `EPHEMERAL=true`, so each container handles exactly one job and then de-registers; Docker Compose immediately restarts the container, which re-registers a fresh one-shot runner. A steady turnover of runner names in the org's runner list (rather than the same names persisting indefinitely) is expected behaviour, not a bug.
+The ExaDev org's **Settings > Actions > Runners** shows the runner scale set itself, rather than individual long-lived runner names the way the previous design did - ARC's ephemeral runners don't persist between jobs, so there's nothing to list when idle.
+
+To confirm ephemeral-pod-per-job is actually working: trigger a real workflow and watch `kubectl get pods -n arc-runners-exadev -w` - a pod should appear only once a job is queued, run to completion, and be deleted within seconds. Unlike the previous design, no disk usage should accumulate on the k3s container/host across repeated runs.
