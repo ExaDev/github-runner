@@ -1,0 +1,8 @@
+services:
+  exadev:
+    build:
+      context: .
+      args:
+        TARGETPLATFORM: linux/arm64
+    env_file: .env.exadev
+    restart: always
