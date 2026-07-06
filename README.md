@@ -44,10 +44,20 @@ No changes to the Dockerfile, the controller install, or any other org's release
 
 ```bash
 kubectl get nodes                              # one Ready node
-kubectl get pods -n actions-runner-controller  # controller pod Running
-kubectl get pods -n arc-runners-exadev          # listener pod Running - zero runner pods when idle is expected, not a bug
+kubectl get pods -n actions-runner-controller  # controller pod AND the scale set's listener pod both run here
+kubectl get pods -n arc-runners-exadev          # zero runner pods when idle is expected, not a bug
 ```
 
 The ExaDev org's **Settings > Actions > Runners** shows the runner scale set itself, rather than individual long-lived runner names the way the previous design did - ARC's ephemeral runners don't persist between jobs, so there's nothing to list when idle.
 
-To confirm ephemeral-pod-per-job is actually working: trigger a real workflow and watch `kubectl get pods -n arc-runners-exadev -w` - a pod should appear only once a job is queued, run to completion, and be deleted within seconds. Unlike the previous design, no disk usage should accumulate on the k3s container/host across repeated runs.
+To confirm ephemeral-pod-per-job is actually working: run `.github/workflows/test-arc-runner.yml` (`gh workflow run test-arc-runner.yml`) and watch `kubectl get pods -n arc-runners-exadev -w` - a pod should appear only once the job is queued, run to completion, and be deleted within seconds. Unlike the previous design, no disk usage should accumulate on the k3s container/host across repeated runs (`colima ssh -- df -h /mnt/lima-colima` should stay flat).
+
+## Heartbeat: how `runner-fallback-action` knows this fleet is healthy
+
+ARC's autoscaling means there is normally **no pre-existing "online runner"** to check the way the previous design's fallback logic did (query `/orgs/{org}/actions/runners` for an online match) - with `minRunners: 0`, pods only exist while a job is actually running. To still support falling back to `ubuntu-latest` if this Mac/k3s/ARC itself goes down, `scripts/heartbeat.sh` runs every few minutes (via `launchd/com.exadev.github-runner.heartbeat.plist`), checks that the k3s node and ARC controller are healthy, and if so pushes a fresh `ARC_HEALTHY_UNTIL` timestamp to an ExaDev org-level Actions variable. [`exadev/runner-fallback-action`](https://github.com/ExaDev/runner-fallback-action) checks that timestamp instead of querying for an online runner - see that repo's `docs/spec.md` for the addendum describing this.
+
+Install the heartbeat:
+```bash
+cp launchd/com.exadev.github-runner.heartbeat.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.exadev.github-runner.heartbeat.plist
+```

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.exadev.github-runner.heartbeat</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/github-runner/scripts/heartbeat.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/opt/github-runner</string>
+	<key>StartInterval</key>
+	<integer>180</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/opt/github-runner/logs/heartbeat.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/opt/github-runner/logs/heartbeat.err.log</string>
+</dict>
+</plist>
