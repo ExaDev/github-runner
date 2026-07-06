@@ -30,7 +30,12 @@ log "Starting k3s..."
 docker compose up -d
 
 log "Waiting for k3s to be ready..."
-until kubectl get nodes >/dev/null 2>&1; do
+# kubectl get nodes succeeding (exit 0) only means the API server is
+# reachable - it returns an empty, still-successful list before the node
+# object itself has registered. Wait for at least one node to actually
+# appear before moving on to kubectl wait, which fails outright ("no
+# matching resources found") if run against zero nodes.
+until [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -gt 0 ]; do
   sleep 2
 done
 kubectl wait --for=condition=Ready node --all --timeout=120s
