@@ -1,0 +1,12 @@
+name: test-ubuntu-latest-routing
+on: workflow_dispatch
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "hostname: $(hostname)"
+          echo "runner name: ${RUNNER_NAME}"
+          uname -a
+          cat /etc/os-release || true
