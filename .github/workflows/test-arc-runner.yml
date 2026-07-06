@@ -1,0 +1,17 @@
+name: test-arc-runner
+
+# Manual smoke test for the ARC scale set itself: confirms a job targeting
+# the exadev-runners scale set directly gets a real ephemeral pod.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: exadev-runners
+    steps:
+      - run: |
+          echo "hostname: $(hostname)"
+          uname -a
+          gcc-11 --version
+          bun --version
+          gh --version
