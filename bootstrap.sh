@@ -17,9 +17,13 @@ lowercase() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # ---- 0. Load config (must happen before docker compose up, which needs
 # K3S_TOKEN from this file - Compose does not read .env.arc automatically,
-# only a default-named .env, so it must be in the shell environment first) --
+# only a default-named .env, so it must be in the shell environment first).
+# set -a exports everything sourced below so child processes (docker
+# compose, helm, kubectl) can see it too, not just this script's own shell.
+set -a
 # shellcheck source=/dev/null
 source .env.arc
+set +a
 
 # ---- 1. Bring up k3s -------------------------------------------------------
 log "Starting k3s..."
