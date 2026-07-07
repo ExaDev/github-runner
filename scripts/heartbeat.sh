@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
-# Run on a schedule (see launchd/com.exadev.github-runner.heartbeat.plist).
-# Checks whether the local k3s cluster and ARC controller are healthy, and
-# if so, pushes a fresh "healthy until" timestamp to an ExaDev org-level
-# Actions variable. This exists because ARC's autoscaling means there is
-# normally NO pre-existing "online runner" to check the way the old
-# myoung34-based design's exadev/runner-fallback-action did (query
-# /orgs/{org}/actions/runners for an online match) - with minRunners: 0,
-# pods only exist while a job is actually running. runner-fallback-action's
-# check is therefore redesigned around infrastructure health (is this
-# heartbeat still fresh?) rather than "is a runner online right now" -
-# see exadev/runner-fallback-action's docs/spec.md addendum.
+# Runs inside the `heartbeat` docker-compose service (see heartbeat/loop.sh for
+# the ~3-min loop). Checks the local k3s cluster and ARC controller are
+# healthy and, if so, refreshes a single secret gist with a unix timestamp
+# ("healthy until"). ExaDev/runner-fallback-action reads that gist to decide
+# self-hosted vs ubuntu-latest - see this action's docs/spec.md.
+#
+# Environment (provided by the compose service):
+#   KUBECONFIG          - a kubeconfig whose server reaches k3s (loop.sh
+#                         rewrites the host kubeconfig to https://k3s:6443)
+#   HEARTBEAT_GH_TOKEN  - a GitHub PAT with `gist` scope (write the gist)
+#   HEARTBEAT_GIST_ID   - the secret gist id to refresh
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
-export KUBECONFIG
-KUBECONFIG="$(pwd)/kubeconfig/kubeconfig.yaml"
-
-# How far in the future to set the healthy-until timestamp: comfortably
-# longer than the launchd interval below, so a single missed/slow tick
-# doesn't spuriously look like an outage, but short enough that a real
-# outage is detected promptly.
-HEARTBEAT_WINDOW_SECONDS=600
+HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT with gist scope)}"
+HEARTBEAT_GIST_ID="${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set}"
+GIST_FILE="${GIST_FILE:-arc-healthy-until}"
+# How far in the future to set the timestamp: comfortably longer than the
+# loop interval, so a single missed/slow tick doesn't look like an outage,
+# but short enough that a real outage is detected promptly.
+HEARTBEAT_WINDOW_SECONDS="${HEARTBEAT_WINDOW_SECONDS:-600}"
 
 healthy=true
 
@@ -34,10 +32,19 @@ if ! kubectl get deployment -n actions-runner-controller -l app.kubernetes.io/na
 fi
 
 if [ "$healthy" != "true" ]; then
-  echo "Unhealthy - not updating ARC_HEALTHY_UNTIL" >&2
+  echo "Unhealthy - not refreshing the heartbeat gist" >&2
   exit 1
 fi
 
 healthy_until=$(($(date +%s) + HEARTBEAT_WINDOW_SECONDS))
-gh variable set ARC_HEALTHY_UNTIL --org ExaDev --body "$healthy_until"
-echo "Healthy - ARC_HEALTHY_UNTIL set to ${healthy_until}"
+# PATCH the gist's single file to the fresh timestamp. Built with jq so the
+# timestamp is safely JSON-encoded (it's numeric, but stay robust).
+body="$(jq -n --arg content "$healthy_until" --arg file "$GIST_FILE" \
+  '{files:{$file:{content:$content}}}')"
+
+curl -fsS -X PATCH \
+  -H "Authorization: Bearer ${HEARTBEAT_GH_TOKEN}" \
+  -H "Accept: application/vnd.github+json" \
+  -d "$body" \
+  "https://api.github.com/gists/${HEARTBEAT_GIST_ID}" >/dev/null
+echo "Healthy - gist ${HEARTBEAT_GIST_ID} refreshed to ${healthy_until}"

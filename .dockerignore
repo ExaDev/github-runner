@@ -1,0 +1,13 @@
+# Keep the heartbeat image's build context small and keep Mac-local secrets
+# out of it. The Dockerfile only COPYs heartbeat/loop.sh and
+# scripts/heartbeat.sh; everything else here is excluded from the context
+# sent to the Docker daemon.
+.git
+.github
+kubeconfig/
+secrets/
+logs/
+.env.arc
+.env.*
+*.pem
+.DS_Store

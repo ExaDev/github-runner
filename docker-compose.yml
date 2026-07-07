@@ -1,15 +1,25 @@
-# The Kubernetes cluster itself is exactly this one service: k3s ships an
-# official Docker image bundling the whole control plane + kubelet in a
-# single privileged container ("cluster in a box"). This is what makes the
-# whole setup portable to any machine with just Docker (+ helm/kubectl on
-# the host) - no Colima-specific --kubernetes flag, no separately-installed
-# kind/k3d CLI. ARC itself (controller + runner scale sets + ephemeral
-# runner pods) is not more compose services - those are Kubernetes-native
-# resources installed via Helm into this cluster, see bootstrap.sh.
+# The Kubernetes cluster itself is exactly one service: k3s ships an official
+# Docker image bundling the whole control plane + kubelet in a single
+# privileged container ("cluster in a box"). This is what makes the whole
+# setup portable to any machine with just Docker (+ helm/kubectl on the host)
+# - no Colima-specific --kubernetes flag, no separately-installed kind/k3d
+# CLI. ARC itself (controller + runner scale sets + ephemeral runner pods) is
+# not more compose services - those are Kubernetes-native resources installed
+# via Helm into this cluster, see bootstrap.sh.
+#
+# The second service, `heartbeat`, is the fleet-health reporter: it checks the
+# k3s node + ARC controller and refreshes a secret gist that
+# ExaDev/runner-fallback-action reads to decide self-hosted vs ubuntu-latest.
+# It runs in the compose network alongside k3s (no launchd / external
+# scheduler), so the whole fleet + its health reporter come up from one
+# `docker compose up`.
 services:
   k3s:
     image: "rancher/k3s:${K3S_VERSION:-latest}"
-    command: server --disable=traefik --write-kubeconfig-mode=644
+    # --tls-san k3s makes the API server cert valid for the "k3s" service DNS
+    # name, so the heartbeat sibling container can reach it at https://k3s:6443
+    # over the compose network (its kubeconfig rewrites 127.0.0.1 -> k3s).
+    command: server --disable=traefik --write-kubeconfig-mode=6443 --tls-san k3s
     privileged: true
     restart: unless-stopped
     tmpfs:
@@ -29,6 +39,26 @@ services:
       - ./kubeconfig:/output
     ports:
       - "6443:6443"
+
+  heartbeat:
+    # Fleet-health reporter. Checks k3s + ARC and refreshes the secret gist.
+    # Build context is the repo root so the Dockerfile can COPY scripts/ and
+    # heartbeat/.
+    build:
+      context: .
+      dockerfile: heartbeat/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - k3s
+    environment:
+      - HEARTBEAT_GH_TOKEN=${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set in .env.arc - a GitHub PAT with gist scope}
+      - HEARTBEAT_GIST_ID=${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set in .env.arc - the secret gist id to refresh}
+      - HEARTBEAT_WINDOW_SECONDS=${HEARTBEAT_WINDOW_SECONDS:-600}
+      - HEARTBEAT_INTERVAL_SECONDS=${HEARTBEAT_INTERVAL_SECONDS:-180}
+    volumes:
+      # The host kubeconfig k3s generates; loop.sh rewrites its server URL to
+      # https://k3s:6443 before using it.
+      - ./kubeconfig:/kubeconfig:ro
 
 volumes:
   k3s-data: {}

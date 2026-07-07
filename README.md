@@ -54,10 +54,18 @@ To confirm ephemeral-pod-per-job is actually working: run `.github/workflows/tes
 
 ## Heartbeat: how `runner-fallback-action` knows this fleet is healthy
 
-ARC's autoscaling means there is normally **no pre-existing "online runner"** to check the way the previous design's fallback logic did (query `/orgs/{org}/actions/runners` for an online match) - with `minRunners: 0`, pods only exist while a job is actually running. To still support falling back to `ubuntu-latest` if this Mac/k3s/ARC itself goes down, `scripts/heartbeat.sh` runs every few minutes (via `launchd/com.exadev.github-runner.heartbeat.plist`), checks that the k3s node and ARC controller are healthy, and if so pushes a fresh `ARC_HEALTHY_UNTIL` timestamp to an ExaDev org-level Actions variable. [`exadev/runner-fallback-action`](https://github.com/ExaDev/runner-fallback-action) checks that timestamp instead of querying for an online runner - see that repo's `docs/spec.md` for the addendum describing this.
+ARC's autoscaling means there is normally **no pre-existing "online runner"** to check the way the previous design's fallback logic did (query `/orgs/{org}/actions/runners` for an online match) - with `minRunners: 0`, pods only exist while a job is actually running. To still support falling back to `ubuntu-latest` if this Mac/k3s/ARC itself goes down, a `heartbeat` service in `docker-compose.yml` checks every ~3 min that the k3s node and ARC controller are healthy and, if so, refreshes a single **secret gist** with a unix timestamp (`now + a short window`). [`exadev/runner-fallback-action`](https://github.com/ExaDev/runner-fallback-action) reads that gist (unauthenticated, over the GitHub API) and routes to `exadev-runners` when the timestamp is still fresh, else `ubuntu-latest` - see that repo's `docs/spec.md` for the algorithm.
 
-Install the heartbeat:
-```bash
-cp launchd/com.exadev.github-runner.heartbeat.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.exadev.github-runner.heartbeat.plist
-```
+The heartbeat is a compose service (Alpine + kubectl + curl + jq), not a macOS launchd job, so the whole fleet + its health reporter come up from one `docker compose up` with nothing host-specific. It runs in the compose network alongside k3s and reaches the API at `https://k3s:6443` (k3s is started with `--tls-san k3s` so its cert is valid for that name; `heartbeat/loop.sh` rewrites the kubeconfig's server URL accordingly).
+
+It needs two values in `.env.arc`:
+- `HEARTBEAT_GH_TOKEN` - a GitHub PAT with `gist` scope (to refresh the gist).
+- `HEARTBEAT_GIST_ID` - the id of the secret gist. Create it once:
+  ```bash
+  echo "$(($(date +%s) + 600))" | gh gist create --filename arc-healthy-until --desc "ExaDev ARC fleet health heartbeat" -
+  # put the hex id from the returned gist URL into .env.arc as HEARTBEAT_GIST_ID
+  ```
+  and put the same id as the `gist-id` default in `exadev/runner-fallback-action`'s `action.yml`.
+
+Once `.env.arc` has those, `docker compose up -d` starts the heartbeat alongside k3s. Confirm it's refreshing: `gh gist view "$HEARTBEAT_GIST_ID"` should show a timestamp near `now + 600`, advancing every ~3 min.
+
