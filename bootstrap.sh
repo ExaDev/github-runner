@@ -15,14 +15,14 @@ log() { echo "==> $*"; }
 
 lowercase() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
-# ---- 0. Load config (must happen before docker compose up, which needs
-# K3S_TOKEN from this file - Compose does not read .env.arc automatically,
-# only a default-named .env, so it must be in the shell environment first).
+# ---- 0. Load config. The file is named .env so docker compose reads it
+# automatically (K3S_TOKEN etc.); we also source it here so the helm/kubectl
+# commands below see the same vars directly in this shell.
 # set -a exports everything sourced below so child processes (docker
 # compose, helm, kubectl) can see it too, not just this script's own shell.
 set -a
 # shellcheck source=/dev/null
-source .env.arc
+source .env
 set +a
 
 # ---- 1. Bring up k3s -------------------------------------------------------

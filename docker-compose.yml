@@ -17,7 +17,13 @@
 services:
   k3s:
     image: "rancher/k3s:${K3S_VERSION:-latest}"
-    command: server --disable=traefik --write-kubeconfig-mode=6443
+    # Delete any stale kubeconfig before starting, then exec k3s. k3s can't
+    # overwrite an existing /output/kubeconfig.yaml through Colima's macOS
+    # share (the file ends up owner-read-only with container-root mapped to
+    # the Mac user), which would crash-loop "permission denied" on every
+    # restart (e.g. a Mac reboot). Removing it first lets k3s recreate it
+    # cleanly each start.
+    entrypoint: ["/bin/sh", "-c", "rm -f /output/kubeconfig.yaml && exec /bin/k3s server --disable=traefik --write-kubeconfig-mode=6443"]
     # Stable node name across container recreations. Without this k3s derives
     # the node name from the container's hostname (its ID), so every recreate
     # (e.g. on an image pull) would register a NEW node and leave the old one

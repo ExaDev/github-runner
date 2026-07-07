@@ -7,7 +7,7 @@
 kubeconfig/
 secrets/
 logs/
-.env.arc
+.env
 .env.*
 *.pem
 .DS_Store

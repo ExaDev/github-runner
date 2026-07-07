@@ -18,7 +18,7 @@ The custom runner toolchain (GCC 11/G++ for C++20, Bun, the `gh` CLI) carries ov
 ## Setup
 
 1. **Create a GitHub App** on the ExaDev org with **Self-hosted runners: read & write** permission, and install it on the org (the same App from the previous design can be reused).
-2. **Configure the environment.** Copy `.env.arc.example` to `.env.arc` and fill in:
+2. **Configure the environment.** Copy `.env.example` to `.env` and fill in:
    - `K3S_TOKEN` - any random string (`openssl rand -hex 32`), used only for node-join auth inside the cluster
    - `EXADEV_APP_ID`, `EXADEV_APP_PRIVATE_KEY_PATH` (a PEM file path, e.g. under `./secrets/`, already gitignored)
    - `EXADEV_APP_INSTALLATION_ID` - optional; `bootstrap.sh` resolves it automatically from the App ID and key if left blank
@@ -34,7 +34,7 @@ The custom runner toolchain (GCC 11/G++ for C++20, Bun, the `gh` CLI) carries ov
 
 The controller install is shared (it watches all namespaces by default). Adding a second org is additive, not a change to anything existing:
 
-1. Copy `.env.arc.example` to `.env.<neworg>` and fill in that org's App credentials.
+1. Copy `.env.example` to `.env.<neworg>` and fill in that org's App credentials.
 2. Add a `values/<neworg>-runners-values.yaml` (copy `values/exadev-runners-values.yaml` as a starting point).
 3. Add an `install_org` call for `<neworg>` at the bottom of `bootstrap.sh`, sourcing `.env.<neworg>`.
 
@@ -58,14 +58,14 @@ ARC's autoscaling means there is normally **no pre-existing "online runner"** to
 
 The heartbeat is a compose service (Alpine + kubectl + curl + jq), not a macOS launchd job, so the whole fleet + its health reporter come up from one `docker compose up` with nothing host-specific. It uses host networking, so kubectl (with the host kubeconfig k3s generates) reaches the k3s API at `127.0.0.1:6443` directly — no TLS-SAN or kubeconfig changes needed.
 
-It needs two values in `.env.arc`:
+It needs two values in `.env`:
 - `HEARTBEAT_GH_TOKEN` - a GitHub PAT with `gist` scope (to refresh the gist).
 - `HEARTBEAT_GIST_ID` - the id of the secret gist. Create it once:
   ```bash
   echo "$(($(date +%s) + 600))" | gh gist create --filename arc-healthy-until --desc "ExaDev ARC fleet health heartbeat" -
-  # put the hex id from the returned gist URL into .env.arc as HEARTBEAT_GIST_ID
+  # put the hex id from the returned gist URL into .env as HEARTBEAT_GIST_ID
   ```
   and put the same id as the `gist-id` default in `exadev/runner-fallback-action`'s `action.yml`.
 
-Once `.env.arc` has those, `docker compose up -d` starts the heartbeat alongside k3s. Confirm it's refreshing: `gh gist view "$HEARTBEAT_GIST_ID"` should show a timestamp near `now + 600`, advancing every ~3 min.
+Once `.env` has those, `docker compose up -d` starts the heartbeat alongside k3s. Confirm it's refreshing: `gh gist view "$HEARTBEAT_GIST_ID"` should show a timestamp near `now + 600`, advancing every ~3 min.
 
