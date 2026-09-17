@@ -29,4 +29,19 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI + buildx plugin only, not the daemon: the dedicated
+# exadev-image-builder scale-set profile runs this image with
+# containerMode.type=dind, which supplies a docker:dind sidecar and shares
+# its socket at DOCKER_HOST - every other profile also gets this image (an
+# image build needs the same image the fleet already uses, so a separate
+# builder-only image would have a chicken-and-egg bootstrap problem), but
+# the CLI alone is inert with no daemon to talk to on an ordinary job.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
 USER runner
