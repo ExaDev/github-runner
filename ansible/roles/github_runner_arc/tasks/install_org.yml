@@ -1,5 +1,5 @@
 ---
-# Included once per org from tasks/main.yml's loop, with `org` set to that org's entry from github_runner_arc_orgs. Ports bootstrap.sh's install_org() bash function: namespace, GitHub App secret, GHCR pull secret, then the runner scale set release.
+# Included once per org from tasks/main.yml's loop, with `org` set to that org's entry from github_runner_arc_orgs. Ports bootstrap.sh's install_org() bash function: resolve the installation ID once per org, then delegate namespace/secrets/scale-set-release creation to install_scale_set_profile.yml once per entry in org.scale_set_profiles - see that key's own comment in host_vars/node-a.yml for why a single org can need more than one.
 
 - name: "{{ org.name }}: resolve installation ID"
   ansible.builtin.include_tasks: resolve_installation_id.yml
@@ -10,64 +10,12 @@
   ansible.builtin.set_fact:
     github_runner_arc_installation_id: "{{ github_runner_arc_resolved_installation_id | default(org.installation_id) }}"
 
-- name: "{{ org.name }}: create namespace"
-  kubernetes.core.k8s:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-    definition:
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: "arc-runners-{{ org.name | lower }}"
-
-- name: "{{ org.name }}: create/update GitHub App secret"
-  kubernetes.core.k8s:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-    definition:
-      apiVersion: v1
-      kind: Secret
-      type: Opaque
-      metadata:
-        name: "{{ org.name | lower }}-github-app"
-        namespace: "arc-runners-{{ org.name | lower }}"
-      stringData:
-        github_app_id: "{{ org.app_id | string }}"
-        github_app_installation_id: "{{ github_runner_arc_installation_id }}"
-        github_app_private_key: "{{ github_runner_arc_secrets.org_private_keys[org.name] }}"
-  no_log: true
-
-- name: "{{ org.name }}: create/update GHCR pull secret"
-  kubernetes.core.k8s:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-    definition:
-      apiVersion: v1
-      kind: Secret
-      type: kubernetes.io/dockerconfigjson
-      metadata:
-        name: ghcr-pull
-        namespace: "arc-runners-{{ org.name | lower }}"
-      data:
-        .dockerconfigjson: >-
-          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_secrets.ghcr_username,
-                                      'password': github_runner_arc_secrets.ghcr_token,
-                                      'auth': (github_runner_arc_secrets.ghcr_username ~ ':' ~ github_runner_arc_secrets.ghcr_token) | b64encode}}})
-             | to_json | b64encode }}
-  no_log: true
-
-- name: "{{ org.name }}: install/upgrade runner scale set"
-  kubernetes.core.helm:
-    name: "{{ org.name | lower }}-runners"
-    chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
-    chart_version: "{{ github_runner_arc_scaleset_chart_version | default(omit) }}"
-    release_namespace: "arc-runners-{{ org.name | lower }}"
-    values_files:
-      - "{{ github_runner_arc_values_dir }}/{{ org.values_file }}"
-    # --set-equivalent overrides only, matching bootstrap.sh exactly: a nested `values:` dict would replace containers[] wholesale (Helm does not deep-merge lists), silently dropping the values file's own command/resources for that container.
-    set_values:
-      - value: "githubConfigUrl=https://github.com/{{ org.name }}"
-      - value: "githubConfigSecret={{ org.name | lower }}-github-app"
-      - value: "template.spec.imagePullSecrets[0].name=ghcr-pull"
-      - value: "template.spec.containers[0].image={{ org.image }}"
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+- name: "{{ org.name }}: install/upgrade each scale-set profile"
+  ansible.builtin.include_tasks: install_scale_set_profile.yml
+  loop: "{{ org.scale_set_profiles }}"
+  loop_control:
+    loop_var: profile
+    label: "{{ profile.suffix | default('(default)') }}"
 
 - name: "{{ org.name }}: trigger an immediate autoscaler reconcile"
   ansible.builtin.command: docker compose exec -T autoscaler /app/scripts/autoscaler.sh
