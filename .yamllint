@@ -1,0 +1,16 @@
+---
+extends: default
+
+rules:
+  # This project writes long comments as single continuous lines by
+  # deliberate convention (never hard-wrapped mid-sentence for column
+  # width), so a fixed line-length limit would just force incorrect
+  # wrapping to satisfy the linter rather than catch anything real.
+  line-length: disable
+  # Neither this repo's YAML nor GitHub Actions workflow files elsewhere in
+  # the org use a leading document marker.
+  document-start: disable
+  truthy:
+    # `on:` is GitHub Actions' own required trigger keyword, not a YAML 1.1
+    # boolean - the standard yamllint exception for any workflow-heavy repo.
+    check-keys: false
