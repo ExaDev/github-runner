@@ -4,8 +4,9 @@
   hosts: all
   gather_facts: true
 
+  # A play-level environment: applies even to the implicit Gathering Facts task, before any fact (including ansible_machine or ansible_env) exists yet - referencing either one here fails every run with "'ansible_machine' is undefined", confirmed live against the real fleet. Listing both Homebrew prefixes unconditionally, plus the standard system dirs, avoids needing any fact at all: an absent directory in PATH is silently skipped by the shell, not an error.
   environment:
-    PATH: "{{ '/opt/homebrew/bin:/opt/homebrew/sbin' if ansible_machine == 'arm64' else '/usr/local/bin:/usr/local/sbin' }}:{{ ansible_env.PATH }}"
+    PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
   pre_tasks:
     - name: Ensure Homebrew prerequisites are installed (helm, kubectl, docker, docker-compose)
