@@ -8,6 +8,9 @@ github_runner_arc_agent_server_url: ""
 # Set on a primary host that a second host will join as a k3s agent, to whatever externally-reachable address that agent will connect through (e.g. a Tailscale MagicDNS name) - k3s's self-signed server cert only auto-includes the container's own hostname/IPs and localhost, so an agent connecting via any other address fails TLS verification unless that address is added as a --tls-san. Left empty (the default) on a primary nothing else ever joins.
 github_runner_arc_primary_tls_san: ""
 
+# Set on EVERY host once more than one host is in play (primary or agent), to that host's own real, externally-reachable address (e.g. a Tailscale IP) - k3s auto-detects a node's own InternalIP from whatever interface it sees locally, which for a container is its own internal Docker/Colima bridge address, not reachable from any other physical machine at all. Confirmed live: leaving this unset broke the flannel VXLAN overlay for any cross-node pod traffic (including every pod's own DNS lookup via CoreDNS, since CoreDNS's ClusterIP resolves to whichever node its own pod happens to be scheduled on) and the API server's own proxy to another node's kubelet (logs/exec), while ordinary job traffic looked completely unaffected since a job's outbound HTTPS never needs the overlay. Left empty (the default) on a genuinely single-host setup, where k3s's own auto-detection is correct.
+github_runner_arc_node_ip: ""
+
 # Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host (primary hosts only - ignored on an agent). Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host. See host_vars/node-a.yml for a real, working example of the full set of variables this role needs.
 github_runner_arc_orgs: []
 
