@@ -45,7 +45,7 @@
   no_log: true
 
 - name: "{{ org.name }}{{ profile.suffix }}: install/upgrade scale-set release"
-  # runnerScaleSetName is deliberately left unset, not forced to the same value across profiles: it defaults to the Helm release name and IS the scale set's own unique registration identity on GitHub's side (not just a label) - confirmed live, forcing two releases to share it made the second one's listener crash-loop trying to register a duplicate. scaleSetLabels is the correct mechanism for pooling: an ADDITIONAL label every profile's runners also carry, alongside their own already-unique default label, letting runs-on: <org>-runners match every profile without any of them colliding on identity.
+  # runnerScaleSetName is deliberately left unset, not forced to the same value across profiles: it defaults to the Helm release name and IS the scale set's own unique registration identity on GitHub's side (not just a label) - confirmed live, forcing two releases to share it made the second one's listener crash-loop trying to register a duplicate. scaleSetLabels is the correct mechanism for pooling: an ADDITIONAL label every profile's runners also carry, alongside their own already-unique default label, letting runs-on: <label> match every profile sharing it without any of them colliding on identity. Most profiles want the org's own shared label (the default below); a profile can set its own runs_on_label instead when it deliberately should NOT pool with the others - e.g. a dedicated image-building profile that ordinary CI jobs have no business landing on.
   kubernetes.core.helm:
     name: "{{ org.name | lower }}-runners{{ profile.suffix }}"
     chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
@@ -59,7 +59,7 @@
       - value: "githubConfigSecret={{ org.name | lower }}-github-app"
       - value: "template.spec.imagePullSecrets[0].name=ghcr-pull"
       - value: "template.spec.containers[0].image={{ org.image }}"
-      - value: "scaleSetLabels[0]={{ org.name | lower }}-runners"
+      - value: "scaleSetLabels[0]={{ profile.runs_on_label | default(org.name | lower ~ '-runners') }}"
     # nodeSelector is a map, not a list, so a nested `values:` dict merges it safely (no wholesale-replacement risk the comment above warns about for containers[]) - simpler and more robust than building a --set path string with escaped dots for a key like kubernetes.io/hostname.
     values:
       template:
