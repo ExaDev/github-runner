@@ -86,12 +86,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install hadolint
-        # actions-runner pods are always linux/amd64 today (no arm64 job has ever been requested); revisit HADOLINT_ARCH if that changes.
+        # Detect arch rather than assume amd64: exadev-runners pods are arm64 (the M3's own architecture), confirmed by a real CI run against this very workflow - an assumption that turned out wrong the first time it actually ran on the fleet instead of just being read as a comment. Downloads into the workspace (no sudo, no system path) - actions-runner pods run the workflow user without write access to /usr/local/bin.
         run: |
-          curl -fsSL -o /usr/local/bin/hadolint "https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-Linux-${HADOLINT_ARCH}"
-          chmod +x /usr/local/bin/hadolint
-        env:
-          HADOLINT_ARCH: x86_64
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) hadolint_arch=x86_64 ;;
+            aarch64|arm64) hadolint_arch=arm64 ;;
+            *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL -o ./hadolint "https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-${hadolint_arch}"
+          chmod +x ./hadolint
       - name: Lint every Dockerfile
         run: |
           set -euo pipefail
@@ -99,7 +103,7 @@ jobs:
           echo "Found ${#dockerfiles[@]} Dockerfile(s)."
           if [ "${#dockerfiles[@]}" -gt 0 ]; then
             # error threshold, not the default (info): this repo deliberately floats several base images/packages on `latest` rather than pinning (see e.g. ghcr.io/exadev/github-runner:latest, rancher/k3s:${K3S_VERSION:-latest}), so hadolint's warning-level pinning advice (DL3007/DL3008/DL3018) stays visible in the log without failing every run over an already-made, documented tradeoff.
-            hadolint --failure-threshold error "${dockerfiles[@]}"
+            ./hadolint --failure-threshold error "${dockerfiles[@]}"
           fi
 
   ansible-syntax-check:
