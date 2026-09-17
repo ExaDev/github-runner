@@ -109,6 +109,9 @@ install_org() {
     --set template.spec.containers[0].image="$image" \
     -f "values/${org_lower}-runners-values.yaml" \
     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+
+  # Every Helm upgrade above reverts maxRunners to the values file's safe floor (see values/exadev-runners-values.yaml). Trigger one immediate autoscaler poll so the safe-floor window after this install shrinks from up to a full poll interval down to seconds, rather than waiting for the loop's own next tick. Best-effort: the autoscaler service is exadev-specific today (see scripts/autoscaler.sh), and the ordinary loop catches this regardless if the exec fails for any reason.
+  docker compose exec -T autoscaler /app/scripts/autoscaler.sh || true
 }
 
 # ---- 4. Install each org ---------------------------------------------------
