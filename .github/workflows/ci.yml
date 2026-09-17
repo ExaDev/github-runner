@@ -127,10 +127,11 @@ jobs:
 
   required-checks:
     name: Required Checks
-    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check]
+    needs: [determine-runner, shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: confirmed live (ExaDev/github-runner#7) that ExaDev's GitHub-hosted runners currently can't schedule at all (runner_id: 0, never assigned) - a bare ubuntu-latest job here would fail every run regardless of every other job's own result. Routes through the same fallback as everything else instead.
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
     timeout-minutes: 5
     steps:
       - name: Fail if any required job failed or was cancelled
