@@ -1,28 +1,24 @@
 ---
 # ExaDev GitHub Actions runner fleet: ARC (Actions Runner Controller) on k3s.
 #
-# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host. Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host.
-#
-# Example host_vars/node-b.yml: github_runner_arc_orgs:
-#     - name: ExaDev
-# app_id: 123456 private_key_op_reference: "op://Vault/example-github-runner/private-key" installation_id: ""             # leave blank; resolved and cached here after the first run image: "ghcr.io/exadev/github-runner:latest" values_file: "exadev-runners-values.yaml"
+# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host. Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host. See host_vars/node-b.yml for a real, working example of the full set of variables this role needs.
 github_runner_arc_orgs: []
 
-# k3s + heartbeat (one Docker Compose stack per host, shared by every org on that host). The private key, GHCR credentials, and heartbeat PAT below are read live from 1Password via `op read` at task time, never stored in this role or in ansible-vault — see tasks/main.yml and tasks/install_org.yml.
-github_runner_arc_k3s_token_op_reference: ""
+# k3s + heartbeat (one Docker Compose stack per host, shared by every org on that host). k3s-token, ghcr-username, ghcr-token, and heartbeat-gh-token all live as separate fields on this ONE 1Password item, read via a single `op item get` call rather than four separate `op read` calls: confirmed live that 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so four separate reads meant four separate approval prompts for values that live on the exact same item. Never stored in this role or in ansible-vault - see tasks/main.yml.
+github_runner_arc_secrets_vault: ""
+github_runner_arc_secrets_item: ""
 github_runner_arc_k3s_version: "latest"
-github_runner_arc_ghcr_pull_username_op_reference: ""
-github_runner_arc_ghcr_pull_token_op_reference: ""
-github_runner_arc_heartbeat_gh_token_op_reference: ""
 github_runner_arc_heartbeat_gist_id: ""
 github_runner_arc_heartbeat_window_seconds: 600
 github_runner_arc_heartbeat_interval_seconds: 180
 
-# Repo root: docker-compose.yml, the .env this role templates, and the values/ Helm values files (the single source of truth for both the ARC controller and every org's runner scale set — this role reads them in place rather than keeping its own copy, so there is exactly one place to change a value) all live there relative to this role.
-github_runner_arc_repo_root: "{{ playbook_dir }}/.."
+# Repo root ON THE TARGET HOST itself: docker-compose.yml, the .env this role templates, and the values/ Helm values files (the single source of truth for both the ARC controller and every org's runner scale set - this role reads them in place rather than keeping its own copy) all live there. Deliberately left undefined here, not defaulted to `{{ playbook_dir }}/..`: playbook_dir is a control-node path, and using it as a template destination on the target host fails outright the moment the control node's own checkout doesn't sit at the identical path as the target's - confirmed live against node-b, whose real checkout lives at a completely different path than this repo's own worktree on the control node. Every host's own host_vars must set this explicitly (see host_vars/node-b.yml).
 github_runner_arc_values_dir: "{{ github_runner_arc_repo_root }}/values"
 github_runner_arc_kubeconfig_path: "{{ github_runner_arc_repo_root }}/kubeconfig/kubeconfig.yaml"
 
-# Helm chart version pins. Left undefined (not set to "") so that
+# kubernetes.core.k8s/k8s_info need the kubernetes Python package on the target host, which a stock macOS Homebrew Python treats as an externally-managed environment (PEP 668) - a plain pip install fails outright, confirmed live against node-b. A dedicated virtualenv sidesteps that without weakening the system Python's own protections.
+github_runner_arc_venv_path: "{{ ansible_facts['env']['HOME'] }}/.ansible-github-runner-venv"
+
+# Helm chart version pins. Left undefined (not set to ""), so that
 # `| default(omit)` in tasks/main.yml and tasks/install_org.yml correctly
 # drops the --version flag entirely rather than passing an empty string. Uncomment and pin in a host's group_vars/host_vars to hold a chart back: github_runner_arc_controller_chart_version: "0.12.1" github_runner_arc_scaleset_chart_version: "0.12.1"
