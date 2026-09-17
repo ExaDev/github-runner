@@ -15,7 +15,7 @@ Prerequisites on the host: Docker (or Colima) with the Compose plugin, `helm`, `
    - `EXADEV_APP_INSTALLATION_ID` — optional. Leave it blank and `bootstrap.sh` resolves it automatically from the App ID and key.
    - `GHCR_PULL_USERNAME`, `GHCR_PULL_TOKEN` — a GHCR personal access token (`read:packages` scope) to pull the private runner image.
    - `HEARTBEAT_GH_TOKEN`, `HEARTBEAT_GIST_ID` — see [Heartbeat](#heartbeat) below.
-3. **Build and push the runner image.** CI does this automatically on a push to `Dockerfile` (see [Build, test, and smoke-test](#build-test-and-smoke-test)). To build locally instead: `docker build -t ghcr.io/exadev/github-runner:latest .`
+3. **Build and push the runner image.** The fleet spans both `arm64` and `amd64` hosts, so this needs a real multi-arch push, not a plain `docker build`: `docker buildx build --platform linux/arm64,linux/amd64 --push -t ghcr.io/exadev/github-runner:latest .` (see [Build, test, and smoke-test](#build-test-and-smoke-test) for why this is currently the only working path, not just a manual fallback).
 4. **Bootstrap everything:**
    ```bash
    ./bootstrap.sh
@@ -41,8 +41,8 @@ Add a host to `ansible/inventory.yml` and give it its own `ansible/host_vars/<ho
 
 ## Build, test, and smoke-test
 
-- **Build the runner image locally:** `docker build -t ghcr.io/exadev/github-runner:latest .`
-- **Build and push via CI:** `.github/workflows/build-runner-image.yml` runs on GitHub-hosted `ubuntu-latest` and triggers on a push to `Dockerfile` or the workflow file, or on demand: `gh workflow run build-runner-image.yml`.
+- **Build the runner image locally (the only working path right now):** `docker buildx build --platform linux/arm64,linux/amd64 --push -t ghcr.io/exadev/github-runner:latest .` from a machine with buildx/QEMU cross-platform support (Docker Desktop has this built in). A plain `docker build` with no `--platform` only produces an image for the building machine's own architecture, which silently breaks scheduling on the fleet's other architecture.
+- **Build and push via CI:** `.github/workflows/build-runner-image.yml` runs on GitHub-hosted `ubuntu-latest`, which this org cannot currently schedule at all - every run of this workflow has failed instantly with no runner ever assigned (see issue #10). Don't rely on this until that's fixed.
 - **Smoke-test the ARC scale set** (confirms a job gets a real ephemeral pod): `gh workflow run test-arc-runner.yml`, then watch `kubectl get pods -n arc-runners-exadev -w`. A pod must appear only once the job is queued, run to completion, and be deleted within seconds.
 - **Smoke-test `ubuntu-latest` routing** (confirms `runner-fallback-action` still reaches GitHub-hosted runners when needed): `gh workflow run test-ubuntu-latest.yml`.
 - **Verify cluster health:**
