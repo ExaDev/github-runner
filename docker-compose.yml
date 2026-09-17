@@ -13,8 +13,8 @@
 services:
   k3s:
     image: "rancher/k3s:${K3S_VERSION:-latest}"
-    # Delete any stale kubeconfig before starting, then exec k3s. k3s can't overwrite an existing /output/kubeconfig.yaml through Colima's macOS share (the file ends up owner-read-only with container-root mapped to the Mac user), which would crash-loop "permission denied" on every restart (e.g. a Mac reboot). Removing it first lets k3s recreate it cleanly each start. --tls-san is appended only when K3S_TLS_SAN is set (${VAR:+word} POSIX sh expansion): a second host joining as an agent connects to this server over its own externally-reachable address (e.g. a Tailscale MagicDNS name), which k3s's self-signed cert doesn't include by default - it auto-includes the container's own hostname/IPs and localhost only. A primary with no agent ever joining it can leave K3S_TLS_SAN unset and this stays a no-op.
-    entrypoint: ["/bin/sh", "-c", "rm -f /output/kubeconfig.yaml && exec /bin/k3s server --disable=traefik --write-kubeconfig-mode=6443 ${K3S_TLS_SAN:+--tls-san $K3S_TLS_SAN}"]
+    # Delete any stale kubeconfig before starting, then exec k3s. k3s can't overwrite an existing /output/kubeconfig.yaml through Colima's macOS share (the file ends up owner-read-only with container-root mapped to the Mac user), which would crash-loop "permission denied" on every restart (e.g. a Mac reboot). Removing it first lets k3s recreate it cleanly each start. --tls-san is appended only when K3S_TLS_SAN is set (${VAR:+word} POSIX sh expansion): a second host joining as an agent connects to this server over its own externally-reachable address (e.g. a Tailscale MagicDNS name), which k3s's self-signed cert doesn't include by default - it auto-includes the container's own hostname/IPs and localhost only. A primary with no agent ever joining it can leave K3S_TLS_SAN unset and this stays a no-op. --node-ip is the same deal for a completely different reason: with no agent ever joining, k3s auto-detects this container's own interface IP fine, but with two hosts, that auto-detected IP is each container's own internal Docker/Colima bridge address (e.g. 172.20.0.2), which is not reachable from the other physical machine at all - confirmed live, it broke the flannel VXLAN overlay (any pod-to-pod or pod-to-ClusterIP traffic that has to cross nodes, including every pod's own DNS lookup via CoreDNS) and the API server's own proxy to the other node's kubelet (logs/exec), while leaving ordinary job traffic looking fine since a job's own outbound HTTPS never needs the overlay at all. --node-ip has no K3S_-prefixed env var equivalent (confirmed via `k3s server --help`), unlike --tls-san which also needs this same explicit-flag treatment for the same reason.
+    entrypoint: ["/bin/sh", "-c", "rm -f /output/kubeconfig.yaml && exec /bin/k3s server --disable=traefik --write-kubeconfig-mode=6443 ${K3S_TLS_SAN:+--tls-san $K3S_TLS_SAN} ${K3S_NODE_IP:+--node-ip $K3S_NODE_IP}"]
     # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry.
     hostname: k3s-server
     container_name: github-runner-k3s
@@ -34,15 +34,20 @@ services:
       - K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml
       - K3S_KUBECONFIG_MODE=666
       - K3S_TLS_SAN=${K3S_TLS_SAN:-}
+      - K3S_NODE_IP=${K3S_NODE_IP:-}
     volumes:
       - k3s-data:/var/lib/rancher/k3s
       - ./kubeconfig:/output
     ports:
       - "6443:6443"
+      # 8472/udp: flannel's own VXLAN backend, needed for any cross-node pod-to-pod or pod-to-ClusterIP traffic once a second host joins as an agent - unpublished, that traffic (including every pod's own DNS lookup via CoreDNS) can never reach this container at all. 10250/tcp: kubelet, needed so the API server on the OTHER node (if this host is ever the agent instead) can proxy exec/logs to a pod scheduled here. Harmless to publish on both roles for the same reason K3S_TLS_SAN/K3S_NODE_IP are wired symmetrically - this fleet's own primary/agent roles have already swapped once.
+      - "8472:8472/udp"
+      - "10250:10250"
 
   k3s-agent:
     image: "rancher/k3s:${K3S_VERSION:-latest}"
-    # No custom entrypoint needed: the image's own default ENTRYPOINT/CMD is already ["/bin/k3s", "agent"] - confirmed via `docker inspect` - so setting K3S_URL/K3S_TOKEN as plain environment variables is sufficient on its own.
+    # Custom entrypoint now needed: --node-ip has no K3S_-prefixed env var equivalent (see the primary k3s service's own comment on this), so the base image's default CMD (["agent"], confirmed via `docker inspect`) can no longer be relied on alone once this needs to append a CLI flag conditionally.
+    entrypoint: ["/bin/sh", "-c", "exec /bin/k3s agent ${K3S_NODE_IP:+--node-ip $K3S_NODE_IP}"]
     hostname: ${K3S_AGENT_NODE_NAME:-k3s-agent}
     container_name: github-runner-k3s-agent
     privileged: true
@@ -61,8 +66,13 @@ services:
       - K3S_URL=${K3S_AGENT_SERVER_URL:-}
       - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - the same shared secret the primary's own K3S_TOKEN uses}
       - K3S_NODE_NAME=${K3S_AGENT_NODE_NAME:-k3s-agent}
+      - K3S_NODE_IP=${K3S_NODE_IP:-}
     volumes:
       - k3s-agent-data:/var/lib/rancher/k3s
+    ports:
+      # Same reasoning as the primary k3s service's own ports - see that comment.
+      - "8472:8472/udp"
+      - "10250:10250"
 
   heartbeat:
     # Fleet-health reporter. Checks k3s + ARC and refreshes the secret gist.
