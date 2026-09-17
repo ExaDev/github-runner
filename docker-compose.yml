@@ -7,31 +7,20 @@
 # not more compose services - those are Kubernetes-native resources installed
 # via Helm into this cluster, see bootstrap.sh.
 #
-# The second service, `heartbeat`, is the fleet-health reporter: it checks the
-# k3s node + ARC controller and refreshes a secret gist that
-# ExaDev/runner-fallback-action reads to decide self-hosted vs ubuntu-latest.
-# It uses host networking so it can reach k3s's API at 127.0.0.1 (already in
-# k3s's serving cert) with no TLS-SAN or kubeconfig gymnastics - and no
-# launchd / external scheduler, so the whole fleet + its health reporter come
-# up from one `docker compose up`.
+# The second service, `heartbeat`, is the fleet-health reporter: it checks the k3s node + ARC controller and refreshes a secret gist that ExaDev/runner-fallback-action reads to decide self-hosted vs ubuntu-latest. It uses host networking so it can reach k3s's API at 127.0.0.1 (already in k3s's serving cert) with no TLS-SAN or kubeconfig gymnastics - and no launchd / external scheduler, so the whole fleet + its health reporter come up from one `docker compose up`.
+#
+# Two hosts, two roles, selected via Compose profiles rather than two separate compose files: the primary host (`docker compose --profile primary up -d`) runs `k3s` (server), `heartbeat`, and every org's ARC controller/runner scale set; a second host (`docker compose --profile agent up -d`) runs only `k3s-agent`, joining the primary's cluster as a worker so its own CPU/RAM become schedulable for runner pods too, with no second control plane and no duplicated heartbeat. See the project README's Architecture section for why a genuine multi-node HA control plane isn't attempted here (a 2-node embedded-etcd quorum is worse than 1 node, not better) - this is purely about spreading runner-pod capacity across both machines, not about surviving either one's loss.
 services:
   k3s:
     image: "rancher/k3s:${K3S_VERSION:-latest}"
-    # Delete any stale kubeconfig before starting, then exec k3s. k3s can't
-    # overwrite an existing /output/kubeconfig.yaml through Colima's macOS
-    # share (the file ends up owner-read-only with container-root mapped to
-    # the Mac user), which would crash-loop "permission denied" on every
-    # restart (e.g. a Mac reboot). Removing it first lets k3s recreate it
-    # cleanly each start.
-    entrypoint: ["/bin/sh", "-c", "rm -f /output/kubeconfig.yaml && exec /bin/k3s server --disable=traefik --write-kubeconfig-mode=6443"]
-    # Stable node name across container recreations. Without this k3s derives
-    # the node name from the container's hostname (its ID), so every recreate
-    # (e.g. on an image pull) would register a NEW node and leave the old one
-    # stale in etcd. Pinning it keeps `kubectl get nodes` to one entry.
+    # Delete any stale kubeconfig before starting, then exec k3s. k3s can't overwrite an existing /output/kubeconfig.yaml through Colima's macOS share (the file ends up owner-read-only with container-root mapped to the Mac user), which would crash-loop "permission denied" on every restart (e.g. a Mac reboot). Removing it first lets k3s recreate it cleanly each start. --tls-san is appended only when K3S_TLS_SAN is set (${VAR:+word} POSIX sh expansion): a second host joining as an agent connects to this server over its own externally-reachable address (e.g. a Tailscale MagicDNS name), which k3s's self-signed cert doesn't include by default - it auto-includes the container's own hostname/IPs and localhost only. A primary with no agent ever joining it can leave K3S_TLS_SAN unset and this stays a no-op.
+    entrypoint: ["/bin/sh", "-c", "rm -f /output/kubeconfig.yaml && exec /bin/k3s server --disable=traefik --write-kubeconfig-mode=6443 ${K3S_TLS_SAN:+--tls-san $K3S_TLS_SAN}"]
+    # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry.
     hostname: k3s-server
     container_name: github-runner-k3s
     privileged: true
     restart: unless-stopped
+    profiles: ["primary"]
     tmpfs:
       - /run
       - /var/run
@@ -44,11 +33,36 @@ services:
       - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - an arbitrary shared secret for node-join auth, unrelated to GitHub}
       - K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml
       - K3S_KUBECONFIG_MODE=666
+      - K3S_TLS_SAN=${K3S_TLS_SAN:-}
     volumes:
       - k3s-data:/var/lib/rancher/k3s
       - ./kubeconfig:/output
     ports:
       - "6443:6443"
+
+  k3s-agent:
+    image: "rancher/k3s:${K3S_VERSION:-latest}"
+    # No custom entrypoint needed: the image's own default ENTRYPOINT/CMD is already ["/bin/k3s", "agent"] - confirmed via `docker inspect` - so setting K3S_URL/K3S_TOKEN as plain environment variables is sufficient on its own.
+    hostname: ${K3S_AGENT_NODE_NAME:-k3s-agent}
+    container_name: github-runner-k3s-agent
+    privileged: true
+    restart: unless-stopped
+    profiles: ["agent"]
+    tmpfs:
+      - /run
+      - /var/run
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 65535
+        hard: 65535
+    # Not `:?required` for K3S_AGENT_SERVER_URL: docker compose validates every service's env interpolation up front regardless of which --profile is active, confirmed live - a required var on this agent-only service broke `docker compose --profile primary up` too, since the primary host's .env never sets it. The Ansible role's own fail-fast check on this host_var is the real enforcement instead.
+    environment:
+      - K3S_URL=${K3S_AGENT_SERVER_URL:-}
+      - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - the same shared secret the primary's own K3S_TOKEN uses}
+      - K3S_NODE_NAME=${K3S_AGENT_NODE_NAME:-k3s-agent}
+    volumes:
+      - k3s-agent-data:/var/lib/rancher/k3s
 
   heartbeat:
     # Fleet-health reporter. Checks k3s + ARC and refreshes the secret gist.
@@ -62,11 +76,13 @@ services:
     # directly - no TLS-SAN change to k3s's cert, no kubeconfig URL rewrite.
     network_mode: host
     restart: unless-stopped
+    profiles: ["primary"]
     depends_on:
       - k3s
+    # Not `:?required` for HEARTBEAT_GH_TOKEN/HEARTBEAT_GIST_ID: the same cross-profile interpolation problem as k3s-agent's K3S_AGENT_SERVER_URL above - an agent host's .env never sets these, and docker compose validates every service regardless of the active --profile. scripts/heartbeat.sh already has its own `:?required` check on both at runtime, so nothing here actually loses the fail-fast behaviour on the primary host.
     environment:
-      - HEARTBEAT_GH_TOKEN=${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set in .env - a GitHub PAT with gist scope}
-      - HEARTBEAT_GIST_ID=${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set in .env - the secret gist id to refresh}
+      - HEARTBEAT_GH_TOKEN=${HEARTBEAT_GH_TOKEN:-}
+      - HEARTBEAT_GIST_ID=${HEARTBEAT_GIST_ID:-}
       - HEARTBEAT_WINDOW_SECONDS=${HEARTBEAT_WINDOW_SECONDS:-600}
       - HEARTBEAT_INTERVAL_SECONDS=${HEARTBEAT_INTERVAL_SECONDS:-180}
     volumes:
@@ -75,3 +91,4 @@ services:
 
 volumes:
   k3s-data: {}
+  k3s-agent-data: {}
