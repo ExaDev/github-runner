@@ -1,0 +1,21 @@
+---
+# Single entrypoint. Scope a run to one machine with --limit, e.g.: ansible-playbook playbook.yml --limit node-b
+- name: ExaDev GitHub Actions runner fleet
+  hosts: all
+  gather_facts: true
+
+  environment:
+    PATH: "{{ '/opt/homebrew/bin:/opt/homebrew/sbin' if ansible_machine == 'arm64' else '/usr/local/bin:/usr/local/sbin' }}:{{ ansible_env.PATH }}"
+
+  pre_tasks:
+    - name: Ensure Homebrew prerequisites are installed (helm, kubectl, docker, docker-compose)
+      community.general.homebrew:
+        name:
+          - helm
+          - kubernetes-cli
+          - docker
+          - docker-compose
+        state: present
+
+  roles:
+    - github_runner_arc
