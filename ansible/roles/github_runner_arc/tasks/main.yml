@@ -1,0 +1,83 @@
+---
+# Ports bootstrap.sh's steps 1-4 (start k3s, wait for it, install the ARC controller, install each org) to Ansible. Safe to rerun, same as the script: every mutating task below uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
+
+- name: Skip role when no orgs are configured for this host
+  ansible.builtin.meta: end_role
+  when: github_runner_arc_orgs | length == 0
+
+- name: Fail if K3S_TOKEN's 1Password reference is not set
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_arc_k3s_token_op_reference is not set on this host.
+      Add it to host_vars/{{ inventory_hostname }}.yml.
+  when: github_runner_arc_k3s_token_op_reference | length == 0
+
+- name: Read K3S_TOKEN from 1Password
+  ansible.builtin.shell: "op read '{{ github_runner_arc_k3s_token_op_reference }}'"
+  changed_when: false
+  no_log: true
+  register: github_runner_arc_k3s_token_raw
+
+- name: Read GHCR pull credentials from 1Password
+  no_log: true
+  block:
+    - name: Read GHCR pull username
+      ansible.builtin.shell: "op read '{{ github_runner_arc_ghcr_pull_username_op_reference }}'"
+      changed_when: false
+      register: github_runner_arc_ghcr_username_raw
+
+    - name: Read GHCR pull token
+      ansible.builtin.shell: "op read '{{ github_runner_arc_ghcr_pull_token_op_reference }}'"
+      changed_when: false
+      register: github_runner_arc_ghcr_token_raw
+
+- name: Read the heartbeat GitHub PAT from 1Password
+  ansible.builtin.shell: "op read '{{ github_runner_arc_heartbeat_gh_token_op_reference }}'"
+  changed_when: false
+  no_log: true
+  register: github_runner_arc_heartbeat_token_raw
+
+- name: Template .env for docker compose
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ github_runner_arc_repo_root }}/.env"
+    mode: "0600"
+  no_log: true
+
+- name: Start k3s and heartbeat via docker compose
+  community.docker.docker_compose_v2:
+    project_src: "{{ github_runner_arc_repo_root }}"
+    state: present
+
+- name: Wait for the k3s node to register (an empty node list is still a successful API response)
+  kubernetes.core.k8s_info:
+    kind: Node
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+  register: github_runner_arc_nodes
+  until: github_runner_arc_nodes.resources | length > 0
+  retries: 60
+  delay: 2
+
+- name: Wait for the k3s node to report Ready
+  ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
+  environment:
+    KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
+  changed_when: false
+
+- name: Install/upgrade the ARC controller (shared by every org on this host)
+  kubernetes.core.helm:
+    name: arc
+    chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+    chart_version: "{{ github_runner_arc_controller_chart_version | default(omit) }}"
+    release_namespace: actions-runner-controller
+    create_namespace: true
+    values_files:
+      - "{{ github_runner_arc_values_dir }}/controller-values.yaml"
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+
+- name: Install/upgrade each org's runner scale set
+  ansible.builtin.include_tasks: install_org.yml
+  loop: "{{ github_runner_arc_orgs }}"
+  loop_control:
+    loop_var: org
+    label: "{{ org.name }}"
