@@ -1,8 +1,6 @@
 name: build-runner-image
 
-# Builds and pushes the custom ARC runner pod image. Runs on GitHub-hosted
-# ubuntu-latest deliberately - building the runner fleet's own image on the
-# runner fleet itself would be circular.
+# Builds and pushes the custom ARC runner pod image. The obvious choice, GitHub-hosted ubuntu-latest, can't schedule for this org at all (see issue #10) - runs on the fleet's own dedicated exadev-image-builder scale-set profile instead (containerMode.type: dind, see values/exadev-runners-values-builder.yaml), not the ordinary exadev-runners label ordinary CI jobs use. This does carry a residual bootstrap risk the ubuntu-latest design was originally meant to avoid: if the currently-deployed image were ever broken badly enough to fail a job outright (e.g. its own Docker CLI missing), this workflow couldn't run to fix itself either. Recovering from that needs a manual `docker buildx build --platform linux/arm64,linux/amd64 --push` from a machine with buildx/QEMU support, same as the one-off push that originally unblocked this - see the README's Build/test/smoke-test section.
 on:
   push:
     branches: [main]
@@ -11,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: exadev-image-builder
     permissions:
       contents: read
       packages: write
@@ -29,4 +27,7 @@ jobs:
           context: .
           platforms: linux/arm64,linux/amd64
           push: true
-          tags: ghcr.io/exadev/github-runner:latest
+          # Tagged by commit SHA alongside :latest, not :latest alone: ARC's ephemeral-pod-per-job model means a bad push only affects pods scheduled after it (in-flight jobs on already-running pods are unaffected), but without a SHA tag there was no way back to "the image from before this push" short of finding the last good commit and rebuilding it from scratch. Roll back via `helm upgrade`/the values file's own image override, promoting a SHA tag to :latest only once it's been verified.
+          tags: |
+            ghcr.io/exadev/github-runner:latest
+            ghcr.io/exadev/github-runner:${{ github.sha }}
