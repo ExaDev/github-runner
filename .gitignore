@@ -6,3 +6,8 @@ secrets/
 kubeconfig/
 logs/
 .DS_Store
+
+!CLAUDE.md
+!AGENTS.md
+!**/CLAUDE.md
+!**/AGENTS.md
