@@ -5,37 +5,60 @@
   ansible.builtin.meta: end_role
   when: github_runner_arc_orgs | length == 0
 
-- name: Fail if K3S_TOKEN's 1Password reference is not set
+- name: Fail if this host's repo root is not set
   ansible.builtin.fail:
     msg: >-
-      github_runner_arc_k3s_token_op_reference is not set on this host.
-      Add it to host_vars/{{ inventory_hostname }}.yml.
-  when: github_runner_arc_k3s_token_op_reference | length == 0
+      github_runner_arc_repo_root is not set on this host. It must be the
+      absolute path of the github-runner checkout on this target host
+      itself (not the control node) - add it to
+      host_vars/{{ inventory_hostname }}.yml.
+  when: github_runner_arc_repo_root is not defined
 
-- name: Read K3S_TOKEN from 1Password
-  ansible.builtin.shell: "op read '{{ github_runner_arc_k3s_token_op_reference }}'"
+- name: Fail if the secrets item's vault or name is not set
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_arc_secrets_vault and github_runner_arc_secrets_item
+      must both be set on this host. Add them to
+      host_vars/{{ inventory_hostname }}.yml.
+  when: github_runner_arc_secrets_vault | length == 0 or github_runner_arc_secrets_item | length == 0
+
+- name: Ensure a dedicated virtualenv has the kubernetes Python client
+  ansible.builtin.pip:
+    name: kubernetes
+    virtualenv: "{{ github_runner_arc_venv_path }}"
+    virtualenv_command: python3 -m venv
+
+- name: Use that virtualenv's Python for every module task on this host from here on
+  ansible.builtin.set_fact:
+    ansible_python_interpreter: "{{ github_runner_arc_venv_path }}/bin/python3"
+
+# Delegated to the control node, not node-b: 1Password access (desktop-app integration, or a signed-in CLI session) belongs to whichever machine an operator is actually running Ansible from, not to every fleet host - node-b itself has no interactive session for `op` to authenticate against. No delegate_facts: a plain `register:` result already attaches to inventory_hostname (node-b) regardless of where the task's execution was delegated to - only `set_fact`'s own fact-namespace assignment is sensitive to delegate_facts (see resolve_installation_id.yml's git history for the one place that mattered, and why delegate_facts: true there was backwards).
+#
+# Every op invocation this role needs (the shared item's four fields, plus every org's own private key) happens in ONE shell script here, back to back with no gap - not spread across separate Ansible tasks. Confirmed live: two different-item op reads issued back-to-back needed only one approval prompt between them, while the same two reads spread across separate Ansible tasks (with real processing time in between) needed two. 1Password's desktop-app integration prompts per invocation, but a tight run of calls with no gap shares one approval.
+- name: Read every 1Password secret this host needs in one shell invocation
+  ansible.builtin.shell: |
+    set -euo pipefail
+    secrets=$(op item get '{{ github_runner_arc_secrets_item }}' --vault '{{ github_runner_arc_secrets_vault }}' --format json --reveal | jq -c '{
+      k3s_token: (.fields[] | select(.label=="k3s-token") | .value),
+      ghcr_username: (.fields[] | select(.label=="ghcr-username") | .value),
+      ghcr_token: (.fields[] | select(.label=="ghcr-token") | .value),
+      heartbeat_gh_token: (.fields[] | select(.label=="heartbeat-gh-token") | .value)
+    }')
+    org_keys='{}'
+    {% for org in github_runner_arc_orgs %}
+    key_{{ loop.index }}=$(op read '{{ org.private_key_op_reference }}')
+    org_keys=$(jq -n --argjson prev "$org_keys" --arg name '{{ org.name }}' --arg key "$key_{{ loop.index }}" '$prev + {($name): $key}')
+    {% endfor %}
+    jq -n --argjson secrets "$secrets" --argjson org_keys "$org_keys" '$secrets + {org_private_keys: $org_keys}'
+  delegate_to: localhost
   changed_when: false
   no_log: true
-  register: github_runner_arc_k3s_token_raw
+  register: github_runner_arc_secrets_raw
 
-- name: Read GHCR pull credentials from 1Password
+- name: Parse the combined secrets read
+  ansible.builtin.set_fact:
+    github_runner_arc_secrets: "{{ github_runner_arc_secrets_raw.stdout | from_json }}"
   no_log: true
-  block:
-    - name: Read GHCR pull username
-      ansible.builtin.shell: "op read '{{ github_runner_arc_ghcr_pull_username_op_reference }}'"
-      changed_when: false
-      register: github_runner_arc_ghcr_username_raw
-
-    - name: Read GHCR pull token
-      ansible.builtin.shell: "op read '{{ github_runner_arc_ghcr_pull_token_op_reference }}'"
-      changed_when: false
-      register: github_runner_arc_ghcr_token_raw
-
-- name: Read the heartbeat GitHub PAT from 1Password
-  ansible.builtin.shell: "op read '{{ github_runner_arc_heartbeat_gh_token_op_reference }}'"
-  changed_when: false
-  no_log: true
-  register: github_runner_arc_heartbeat_token_raw
 
 - name: Template .env for docker compose
   ansible.builtin.template:
@@ -44,9 +67,16 @@
     mode: "0600"
   no_log: true
 
+- name: Determine the active Docker CLI context
+  # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use - confirmed live against node-b, which runs Colima (docker.sock lives under ~/.colima/default/, not /var/run) and failed outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.
+  ansible.builtin.command: docker context show
+  changed_when: false
+  register: github_runner_arc_docker_context
+
 - name: Start k3s and heartbeat via docker compose
   community.docker.docker_compose_v2:
     project_src: "{{ github_runner_arc_repo_root }}"
+    cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
     state: present
 
 - name: Wait for the k3s node to register (an empty node list is still a successful API response)
