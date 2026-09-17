@@ -22,6 +22,23 @@ Prerequisites on the host: Docker (or Colima) with the Compose plugin, `helm`, `
    ```
    This starts k3s, waits for it to be ready, installs the ARC controller, resolves the App installation ID if needed, creates the GitHub App and GHCR pull secrets, and installs the ExaDev runner scale set. It is safe to rerun at any time, for example after rotating the App's private key.
 
+## Ansible
+
+`ansible/` deploys this same fleet from a control machine over SSH, instead of running `bootstrap.sh` locally on the target Mac. It is self-contained: its own inventory, its own `ansible.cfg`, and its own requirements, with no dependency on any other Ansible repo — anyone who clones `ExaDev/github-runner` alone can run it.
+
+```bash
+cd ansible
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook playbook.yml --limit node-b --check   # dry run
+ansible-playbook playbook.yml --limit node-b           # real run
+```
+
+Every secret (the App private key, GHCR credentials, the heartbeat PAT, `K3S_TOKEN`) is read live from 1Password via `op read` at task time, never stored in the role or in ansible-vault. `ansible/roles/github_runner_arc/defaults/main.yml` documents the `op://` references and the `github_runner_arc_orgs` shape each host's own `ansible/host_vars/<host>.yml` sets; `ansible/host_vars/node-b.yml` has `node-b`'s already wired up. The role templates a real `.env` at the repo root from these values, so `docker-compose.yml` itself needs no changes and keeps working unmodified if you fall back to running `bootstrap.sh` directly.
+
+Add a host to `ansible/inventory.yml` and give it its own `ansible/host_vars/<host>.yml` to run the fleet, or a second org, on another machine. The role no-ops entirely on any host without a populated `github_runner_arc_orgs`.
+
+`bootstrap.sh` stays the proven, exact source of truth for these steps until the Ansible role has actually been run and verified end to end against real infrastructure (`docker ps` and `kubectl get pods -A` on the target host must match a `bootstrap.sh` run). Prefer Ansible once that verification has happened, since it is host-agnostic and needs no interactive shell on the target Mac.
+
 ## Build, test, and smoke-test
 
 - **Build the runner image locally:** `docker build -t ghcr.io/exadev/github-runner:latest .`
@@ -68,7 +85,7 @@ Adding a second org is additive, never a change to anything existing:
 
 1. Copy `.env.example` to `.env.<neworg>` and fill in that org's App credentials.
 2. Add `values/<neworg>-runners-values.yaml` (copy `values/exadev-runners-values.yaml` as a starting point).
-3. Add an `install_org` call for `<neworg>` at the bottom of `bootstrap.sh`, sourcing `.env.<neworg>`.
+3. Add an `install_org` call for `<neworg>` at the bottom of `bootstrap.sh`, sourcing `.env.<neworg>` — or, via Ansible, add another entry to the target host's `github_runner_arc_orgs` in its `ansible/host_vars/<host>.yml`.
 
 The controller install stays shared: it watches all namespaces by default, so one install serves every org's runner scale set release. No changes to the `Dockerfile`, the controller install, or any other org's release are needed to add an org.
 
