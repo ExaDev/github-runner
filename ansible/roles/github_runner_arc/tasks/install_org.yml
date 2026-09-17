@@ -6,14 +6,9 @@
   when: (org.installation_id | default('')) | length == 0
 
 - name: "{{ org.name }}: set the effective installation ID"
+  # Read directly by name, no hostvars indirection: resolve_installation_id.yml sets this via a plain set_fact with no delegate_facts, so - per Ansible's own default - it already attaches to inventory_hostname (node-b, this host), not to the localhost it delegated its own execution to.
   ansible.builtin.set_fact:
     github_runner_arc_installation_id: "{{ github_runner_arc_resolved_installation_id | default(org.installation_id) }}"
-
-- name: "{{ org.name }}: read App private key from 1Password"
-  ansible.builtin.shell: "op read '{{ org.private_key_op_reference }}'"
-  changed_when: false
-  no_log: true
-  register: github_runner_arc_org_private_key_raw
 
 - name: "{{ org.name }}: create namespace"
   kubernetes.core.k8s:
@@ -37,7 +32,7 @@
       stringData:
         github_app_id: "{{ org.app_id | string }}"
         github_app_installation_id: "{{ github_runner_arc_installation_id }}"
-        github_app_private_key: "{{ github_runner_arc_org_private_key_raw.stdout }}"
+        github_app_private_key: "{{ github_runner_arc_secrets.org_private_keys[org.name] }}"
   no_log: true
 
 - name: "{{ org.name }}: create/update GHCR pull secret"
@@ -52,9 +47,9 @@
         namespace: "arc-runners-{{ org.name | lower }}"
       data:
         .dockerconfigjson: >-
-          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_ghcr_username_raw.stdout,
-                                      'password': github_runner_arc_ghcr_token_raw.stdout,
-                                      'auth': (github_runner_arc_ghcr_username_raw.stdout ~ ':' ~ github_runner_arc_ghcr_token_raw.stdout) | b64encode}}})
+          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_secrets.ghcr_username,
+                                      'password': github_runner_arc_secrets.ghcr_token,
+                                      'auth': (github_runner_arc_secrets.ghcr_username ~ ':' ~ github_runner_arc_secrets.ghcr_token) | b64encode}}})
              | to_json | b64encode }}
   no_log: true
 
