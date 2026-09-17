@@ -1,0 +1,28 @@
+---
+# ExaDev GitHub Actions runner fleet: ARC (Actions Runner Controller) on k3s.
+#
+# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host. Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host.
+#
+# Example host_vars/node-b.yml: github_runner_arc_orgs:
+#     - name: ExaDev
+# app_id: 123456 private_key_op_reference: "op://Vault/example-github-runner/private-key" installation_id: ""             # leave blank; resolved and cached here after the first run image: "ghcr.io/exadev/github-runner:latest" values_file: "exadev-runners-values.yaml"
+github_runner_arc_orgs: []
+
+# k3s + heartbeat (one Docker Compose stack per host, shared by every org on that host). The private key, GHCR credentials, and heartbeat PAT below are read live from 1Password via `op read` at task time, never stored in this role or in ansible-vault — see tasks/main.yml and tasks/install_org.yml.
+github_runner_arc_k3s_token_op_reference: ""
+github_runner_arc_k3s_version: "latest"
+github_runner_arc_ghcr_pull_username_op_reference: ""
+github_runner_arc_ghcr_pull_token_op_reference: ""
+github_runner_arc_heartbeat_gh_token_op_reference: ""
+github_runner_arc_heartbeat_gist_id: ""
+github_runner_arc_heartbeat_window_seconds: 600
+github_runner_arc_heartbeat_interval_seconds: 180
+
+# Repo root: docker-compose.yml, the .env this role templates, and the values/ Helm values files (the single source of truth for both the ARC controller and every org's runner scale set — this role reads them in place rather than keeping its own copy, so there is exactly one place to change a value) all live there relative to this role.
+github_runner_arc_repo_root: "{{ playbook_dir }}/.."
+github_runner_arc_values_dir: "{{ github_runner_arc_repo_root }}/values"
+github_runner_arc_kubeconfig_path: "{{ github_runner_arc_repo_root }}/kubeconfig/kubeconfig.yaml"
+
+# Helm chart version pins. Left undefined (not set to "") so that
+# `| default(omit)` in tasks/main.yml and tasks/install_org.yml correctly
+# drops the --version flag entirely rather than passing an empty string. Uncomment and pin in a host's group_vars/host_vars to hold a chart back: github_runner_arc_controller_chart_version: "0.12.1" github_runner_arc_scaleset_chart_version: "0.12.1"
