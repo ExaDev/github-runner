@@ -12,10 +12,30 @@
 # Two hosts, two roles, selected via Compose profiles rather than two separate compose files: the primary host (`docker compose --profile primary up -d`) runs `k3s` (server), `heartbeat`, and every org's ARC controller/runner scale set; a second host (`docker compose --profile agent up -d`) runs only `k3s-agent`, joining the primary's cluster as a worker so its own CPU/RAM become schedulable for runner pods too, with no second control plane and no duplicated heartbeat. See the project README's Architecture section for why a genuine multi-node HA control plane isn't attempted here (a 2-node embedded-etcd quorum is worse than 1 node, not better) - this is purely about spreading runner-pod capacity across both machines, not about surviving either one's loss.
 services:
   k3s:
-    image: "rancher/k3s:${K3S_VERSION:-latest}"
-    # Delete any stale kubeconfig before starting, then exec k3s. k3s can't overwrite an existing /output/kubeconfig.yaml through Colima's macOS share (the file ends up owner-read-only with container-root mapped to the Mac user), which would crash-loop "permission denied" on every restart (e.g. a Mac reboot). Removing it first lets k3s recreate it cleanly each start. --tls-san is appended only when K3S_TLS_SAN is set (${VAR:+word} POSIX sh expansion): a second host joining as an agent connects to this server over its own externally-reachable address (e.g. a Tailscale MagicDNS name), which k3s's self-signed cert doesn't include by default - it auto-includes the container's own hostname/IPs and localhost only. A primary with no agent ever joining it can leave K3S_TLS_SAN unset and this stays a no-op. --node-external-ip is the same deal for a completely different reason: with no agent ever joining, k3s auto-detects this container's own interface IP fine, but with two hosts, that auto-detected IP is each container's own internal Docker/Colima bridge address (e.g. 172.20.0.2), which is not reachable from the other physical machine at all - confirmed live, it broke the flannel VXLAN overlay (any pod-to-pod or pod-to-ClusterIP traffic that has to cross nodes, including every pod's own DNS lookup via CoreDNS) and the API server's own proxy to the other node's kubelet (logs/exec), while leaving ordinary job traffic looking fine since a job's own outbound HTTPS never needs the overlay at all. Deliberately --node-external-ip, not --node-ip: --node-ip requires the address to actually be bound to a local interface inside the container (k3s validates this and fatally refuses to start networking otherwise), and a host's Tailscale interface lives on the macOS host, never inside the container's own network namespace - confirmed live, --node-ip crashed k3s's own network policy controller outright ("failed to find interface with specified node ip"). --node-external-ip has no such validation, exactly the flag k3s provides for an externally-reachable address that isn't a local interface. Neither flag has a K3S_-prefixed env var equivalent (confirmed via `k3s server --help`), unlike most other settings here. --flannel-external-ip is a THIRD, separate piece needed alongside --node-external-ip, not a duplicate of it: flannel keeps its own `public-ip` annotation per node (flannel.alpha.coreos.com/public-ip), used specifically to pick VXLAN tunnel-endpoint addresses, and it does not automatically follow whatever address Kubernetes itself advertises for the node - confirmed live, cross-node pod traffic remained broken in one direction even after --node-external-ip alone made both nodes' own status.addresses correct, because flannel's own annotation was still the internal Docker/Colima bridge address. This flag is server-only (no equivalent under `k3s agent --help`) since flannel's backend configuration is managed centrally by the server, not per-agent - a plain boolean, no value needed, so unlike the two IP flags above it isn't conditional on a variable being set.
-    entrypoint: ["/bin/sh", "-c", "rm -f /output/kubeconfig.yaml && exec /bin/k3s server --disable=traefik --write-kubeconfig-mode=6443 --flannel-external-ip ${K3S_TLS_SAN:+--tls-san $K3S_TLS_SAN} ${K3S_NODE_EXTERNAL_IP:+--node-external-ip $K3S_NODE_EXTERNAL_IP}"]
-    # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry.
+    # Built locally (see k3s/Dockerfile), not the plain rancher/k3s image: k3s's own built-in --vpn-auth integration (below) needs the tailscale binaries actually present in the image, and the base image has no package manager at all to install them at runtime.
+    build:
+      context: ./k3s
+      args:
+        K3S_VERSION: "${K3S_VERSION:-latest}"
+    # Starts tailscaled as a background daemon first (k3s's own vpn-auth integration only runs `tailscale up` - it does not start the daemon itself, confirmed live: without this, k3s fails outright with "tailscale up failed: ... it doesn't appear to be running"), waits for its control socket to actually exist, then execs k3s.
+    #
+    # --vpn-auth is k3s's own documented (if experimental) mechanism for running Tailscale INSIDE the cluster rather than depending on the host's own separate Tailscale client: each node's k3s process joins the tailnet as its own device, using flannel's native "tailscale" backend (not VXLAN at all) for pod traffic, and k3s auto-detects the resulting Tailscale IP for --node-ip with no manual IP configuration needed. This replaces an earlier, considerably hackier approach (--node-external-ip + --flannel-external-ip layered on the HOST's own already-running Tailscale, tunnelled through Docker's own UDP port-publishing) that turned out to need two nested tunnels for the same traffic and was correspondingly fragile.
+    #
+    # --disable-network-policy: this fleet has no use for Kubernetes NetworkPolicy at all, and kube-router's own enforcement chains sit directly in the FORWARD path every cross-node pod packet takes - removing a whole class of policy-chain interaction we don't need.
+    #
+    # --tls-san is appended only when K3S_TLS_SAN is set (${VAR:+word} POSIX sh expansion): an agent joins via this primary's own NEW Tailscale-assigned MagicDNS name (see K3S_TLS_SAN's own value in host_vars), which k3s's self-signed cert doesn't include by default.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /var/run/tailscale /var/lib/tailscale
+        tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+        until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 0.5; done
+        rm -f /output/kubeconfig.yaml
+        exec /bin/k3s server --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 \
+          --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY" \
+          ${K3S_TLS_SAN:+--tls-san $K3S_TLS_SAN}
+    # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry. This is also the hostname Tailscale registers the container's own new device under, giving it a stable MagicDNS name too.
     hostname: k3s-server
     container_name: github-runner-k3s
     privileged: true
@@ -34,20 +54,30 @@ services:
       - K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml
       - K3S_KUBECONFIG_MODE=666
       - K3S_TLS_SAN=${K3S_TLS_SAN:-}
-      - K3S_NODE_EXTERNAL_IP=${K3S_NODE_EXTERNAL_IP:-}
+      - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:?K3S_VPN_AUTH_JOIN_KEY must be set in .env - a reusable, pre-authorized Tailscale auth key (see README's Tailscale section for how it's provisioned)}
     volumes:
       - k3s-data:/var/lib/rancher/k3s
+      # Persists this container's own Tailscale device identity/keys across recreations - without this, every recreate would register a brand new device on the tailnet instead of reconnecting as the same one, since the join key is reusable by design.
+      - k3s-tailscale-data:/var/lib/tailscale
       - ./kubeconfig:/output
     ports:
       - "6443:6443"
-      # 8472/udp: flannel's own VXLAN backend, needed for any cross-node pod-to-pod or pod-to-ClusterIP traffic once a second host joins as an agent - unpublished, that traffic (including every pod's own DNS lookup via CoreDNS) can never reach this container at all. 10250/tcp: kubelet, needed so the API server on the OTHER node (if this host is ever the agent instead) can proxy exec/logs to a pod scheduled here. Harmless to publish on both roles for the same reason K3S_TLS_SAN/K3S_NODE_EXTERNAL_IP are wired symmetrically - this fleet's own primary/agent roles have already swapped once.
-      - "8472:8472/udp"
-      - "10250:10250"
+      # No 8472/udp or 10250/tcp published: Tailscale establishes outbound connections and NAT-traverses itself (DERP relay/STUN), so no inbound Docker port-forwarding is needed for cross-node traffic at all - confirmed live, unlike the VXLAN-over-Docker- port-publish approach this replaced.
 
   k3s-agent:
-    image: "rancher/k3s:${K3S_VERSION:-latest}"
-    # Custom entrypoint now needed: --node-external-ip has no K3S_-prefixed env var equivalent (see the primary k3s service's own comment on this), so the base image's default CMD (["agent"], confirmed via `docker inspect`) can no longer be relied on alone once this needs to append a CLI flag conditionally.
-    entrypoint: ["/bin/sh", "-c", "exec /bin/k3s agent ${K3S_NODE_EXTERNAL_IP:+--node-external-ip $K3S_NODE_EXTERNAL_IP}"]
+    build:
+      context: ./k3s
+      args:
+        K3S_VERSION: "${K3S_VERSION:-latest}"
+    # Same tailscaled-then-k3s startup as the primary k3s service - see that service's own comment for the full reasoning. --server points at the primary's own new Tailscale MagicDNS name (K3S_AGENT_SERVER_URL), not the host machine's own pre-existing Tailscale identity.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /var/run/tailscale /var/lib/tailscale
+        tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
+        until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 0.5; done
+        exec /bin/k3s agent --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY"
     hostname: ${K3S_AGENT_NODE_NAME:-k3s-agent}
     container_name: github-runner-k3s-agent
     privileged: true
@@ -66,13 +96,11 @@ services:
       - K3S_URL=${K3S_AGENT_SERVER_URL:-}
       - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - the same shared secret the primary's own K3S_TOKEN uses}
       - K3S_NODE_NAME=${K3S_AGENT_NODE_NAME:-k3s-agent}
-      - K3S_NODE_EXTERNAL_IP=${K3S_NODE_EXTERNAL_IP:-}
+      - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:?K3S_VPN_AUTH_JOIN_KEY must be set in .env - the same reusable, pre-authorized Tailscale auth key the primary's own K3S_VPN_AUTH_JOIN_KEY uses}
     volumes:
       - k3s-agent-data:/var/lib/rancher/k3s
-    ports:
-      # Same reasoning as the primary k3s service's own ports - see that comment.
-      - "8472:8472/udp"
-      - "10250:10250"
+      # Same reasoning as the primary k3s service's own tailscale volume.
+      - k3s-agent-tailscale-data:/var/lib/tailscale
 
   heartbeat:
     # Fleet-health reporter. Checks k3s + ARC and refreshes the secret gist.
@@ -102,3 +130,5 @@ services:
 volumes:
   k3s-data: {}
   k3s-agent-data: {}
+  k3s-tailscale-data: {}
+  k3s-agent-tailscale-data: {}
