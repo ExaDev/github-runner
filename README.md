@@ -52,8 +52,9 @@ An org with hosts of very different real capacity needs more than one **scale-se
   kubectl get pods -n arc-runners-exadev          # zero runner pods when idle is expected, not a bug
   ```
 - **Confirm no disk accumulates across repeated runner jobs:** `colima ssh -- df -h /mnt/lima-colima` must stay flat across repeated `test-arc-runner.yml` runs.
+- **Lint:** `.github/workflows/ci.yml` runs Shellcheck, actionlint, yamllint, and hadolint on every push and pull request, gated by one `required-checks` job so a repository ruleset only ever has to require that one check regardless of how many lint jobs exist. hadolint's warning-level pinning advice is visible but non-blocking (`--failure-threshold error`): this repo deliberately floats several images/packages on `latest` rather than pinning. yamllint's config lives in `.yamllint`, relaxing the three default rules that conflict with this project's own conventions (long single-line comments, no leading `---`, GitHub Actions' `on:` key).
 
-There is no application test suite or linter configured in this repo; the checks above are the project's actual verification surface.
+There is no application test suite in this repo; the checks above are the project's actual verification surface.
 
 ## Architecture
 
@@ -64,6 +65,8 @@ ARC's `gha-runner-scale-set` solves both by design: it runs one fresh pod per jo
 The custom runner toolchain (GCC 11/G++ for C++20, Bun, the `gh` CLI — see `Dockerfile`) carries over from the previous design, rebased onto ARC's own [`actions/actions-runner`](https://github.com/actions/runner/pkgs/container/actions-runner) base image instead of `catthehacker/ubuntu:act-latest`. ARC's runner pods use their own registration flow, so the previous design's vendored [myoung34/docker-github-actions-runner](https://github.com/myoung34/docker-github-actions-runner) scripts (registration, GitHub App JWT signing, ephemeral re-registration) are not needed.
 
 `.github/workflows/build-runner-image.yml` is meant to build and push the runner image on GitHub-hosted `ubuntu-latest`, deliberately not on this fleet itself, since building the fleet's own image on the fleet would be circular - but this org can't currently schedule `ubuntu-latest` at all, so every run of it has failed instantly (see [issue #10](https://github.com/ExaDev/github-runner/issues/10)). See [Build, test, and smoke-test](#build-test-and-smoke-test) for the actual current path.
+
+`.github/workflows/ci.yml` dogfoods the fleet instead: its lint jobs prefer `exadev-runners`, routed through [`ExaDev/runner-fallback-action`](https://github.com/ExaDev/runner-fallback-action) so a run falls back to `ubuntu-latest` if the fleet's heartbeat reports it unhealthy. This is safe precisely because lint jobs (unlike the image build above) don't need the fleet to already be working to run — there's no circularity.
 
 ### Heartbeat
 
@@ -103,6 +106,7 @@ Commits follow Conventional Commits (`fix:`, `feat:`, `tune:`, and so on).
 - **Zero runner pods in an `arc-runners-<org>` namespace (or its per-profile `-<suffix>` variant) when idle is expected, not a bug** — `minRunners: 0` means pods exist only while a job is running.
 - **The ExaDev org's Settings > Actions > Runners page shows the runner scale set itself**, not individual long-lived runner names the way the previous design did. ARC's ephemeral runners do not persist between jobs, so there is nothing to list while idle.
 - **`values/exadev-runners-values.yaml`'s `maxRunners` and per-pod resource limits are tuned from a real out-of-memory and pod-eviction incident**, not arbitrary defaults — read that file's comments in full before changing either value; a higher `maxRunners` without matching headroom reproduces the same failure.
+- **`ci.yml`'s `determine-runner` job is deliberately anchored on `exadev-runners` directly, not `ubuntu-latest`.** This is the fleet's own repo, so its CI dogfoods the fleet fully rather than hedging on it — unlike a consuming repo (for example `ExaDev/spot-of-the-day`), where `ubuntu-latest` is the recommended anchor so a fully-down fleet can still fall back. The trade-off here is accepted, not a workaround: if the fleet is entirely down, `determine-runner` cannot schedule and CI cannot fall back to `ubuntu-latest` either.
 
 ## References
 
