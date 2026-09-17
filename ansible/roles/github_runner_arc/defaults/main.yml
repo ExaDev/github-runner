@@ -1,7 +1,14 @@
 ---
 # ExaDev GitHub Actions runner fleet: ARC (Actions Runner Controller) on k3s.
 #
-# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host. Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host. See host_vars/node-b.yml for a real, working example of the full set of variables this role needs.
+# "primary" (the default) runs the full stack: k3s server, heartbeat, the ARC controller, and every org's runner scale set. "agent" joins an existing primary's cluster as a worker only - see docker-compose.yml's own top comment for why this is additive runner-pod capacity, not control-plane HA, and set github_runner_arc_agent_server_url when using it.
+github_runner_arc_node_role: "primary"
+github_runner_arc_agent_server_url: ""
+
+# Set on a primary host that a second host will join as a k3s agent, to whatever externally-reachable address that agent will connect through (e.g. a Tailscale MagicDNS name) - k3s's self-signed server cert only auto-includes the container's own hostname/IPs and localhost, so an agent connecting via any other address fails TLS verification unless that address is added as a --tls-san. Left empty (the default) on a primary nothing else ever joins.
+github_runner_arc_primary_tls_san: ""
+
+# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host (primary hosts only - ignored on an agent). Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host. See host_vars/node-a.yml for a real, working example of the full set of variables this role needs.
 github_runner_arc_orgs: []
 
 # k3s + heartbeat (one Docker Compose stack per host, shared by every org on that host). k3s-token, ghcr-username, ghcr-token, and heartbeat-gh-token all live as separate fields on this ONE 1Password item, read via a single `op item get` call rather than four separate `op read` calls: confirmed live that 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so four separate reads meant four separate approval prompts for values that live on the exact same item. Never stored in this role or in ansible-vault - see tasks/main.yml.

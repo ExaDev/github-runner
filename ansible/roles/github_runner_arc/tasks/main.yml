@@ -1,9 +1,12 @@
 ---
 # Ports bootstrap.sh's steps 1-4 (start k3s, wait for it, install the ARC controller, install each org) to Ansible. Safe to rerun, same as the script: every mutating task below uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
+#
+# Two node roles, not one: github_runner_arc_node_role selects between "primary" (today's full behaviour - k3s server, heartbeat, the ARC controller, every org's runner scale set) and "agent" (a second host joining the primary's cluster purely as a worker, so its own CPU/RAM become schedulable for runner pods too). See docker-compose.yml's own top comment for why this is additive capacity, not control-plane HA.
 
-- name: Skip role when no orgs are configured for this host
-  ansible.builtin.meta: end_role
-  when: github_runner_arc_orgs | length == 0
+- name: Fail if the node role is invalid
+  ansible.builtin.fail:
+    msg: "github_runner_arc_node_role must be 'primary' or 'agent' (got '{{ github_runner_arc_node_role }}')."
+  when: github_runner_arc_node_role not in ['primary', 'agent']
 
 - name: Fail if this host's repo root is not set
   ansible.builtin.fail:
@@ -22,19 +25,9 @@
       host_vars/{{ inventory_hostname }}.yml.
   when: github_runner_arc_secrets_vault | length == 0 or github_runner_arc_secrets_item | length == 0
 
-- name: Ensure a dedicated virtualenv has the kubernetes Python client
-  ansible.builtin.pip:
-    name: kubernetes
-    virtualenv: "{{ github_runner_arc_venv_path }}"
-    virtualenv_command: python3 -m venv
-
-- name: Use that virtualenv's Python for every module task on this host from here on
-  ansible.builtin.set_fact:
-    ansible_python_interpreter: "{{ github_runner_arc_venv_path }}/bin/python3"
-
-# Delegated to the control node, not node-b: 1Password access (desktop-app integration, or a signed-in CLI session) belongs to whichever machine an operator is actually running Ansible from, not to every fleet host - node-b itself has no interactive session for `op` to authenticate against. No delegate_facts: a plain `register:` result already attaches to inventory_hostname (node-b) regardless of where the task's execution was delegated to - only `set_fact`'s own fact-namespace assignment is sensitive to delegate_facts (see resolve_installation_id.yml's git history for the one place that mattered, and why delegate_facts: true there was backwards).
+# Delegated to the control node, not this host: 1Password access (desktop-app integration, or a signed-in CLI session) belongs to whichever machine an operator is actually running Ansible from, not to every fleet host. No delegate_facts: a plain `register:` result already attaches to inventory_hostname regardless of where the task's execution was delegated to - only `set_fact`'s own fact-namespace assignment is sensitive to delegate_facts (see resolve_installation_id.yml's git history for the one place that mattered, and why delegate_facts: true there was backwards).
 #
-# Every op invocation this role needs (the shared item's four fields, plus every org's own private key) happens in ONE shell script here, back to back with no gap - not spread across separate Ansible tasks. Confirmed live: two different-item op reads issued back-to-back needed only one approval prompt between them, while the same two reads spread across separate Ansible tasks (with real processing time in between) needed two. 1Password's desktop-app integration prompts per invocation, but a tight run of calls with no gap shares one approval.
+# Every op invocation this host needs (the shared item's fields, plus every org's own private key - empty on an agent host, since github_runner_arc_orgs is only ever populated on the primary) happens in ONE shell script here, back to back with no gap - not spread across separate Ansible tasks. Confirmed live: two different-item op reads issued back-to-back needed only one approval prompt between them, while the same two reads spread across separate Ansible tasks (with real processing time in between) needed two. 1Password's desktop-app integration prompts per invocation, but a tight run of calls with no gap shares one approval.
 - name: Read every 1Password secret this host needs in one shell invocation
   ansible.builtin.shell: |
     set -euo pipefail
@@ -60,6 +53,58 @@
     github_runner_arc_secrets: "{{ github_runner_arc_secrets_raw.stdout | from_json }}"
   no_log: true
 
+- name: Determine the active Docker CLI context
+  # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use - confirmed live against node-b, which runs Colima (docker.sock lives under ~/.colima/default/, not /var/run) and failed outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.
+  ansible.builtin.command: docker context show
+  changed_when: false
+  register: github_runner_arc_docker_context
+
+- name: Join as a k3s agent and stop here (nothing else applies to a worker-only node)
+  when: github_runner_arc_node_role == "agent"
+  block:
+    - name: Fail if the primary's server URL is not set
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_arc_agent_server_url is not set on this agent
+          host. It must be the primary host's own
+          https://<address>:6443 - add it to
+          host_vars/{{ inventory_hostname }}.yml.
+      when: github_runner_arc_agent_server_url | length == 0
+
+    - name: Template .env for the k3s agent
+      ansible.builtin.template:
+        src: env-agent.j2
+        dest: "{{ github_runner_arc_repo_root }}/.env"
+        mode: "0600"
+      no_log: true
+
+    - name: Join the primary's k3s cluster as an agent
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_arc_repo_root }}"
+        profiles: ["agent"]
+        cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
+        state: present
+
+    - name: End the role here - an agent host runs no org installs or ARC controller of its own
+      ansible.builtin.meta: end_role
+
+# Everything below only ever runs on the primary: an agent host already ended the role in the block above.
+
+- name: Skip the rest of the role when no orgs are configured for this primary host
+  ansible.builtin.meta: end_role
+  when: github_runner_arc_orgs | length == 0
+
+- name: Ensure a dedicated virtualenv has the kubernetes Python client
+  # Only needed here, not on an agent host: kubernetes.core.k8s/k8s_info/helm (used below and in install_org.yml) are primary-only - an agent host never talks to the Kubernetes API directly, it only joins the cluster docker-compose already set up above.
+  ansible.builtin.pip:
+    name: kubernetes
+    virtualenv: "{{ github_runner_arc_venv_path }}"
+    virtualenv_command: python3 -m venv
+
+- name: Use that virtualenv's Python for every module task on this host from here on
+  ansible.builtin.set_fact:
+    ansible_python_interpreter: "{{ github_runner_arc_venv_path }}/bin/python3"
+
 - name: Template .env for docker compose
   ansible.builtin.template:
     src: env.j2
@@ -67,15 +112,10 @@
     mode: "0600"
   no_log: true
 
-- name: Determine the active Docker CLI context
-  # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use - confirmed live against node-b, which runs Colima (docker.sock lives under ~/.colima/default/, not /var/run) and failed outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.
-  ansible.builtin.command: docker context show
-  changed_when: false
-  register: github_runner_arc_docker_context
-
 - name: Start k3s and heartbeat via docker compose
   community.docker.docker_compose_v2:
     project_src: "{{ github_runner_arc_repo_root }}"
+    profiles: ["primary"]
     cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
     state: present
 
@@ -88,7 +128,8 @@
   retries: 60
   delay: 2
 
-- name: Wait for the k3s node to report Ready
+- name: Wait for every node to report Ready
+  # --all, not a --limit-scoped single node: once an agent has joined, this must wait for it too, not just the primary's own control-plane node.
   ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
   environment:
     KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
