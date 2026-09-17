@@ -1,0 +1,75 @@
+---
+# Included once per org from tasks/main.yml's loop, with `org` set to that org's entry from github_runner_arc_orgs. Ports bootstrap.sh's install_org() bash function: namespace, GitHub App secret, GHCR pull secret, then the runner scale set release.
+
+- name: "{{ org.name }}: resolve installation ID"
+  ansible.builtin.include_tasks: resolve_installation_id.yml
+  when: (org.installation_id | default('')) | length == 0
+
+- name: "{{ org.name }}: set the effective installation ID"
+  ansible.builtin.set_fact:
+    github_runner_arc_installation_id: "{{ github_runner_arc_resolved_installation_id | default(org.installation_id) }}"
+
+- name: "{{ org.name }}: read App private key from 1Password"
+  ansible.builtin.shell: "op read '{{ org.private_key_op_reference }}'"
+  changed_when: false
+  no_log: true
+  register: github_runner_arc_org_private_key_raw
+
+- name: "{{ org.name }}: create namespace"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "arc-runners-{{ org.name | lower }}"
+
+- name: "{{ org.name }}: create/update GitHub App secret"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: "{{ org.name | lower }}-github-app"
+        namespace: "arc-runners-{{ org.name | lower }}"
+      stringData:
+        github_app_id: "{{ org.app_id | string }}"
+        github_app_installation_id: "{{ github_runner_arc_installation_id }}"
+        github_app_private_key: "{{ github_runner_arc_org_private_key_raw.stdout }}"
+  no_log: true
+
+- name: "{{ org.name }}: create/update GHCR pull secret"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/dockerconfigjson
+      metadata:
+        name: ghcr-pull
+        namespace: "arc-runners-{{ org.name | lower }}"
+      data:
+        .dockerconfigjson: >-
+          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_ghcr_username_raw.stdout,
+                                      'password': github_runner_arc_ghcr_token_raw.stdout,
+                                      'auth': (github_runner_arc_ghcr_username_raw.stdout ~ ':' ~ github_runner_arc_ghcr_token_raw.stdout) | b64encode}}})
+             | to_json | b64encode }}
+  no_log: true
+
+- name: "{{ org.name }}: install/upgrade runner scale set"
+  kubernetes.core.helm:
+    name: "{{ org.name | lower }}-runners"
+    chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+    chart_version: "{{ github_runner_arc_scaleset_chart_version | default(omit) }}"
+    release_namespace: "arc-runners-{{ org.name | lower }}"
+    values_files:
+      - "{{ github_runner_arc_values_dir }}/{{ org.values_file }}"
+    # --set-equivalent overrides only, matching bootstrap.sh exactly: a nested `values:` dict would replace containers[] wholesale (Helm does not deep-merge lists), silently dropping the values file's own command/resources for that container.
+    set_values:
+      - value: "githubConfigUrl=https://github.com/{{ org.name }}"
+      - value: "githubConfigSecret={{ org.name | lower }}-github-app"
+      - value: "template.spec.imagePullSecrets[0].name=ghcr-pull"
+      - value: "template.spec.containers[0].image={{ org.image }}"
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
