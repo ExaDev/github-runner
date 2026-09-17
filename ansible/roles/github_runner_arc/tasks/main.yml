@@ -27,7 +27,7 @@
 
 # Delegated to the control node, not this host: 1Password access (desktop-app integration, or a signed-in CLI session) belongs to whichever machine an operator is actually running Ansible from, not to every fleet host. No delegate_facts: a plain `register:` result already attaches to inventory_hostname regardless of where the task's execution was delegated to - only `set_fact`'s own fact-namespace assignment is sensitive to delegate_facts (see resolve_installation_id.yml's git history for the one place that mattered, and why delegate_facts: true there was backwards).
 #
-# Every op invocation this host needs (the shared item's fields, plus every org's own private key - empty on an agent host, since github_runner_arc_orgs is only ever populated on the primary) happens in ONE shell script here, back to back with no gap - not spread across separate Ansible tasks. Confirmed live: two different-item op reads issued back-to-back needed only one approval prompt between them, while the same two reads spread across separate Ansible tasks (with real processing time in between) needed two. 1Password's desktop-app integration prompts per invocation, but a tight run of calls with no gap shares one approval.
+# Every op invocation this host needs (the shared item's fields - k3s-token, ghcr-username, ghcr-token, heartbeat-gh-token, tailscale-join-key - plus every org's own private key, empty on an agent host since github_runner_arc_orgs is only ever populated on the primary) happens in ONE shell script here, back to back with no gap - not spread across separate Ansible tasks. Confirmed live: two different-item op reads issued back-to-back needed only one approval prompt between them, while the same two reads spread across separate Ansible tasks (with real processing time in between) needed two. 1Password's desktop-app integration prompts per invocation, but a tight run of calls with no gap shares one approval.
 - name: Read every 1Password secret this host needs in one shell invocation
   ansible.builtin.shell: |
     set -euo pipefail
@@ -35,7 +35,8 @@
       k3s_token: (.fields[] | select(.label=="k3s-token") | .value),
       ghcr_username: (.fields[] | select(.label=="ghcr-username") | .value),
       ghcr_token: (.fields[] | select(.label=="ghcr-token") | .value),
-      heartbeat_gh_token: (.fields[] | select(.label=="heartbeat-gh-token") | .value)
+      heartbeat_gh_token: (.fields[] | select(.label=="heartbeat-gh-token") | .value),
+      tailscale_join_key: (.fields[] | select(.label=="tailscale-join-key") | .value)
     }')
     org_keys='{}'
     {% for org in github_runner_arc_orgs %}
