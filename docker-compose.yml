@@ -9,7 +9,9 @@
 #
 # The second service, `heartbeat`, is the fleet-health reporter: it checks the k3s node + ARC controller and refreshes a secret gist that ExaDev/runner-fallback-action reads to decide self-hosted vs ubuntu-latest. It uses host networking so it can reach k3s's API at 127.0.0.1 (already in k3s's serving cert) with no TLS-SAN or kubeconfig gymnastics - and no launchd / external scheduler, so the whole fleet + its health reporter come up from one `docker compose up`.
 #
-# Two hosts, two roles, selected via Compose profiles rather than two separate compose files: the primary host (`docker compose --profile primary up -d`) runs `k3s` (server), `heartbeat`, and every org's ARC controller/runner scale set; a second host (`docker compose --profile agent up -d`) runs only `k3s-agent`, joining the primary's cluster as a worker so its own CPU/RAM become schedulable for runner pods too, with no second control plane and no duplicated heartbeat. See the project README's Architecture section for why a genuine multi-node HA control plane isn't attempted here (a 2-node embedded-etcd quorum is worse than 1 node, not better) - this is purely about spreading runner-pod capacity across both machines, not about surviving either one's loss.
+# The third service, `autoscaler`, raises and lowers the single AutoscalingRunnerSet's spec.maxRunners based on real, current memory usage and host/VM pressure - never job identity or queue depth. It runs host-networked for the same reason as heartbeat, and shares the ./logs/ bind mount with it so heartbeat can read and republish the autoscaler's own status file in the same gist - see scripts/autoscaler.sh and scripts/heartbeat.sh.
+#
+# Two hosts, two roles, selected via Compose profiles rather than two separate compose files: the primary host (`docker compose --profile primary up -d`) runs `k3s` (server), `heartbeat`, `autoscaler`, and every org's ARC controller/runner scale set; a second host (`docker compose --profile agent up -d`) runs only `k3s-agent`, joining the primary's cluster as a worker so its own CPU/RAM become schedulable for runner pods too, with no second control plane and no duplicated heartbeat/autoscaler. See the project README's Architecture section for why a genuine multi-node HA control plane isn't attempted here (a 2-node embedded-etcd quorum is worse than 1 node, not better) - this is purely about spreading runner-pod capacity across both machines, not about surviving either one's loss.
 services:
   k3s:
     # Built locally (see k3s/Dockerfile), not the plain rancher/k3s image: k3s's own built-in --vpn-auth integration (below) needs the tailscale binaries actually present in the image, and the base image has no package manager at all to install them at runtime.
@@ -133,6 +135,30 @@ services:
     volumes:
       # The host kubeconfig k3s generates; loop.sh uses it as-is (127.0.0.1).
       - ./kubeconfig:/kubeconfig:ro
+      # Read-only: the autoscaler service writes its status file here; this service only reads it back to republish in the heartbeat gist.
+      - ./logs/autoscaler:/state:ro
+
+  autoscaler:
+    # Usage-driven maxRunners autoscaler. Build context is the repo root so the Dockerfile can COPY scripts/ and autoscaler/.
+    build:
+      context: .
+      dockerfile: autoscaler/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - k3s
+    environment:
+      - AUTOSCALER_DRY_RUN=${AUTOSCALER_DRY_RUN:-true}
+      - AUTOSCALER_POLL_SECONDS=${AUTOSCALER_POLL_SECONDS:-45}
+      - AUTOSCALER_USABLE_BUDGET_GI=${AUTOSCALER_USABLE_BUDGET_GI:-20}
+      - AUTOSCALER_MAX_CEILING=${AUTOSCALER_MAX_CEILING:-4}
+      - AUTOSCALER_FLOOR=${AUTOSCALER_FLOOR:-2}
+      - AUTOSCALER_RAISE_CONFIRM_POLLS=${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}
+      - AUTOSCALER_SWAP_PRESSURE_PCT=${AUTOSCALER_SWAP_PRESSURE_PCT:-50}
+      - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT=${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}
+    volumes:
+      - ./kubeconfig:/kubeconfig:ro
+      - ./logs/autoscaler:/state
 
 volumes:
   k3s-data: {}
