@@ -1,0 +1,21 @@
+name: test-autoscaler
+
+# Manual traffic generator for the usage-driven autoscaler: dispatches several jobs onto exadev-runners at once so there is real, concurrent memory usage to watch the autoscaler's dry-run output/status react to (see the project README's Autoscaler section). This workflow does not assert anything about the autoscaler itself - it only creates the load; watch `docker compose logs -f autoscaler` and the status file it writes to logs/autoscaler/autoscaler-status.json while this runs.
+on:
+  workflow_dispatch:
+    inputs:
+      hold_seconds:
+        description: "How long each probe job sleeps for, in seconds"
+        required: false
+        default: "120"
+
+jobs:
+  generate-load:
+    runs-on: exadev-runners
+    strategy:
+      matrix:
+        job_index: [1, 2, 3]
+    steps:
+      - run: |
+          echo "probe job ${{ matrix.job_index }}: hostname $(hostname), holding for ${{ github.event.inputs.hold_seconds || '120' }}s"
+          sleep "${{ github.event.inputs.hold_seconds || '120' }}"
