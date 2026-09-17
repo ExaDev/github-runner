@@ -1,0 +1,138 @@
+name: CI
+
+# Lints every shell script, workflow file, YAML file, and Dockerfile in the repo. There is no application test suite here (this repo is fleet infrastructure config, not application code) - these checks are its actual verification surface, matching the README's Build/test/lint section.
+#
+# Dogfoods the fleet: every job after determine-runner routes through ExaDev/runner-fallback-action, preferring exadev-runners and falling back to ubuntu-latest only if the fleet's heartbeat gist reports it unhealthy (or the run is a fork PR / Dependabot - that guard lives inside the action). See the README's Heartbeat section for how the gist is kept fresh, and ExaDev/runner-fallback-action's own README for the routing design.
+#
+# determine-runner itself is TEMPORARILY anchored on exadev-runners directly, not ubuntu-latest as the action's README recommends for real workflows, while ExaDev's GitHub-hosted runners are blocked by an account billing issue - matching the same live workaround already in place on ExaDev/spot-of-the-day and ExaDev/runner-fallback-action's own conformance.yml. This sacrifices the fallback safety net for this one bootstrap job specifically: if the fleet is down while anchored this way, determine-runner cannot run and cannot hand off to ubuntu-latest either. Revert to ubuntu-latest once that billing issue is resolved.
+#
+# required-checks is the single required status check in this repo's ruleset (never the individual job names), so adding or renaming a lint job never needs a ruleset update - matching ExaDev/eslint-config and ExaDev/wire-mesh's own ci.yml.
+#
+# The action is pinned to a commit SHA, not @main - bump deliberately when it changes. (b774d51 = the secret-gist redesign, the current HEAD of main as of the day this workflow was written.)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  determine-runner:
+    name: Determine runner
+    runs-on: exadev-runners
+    timeout-minutes: 5
+    outputs:
+      selected-runner: ${{ steps.fallback.outputs.selected-runner || '["ubuntu-latest"]' }}
+      preferred-available: ${{ steps.fallback.outputs.preferred-available || 'false' }}
+    steps:
+      - id: fallback
+        uses: ExaDev/runner-fallback-action@b774d51ff5360bf53705b2eb34ff019afd4d7f07
+
+  shellcheck:
+    name: Shellcheck
+    needs: determine-runner
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint every shell script
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          mapfile -t scripts < <(find . -type f -name '*.sh' -not -path './.git/*')
+          echo "Found ${#scripts[@]} shell script(s)."
+          if [ "${#scripts[@]}" -gt 0 ]; then
+            shellcheck "${scripts[@]}"
+          fi
+
+  actionlint:
+    name: actionlint
+    needs: determine-runner
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+      - name: Lint every workflow file
+        run: ./actionlint -color
+
+  yamllint:
+    name: YAML lint
+    needs: determine-runner
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint every YAML file
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq yamllint
+          yamllint .
+
+  hadolint:
+    name: hadolint
+    needs: determine-runner
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install hadolint
+        # actions-runner pods are always linux/amd64 today (no arm64 job has ever been requested); revisit HADOLINT_ARCH if that changes.
+        run: |
+          curl -fsSL -o /usr/local/bin/hadolint "https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-Linux-${HADOLINT_ARCH}"
+          chmod +x /usr/local/bin/hadolint
+        env:
+          HADOLINT_ARCH: x86_64
+      - name: Lint every Dockerfile
+        run: |
+          set -euo pipefail
+          mapfile -t dockerfiles < <(find . -type f -iname 'Dockerfile*' -not -path './.git/*')
+          echo "Found ${#dockerfiles[@]} Dockerfile(s)."
+          if [ "${#dockerfiles[@]}" -gt 0 ]; then
+            # error threshold, not the default (info): this repo deliberately floats several base images/packages on `latest` rather than pinning (see e.g. ghcr.io/exadev/github-runner:latest, rancher/k3s:${K3S_VERSION:-latest}), so hadolint's warning-level pinning advice (DL3007/DL3008/DL3018) stays visible in the log without failing every run over an already-made, documented tradeoff.
+            hadolint --failure-threshold error "${dockerfiles[@]}"
+          fi
+
+  ansible-syntax-check:
+    name: Ansible syntax check
+    needs: determine-runner
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Syntax-check the playbook
+        # Guarded inside the step, not via a job-level if: ansible/ doesn't exist on main yet (ExaDev/github-runner#2 is still open), and hashFiles() isn't available in a job-level if anyway (it can only see files after checkout has already run). Safe to leave this guard in place once that PR merges - it just always proceeds.
+        run: |
+          set -euo pipefail
+          if [ ! -f ansible/playbook.yml ]; then
+            echo "ansible/playbook.yml not present yet - nothing to check."
+            exit 0
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ansible
+          (cd ansible && ansible-playbook playbook.yml --syntax-check)
+
+  required-checks:
+    name: Required Checks
+    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check]
+    # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more required jobs did not succeed:"
+            echo '${{ toJSON(needs) }}'
+            exit 1
+          fi
