@@ -15,8 +15,11 @@ RUN apt-get update \
         gcc-11 g++-11 unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Bun (JS runtime), installed system-wide
-RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+# Bun (JS runtime), installed system-wide. Explicit bash -c (the default RUN
+# shell, /bin/sh/dash on this base image, has no pipefail): without it, a
+# failed curl (e.g. a transient network error) would exit 0 through the
+# pipe and silently install nothing.
+RUN /bin/bash -c "set -o pipefail && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash"
 
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
