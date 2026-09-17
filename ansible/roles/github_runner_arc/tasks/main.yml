@@ -94,14 +94,6 @@
   ansible.builtin.meta: end_role
   when: github_runner_arc_orgs | length == 0
 
-- name: Ensure helm and kubectl are installed
-  # Only needed here, not on an agent host: same reasoning as the venv task below - kubernetes.core.k8s/k8s_info/helm are primary-only. Docker/Colima itself is deliberately NOT installed here: unlike a stock CLI tool, it needs a real per-host sizing decision (Colima's own VM CPU/memory/disk allocation - see values/exadev-runners-values-node-a.yaml for how much that decision actually matters) that has no safe one-size-fits-all default, so the README still lists it as a manual prerequisite.
-  community.general.homebrew:
-    name:
-      - helm
-      - kubernetes-cli
-    state: present
-
 - name: Ensure a dedicated virtualenv has the kubernetes Python client
   # Only needed here, not on an agent host: kubernetes.core.k8s/k8s_info/helm (used below and in install_org.yml) are primary-only - an agent host never talks to the Kubernetes API directly, it only joins the cluster docker-compose already set up above.
   ansible.builtin.pip:
@@ -128,11 +120,12 @@
     state: present
 
 - name: Wait for the k3s node to register (an empty node list is still a successful API response)
+  # default([]) on resources, not just a bare .resources access: the very first poll can hit the API before it's actually listening yet (the container has only just started), and that attempt's own result dict has no `resources` key at all - confirmed live on a fresh node-a bootstrap, where the bare access threw "object of type 'dict' has no attribute 'resources'" and aborted the whole `until` loop outright instead of retrying, even though the exact same module call succeeded cleanly moments later once the API was actually up.
   kubernetes.core.k8s_info:
     kind: Node
     kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
   register: github_runner_arc_nodes
-  until: github_runner_arc_nodes.resources | length > 0
+  until: github_runner_arc_nodes.resources | default([]) | length > 0
   retries: 60
   delay: 2
 
