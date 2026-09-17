@@ -94,6 +94,14 @@
   ansible.builtin.meta: end_role
   when: github_runner_arc_orgs | length == 0
 
+- name: Ensure helm and kubectl are installed
+  # Only needed here, not on an agent host: same reasoning as the venv task below - kubernetes.core.k8s/k8s_info/helm are primary-only. Docker/Colima itself is deliberately NOT installed here: unlike a stock CLI tool, it needs a real per-host sizing decision (Colima's own VM CPU/memory/disk allocation - see values/exadev-runners-values-node-a.yaml for how much that decision actually matters) that has no safe one-size-fits-all default, so the README still lists it as a manual prerequisite.
+  community.general.homebrew:
+    name:
+      - helm
+      - kubernetes-cli
+    state: present
+
 - name: Ensure a dedicated virtualenv has the kubernetes Python client
   # Only needed here, not on an agent host: kubernetes.core.k8s/k8s_info/helm (used below and in install_org.yml) are primary-only - an agent host never talks to the Kubernetes API directly, it only joins the cluster docker-compose already set up above.
   ansible.builtin.pip:
