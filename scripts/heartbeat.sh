@@ -6,15 +6,18 @@
 # self-hosted vs ubuntu-latest - see this action's docs/spec.md.
 #
 # Environment (provided by the compose service):
-#   KUBECONFIG          - a kubeconfig whose server reaches k3s (loop.sh
-#                         rewrites the host kubeconfig to https://k3s:6443)
-#   HEARTBEAT_GH_TOKEN  - a GitHub PAT with `gist` scope (write the gist)
-#   HEARTBEAT_GIST_ID   - the secret gist id to refresh
+# - KUBECONFIG: a kubeconfig whose server reaches k3s (loop.sh rewrites the host kubeconfig to https://k3s:6443)
+# - HEARTBEAT_GH_TOKEN: a GitHub PAT with `gist` scope (write the gist)
+# - HEARTBEAT_GIST_ID: the secret gist id to refresh
+# - HEARTBEAT_STATE_DIR: shared, read-only mount of the autoscaler's own state dir (see scripts/autoscaler.sh)
 set -euo pipefail
 
 HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT with gist scope)}"
 HEARTBEAT_GIST_ID="${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set}"
 GIST_FILE="${GIST_FILE:-arc-healthy-until}"
+HEARTBEAT_STATE_DIR="${HEARTBEAT_STATE_DIR:-/state}"
+AUTOSCALER_STATUS_PATH="$HEARTBEAT_STATE_DIR/autoscaler-status.json"
+AUTOSCALER_STATUS_GIST_FILE="${AUTOSCALER_STATUS_GIST_FILE:-autoscaler-status.json}"
 # How far in the future to set the timestamp: comfortably longer than the
 # loop interval, so a single missed/slow tick doesn't look like an outage,
 # but short enough that a real outage is detected promptly.
@@ -37,10 +40,13 @@ if [ "$healthy" != "true" ]; then
 fi
 
 healthy_until=$(($(date +%s) + HEARTBEAT_WINDOW_SECONDS))
-# PATCH the gist's single file to the fresh timestamp. Built with jq so the
-# timestamp is safely JSON-encoded (it's numeric, but stay robust).
-body="$(jq -n --arg content "$healthy_until" --arg file "$GIST_FILE" \
-  '{files:{$file:{content:$content}}}')"
+# PATCH the gist's timestamp file, plus the autoscaler's own status file when one exists (it won't on a fresh cluster before the autoscaler's first poll) - zero new credentials, reusing this service's existing gist-write access rather than giving the autoscaler its own.
+files_json="$(jq -n --arg content "$healthy_until" --arg file "$GIST_FILE" '{($file): {content: $content}}')"
+if [ -f "$AUTOSCALER_STATUS_PATH" ]; then
+  files_json="$(jq --arg file "$AUTOSCALER_STATUS_GIST_FILE" --slurpfile status "$AUTOSCALER_STATUS_PATH" \
+    '. + {($file): {content: ($status[0] | tostring)}}' <<< "$files_json")"
+fi
+body="$(jq -n --argjson files "$files_json" '{files: $files}')"
 
 curl -fsS -X PATCH \
   -H "Authorization: Bearer ${HEARTBEAT_GH_TOKEN}" \
