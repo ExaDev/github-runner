@@ -73,3 +73,11 @@
       - value: "template.spec.imagePullSecrets[0].name=ghcr-pull"
       - value: "template.spec.containers[0].image={{ org.image }}"
     kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+
+- name: "{{ org.name }}: trigger an immediate autoscaler reconcile"
+  ansible.builtin.command: docker compose exec -T autoscaler /app/scripts/autoscaler.sh
+  args:
+    chdir: "{{ github_runner_arc_repo_root }}"
+  changed_when: false
+  failed_when: false
+  # Every Helm upgrade above reverts maxRunners to its values file's safe floor. This shrinks that safe-floor window to seconds instead of waiting for the autoscaler's own next poll tick. Best-effort, matching bootstrap.sh's identical step: the autoscaler service is exadev-specific today, and the ordinary poll loop catches this regardless if the exec fails for any reason (including the service not existing yet).
