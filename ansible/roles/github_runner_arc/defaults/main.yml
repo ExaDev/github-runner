@@ -9,6 +9,8 @@ github_runner_arc_agent_server_url: ""
 github_runner_arc_primary_tls_san: ""
 
 # github_runner_arc_secrets.tailscale_join_key (read from the shared secrets item's tailscale-join-key field by tasks/main.yml's own combined secrets read - nothing to set here) is what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host once more than one is in play: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic - avoiding an earlier, considerably hackier attempt (--node-external-ip + --flannel-external-ip layered on the HOST's own already-running Tailscale, tunnelled through Docker's own UDP port-publishing) that needed two nested tunnels for the same traffic and was correspondingly fragile.
+#
+# tasks/ensure_tailscale.yml uses the shared secrets item's tailscale-api-token field to keep the tailnet's ACL grant and this join key themselves provisioned - see that file's own comments for what it manages and the one manual step (creating the API token itself) that has no API to automate.
 
 # Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host (primary hosts only - ignored on an agent). Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host. See host_vars/node-a.yml for a real, working example of the full set of variables this role needs.
 github_runner_arc_orgs: []
