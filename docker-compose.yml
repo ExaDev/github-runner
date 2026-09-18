@@ -145,6 +145,7 @@ services:
       dockerfile: autoscaler/Dockerfile
     network_mode: host
     restart: unless-stopped
+    profiles: ["primary"]
     depends_on:
       - k3s
     environment:
