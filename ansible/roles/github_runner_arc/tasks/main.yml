@@ -27,7 +27,13 @@
 
 # Delegated to the control node, not this host: 1Password access (desktop-app integration, or a signed-in CLI session) belongs to whichever machine an operator is actually running Ansible from, not to every fleet host. No delegate_facts: a plain `register:` result already attaches to inventory_hostname regardless of where the task's execution was delegated to - only `set_fact`'s own fact-namespace assignment is sensitive to delegate_facts (see resolve_installation_id.yml's git history for the one place that mattered, and why delegate_facts: true there was backwards).
 #
-# Every op invocation this host needs (the shared item's fields - k3s-token, ghcr-username, ghcr-token, heartbeat-gh-token, tailscale-join-key - plus every org's own private key, empty on an agent host since github_runner_arc_orgs is only ever populated on the primary) happens in ONE shell script here, back to back with no gap - not spread across separate Ansible tasks. Confirmed live: two different-item op reads issued back-to-back needed only one approval prompt between them, while the same two reads spread across separate Ansible tasks (with real processing time in between) needed two. 1Password's desktop-app integration prompts per invocation, but a tight run of calls with no gap shares one approval.
+# Cached on the CONTROL NODE (never in this repo, never on a fleet host) after the first successful read, keyed by the secrets item name - a repeated debugging session running this playbook dozens of times otherwise means dozens of separate 1Password desktop-app approval prompts, one per run, even though the underlying secrets rarely change between runs. `lookup('env', 'HOME')`, not `ansible_facts`: inside a delegated task, ansible_facts still refers to the CURRENT (target) host's own gathered facts, not localhost's - the exact same subtlety already documented for delegate_facts above. Delete the cache file to force a fresh read (e.g. after rotating a secret).
+- name: Check for a cached 1Password secrets read
+  ansible.builtin.stat:
+    path: "{{ lookup('env', 'HOME') }}/.cache/github-runner-arc/secrets-{{ github_runner_arc_secrets_item }}.json"
+  delegate_to: localhost
+  register: github_runner_arc_secrets_cache_file
+
 - name: Read every 1Password secret this host needs in one shell invocation
   ansible.builtin.shell: |
     set -euo pipefail
@@ -48,10 +54,24 @@
   changed_when: false
   no_log: true
   register: github_runner_arc_secrets_raw
+  when: not github_runner_arc_secrets_cache_file.stat.exists
 
-- name: Parse the combined secrets read
+- name: Cache this read for future runs
+  ansible.builtin.copy:
+    dest: "{{ lookup('env', 'HOME') }}/.cache/github-runner-arc/secrets-{{ github_runner_arc_secrets_item }}.json"
+    content: "{{ github_runner_arc_secrets_raw.stdout }}"
+    mode: "0600"
+  delegate_to: localhost
+  no_log: true
+  when: not github_runner_arc_secrets_cache_file.stat.exists
+
+- name: Parse the combined secrets read (from cache, or the read just above)
   ansible.builtin.set_fact:
-    github_runner_arc_secrets: "{{ github_runner_arc_secrets_raw.stdout | from_json }}"
+    github_runner_arc_secrets: >-
+      {{
+        (lookup('file', github_runner_arc_secrets_cache_file.stat.path) if github_runner_arc_secrets_cache_file.stat.exists
+         else github_runner_arc_secrets_raw.stdout) | from_json
+      }}
   no_log: true
 
 - name: Determine the active Docker CLI context
