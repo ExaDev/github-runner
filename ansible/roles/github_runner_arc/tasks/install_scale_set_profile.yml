@@ -66,3 +66,36 @@
         spec:
           nodeSelector: "{{ profile.node_selector | default({}) }}"
     kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+
+# A Helm upgrade that changes the pod template (resource limits, nodeSelector, and similar) renames the EphemeralRunnerSet the release owns - it carries a spec-hash suffix. The AutoscalingListener is supposed to track the rename, but can be left pointing at the old, now-deleted name: it then crash-loops every second or two failing to patch a runner set that no longer exists, and the scale set's own job queue never gets serviced. Confirmed live - see README's Non-obvious behaviour section. Self-heal by deleting the stale listener; the controller recreates it immediately against whichever EphemeralRunnerSet actually exists now.
+- name: "{{ org.name }}{{ profile.suffix }}: check for a stale AutoscalingListener referencing a deleted EphemeralRunnerSet"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    api_version: actions.github.com/v1alpha1
+    kind: AutoscalingListener
+    namespace: actions-runner-controller
+    label_selectors:
+      - "actions.github.com/scale-set-name={{ org.name | lower }}-runners{{ profile.suffix }}"
+  register: github_runner_arc_listener
+
+- name: "{{ org.name }}{{ profile.suffix }}: check the EphemeralRunnerSet the listener actually points at still exists"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    api_version: actions.github.com/v1alpha1
+    kind: EphemeralRunnerSet
+    namespace: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
+    name: "{{ github_runner_arc_listener.resources[0].spec.ephemeralRunnerSetName }}"
+  register: github_runner_arc_ephemeral_runner_set
+  when: github_runner_arc_listener.resources | length > 0
+
+- name: "{{ org.name }}{{ profile.suffix }}: delete the stale listener so the controller recreates it against the current EphemeralRunnerSet"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    state: absent
+    api_version: actions.github.com/v1alpha1
+    kind: AutoscalingListener
+    namespace: actions-runner-controller
+    name: "{{ github_runner_arc_listener.resources[0].metadata.name }}"
+  when:
+    - github_runner_arc_listener.resources | length > 0
+    - github_runner_arc_ephemeral_runner_set.resources | length == 0
