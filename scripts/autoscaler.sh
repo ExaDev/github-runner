@@ -105,7 +105,9 @@ MEM_TOTAL_KIB="$(awk '/^MemTotal:/{print $2}' "$MEMINFO_PATH")"
 MEM_AVAILABLE_KIB="$(awk '/^MemAvailable:/{print $2}' "$MEMINFO_PATH")"
 SWAP_TOTAL_KIB="$(awk '/^SwapTotal:/{print $2}' "$MEMINFO_PATH")"
 SWAP_FREE_KIB="$(awk '/^SwapFree:/{print $2}' "$MEMINFO_PATH")"
-[ -n "$MEM_TOTAL_KIB" ] && [ -n "$MEM_AVAILABLE_KIB" ] || fail_safe "could not read $MEMINFO_PATH"
+if [ -z "$MEM_TOTAL_KIB" ] || [ -z "$MEM_AVAILABLE_KIB" ]; then
+  fail_safe "could not read $MEMINFO_PATH"
+fi
 
 mem_available_pct=$(( MEM_AVAILABLE_KIB * 100 / MEM_TOTAL_KIB ))
 swap_used_pct=0
