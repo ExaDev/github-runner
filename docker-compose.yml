@@ -151,9 +151,12 @@ services:
     environment:
       - AUTOSCALER_DRY_RUN=${AUTOSCALER_DRY_RUN:-true}
       - AUTOSCALER_POLL_SECONDS=${AUTOSCALER_POLL_SECONDS:-45}
-      - AUTOSCALER_USABLE_BUDGET_GI=${AUTOSCALER_USABLE_BUDGET_GI:-20}
-      - AUTOSCALER_MAX_CEILING=${AUTOSCALER_MAX_CEILING:-4}
-      - AUTOSCALER_FLOOR=${AUTOSCALER_FLOOR:-2}
+      # 24Gi: node-b's ~20.9Gi usable plus node-a's ~3.8Gi usable (see values/exadev-runners-values.yaml's own derivation), rounded down slightly for margin - the autoscaler manages one AutoscalingRunnerSet spanning the whole unpinned pool now, not just node-b alone.
+      - AUTOSCALER_USABLE_BUDGET_GI=${AUTOSCALER_USABLE_BUDGET_GI:-24}
+      # 7: floor(20.9/3) + floor(3.8/3) at the values file's own 3Gi Guaranteed-QoS pod size - the real bin-packing-safe ceiling across both nodes, not an arbitrary cap.
+      - AUTOSCALER_MAX_CEILING=${AUTOSCALER_MAX_CEILING:-7}
+      # Matches values/exadev-runners-values.yaml's own static maxRunners - the same proven-safe floor, enforced by two mechanisms (Helm's persisted value, the autoscaler's own fail-safe patch target).
+      - AUTOSCALER_FLOOR=${AUTOSCALER_FLOOR:-3}
       - AUTOSCALER_RAISE_CONFIRM_POLLS=${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}
       - AUTOSCALER_SWAP_PRESSURE_PCT=${AUTOSCALER_SWAP_PRESSURE_PCT:-50}
       - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT=${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}
