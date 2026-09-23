@@ -240,6 +240,8 @@
     name: kubernetes
     virtualenv: "{{ github_runner_arc_venv_path }}"
     virtualenv_command: python3 -m venv
+    # Same reason as bootstrap.sh's own ansible-core install: prefer the newest version that has a wheel for this platform over compiling a newer one from source (e.g. cryptography, which publishes no Intel macOS wheels after 48.0.1).
+    extra_args: --prefer-binary
   when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
 
 - name: Use that virtualenv's Python for every module task on this host from here on

@@ -16,7 +16,8 @@ set +a
 if [ ! -x "${venv}/bin/ansible-playbook" ]; then
   log "Installing Ansible into ${venv}..."
   python3 -m venv "$venv"
-  "${venv}/bin/pip" install --quiet ansible-core
+  # --prefer-binary: cryptography (an ansible-core dependency) stopped publishing Intel macOS wheels after 48.0.1, so without it pip picks the newest version on an Intel Mac and compiles it from source, which needs a working Rust and C toolchain.
+  "${venv}/bin/pip" install --quiet --prefer-binary ansible-core
 fi
 "${venv}/bin/ansible-galaxy" collection install -r ansible/requirements.yml -p "${venv}/collections" >/dev/null
 
