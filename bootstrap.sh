@@ -180,6 +180,10 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # kubectl top pod needs this too, not just pods.metrics.k8s.io above - confirmed live: without it, kubectl top pod fails outright with 'pods is forbidden ... in API group ""' even though the metrics.k8s.io grant alone looks sufficient. It resolves/cross-references the plain Pod objects alongside their metrics, not metrics data on its own.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
