@@ -15,6 +15,8 @@
     return_content: true
   delegate_to: localhost
   no_log: true
+  # A read-only GET, so safe under --check - and without it uri skips in check mode, leaving the next task nothing to compute the desired policy from.
+  check_mode: false
   register: github_runner_arc_acl_current
 
 - name: Compute the ACL policy with the github-runner-node grant/tagOwner/autoApprover ensured
