@@ -121,7 +121,7 @@
         name: github-runner-heartbeat-status-reader
         apiGroup: rbac.authorization.k8s.io
 
-# autoscaler: read per-node memory usage via metrics-server (cluster-wide, so a ClusterRole).
+# autoscaler: read per-node memory usage via metrics-server (cluster-wide, so a ClusterRole). Needs both rules, not metrics.k8s.io alone - confirmed live, kubectl top nodes fails outright with "nodes is forbidden ... at the cluster scope" without the plain core grant too, the same gap as kubectl top pod needing core pods alongside pods.metrics.k8s.io above.
 - name: "platform: autoscaler RBAC - read node metrics"
   kubernetes.core.k8s:
     kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
@@ -132,6 +132,9 @@
         name: github-runner-autoscaler-node-metrics-reader
       rules:
         - apiGroups: ["metrics.k8s.io"]
+          resources: ["nodes"]
+          verbs: ["get", "list"]
+        - apiGroups: [""]
           resources: ["nodes"]
           verbs: ["get", "list"]
 

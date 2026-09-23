@@ -153,6 +153,10 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes"]
     verbs: ["get", "list"]
+  # kubectl top nodes needs this too, not just nodes.metrics.k8s.io above - confirmed live, the same gap as kubectl top pod needing core pods alongside pods.metrics.k8s.io elsewhere in this file.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
