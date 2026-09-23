@@ -53,7 +53,7 @@
     release_namespace: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
     values_files:
       - "{{ github_runner_arc_values_dir }}/{{ profile.values_file }}"
-    # --set-equivalent overrides only for containers[], matching bootstrap.sh exactly: a nested `values:` dict would replace it wholesale (Helm does not deep-merge lists), silently dropping the values file's own command/resources for that container.
+    # --set-equivalent overrides only for containers[]: a nested `values:` dict would replace it wholesale (Helm does not deep-merge lists), silently dropping the values file's own command/resources for that container.
     set_values:
       - value: "githubConfigUrl=https://github.com/{{ org.name }}"
       - value: "githubConfigSecret={{ org.name | lower }}-github-app"

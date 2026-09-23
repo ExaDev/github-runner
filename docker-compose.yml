@@ -1,6 +1,6 @@
 # The Kubernetes cluster itself is exactly one service: k3s ships an official Docker image bundling the whole control plane + kubelet in a single privileged container ("cluster in a box"). This is what makes the whole setup portable to any machine with just Docker (+ helm/kubectl on the host)
 # - no Colima-specific --kubernetes flag, no separately-installed kind/k3d
-# CLI. ARC itself (controller + runner scale sets + ephemeral runner pods), plus the fleet-health reporter and usage-driven autoscaler, are not more Compose services - they're all Kubernetes-native resources installed via Ansible/Helm into this cluster (see bootstrap.sh and ansible/roles/github_runner_arc/tasks/install_platform.yml), genuinely unpinned to any one host the same way ordinary runner pods already are.
+# CLI. ARC itself (controller + runner scale sets + ephemeral runner pods), plus the fleet-health reporter and usage-driven autoscaler, are not more Compose services - they're all Kubernetes-native resources installed by the Ansible role into this cluster (see ansible/roles/github_runner_arc/, which bootstrap.sh also runs), genuinely unpinned to any one host the same way ordinary runner pods already are.
 #
 # Two roles, selected via Compose profiles rather than separate compose files:
 #  - `--profile server`: a control-plane/etcd member (`k3s` service, running

@@ -1,5 +1,5 @@
 ---
-# Included once per org from tasks/main.yml's loop, with `org` set to that org's entry from github_runner_arc_orgs. Ports bootstrap.sh's install_org() bash function: resolve the installation ID once per org, then delegate namespace/secrets/scale-set-release creation to install_scale_set_profile.yml once per entry in org.scale_set_profiles - see that key's own comment in host_vars/node-a.yml for why a single org can need more than one.
+# Included once per org from tasks/main.yml's loop, with `org` set to that org's entry from github_runner_arc_orgs. Resolves the installation ID once per org, then delegates namespace/secrets/scale-set-release creation to install_scale_set_profile.yml once per entry in org.scale_set_profiles - see that key's own comment in host_vars/node-a.yml for why a single org can need more than one.
 
 - name: "{{ org.name }}: resolve installation ID"
   ansible.builtin.include_tasks: resolve_installation_id.yml
