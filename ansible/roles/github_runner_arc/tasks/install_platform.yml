@@ -230,8 +230,17 @@
         name: github-runner-autoscaler-status-writer
         apiGroup: rbac.authorization.k8s.io
 
-# Pre-created empty rather than left for the autoscaler to create on first poll: neither ServiceAccount above is granted `create` on configmaps, only get/patch - a deliberate minimal-permission choice. If this ConfigMap is ever deleted by hand, both pods fail loud (RBAC Forbidden on create) rather than silently recreating it, and it self-heals the next time this task runs.
+# Pre-created empty rather than left for the autoscaler to create on first poll: neither ServiceAccount above is granted `create` on configmaps, only get/patch - a deliberate minimal-permission choice. If this ConfigMap is ever deleted by hand, both pods fail loud (RBAC Forbidden on create) rather than silently recreating it, and it self-heals the next time this task runs. Created only when absent: once the autoscaler owns its contents, applying the empty definition again would wipe its live status and raise-confirm counter on every run.
+- name: "platform: check whether the shared autoscaler-status ConfigMap exists"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    kind: ConfigMap
+    namespace: "{{ github_runner_arc_platform_namespace }}"
+    name: autoscaler-status
+  register: github_runner_arc_autoscaler_status_configmap
+
 - name: "platform: pre-create the shared autoscaler-status ConfigMap"
+  when: github_runner_arc_autoscaler_status_configmap.resources | length == 0
   kubernetes.core.k8s:
     kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
     definition:
