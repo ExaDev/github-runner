@@ -9,7 +9,9 @@
     PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 
   pre_tasks:
+    # macOS only: every current fleet host is a Mac, but nothing else in the role is Mac-specific (k3s runs in Docker), and bootstrap.sh can run this playbook locally on any Docker host. Elsewhere, helm/kubectl/docker come from the host's own package manager - see the README's Getting started section.
     - name: Ensure Homebrew prerequisites are installed (helm, kubectl, docker, docker-compose)
+      when: ansible_facts['os_family'] == 'Darwin'
       community.general.homebrew:
         name:
           - helm
