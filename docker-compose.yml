@@ -45,8 +45,12 @@ services:
         tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
         until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 0.5; done
         # Brings tailscale up ourselves, ahead of k3s's own --vpn-auth doing the same thing, purely to learn this node's own Tailscale IP before exec'ing k3s (exec replaces this script's own process, so nothing here can run afterward to react to what --vpn-auth's own internal tailscale-up produces). Confirmed against k3s's own vpn.go source, not just its docs: --vpn-auth's StartVPN() checks the Tailscale backend state first and skips its own `tailscale up` call entirely once state is already "Running" - so this isn't a redundant double-call, k3s's own internal call becomes a genuine no-op once we've already brought the daemon up.
-        tailscale up --auth-key="$K3S_VPN_AUTH_JOIN_KEY" --hostname="$(hostname)"
-        until ts_ip=$$(tailscale ip -4 2>/dev/null) && [ -n "$$ts_ip" ]; do sleep 0.5; done
+        #
+        # Only calls `tailscale up` if the daemon isn't already authenticated from its own persisted state volume - confirmed live: calling it unconditionally on every container restart (restart: unless-stopped, e.g. after a transient k3s failure) re-registered a BRAND NEW device each time under the reusable join key, instead of reconnecting the existing one, leaving a growing trail of stale devices on the tailnet. k3s's own --vpn-auth avoids this exact problem by checking backend state first (see above) - our own manual pre-empt call needs the identical guard, not just the "safe to call twice within one process start" reasoning above, which only covers calling it AFTER tailscaled has JUST started fresh in the same script run, not across separate container restarts against already-persisted state.
+        if ! ts_ip=$$(tailscale ip -4 2>/dev/null) || [ -z "$$ts_ip" ]; then
+          tailscale up --auth-key="$K3S_VPN_AUTH_JOIN_KEY" --hostname="$(hostname)"
+          until ts_ip=$$(tailscale ip -4 2>/dev/null) && [ -n "$$ts_ip" ]; do sleep 0.5; done
+        fi
         rm -f /output/kubeconfig.yaml
         printf 'nameserver 100.100.100.100\n' > /etc/k3s-resolv.conf
         set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 --cluster-init \
@@ -94,7 +98,9 @@ services:
     #
     # --disable=traefik --disable-network-policy must match the primary's own flags exactly - k3s validates certain flags as "critical configuration" that every server in the cluster must agree on, confirmed live: joining without --disable-network-policy here failed outright with "critical configuration mismatched: disable-network-policy" even though this node was never going to run traefik/network-policy enforcement differently from the primary anyway.
     #
-    # --node-ip: same reasoning as the primary k3s service's own comment above - this node's etcd member needs config.PrivateIP set to its OWN real Tailscale IP (via --node-ip, read before --vpn-auth's own executor-layer code rebuilds NodeIP from its own detection), not the container's internal Docker-bridge IP, or the primary can never reach it as a peer at all. Brings tailscale up itself first (safe to call twice - see the primary's own comment; confirmed against k3s's own vpn.go source: --vpn-auth checks the backend state and skips its own `tailscale up` call entirely once already "Running") purely to learn this node's own Tailscale IP before exec'ing k3s, since exec replaces this script's own process and nothing can react afterward to what --vpn-auth's own internal call would have produced.
+    # --node-ip: same reasoning as the primary k3s service's own comment above - this node's etcd member needs config.PrivateIP set to its OWN real Tailscale IP (via --node-ip, read before --vpn-auth's own executor-layer code rebuilds NodeIP from its own detection), not the container's internal Docker-bridge IP, or the primary can never reach it as a peer at all. Only calls `tailscale up` when not already authenticated (see the primary's own comment - unconditionally calling it on every restart re-registers a brand new device instead of reconnecting the persisted one) purely to learn this node's own Tailscale IP before exec'ing k3s, since exec replaces this script's own process and nothing can react afterward to what --vpn-auth's own internal call would have produced.
+    #
+    # Unlike the primary, this node also has to resolve K3S_JOIN_SERVER_URL's own hostname (the primary's MagicDNS name) before k3s can even attempt to bootstrap against it - confirmed live: k3s failed outright with "dial tcp: lookup k3s-server.example-tailnet.ts.net: no such host" immediately after `tailscale ip -4` had already returned a real address. Tailscale assigns the IP and wires up its own MagicDNS resolver (100.100.100.100, via /etc/resolv.conf) as two separate steps, not atomically - an IP being assigned is not proof DNS resolution against another tailnet member is actually working yet. Waits for a real `nslookup` success against the join server's own hostname specifically, not just tailscale's own readiness, before proceeding.
     entrypoint:
       - /bin/sh
       - -c
@@ -102,8 +108,13 @@ services:
         mkdir -p /var/run/tailscale /var/lib/tailscale
         tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
         until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 0.5; done
-        tailscale up --auth-key="$K3S_VPN_AUTH_JOIN_KEY" --hostname="$(hostname)"
-        until ts_ip=$$(tailscale ip -4 2>/dev/null) && [ -n "$$ts_ip" ]; do sleep 0.5; done
+        if ! ts_ip=$$(tailscale ip -4 2>/dev/null) || [ -z "$$ts_ip" ]; then
+          tailscale up --auth-key="$K3S_VPN_AUTH_JOIN_KEY" --hostname="$(hostname)"
+          until ts_ip=$$(tailscale ip -4 2>/dev/null) && [ -n "$$ts_ip" ]; do sleep 0.5; done
+        fi
+        join_host=$${K3S_JOIN_SERVER_URL#https://}
+        join_host=$${join_host%%:*}
+        until nslookup "$$join_host" >/dev/null 2>&1; do sleep 0.5; done
         printf 'nameserver 100.100.100.100\n' > /etc/k3s-resolv.conf
         set -- --disable=traefik --disable-network-policy --server "$K3S_JOIN_SERVER_URL" \
           --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY" \
