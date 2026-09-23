@@ -1,22 +1,14 @@
-# The Kubernetes cluster itself is exactly one service: k3s ships an official
-# Docker image bundling the whole control plane + kubelet in a single
-# privileged container ("cluster in a box"). This is what makes the whole
-# setup portable to any machine with just Docker (+ helm/kubectl on the host)
+# The Kubernetes cluster itself is exactly one service: k3s ships an official Docker image bundling the whole control plane + kubelet in a single privileged container ("cluster in a box"). This is what makes the whole setup portable to any machine with just Docker (+ helm/kubectl on the host)
 # - no Colima-specific --kubernetes flag, no separately-installed kind/k3d
-# CLI. ARC itself (controller + runner scale sets + ephemeral runner pods) is
-# not more compose services - those are Kubernetes-native resources installed
-# via Helm into this cluster, see bootstrap.sh.
+# CLI. ARC itself (controller + runner scale sets + ephemeral runner pods), plus the fleet-health reporter and usage-driven autoscaler, are not more Compose services - they're all Kubernetes-native resources installed via Ansible/Helm into this cluster (see bootstrap.sh and ansible/roles/github_runner_arc/tasks/install_platform.yml), genuinely unpinned to any one host the same way ordinary runner pods already are.
 #
-# The second service, `heartbeat`, is the fleet-health reporter: it checks the k3s node + ARC controller and refreshes a secret gist that ExaDev/runner-fallback-action reads to decide self-hosted vs ubuntu-latest. It uses host networking so it can reach k3s's API at 127.0.0.1 (already in k3s's serving cert) with no TLS-SAN or kubeconfig gymnastics - and no launchd / external scheduler, so the whole fleet + its health reporter come up from one `docker compose up`.
+# Two roles, selected via Compose profiles rather than separate compose files:
+#  - `--profile server`: a control-plane/etcd member (`k3s` service, running
+# `k3s server`). Every server host runs the SAME service - whether it bootstraps the cluster (`--cluster-init`) or joins an existing one (`--server <url>`) is decided at runtime by whether K3S_JOIN_SERVER_URL is set, not by a separate service/profile. See the project README's Architecture section for why 3 servers is the right minimum (etcd quorum math: 2 is worse than 1, not better) and why every server needs every server's own hostname on every server's own --tls-san list, not just its own - see K3S_TLS_SAN_LIST below.
+#  - `--profile agent`: a pure worker (`k3s-agent` service, running
+#    `k3s agent`) - schedulable capacity with no control-plane role at all.
 #
-# The third service, `autoscaler`, raises and lowers the single AutoscalingRunnerSet's spec.maxRunners based on real, current memory usage and host/VM pressure - never job identity or queue depth. It runs host-networked for the same reason as heartbeat, and shares the ./logs/ bind mount with it so heartbeat can read and republish the autoscaler's own status file in the same gist - see scripts/autoscaler.sh and scripts/heartbeat.sh.
-#
-# Three roles, selected via Compose profiles rather than separate compose files:
-#  - `--profile primary`: the ONE node that bootstraps the cluster (`k3s --cluster-init`, converting its datastore to embedded etcd), plus `heartbeat`, `autoscaler`, and every org's ARC controller/runner scale set.
-#  - `--profile server`: an ADDITIONAL control-plane member (`k3s-server` service, running `k3s server --server https://<primary>:6443`, NOT `k3s agent`) - a genuine etcd member, not just a worker, giving the control plane real fault tolerance. See the project README's Architecture section for why 3 is the right minimum (etcd quorum math: 2 servers is worse than 1, not better) and why client-side failover across servers needs every server's own hostname on every server's own --tls-san list, not just its own - see K3S_TLS_SAN_LIST below.
-#  - `--profile agent`: a pure worker (`k3s-agent` service, running `k3s agent`) - schedulable capacity with no control-plane role at all. Not currently used by any host, kept available for a future machine that shouldn't hold cluster state.
-#
-# All three roles are schedulable for ordinary runner pods by default - k3s does not taint server nodes the way vanilla kubeadm Kubernetes taints control-plane nodes, confirmed against k3s's own docs.
+# Both roles are schedulable for ordinary runner pods by default - k3s does not taint server nodes the way vanilla kubeadm Kubernetes taints control-plane nodes, confirmed against k3s's own docs.
 services:
   k3s:
     # Built locally (see k3s/Dockerfile), not the plain rancher/k3s image: k3s's own built-in --vpn-auth integration (below) needs the tailscale binaries actually present in the image, and the base image has no package manager at all to install them at runtime.
@@ -30,13 +22,15 @@ services:
     #
     # --disable-network-policy: this fleet has no use for Kubernetes NetworkPolicy at all, and kube-router's own enforcement chains sit directly in the FORWARD path every cross-node pod packet takes - removing a whole class of policy-chain interaction we don't need.
     #
-    # --cluster-init: converts this server's datastore from single-node SQLite to embedded etcd - the one supported migration path k3s documents (restart an existing server with this flag; on a genuinely fresh install it bootstraps etcd directly). Once initialized, further --cluster-init/datastore flags are ignored on restart, so this is safe to leave in place permanently rather than being a one-shot migration flag to remove afterward.
+    # --cluster-init (only when K3S_JOIN_SERVER_URL is unset) converts this server's datastore from single-node SQLite to embedded etcd - the one supported migration path k3s documents (restart an existing server with this flag; on a genuinely fresh install it bootstraps etcd directly). Once initialized, further --cluster-init/datastore flags are ignored on restart, so this is safe to leave in place permanently rather than being a one-shot migration flag to remove afterward. A host with K3S_JOIN_SERVER_URL set instead passes --server <url>, joining an already-initialized cluster as an additional control-plane/etcd member - which of the two happens is a per-host Ansible decision (github_runner_arc_etcd_bootstrap), not a separate service or profile.
     #
-    # --tls-san is appended once per hostname in K3S_TLS_SAN_LIST (space-separated, looped below into one --tls-san flag per entry). A multi-server cluster needs EVERY server's own hostname on EVERY server's own cert, not just its own: a client (kubectl, the failover wrapper) reaching any server directly by its own Tailscale hostname needs that server's cert to already cover the name being connected to, confirmed against k3s's own HA docs.
+    # --tls-san is appended once per hostname in K3S_TLS_SAN_LIST (space-separated, looped below into one --tls-san flag per entry). A multi-server cluster needs EVERY server's own hostname on EVERY server's own cert, not just its own: a client (kubectl, Ansible) reaching any server directly by its own Tailscale hostname needs that server's cert to already cover the name being connected to, confirmed against k3s's own HA docs.
     #
     # --node-ip forces etcd's own peer-advertise address onto this node's real Tailscale IP - this is the actual fix, not an --etcd-arg passthrough (tried first, and wrong: it only overrides etcd's own raw --initial-advertise-peer-urls flag, but k3s independently builds its own --initial-cluster string from config.PrivateIP, computed separately and earlier - the two then disagreed and etcd's bootstrap validation rejected the mismatch outright, confirmed live: "--initial-cluster has k3s-server-<id>=https://<bridge-ip>:2380 but missing from --initial-advertise-peer-urls=https://<tailscale-ip>:2380"). Traced through k3s's own source (pkg/cli/server/server.go, pkg/executor/embed/embed.go): PrivateIP is populated from --node-ip's own value if set, and this happens BEFORE --vpn-auth's own executor-layer code later rebuilds NodeIP from its own Tailscale detection (logging a mismatch warning if --node-ip was already set, but not reverting PrivateIP, which was already computed by then) - so setting --node-ip ourselves, to the same real Tailscale IP vpn-auth would itself have detected, is what actually makes config.PrivateIP (and therefore etcd's peer-advertise address) correct. k3s logs "Etcd IP (PrivateIP) remains the local IP. Running etcd traffic over VPN is not recommended due to performance issues" when this isn't done - a warning that assumes a real local network exists as the better default; that assumption doesn't hold here, since each container's own bridge IP is never reachable from another machine at all (the exact thing vpn-auth exists to solve for every other kind of traffic) - confirmed live: joining a second server failed outright, "MemberAdd request timed out", because it was trying to reach the first server's own unroutable bridge IP. Waits for `tailscale ip -4` to return a real address (not just the control socket existing, which can be true long before Tailscale is actually authenticated/assigned an IP) before reading it into this flag. No --etcd-arg at all: an earlier attempt kept a "harmless" --etcd-arg="listen-peer-urls=https://0.0.0.0:2380" as a belt-and-braces bind override, but that's a GLOBAL etcd flag override, not scoped to the real server's own etcd instance - it also forced k3s's separate, internal "temporary etcd" (spun up on every RESTART, not first boot, to reconcile with the existing on-disk datastore before the real instance starts - see "Starting temporary etcd to reconcile with datastore" in its own logs) onto the same TLS 0.0.0.0:2380 bind, which that temporary instance has no certs for by design (it normally listens on a local, ephemeral, non-TLS port). Confirmed live: this only broke on the SECOND deploy (a restart against an already-initialized datastore), never the first (fresh --cluster-init has no reconciliation phase), which is exactly why it wasn't caught earlier - fatal: "cannot listen on TLS for [::]:2380: KeyFile and CertFile are not presented". --node-ip alone is sufficient; etcd's own default listen-peer-urls already derives from the same PrivateIP correctly.
     #
     # --resolv-conf points kubelet at a synthetic file containing only Tailscale's own fixed, well-known MagicDNS resolver IP (100.100.100.100 - always this value, regardless of tailnet), with no search domains at all. Without this, kubelet's dnsPolicy: ClusterFirst merges the CONTAINER's own real /etc/resolv.conf search list into every pod's resolv.conf - and that file is entirely owned and overwritten by `tailscale up` itself (see vpn-auth above) to include the tailnet's own configured search domains. Confirmed live: this tailnet has a personal domain configured as a global Tailscale DNS search path, that domain carries a wildcard DNS record pointing at a Netlify-hosted site, and Kubernetes' own ndots:5 default means a pod's resolver tries every search-suffixed name (e.g. "api.github.com.<that domain>") before the bare hostname - the wildcard record answers first, so curl connects to Netlify's edge while still sending the original SNI, and TLS hostname verification fails against Netlify's own certificate. CoreDNS itself was never affected (it forwards queries verbatim with no ndots/search logic of its own), which is why a plain DNS lookup from inside a pod always looked correct - only an application's own getaddrinfo-based resolution (curl, any real HTTP client) hit this. Pods still resolve every hostname correctly via CoreDNS regardless of this flag, since CoreDNS's own upstream forward continues to use the real Tailscale resolver at 100.100.100.100 directly - this flag only stops kubelet from also copying the search-domain list into pods that don't need it.
+    #
+    # A joining server also has to resolve K3S_JOIN_SERVER_URL's own hostname (the bootstrap host's MagicDNS name) before k3s can even attempt to bootstrap against it - confirmed live: k3s failed outright with "dial tcp: lookup k3s-server.example-tailnet.ts.net: no such host" immediately after `tailscale ip -4` had already returned a real address. Tailscale assigns the IP and wires up its own MagicDNS resolver as two separate steps, not atomically - an IP being assigned is not proof DNS resolution against another tailnet member is actually working yet. Waits for a real `nslookup` success against the join server's own hostname specifically before proceeding, but only when actually joining (K3S_JOIN_SERVER_URL set) - the bootstrap host has nothing else to resolve.
     entrypoint:
       - /bin/sh
       - -c
@@ -51,20 +45,30 @@ services:
           tailscale up --auth-key="$K3S_VPN_AUTH_JOIN_KEY" --hostname="$(hostname)"
           until ts_ip=$$(tailscale ip -4 2>/dev/null) && [ -n "$$ts_ip" ]; do sleep 0.5; done
         fi
+        if [ -n "$K3S_JOIN_SERVER_URL" ]; then
+          join_host=$${K3S_JOIN_SERVER_URL#https://}
+          join_host=$${join_host%%:*}
+          until nslookup "$$join_host" >/dev/null 2>&1; do sleep 0.5; done
+        fi
         rm -f /output/kubeconfig.yaml
         printf 'nameserver 100.100.100.100\n' > /etc/k3s-resolv.conf
-        set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 --cluster-init \
+        set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 \
           --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY" \
           --resolv-conf=/etc/k3s-resolv.conf \
           --node-ip="$$ts_ip"
+        if [ -n "$K3S_JOIN_SERVER_URL" ]; then
+          set -- "$@" --server "$K3S_JOIN_SERVER_URL"
+        else
+          set -- "$@" --cluster-init
+        fi
         for san in $K3S_TLS_SAN_LIST; do set -- "$@" --tls-san "$$san"; done
         exec /bin/k3s server "$@"
-    # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry. This is also the hostname Tailscale registers the container's own new device under, giving it a stable MagicDNS name too.
-    hostname: k3s-server
+    # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry. This is also the hostname Tailscale registers the container's own new device under, giving it a stable MagicDNS name too. Every server host sets its own K3S_NODE_NAME (Ansible defaults it to the host's own inventory name; the bootstrap host overrides it to keep its pre-existing "k3s-server" identity rather than forcing a disruptive rename - see host_vars/node-a.yml).
+    hostname: ${K3S_NODE_NAME:-k3s-server}
     container_name: github-runner-k3s
     privileged: true
     restart: unless-stopped
-    profiles: ["primary"]
+    profiles: ["server"]
     tmpfs:
       - /run
       - /var/run
@@ -79,6 +83,8 @@ services:
       - K3S_KUBECONFIG_MODE=666
       - K3S_TLS_SAN_LIST=${K3S_TLS_SAN_LIST:?K3S_TLS_SAN_LIST must be set in .env - a space-separated list of every server node's own Tailscale hostname, including this one's}
       - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:?K3S_VPN_AUTH_JOIN_KEY must be set in .env - a reusable, pre-authorized Tailscale auth key (see README's Tailscale section for how it's provisioned)}
+      # Empty (not :?required) on the bootstrap host - the one server with nothing to join. Every OTHER server host's own .env sets this to the bootstrap host's own URL.
+      - K3S_JOIN_SERVER_URL=${K3S_JOIN_SERVER_URL:-}
     volumes:
       - k3s-data:/var/lib/rancher/k3s
       # Persists this container's own Tailscale device identity/keys across recreations - without this, every recreate would register a brand new device on the tailnet instead of reconnecting as the same one, since the join key is reusable by design.
@@ -88,75 +94,14 @@ services:
       - "6443:6443"
       # No 8472/udp or 10250/tcp published: Tailscale establishes outbound connections and NAT-traverses itself (DERP relay/STUN), so no inbound Docker port-forwarding is needed for cross-node traffic at all - confirmed live, unlike the VXLAN-over-Docker- port-publish approach this replaced.
 
-  k3s-server:
-    build:
-      context: ./k3s
-      args:
-        K3S_VERSION: "${K3S_VERSION:-latest}"
-    # Joins an EXISTING cluster as an additional control-plane/etcd member - k3s server --server <url>, not k3s agent. Same tailscaled-then-k3s startup as the primary's own k3s service; see that service's own comments for the vpn-auth/resolv-conf/tls-san-list reasoning, all identical here.
-    #
-    # --disable=traefik --disable-network-policy must match the primary's own flags exactly - k3s validates certain flags as "critical configuration" that every server in the cluster must agree on, confirmed live: joining without --disable-network-policy here failed outright with "critical configuration mismatched: disable-network-policy" even though this node was never going to run traefik/network-policy enforcement differently from the primary anyway.
-    #
-    # --node-ip: same reasoning as the primary k3s service's own comment above - this node's etcd member needs config.PrivateIP set to its OWN real Tailscale IP (via --node-ip, read before --vpn-auth's own executor-layer code rebuilds NodeIP from its own detection), not the container's internal Docker-bridge IP, or the primary can never reach it as a peer at all. Only calls `tailscale up` when not already authenticated (see the primary's own comment - unconditionally calling it on every restart re-registers a brand new device instead of reconnecting the persisted one) purely to learn this node's own Tailscale IP before exec'ing k3s, since exec replaces this script's own process and nothing can react afterward to what --vpn-auth's own internal call would have produced.
-    #
-    # Unlike the primary, this node also has to resolve K3S_JOIN_SERVER_URL's own hostname (the primary's MagicDNS name) before k3s can even attempt to bootstrap against it - confirmed live: k3s failed outright with "dial tcp: lookup k3s-server.example-tailnet.ts.net: no such host" immediately after `tailscale ip -4` had already returned a real address. Tailscale assigns the IP and wires up its own MagicDNS resolver (100.100.100.100, via /etc/resolv.conf) as two separate steps, not atomically - an IP being assigned is not proof DNS resolution against another tailnet member is actually working yet. Waits for a real `nslookup` success against the join server's own hostname specifically, not just tailscale's own readiness, before proceeding.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        mkdir -p /var/run/tailscale /var/lib/tailscale
-        tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
-        until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 0.5; done
-        if ! ts_ip=$$(tailscale ip -4 2>/dev/null) || [ -z "$$ts_ip" ]; then
-          tailscale up --auth-key="$K3S_VPN_AUTH_JOIN_KEY" --hostname="$(hostname)"
-          until ts_ip=$$(tailscale ip -4 2>/dev/null) && [ -n "$$ts_ip" ]; do sleep 0.5; done
-        fi
-        join_host=$${K3S_JOIN_SERVER_URL#https://}
-        join_host=$${join_host%%:*}
-        until nslookup "$$join_host" >/dev/null 2>&1; do sleep 0.5; done
-        printf 'nameserver 100.100.100.100\n' > /etc/k3s-resolv.conf
-        set -- --disable=traefik --disable-network-policy --server "$K3S_JOIN_SERVER_URL" \
-          --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY" \
-          --resolv-conf=/etc/k3s-resolv.conf \
-          --node-ip="$$ts_ip"
-        for san in $K3S_TLS_SAN_LIST; do set -- "$@" --tls-san "$$san"; done
-        exec /bin/k3s server "$@"
-    # Own stable hostname per joining server (K3S_SERVER_NODE_NAME), not the primary's "k3s-server" - each is a genuinely separate Tailscale device once vpn-auth registers it, and reusing one hostname across multiple devices would be ambiguous for TLS SANs and for anything addressing a specific server by name.
-    #
-    # Not `:?required`: docker compose validates every service's env interpolation up front regardless of which --profile is active, confirmed live - a required var on this server-only service broke `docker compose --profile primary up` too, since the primary host's .env never sets it. The Ansible role's own fail-fast check on this host_var is the real enforcement instead - same pattern as K3S_AGENT_SERVER_URL/K3S_AGENT_NODE_NAME on the agent service below.
-    hostname: ${K3S_SERVER_NODE_NAME:-k3s-server-joiner}
-    container_name: github-runner-k3s-server
-    privileged: true
-    restart: unless-stopped
-    profiles: ["server"]
-    tmpfs:
-      - /run
-      - /var/run
-    ulimits:
-      nproc: 65535
-      nofile:
-        soft: 65535
-        hard: 65535
-    # Not `:?required` for K3S_JOIN_SERVER_URL: same cross-profile interpolation problem as K3S_SERVER_NODE_NAME's own comment above - the primary host's .env never sets it. The Ansible role's own fail-fast check is the real enforcement instead. K3S_TOKEN and K3S_TLS_SAN_LIST stay `:?required`: both the primary's and a server's own .env always set them (env.j2 and env-server.j2 both emit them), so there's no cross-profile gap to work around.
-    environment:
-      - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - the same shared secret the primary's own K3S_TOKEN uses}
-      - K3S_JOIN_SERVER_URL=${K3S_JOIN_SERVER_URL:-}
-      - K3S_TLS_SAN_LIST=${K3S_TLS_SAN_LIST:?K3S_TLS_SAN_LIST must be set in .env - the same space-separated list of every server's own hostname the primary uses}
-      - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:?K3S_VPN_AUTH_JOIN_KEY must be set in .env - the same reusable, pre-authorized Tailscale auth key the primary's own K3S_VPN_AUTH_JOIN_KEY uses}
-    volumes:
-      - k3s-server-data:/var/lib/rancher/k3s
-      - k3s-server-tailscale-data:/var/lib/tailscale
-    ports:
-      - "6443:6443"
-
   k3s-agent:
     build:
       context: ./k3s
       args:
         K3S_VERSION: "${K3S_VERSION:-latest}"
-    # Same tailscaled-then-k3s startup as the primary k3s service - see that service's own comment for the full reasoning. --server points at the primary's own new Tailscale MagicDNS name (K3S_AGENT_SERVER_URL), not the host machine's own pre-existing Tailscale identity.
+    # Same tailscaled-then-k3s startup as the k3s service - see that service's own comment for the full reasoning. --server points at a server's own Tailscale MagicDNS name (K3S_AGENT_SERVER_URL), not the host machine's own pre-existing Tailscale identity.
     #
-    # --resolv-conf: same fix, same reasoning as the primary k3s service's own comment above - a pod scheduled onto this agent node needs the exact same protection from its kubelet merging this container's own Tailscale-owned search domains into pod resolv.conf.
+    # --resolv-conf: same fix, same reasoning as the k3s service's own comment above - a pod scheduled onto this agent node needs the exact same protection from its kubelet merging this container's own Tailscale-owned search domains into pod resolv.conf.
     entrypoint:
       - /bin/sh
       - -c
@@ -179,74 +124,19 @@ services:
       nofile:
         soft: 65535
         hard: 65535
-    # Not `:?required` for K3S_AGENT_SERVER_URL: docker compose validates every service's env interpolation up front regardless of which --profile is active, confirmed live - a required var on this agent-only service broke `docker compose --profile primary up` too, since the primary host's .env never sets it. The Ansible role's own fail-fast check on this host_var is the real enforcement instead.
+    # Not `:?required` for K3S_AGENT_SERVER_URL: docker compose validates every service's env interpolation up front regardless of which --profile is active, confirmed live - a required var on this agent-only service broke `docker compose --profile server up` too, since a server host's .env never sets it. The Ansible role's own fail-fast check on this host_var is the real enforcement instead.
     environment:
       - K3S_URL=${K3S_AGENT_SERVER_URL:-}
-      - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - the same shared secret the primary's own K3S_TOKEN uses}
+      - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - the same shared secret every server's own K3S_TOKEN uses}
       - K3S_NODE_NAME=${K3S_AGENT_NODE_NAME:-k3s-agent}
-      - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:?K3S_VPN_AUTH_JOIN_KEY must be set in .env - the same reusable, pre-authorized Tailscale auth key the primary's own K3S_VPN_AUTH_JOIN_KEY uses}
+      - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:?K3S_VPN_AUTH_JOIN_KEY must be set in .env - the same reusable, pre-authorized Tailscale auth key every server's own K3S_VPN_AUTH_JOIN_KEY uses}
     volumes:
       - k3s-agent-data:/var/lib/rancher/k3s
-      # Same reasoning as the primary k3s service's own tailscale volume.
+      # Same reasoning as the k3s service's own tailscale volume.
       - k3s-agent-tailscale-data:/var/lib/tailscale
-
-  heartbeat:
-    # Fleet-health reporter. Checks k3s + ARC and refreshes the secret gist.
-    # Build context is the repo root so the Dockerfile can COPY scripts/ and
-    # heartbeat/.
-    build:
-      context: .
-      dockerfile: heartbeat/Dockerfile
-    # Host networking: the container shares the host's network namespace, so
-    # kubectl (with the host kubeconfig) reaches k3s's published 127.0.0.1:6443
-    # directly - no TLS-SAN change to k3s's cert, no kubeconfig URL rewrite.
-    network_mode: host
-    restart: unless-stopped
-    profiles: ["primary"]
-    depends_on:
-      - k3s
-    # Not `:?required` for HEARTBEAT_GH_TOKEN/HEARTBEAT_GIST_ID: the same cross-profile interpolation problem as k3s-agent's K3S_AGENT_SERVER_URL above - an agent host's .env never sets these, and docker compose validates every service regardless of the active --profile. scripts/heartbeat.sh already has its own `:?required` check on both at runtime, so nothing here actually loses the fail-fast behaviour on the primary host.
-    environment:
-      - HEARTBEAT_GH_TOKEN=${HEARTBEAT_GH_TOKEN:-}
-      - HEARTBEAT_GIST_ID=${HEARTBEAT_GIST_ID:-}
-      - HEARTBEAT_WINDOW_SECONDS=${HEARTBEAT_WINDOW_SECONDS:-600}
-      - HEARTBEAT_INTERVAL_SECONDS=${HEARTBEAT_INTERVAL_SECONDS:-180}
-    volumes:
-      # The host kubeconfig k3s generates; loop.sh uses it as-is (127.0.0.1).
-      - ./kubeconfig:/kubeconfig:ro
-      # Read-only: the autoscaler service writes its status file here; this service only reads it back to republish in the heartbeat gist.
-      - ./logs/autoscaler:/state:ro
-
-  autoscaler:
-    # Usage-driven maxRunners autoscaler. Build context is the repo root so the Dockerfile can COPY scripts/ and autoscaler/.
-    build:
-      context: .
-      dockerfile: autoscaler/Dockerfile
-    network_mode: host
-    restart: unless-stopped
-    profiles: ["primary"]
-    depends_on:
-      - k3s
-    environment:
-      - AUTOSCALER_DRY_RUN=${AUTOSCALER_DRY_RUN:-true}
-      - AUTOSCALER_POLL_SECONDS=${AUTOSCALER_POLL_SECONDS:-45}
-      # 24Gi: node-b's ~20.9Gi usable plus node-a's ~3.8Gi usable (see values/exadev-runners-values.yaml's own derivation), rounded down slightly for margin - the autoscaler manages one AutoscalingRunnerSet spanning the whole unpinned pool now, not just node-b alone.
-      - AUTOSCALER_USABLE_BUDGET_GI=${AUTOSCALER_USABLE_BUDGET_GI:-24}
-      # 7: floor(20.9/3) + floor(3.8/3) at the values file's own 3Gi Guaranteed-QoS pod size - the real bin-packing-safe ceiling across both nodes, not an arbitrary cap.
-      - AUTOSCALER_MAX_CEILING=${AUTOSCALER_MAX_CEILING:-7}
-      # Matches values/exadev-runners-values.yaml's own static maxRunners - the same proven-safe floor, enforced by two mechanisms (Helm's persisted value, the autoscaler's own fail-safe patch target).
-      - AUTOSCALER_FLOOR=${AUTOSCALER_FLOOR:-3}
-      - AUTOSCALER_RAISE_CONFIRM_POLLS=${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}
-      - AUTOSCALER_SWAP_PRESSURE_PCT=${AUTOSCALER_SWAP_PRESSURE_PCT:-50}
-      - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT=${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}
-    volumes:
-      - ./kubeconfig:/kubeconfig:ro
-      - ./logs/autoscaler:/state
 
 volumes:
   k3s-data: {}
   k3s-agent-data: {}
-  k3s-server-data: {}
   k3s-tailscale-data: {}
   k3s-agent-tailscale-data: {}
-  k3s-server-tailscale-data: {}
