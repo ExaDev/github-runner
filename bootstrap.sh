@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Idempotent setup: brings up the k3s cluster (if not already running),
-# waits for it to be ready, resolves each org's GitHub App installation ID,
-# creates/updates the GitHub App and GHCR pull secrets, and installs or
-# upgrades the ARC controller plus each org's runner scale set release.
-# Safe to rerun any time - e.g. after rotating a key, or to add an org by
-# adding a new install_org call below with its own values/<org>-runners-values.yaml.
+# Idempotent setup: brings up the k3s cluster (if not already running), waits for it to be ready, installs/upgrades the ARC controller and the in-cluster fleet-health platform (heartbeat + autoscaler - see install_platform below), resolves each org's GitHub App installation ID, creates/updates the GitHub App and GHCR pull secrets, and installs or upgrades each org's runner scale set release. Safe to rerun any time - e.g. after rotating a key, or to add an org by adding a new install_org call below with its own values/<org>-runners-values.yaml.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -48,7 +43,267 @@ helm upgrade --install arc \
   -f values/controller-values.yaml \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
 
-# ---- 3. Per-org helpers -----------------------------------------------------
+# ---- 3. Fleet-health platform (heartbeat + autoscaler) -------------------- Installs both as genuinely unpinned, in-cluster Deployments - the same pattern ARC's own controller pods already use - rather than host-pinned Docker Compose services. Mirrors ansible/roles/github_runner_arc/tasks/install_platform.yml exactly; keep both in sync if either changes. RBAC is scoped to exactly what each container reads/writes - see scripts/heartbeat.sh/scripts/autoscaler.sh.
+install_platform() {
+  local namespace="github-runner-platform"
+
+  log "Installing/upgrading the fleet-health platform (heartbeat + autoscaler)..."
+
+  kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+  kubectl create serviceaccount heartbeat --namespace="$namespace" --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create serviceaccount autoscaler --namespace="$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+  kubectl create secret generic heartbeat-gh-token \
+    --namespace="$namespace" \
+    --from-literal=token="$HEARTBEAT_GH_TOKEN" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  kubectl create secret docker-registry ghcr-pull \
+    --namespace="$namespace" \
+    --docker-server=ghcr.io \
+    --docker-username="$GHCR_PULL_USERNAME" \
+    --docker-password="$GHCR_PULL_TOKEN" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  # Pre-created empty, not left for the autoscaler to create on first poll - neither ServiceAccount below is granted `create` on configmaps, only get/patch.
+  kubectl create configmap autoscaler-status \
+    --namespace="$namespace" \
+    --from-literal=status.json="" \
+    --from-literal=raise-confirm-count="0" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: github-runner-heartbeat-nodes-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: github-runner-heartbeat-nodes-reader
+subjects:
+  - kind: ServiceAccount
+    name: heartbeat
+    namespace: ${namespace}
+roleRef:
+  kind: ClusterRole
+  name: github-runner-heartbeat-nodes-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-runner-heartbeat-controller-reader
+  namespace: actions-runner-controller
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-runner-heartbeat-controller-reader
+  namespace: actions-runner-controller
+subjects:
+  - kind: ServiceAccount
+    name: heartbeat
+    namespace: ${namespace}
+roleRef:
+  kind: Role
+  name: github-runner-heartbeat-controller-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-runner-heartbeat-status-reader
+  namespace: ${namespace}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["autoscaler-status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-runner-heartbeat-status-reader
+  namespace: ${namespace}
+subjects:
+  - kind: ServiceAccount
+    name: heartbeat
+    namespace: ${namespace}
+roleRef:
+  kind: Role
+  name: github-runner-heartbeat-status-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: github-runner-autoscaler-node-metrics-reader
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: github-runner-autoscaler-node-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: autoscaler
+    namespace: ${namespace}
+roleRef:
+  kind: ClusterRole
+  name: github-runner-autoscaler-node-metrics-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-runner-autoscaler-runnerset-manager
+  namespace: arc-runners-exadev
+rules:
+  - apiGroups: ["actions.github.com"]
+    resources: ["autoscalingrunnersets"]
+    resourceNames: ["exadev-runners"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-runner-autoscaler-runnerset-manager
+  namespace: arc-runners-exadev
+subjects:
+  - kind: ServiceAccount
+    name: autoscaler
+    namespace: ${namespace}
+roleRef:
+  kind: Role
+  name: github-runner-autoscaler-runnerset-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-runner-autoscaler-status-writer
+  namespace: ${namespace}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["autoscaler-status"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-runner-autoscaler-status-writer
+  namespace: ${namespace}
+subjects:
+  - kind: ServiceAccount
+    name: autoscaler
+    namespace: ${namespace}
+roleRef:
+  kind: Role
+  name: github-runner-autoscaler-status-writer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: heartbeat
+  namespace: ${namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: heartbeat
+  template:
+    metadata:
+      labels:
+        app: heartbeat
+    spec:
+      serviceAccountName: heartbeat
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: heartbeat
+          image: ghcr.io/exadev/github-runner-heartbeat:latest
+          env:
+            - name: HEARTBEAT_GIST_ID
+              value: "${HEARTBEAT_GIST_ID}"
+            - name: HEARTBEAT_WINDOW_SECONDS
+              value: "${HEARTBEAT_WINDOW_SECONDS:-600}"
+            - name: HEARTBEAT_INTERVAL_SECONDS
+              value: "${HEARTBEAT_INTERVAL_SECONDS:-180}"
+            - name: HEARTBEAT_STATE_NAMESPACE
+              value: "${namespace}"
+            - name: HEARTBEAT_GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: heartbeat-gh-token
+                  key: token
+          resources:
+            requests: {cpu: "50m", memory: "32Mi"}
+            limits: {cpu: "200m", memory: "64Mi"}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autoscaler
+  namespace: ${namespace}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: autoscaler
+  template:
+    metadata:
+      labels:
+        app: autoscaler
+    spec:
+      serviceAccountName: autoscaler
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: autoscaler
+          image: ghcr.io/exadev/github-runner-autoscaler:latest
+          env:
+            - name: AUTOSCALER_DRY_RUN
+              value: "${AUTOSCALER_DRY_RUN:-true}"
+            - name: AUTOSCALER_POLL_SECONDS
+              value: "${AUTOSCALER_POLL_SECONDS:-45}"
+            - name: AUTOSCALER_USABLE_BUDGET_GI
+              value: "${AUTOSCALER_USABLE_BUDGET_GI:-24}"
+            - name: AUTOSCALER_MAX_CEILING
+              value: "${AUTOSCALER_MAX_CEILING:-7}"
+            - name: AUTOSCALER_FLOOR
+              value: "${AUTOSCALER_FLOOR:-3}"
+            - name: AUTOSCALER_RAISE_CONFIRM_POLLS
+              value: "${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}"
+            - name: AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT
+              value: "${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}"
+            - name: AUTOSCALER_STATE_NAMESPACE
+              value: "${namespace}"
+          resources:
+            requests: {cpu: "50m", memory: "32Mi"}
+            limits: {cpu: "200m", memory: "64Mi"}
+EOF
+}
+
+# ---- 4. Per-org helpers -----------------------------------------------------
 
 # Resolves a GitHub App's installation ID for a given org login, using only
 # the App ID and private key - signs a short-lived JWT per GitHub's
@@ -111,10 +366,13 @@ install_org() {
     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
 
   # Every Helm upgrade above reverts maxRunners to the values file's safe floor (see values/exadev-runners-values.yaml). Trigger one immediate autoscaler poll so the safe-floor window after this install shrinks from up to a full poll interval down to seconds, rather than waiting for the loop's own next tick. Best-effort: the autoscaler service is exadev-specific today (see scripts/autoscaler.sh), and the ordinary loop catches this regardless if the exec fails for any reason.
-  docker compose exec -T autoscaler /app/scripts/autoscaler.sh || true
+  # kubectl exec, not docker compose exec: the autoscaler runs as an in-cluster Deployment now (see install_platform above), genuinely unpinned to any one host, so this goes through the API server rather than a local Docker socket.
+  kubectl exec deploy/autoscaler -n github-runner-platform -- /app/scripts/autoscaler.sh || true
 }
 
-# ---- 4. Install each org ---------------------------------------------------
+# ---- 5. Install the fleet-health platform, then each org ------------------
+install_platform
+
 if [ -z "${EXADEV_APP_INSTALLATION_ID:-}" ]; then
   log "Resolving ExaDev App installation ID..."
   EXADEV_APP_INSTALLATION_ID=$(resolve_installation_id "$EXADEV_APP_ID" "$EXADEV_APP_PRIVATE_KEY_PATH" "ExaDev")

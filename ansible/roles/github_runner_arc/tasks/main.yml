@@ -1,12 +1,12 @@
 ---
 # Ports bootstrap.sh's steps 1-4 (start k3s, wait for it, install the ARC controller, install each org) to Ansible. Safe to rerun, same as the script: every mutating task below uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
 #
-# Three node roles: github_runner_arc_node_role selects between "primary" (bootstraps the cluster - k3s --cluster-init, embedded etcd, heartbeat, the ARC controller, every org's runner scale set), "server" (joins an EXISTING cluster as an additional control-plane/etcd member - k3s server --server <url>, a genuine HA member, not just a worker), and "agent" (joins as a pure worker with no control-plane role). See docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
+# Two node roles: github_runner_arc_node_role selects between "server" (a control-plane/etcd member - k3s server, either bootstrapping the cluster or joining an existing one, see github_runner_arc_etcd_bootstrap below) and "agent" (joins as a pure worker with no control-plane role). Whether a server host bootstraps (k3s --cluster-init, embedded etcd) or joins is decided by the orthogonal per-host boolean github_runner_arc_etcd_bootstrap - a one-time distinction, irrelevant to how the host operates once past first boot, not a separate role. Installing the ARC controller and each org's runner scale set is likewise not tied to a role at all: it's driven purely by whether THIS host's own github_runner_arc_orgs is non-empty, so any server host can be the one Ansible installs against, not just whichever host happened to bootstrap etcd. See docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
 
 - name: Fail if the node role is invalid
   ansible.builtin.fail:
-    msg: "github_runner_arc_node_role must be 'primary', 'server', or 'agent' (got '{{ github_runner_arc_node_role }}')."
-  when: github_runner_arc_node_role not in ['primary', 'server', 'agent']
+    msg: "github_runner_arc_node_role must be 'server' or 'agent' (got '{{ github_runner_arc_node_role }}')."
+  when: github_runner_arc_node_role not in ['server', 'agent']
 
 - name: Fail if this host's repo root is not set
   ansible.builtin.fail:
@@ -25,10 +25,10 @@
       host_vars/{{ inventory_hostname }}.yml.
   when: github_runner_arc_secrets_vault | length == 0 or github_runner_arc_secrets_item | length == 0
 
-# Only the primary ever runs the heartbeat service (see docker-compose.yml's own profiles), and scripts/heartbeat.sh has its own `:?required` check on HEARTBEAT_GIST_ID at container startup - so an empty gist id here would otherwise only surface as a crash-looping heartbeat container discovered after the fact. Bootstraps it the same way the README's own manual instructions do (`gh gist create`, using the control node's own authenticated `gh` session), then fails deliberately: the new gist's id needs recording in TWO places a human must do by hand (this host's own host_vars, and exadev/runner-fallback-action's own action.yml default) - creating it silently and continuing would leave the second half of that undone with no signal that it's needed.
-- name: Bootstrap the heartbeat gist if this primary doesn't have one yet
+# Only the etcd-bootstrap host's own gist id matters here (see the heartbeat Deployment's own RBAC/Secret in install_platform.yml for where it's actually consumed) - scripts/heartbeat.sh has its own `:?required` check on HEARTBEAT_GIST_ID at container startup, so an empty gist id here would otherwise only surface as a crash-looping pod discovered after the fact. Bootstraps it the same way the README's own manual instructions do (`gh gist create`, using the control node's own authenticated `gh` session), then fails deliberately: the new gist's id needs recording in TWO places a human must do by hand (this host's own host_vars, and exadev/runner-fallback-action's own action.yml default) - creating it silently and continuing would leave the second half of that undone with no signal that it's needed.
+- name: Bootstrap the heartbeat gist if this host doesn't have one yet
   when:
-    - github_runner_arc_node_role == "primary"
+    - github_runner_arc_etcd_bootstrap
     - github_runner_arc_heartbeat_gist_id | length == 0
   block:
     - name: Create the heartbeat status gist
@@ -65,7 +65,7 @@
   delegate_to: localhost
   register: github_runner_arc_secrets_cache_file
 
-# The cache above is shared by every host that uses this exact secrets item, but github_runner_arc_orgs is host-specific (an agent host defines none at all). Building org_private_keys from only the TRIGGERING host's own org list means whichever host happens to populate the cache first determines what's in it forever after - confirmed live: an agent-only test run seeded the cache with an empty org_private_keys, silently breaking the primary's own later GitHub App secret creation once it read that same cache back. Aggregating across every host sharing this item makes the cached content correct regardless of which host writes it first.
+# The cache above is shared by every host that uses this exact secrets item, but github_runner_arc_orgs is host-specific (an agent host defines none at all). Building org_private_keys from only the TRIGGERING host's own org list means whichever host happens to populate the cache first determines what's in it forever after - confirmed live: an agent-only test run seeded the cache with an empty org_private_keys, silently breaking a later GitHub App secret creation once another host read that same cache back. Aggregating across every host sharing this item makes the cached content correct regardless of which host writes it first.
 - name: Compute every org configured anywhere in the fleet that shares this secrets item
   ansible.builtin.set_fact:
     github_runner_arc_all_orgs: >-
@@ -77,6 +77,16 @@
         | map(attribute='github_runner_arc_orgs', default=[])
         | list | flatten | unique(attribute='name')
       }}
+
+# Now that ARC/org installs are driven purely by per-host config presence rather than a single designated "primary", two or more server hosts could in principle both configure the same org name - kubernetes.core.helm (one release, one namespace) would then race against itself from two hosts under Ansible's default parallel-per-task execution. This fleet's own convention is exactly one host per org (see host_vars/node-a.yml), enforced here rather than left as an unwritten assumption.
+- name: Fail if the same org name is configured on more than one host
+  ansible.builtin.fail:
+    msg: >-
+      Org '{{ item }}' is configured in github_runner_arc_orgs on more than
+      one host. Each org's Helm release must be installed from exactly one
+      host - remove the duplicate from every host_vars file but one.
+  loop: "{{ github_runner_arc_all_orgs | map(attribute='name') | list }}"
+  when: (github_runner_arc_all_orgs | map(attribute='name') | list | select('equalto', item) | list | length) > 1
 
 - name: Read every 1Password secret this host needs in one shell invocation
   ansible.builtin.shell: |
@@ -130,53 +140,61 @@
   changed_when: false
   register: github_runner_arc_docker_context
 
-- name: Join as an additional k3s server and stop here (a genuine control-plane/etcd member, but org installs and the ARC controller still only ever run on the primary)
+- name: Set up and start this host as a k3s server, bootstrapping or joining as configured
   when: github_runner_arc_node_role == "server"
   block:
-    - name: Fail if the join-server URL is not set
+    - name: Fail if bootstrap and join-server-url are both set (contradictory - can't bootstrap AND join)
       ansible.builtin.fail:
         msg: >-
-          github_runner_arc_join_server_url is not set on this server
-          host. It must be an existing cluster member's own
-          https://<address>:6443 - add it to
-          host_vars/{{ inventory_hostname }}.yml.
-      when: github_runner_arc_join_server_url | length == 0
+          github_runner_arc_etcd_bootstrap is true AND
+          github_runner_arc_join_server_url is set on this host - a host
+          either bootstraps the cluster or joins an existing one, not both.
+          Fix host_vars/{{ inventory_hostname }}.yml.
+      when: github_runner_arc_etcd_bootstrap and github_runner_arc_join_server_url | length > 0
+
+    - name: Fail if neither bootstrapping nor a join-server-url is set (nothing for this host to do)
+      ansible.builtin.fail:
+        msg: >-
+          Neither github_runner_arc_etcd_bootstrap nor
+          github_runner_arc_join_server_url is set on this server host - it
+          must either bootstrap the cluster or join an existing one. Add one
+          of them to host_vars/{{ inventory_hostname }}.yml.
+      when: not github_runner_arc_etcd_bootstrap and github_runner_arc_join_server_url | length == 0
 
     - name: Fail if this host isn't included in the fleet's own TLS SAN list
+      # Checks the EFFECTIVE node name (github_runner_arc_node_name if set, else inventory_hostname), not raw inventory_hostname - a bootstrap host may deliberately override its own node name (e.g. node-a's own K3S_NODE_NAME stays "k3s-server", not "node-a", to preserve its existing Tailscale device identity - see host_vars/node-a.yml), and checking the wrong string here would incorrectly fail that host.
       ansible.builtin.fail:
         msg: >-
           github_runner_arc_tls_sans does not include this host's own
-          hostname. Every server needs every server's own hostname on its
-          --tls-san list, including its own - add it to
-          github_runner_arc_tls_sans in host_vars/{{ inventory_hostname }}.yml
-          (and on every OTHER server's own host_vars too).
-      when: inventory_hostname not in (github_runner_arc_tls_sans | join(' '))
+          effective node name ({{ github_runner_arc_node_name if github_runner_arc_node_name | length > 0 else inventory_hostname }}).
+          Every server needs every server's own hostname on its --tls-san
+          list, including its own - add it to github_runner_arc_tls_sans in
+          host_vars/{{ inventory_hostname }}.yml (and on every OTHER
+          server's own host_vars too).
+      when: (github_runner_arc_node_name if github_runner_arc_node_name | length > 0 else inventory_hostname) not in (github_runner_arc_tls_sans | join(' '))
 
-    - name: Template .env for the additional k3s server
+    - name: Template .env for this k3s server
       ansible.builtin.template:
-        src: env-server.j2
+        src: env.j2
         dest: "{{ github_runner_arc_repo_root }}/.env"
         mode: "0600"
       no_log: true
 
-    - name: Join the existing cluster as an additional control-plane member
+    - name: Start k3s via docker compose (bootstrapping or joining, per this host's own .env)
       community.docker.docker_compose_v2:
         project_src: "{{ github_runner_arc_repo_root }}"
         profiles: ["server"]
         cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
         state: present
 
-    - name: End the role here - a server host runs no org installs or ARC controller of its own
-      ansible.builtin.meta: end_role
-
 - name: Join as a k3s agent and stop here (nothing else applies to a worker-only node)
   when: github_runner_arc_node_role == "agent"
   block:
-    - name: Fail if the primary's server URL is not set
+    - name: Fail if the join server URL is not set
       ansible.builtin.fail:
         msg: >-
           github_runner_arc_agent_server_url is not set on this agent
-          host. It must be the primary host's own
+          host. It must be an existing server host's own
           https://<address>:6443 - add it to
           host_vars/{{ inventory_hostname }}.yml.
       when: github_runner_arc_agent_server_url | length == 0
@@ -188,7 +206,7 @@
         mode: "0600"
       no_log: true
 
-    - name: Join the primary's k3s cluster as an agent
+    - name: Join the cluster as an agent
       community.docker.docker_compose_v2:
         project_src: "{{ github_runner_arc_repo_root }}"
         profiles: ["agent"]
@@ -198,36 +216,20 @@
     - name: End the role here - an agent host runs no org installs or ARC controller of its own
       ansible.builtin.meta: end_role
 
-# Everything below only ever runs on the primary: a server or agent host already ended the role in one of the two blocks above.
-
-- name: Skip the rest of the role when no orgs are configured for this primary host
-  ansible.builtin.meta: end_role
-  when: github_runner_arc_orgs | length == 0
+# Everything below only ever runs on a server-role host, gated per-task on whether THIS host has orgs configured - an agent host already ended the role above.
 
 - name: Ensure a dedicated virtualenv has the kubernetes Python client
-  # Only needed here, not on an agent host: kubernetes.core.k8s/k8s_info/helm (used below and in install_org.yml) are primary-only - an agent host never talks to the Kubernetes API directly, it only joins the cluster docker-compose already set up above.
+  # Only needed on a host that actually talks to the Kubernetes API (kubernetes.core.k8s/k8s_info/helm, used below, in install_platform.yml, and in install_org.yml) - a server host with neither orgs nor the fleet-health platform configured (e.g. node-b, node-c) never needs this.
   ansible.builtin.pip:
     name: kubernetes
     virtualenv: "{{ github_runner_arc_venv_path }}"
     virtualenv_command: python3 -m venv
+  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
 
 - name: Use that virtualenv's Python for every module task on this host from here on
   ansible.builtin.set_fact:
     ansible_python_interpreter: "{{ github_runner_arc_venv_path }}/bin/python3"
-
-- name: Template .env for docker compose
-  ansible.builtin.template:
-    src: env.j2
-    dest: "{{ github_runner_arc_repo_root }}/.env"
-    mode: "0600"
-  no_log: true
-
-- name: Start k3s and heartbeat via docker compose
-  community.docker.docker_compose_v2:
-    project_src: "{{ github_runner_arc_repo_root }}"
-    profiles: ["primary"]
-    cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
-    state: present
+  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
 
 - name: Wait for the k3s node to register (an empty node list is still a successful API response)
   # default([]) on resources, not just a bare .resources access: the very first poll can hit the API before it's actually listening yet (the container has only just started), and that attempt's own result dict has no `resources` key at all - confirmed live on a fresh node-a bootstrap, where the bare access threw "object of type 'dict' has no attribute 'resources'" and aborted the whole `until` loop outright instead of retrying, even though the exact same module call succeeded cleanly moments later once the API was actually up.
@@ -238,18 +240,19 @@
   until: github_runner_arc_nodes.resources | default([]) | length > 0
   retries: 60
   delay: 2
+  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
 
 - name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
-  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password - but the primary still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. Confirmed live for an agent - see README's Non-obvious behaviour section - and the same failure mode applies identically to a "server"-role host's own container recreation, since it's the same underlying k3s node-password mechanism regardless of which join mode registered the node. Only ever touches server/agent-role hosts by their own known inventory hostname (which is also their registered k8s node name, per env-server.j2/env-agent.j2's own K3S_SERVER_NODE_NAME/K3S_AGENT_NODE_NAME): never the primary's own control-plane registration, which fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
+  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password - but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. Confirmed live for an agent - see README's Non-obvious behaviour section - and the same failure mode applies identically to any joining server's own container recreation, since it's the same underlying k3s node-password mechanism regardless of join mode. Only ever touches hosts that are NOT the etcd-bootstrap host: that host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
   block:
     - name: Wait for every node to report Ready
-      # --all, not a --limit-scoped single node: once a server/agent has joined, this must wait for it too, not just the primary's own control-plane node.
+      # --all, not a --limit-scoped single node: once a server/agent has joined, this must wait for it too, not just this host's own control-plane node.
       ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
       environment:
         KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
       changed_when: false
   rescue:
-    - name: Clear every server/agent host's stale node-password secret
+    - name: Clear every non-bootstrap host's stale node-password secret
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
         state: absent
@@ -257,22 +260,27 @@
         namespace: kube-system
         name: "{{ item }}.node-password.k3s"
       loop: "{{ groups['all'] }}"
-      when: hostvars[item].github_runner_arc_node_role | default('primary') in ['server', 'agent']
+      when: not (hostvars[item].github_runner_arc_etcd_bootstrap | default(false))
 
-    - name: Clear every server/agent host's stale Node object to match
+    - name: Clear every non-bootstrap host's stale Node object to match
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
         state: absent
         kind: Node
         name: "{{ item }}"
       loop: "{{ groups['all'] }}"
-      when: hostvars[item].github_runner_arc_node_role | default('primary') in ['server', 'agent']
+      when: not (hostvars[item].github_runner_arc_etcd_bootstrap | default(false))
 
     - name: Retry waiting for every node to report Ready now that any stale registration is cleared
       ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
       environment:
         KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
       changed_when: false
+  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
+
+- name: Ensure the fleet-health platform (heartbeat + autoscaler) is installed
+  ansible.builtin.include_tasks: install_platform.yml
+  when: github_runner_arc_heartbeat_gist_id | length > 0
 
 - name: Install/upgrade the ARC controller (shared by every org on this host)
   kubernetes.core.helm:
@@ -284,6 +292,7 @@
     values_files:
       - "{{ github_runner_arc_values_dir }}/controller-values.yaml"
     kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+  when: github_runner_arc_orgs | length > 0
 
 - name: Install/upgrade each org's runner scale set
   ansible.builtin.include_tasks: install_org.yml

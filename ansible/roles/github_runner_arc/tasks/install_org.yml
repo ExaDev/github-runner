@@ -18,9 +18,10 @@
     label: "{{ profile.suffix | default('(default)') }}"
 
 - name: "{{ org.name }}: trigger an immediate autoscaler reconcile"
-  ansible.builtin.command: docker compose exec -T autoscaler /app/scripts/autoscaler.sh
-  args:
-    chdir: "{{ github_runner_arc_repo_root }}"
+  # kubectl exec, not docker compose exec: the autoscaler runs as an in-cluster Deployment now, genuinely unpinned to any one host, so this has to go through the API server rather than a local Docker socket - it also means this step now actually works when Ansible is run against a host other than wherever the autoscaler pod happens to be scheduled, unlike the docker-compose-exec equivalent it replaces, which silently no-op'd from any host but the one pinned to run it.
+  ansible.builtin.command: kubectl exec deploy/autoscaler -n {{ github_runner_arc_platform_namespace }} -- /app/scripts/autoscaler.sh
+  environment:
+    KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
   changed_when: false
   failed_when: false
-  # Every Helm upgrade above reverts maxRunners to its values file's safe floor. This shrinks that safe-floor window to seconds instead of waiting for the autoscaler's own next poll tick. Best-effort, matching bootstrap.sh's identical step: the autoscaler service is exadev-specific today, and the ordinary poll loop catches this regardless if the exec fails for any reason (including the service not existing yet).
+  # Every Helm upgrade above reverts maxRunners to its values file's safe floor. This shrinks that safe-floor window to seconds instead of waiting for the autoscaler's own next poll tick. Best-effort: the autoscaler is exadev-specific today, and the ordinary poll loop catches this regardless if the exec fails for any reason (including the Deployment not existing yet).

@@ -1,0 +1,367 @@
+---
+# Installs the fleet-health platform (heartbeat + autoscaler) as genuinely unpinned, in-cluster Kubernetes Deployments - the same pattern ARC's own controller pods already use - rather than host-pinned Docker Compose services. Included from tasks/main.yml when github_runner_arc_heartbeat_gist_id is set on this host; any server host can be that host, same as github_runner_arc_orgs for org installs. See scripts/heartbeat.sh and scripts/autoscaler.sh for what each container actually does; RBAC below is scoped to exactly what each one reads/writes, no wildcards.
+
+- name: "platform: create namespace"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ github_runner_arc_platform_namespace }}"
+
+- name: "platform: create heartbeat/autoscaler service accounts"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ item }}"
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+  loop:
+    - heartbeat
+    - autoscaler
+
+# heartbeat: read node Ready status (cluster-wide, so a ClusterRole - Nodes are not namespaced).
+- name: "platform: heartbeat RBAC - read nodes"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: github-runner-heartbeat-nodes-reader
+      rules:
+        - apiGroups: [""]
+          resources: ["nodes"]
+          verbs: ["get", "list"]
+
+- name: "platform: heartbeat RBAC - bind node-reader"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: github-runner-heartbeat-nodes-reader
+      subjects:
+        - kind: ServiceAccount
+          name: heartbeat
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: ClusterRole
+        name: github-runner-heartbeat-nodes-reader
+        apiGroup: rbac.authorization.k8s.io
+
+# heartbeat: read the ARC controller's own Deployment readiness, in its own namespace.
+- name: "platform: heartbeat RBAC - read the ARC controller Deployment"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: github-runner-heartbeat-controller-reader
+        namespace: actions-runner-controller
+      rules:
+        - apiGroups: ["apps"]
+          resources: ["deployments"]
+          verbs: ["get", "list"]
+
+- name: "platform: heartbeat RBAC - bind controller-reader"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: github-runner-heartbeat-controller-reader
+        namespace: actions-runner-controller
+      subjects:
+        - kind: ServiceAccount
+          name: heartbeat
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: Role
+        name: github-runner-heartbeat-controller-reader
+        apiGroup: rbac.authorization.k8s.io
+
+# heartbeat: read the autoscaler's own shared status ConfigMap, scoped by resourceNames to the one object it actually touches.
+- name: "platform: heartbeat RBAC - read the autoscaler status ConfigMap"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: github-runner-heartbeat-status-reader
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      rules:
+        - apiGroups: [""]
+          resources: ["configmaps"]
+          resourceNames: ["autoscaler-status"]
+          verbs: ["get"]
+
+- name: "platform: heartbeat RBAC - bind status-reader"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: github-runner-heartbeat-status-reader
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      subjects:
+        - kind: ServiceAccount
+          name: heartbeat
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: Role
+        name: github-runner-heartbeat-status-reader
+        apiGroup: rbac.authorization.k8s.io
+
+# autoscaler: read per-node memory usage via metrics-server (cluster-wide, so a ClusterRole).
+- name: "platform: autoscaler RBAC - read node metrics"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: github-runner-autoscaler-node-metrics-reader
+      rules:
+        - apiGroups: ["metrics.k8s.io"]
+          resources: ["nodes"]
+          verbs: ["get", "list"]
+
+- name: "platform: autoscaler RBAC - bind node-metrics-reader"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: github-runner-autoscaler-node-metrics-reader
+      subjects:
+        - kind: ServiceAccount
+          name: autoscaler
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: ClusterRole
+        name: github-runner-autoscaler-node-metrics-reader
+        apiGroup: rbac.authorization.k8s.io
+
+# autoscaler: read/patch the ExaDev scale set's AutoscalingRunnerSet (scoped to the one object by resourceNames), and read pod-level metrics in its own namespace. arc-runners-exadev/exadev-runners are the same fixed target scripts/autoscaler.sh already defaults to - this whole subsystem manages exactly one scale set by design, not a generic multi-org autoscaler (see that script's own comment).
+- name: "platform: autoscaler RBAC - manage the ExaDev AutoscalingRunnerSet and read pod metrics"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: github-runner-autoscaler-runnerset-manager
+        namespace: arc-runners-exadev
+      rules:
+        - apiGroups: ["actions.github.com"]
+          resources: ["autoscalingrunnersets"]
+          resourceNames: ["exadev-runners"]
+          verbs: ["get", "patch"]
+        - apiGroups: ["metrics.k8s.io"]
+          resources: ["pods"]
+          verbs: ["get", "list"]
+
+- name: "platform: autoscaler RBAC - bind runnerset-manager"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: github-runner-autoscaler-runnerset-manager
+        namespace: arc-runners-exadev
+      subjects:
+        - kind: ServiceAccount
+          name: autoscaler
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: Role
+        name: github-runner-autoscaler-runnerset-manager
+        apiGroup: rbac.authorization.k8s.io
+
+# autoscaler: read/patch the shared status ConfigMap, scoped by resourceNames.
+- name: "platform: autoscaler RBAC - manage the status ConfigMap"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: github-runner-autoscaler-status-writer
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      rules:
+        - apiGroups: [""]
+          resources: ["configmaps"]
+          resourceNames: ["autoscaler-status"]
+          verbs: ["get", "patch"]
+
+- name: "platform: autoscaler RBAC - bind status-writer"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: github-runner-autoscaler-status-writer
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      subjects:
+        - kind: ServiceAccount
+          name: autoscaler
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: Role
+        name: github-runner-autoscaler-status-writer
+        apiGroup: rbac.authorization.k8s.io
+
+# Pre-created empty rather than left for the autoscaler to create on first poll: neither ServiceAccount above is granted `create` on configmaps, only get/patch - a deliberate minimal-permission choice. If this ConfigMap is ever deleted by hand, both pods fail loud (RBAC Forbidden on create) rather than silently recreating it, and it self-heals the next time this task runs.
+- name: "platform: pre-create the shared autoscaler-status ConfigMap"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: autoscaler-status
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      data:
+        status.json: ""
+        raise-confirm-count: "0"
+
+- name: "platform: create/update heartbeat's GitHub PAT secret"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: heartbeat-gh-token
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      stringData:
+        token: "{{ github_runner_arc_secrets.heartbeat_gh_token }}"
+  no_log: true
+
+- name: "platform: create/update GHCR pull secret"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/dockerconfigjson
+      metadata:
+        name: ghcr-pull
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      data:
+        .dockerconfigjson: >-
+          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_secrets.ghcr_username,
+                                      'password': github_runner_arc_secrets.ghcr_token,
+                                      'auth': (github_runner_arc_secrets.ghcr_username ~ ':' ~ github_runner_arc_secrets.ghcr_token) | b64encode}}})
+             | to_json | b64encode }}
+  no_log: true
+
+- name: "platform: install/upgrade the heartbeat Deployment"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: heartbeat
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: heartbeat
+        template:
+          metadata:
+            labels:
+              app: heartbeat
+          spec:
+            serviceAccountName: heartbeat
+            imagePullSecrets:
+              - name: ghcr-pull
+            containers:
+              - name: heartbeat
+                image: "{{ github_runner_arc_heartbeat_image }}"
+                env:
+                  - name: HEARTBEAT_GIST_ID
+                    value: "{{ github_runner_arc_heartbeat_gist_id }}"
+                  - name: HEARTBEAT_WINDOW_SECONDS
+                    value: "{{ github_runner_arc_heartbeat_window_seconds | string }}"
+                  - name: HEARTBEAT_INTERVAL_SECONDS
+                    value: "{{ github_runner_arc_heartbeat_interval_seconds | string }}"
+                  - name: HEARTBEAT_STATE_NAMESPACE
+                    value: "{{ github_runner_arc_platform_namespace }}"
+                  - name: HEARTBEAT_GH_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: heartbeat-gh-token
+                        key: token
+                resources:
+                  requests:
+                    cpu: "50m"
+                    memory: "32Mi"
+                  limits:
+                    cpu: "200m"
+                    memory: "64Mi"
+
+- name: "platform: install/upgrade the autoscaler Deployment"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: autoscaler
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: autoscaler
+        template:
+          metadata:
+            labels:
+              app: autoscaler
+          spec:
+            serviceAccountName: autoscaler
+            imagePullSecrets:
+              - name: ghcr-pull
+            containers:
+              - name: autoscaler
+                image: "{{ github_runner_arc_autoscaler_image }}"
+                env:
+                  - name: AUTOSCALER_DRY_RUN
+                    value: "{{ github_runner_arc_autoscaler_dry_run | string | lower }}"
+                  - name: AUTOSCALER_POLL_SECONDS
+                    value: "{{ github_runner_arc_autoscaler_poll_seconds | string }}"
+                  - name: AUTOSCALER_USABLE_BUDGET_GI
+                    value: "{{ github_runner_arc_autoscaler_usable_budget_gi | string }}"
+                  - name: AUTOSCALER_MAX_CEILING
+                    value: "{{ github_runner_arc_autoscaler_max_ceiling | string }}"
+                  - name: AUTOSCALER_FLOOR
+                    value: "{{ github_runner_arc_autoscaler_floor | string }}"
+                  - name: AUTOSCALER_RAISE_CONFIRM_POLLS
+                    value: "{{ github_runner_arc_autoscaler_raise_confirm_polls | string }}"
+                  - name: AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT
+                    value: "{{ github_runner_arc_autoscaler_mem_available_pressure_pct | string }}"
+                  - name: AUTOSCALER_STATE_NAMESPACE
+                    value: "{{ github_runner_arc_platform_namespace }}"
+                resources:
+                  requests:
+                    cpu: "50m"
+                    memory: "32Mi"
+                  limits:
+                    cpu: "200m"
+                    memory: "64Mi"

@@ -1,28 +1,53 @@
 ---
 # ExaDev GitHub Actions runner fleet: ARC (Actions Runner Controller) on k3s.
 #
-# Three roles: "primary" (the default) bootstraps the cluster (k3s --cluster-init, embedded etcd) and runs the full stack - heartbeat, autoscaler, the ARC controller, every org's runner scale set. "server" joins an EXISTING cluster as an additional control-plane/etcd member (k3s server --server <url>, not k3s agent) - a genuine HA member, not just a worker; set github_runner_arc_join_server_url when using it. "agent" joins as a pure worker with no control-plane role at all - see docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
-github_runner_arc_node_role: "primary"
+# Two roles: "server" (the default) is a control-plane/etcd member (k3s server) - a genuine HA member, not just a worker. Whether a server host bootstraps the cluster (k3s --cluster-init, embedded etcd) or joins an EXISTING one is an orthogonal, one-time per-host decision (github_runner_arc_etcd_bootstrap below), not a separate role: set it true on exactly one host (whichever bootstrapped the cluster originally), and set github_runner_arc_join_server_url on every other server host instead. "agent" joins as a pure worker with no control-plane role at all. Installing the ARC controller, each org's runner scale set, and the fleet-health platform (heartbeat/autoscaler) is likewise not tied to a role - see tasks/main.yml, where each is gated purely on whether THIS host's own github_runner_arc_orgs/github_runner_arc_heartbeat_gist_id is set, so any server host can be the one Ansible installs against. See docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
+github_runner_arc_node_role: "server"
 github_runner_arc_agent_server_url: ""
 github_runner_arc_join_server_url: ""
 
-# Every server node's own Tailscale hostname (the primary's own, plus every "server"-role host's own), applied identically to every server's own --tls-san list - a multi-server cluster needs every server's cert to cover every server's own name, not just its own, since a client (kubectl, the failover wrapper) may reach any of them directly. Set identically on every primary/server host's own host_vars. Empty (the default) is only valid for a genuinely single-server setup where nothing else ever joins.
+# One-time, per-host: true on exactly the one server host that originally ran k3s --cluster-init to bootstrap the cluster's embedded etcd; false (the default) on every other server, which instead joins via github_runner_arc_join_server_url. Irrelevant to how a host operates once past first boot - kept only because a host needs to know which one to pass at startup, and because the node-password self-heal rescue block in tasks/main.yml uses it to know which host owns the node-password Secret store versus which hosts must re-authenticate against a remote peer's copy of it.
+github_runner_arc_etcd_bootstrap: false
+
+# This host's own k3s node name/Tailscale hostname. Empty (the default) means "use inventory_hostname" - every server's own host_vars can leave this unset unless it needs to differ (e.g. to preserve a pre-existing device identity across a role change - see host_vars/node-a.yml's own override and comment).
+github_runner_arc_node_name: ""
+
+# Every server node's own Tailscale hostname (every "server"-role host's own, including the bootstrap host's), applied identically to every server's own --tls-san list - a multi-server cluster needs every server's cert to cover every server's own name, not just its own, since a client (kubectl, Ansible) may reach any of them directly. Set identically on every server host's own host_vars. Empty (the default) is only valid for a genuinely single-server setup where nothing else ever joins.
 github_runner_arc_tls_sans: []
 
 # github_runner_arc_secrets.tailscale_join_key (read from the shared secrets item's tailscale-join-key field by tasks/main.yml's own combined secrets read - nothing to set here) is what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host once more than one is in play: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic - avoiding an earlier, considerably hackier attempt (--node-external-ip + --flannel-external-ip layered on the HOST's own already-running Tailscale, tunnelled through Docker's own UDP port-publishing) that needed two nested tunnels for the same traffic and was correspondingly fragile.
 #
 # tasks/ensure_tailscale.yml uses the shared secrets item's tailscale-api-token field to keep the tailnet's ACL grant and this join key themselves provisioned - see that file's own comments for what it manages and the one manual step (creating the API token itself) that has no API to automate.
 
-# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets on that host (primary hosts only - ignored on an agent). Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops entirely on that host. See host_vars/node-a.yml for a real, working example of the full set of variables this role needs.
+# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets FROM that host (server hosts only - ignored on an agent; any server host works, not just a specific designated one). Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops that part entirely on that host. See host_vars/node-a.yml for a real, working example of the full set of variables this role needs.
 github_runner_arc_orgs: []
 
-# k3s + heartbeat (one Docker Compose stack per host, shared by every org on that host). k3s-token, ghcr-username, ghcr-token, and heartbeat-gh-token all live as separate fields on this ONE 1Password item, read via a single `op item get` call rather than four separate `op read` calls: confirmed live that 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so four separate reads meant four separate approval prompts for values that live on the exact same item. Never stored in this role or in ansible-vault - see tasks/main.yml.
+# k3s + the fleet-health platform (heartbeat/autoscaler, installed as in-cluster Kubernetes Deployments by install_platform.yml - see tasks/main.yml). k3s-token, ghcr-username, ghcr-token, and heartbeat-gh-token all live as separate fields on this ONE 1Password item, read via a single `op item get` call rather than four separate `op read` calls: confirmed live that 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so four separate reads meant four separate approval prompts for values that live on the exact same item. Never stored in this role or in ansible-vault - see tasks/main.yml.
 github_runner_arc_secrets_vault: ""
 github_runner_arc_secrets_item: ""
 github_runner_arc_k3s_version: "latest"
+
+# Set github_runner_arc_heartbeat_gist_id in a host's own host_vars to install the fleet-health platform FROM that host (server hosts only; any server host works, same as github_runner_arc_orgs above). Empty (the default) means install_platform.yml no-ops entirely on that host.
 github_runner_arc_heartbeat_gist_id: ""
 github_runner_arc_heartbeat_window_seconds: 600
 github_runner_arc_heartbeat_interval_seconds: 180
+
+# Namespace and image refs for the fleet-health platform's own Deployments (see install_platform.yml). Built and pushed the same manual multi-arch way as the main runner image - see the README's Build/test section.
+github_runner_arc_platform_namespace: "github-runner-platform"
+github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:latest"
+github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:latest"
+
+# Usage-driven autoscaler tunables - see scripts/autoscaler.sh and the README's Autoscaler section for the full algorithm. AUTOSCALER_SWAP_PRESSURE_PCT has no equivalent here: swap pressure is dropped as a signal now that the autoscaler pod can be scheduled on any node (no cluster-wide swap metric exists via kubectl top nodes/metrics-server) - see scripts/autoscaler.sh's own comment.
+github_runner_arc_autoscaler_dry_run: true
+github_runner_arc_autoscaler_poll_seconds: 45
+# 24Gi: node-b's ~20.9Gi usable plus node-a's ~3.8Gi usable (see values/exadev-runners-values.yaml's own derivation), rounded down slightly for margin - the autoscaler manages one AutoscalingRunnerSet spanning the whole unpinned pool, not just one node.
+github_runner_arc_autoscaler_usable_budget_gi: 24
+# 7: floor(20.9/3) + floor(3.8/3) at the values file's own 3Gi Guaranteed-QoS pod size - the real bin-packing-safe ceiling across the pool, not an arbitrary cap.
+github_runner_arc_autoscaler_max_ceiling: 7
+# Matches values/exadev-runners-values.yaml's own static maxRunners - the same proven-safe floor, enforced by two mechanisms (Helm's persisted value, the autoscaler's own fail-safe patch target).
+github_runner_arc_autoscaler_floor: 3
+github_runner_arc_autoscaler_raise_confirm_polls: 2
+github_runner_arc_autoscaler_mem_available_pressure_pct: 15
 
 # Repo root ON THE TARGET HOST itself: docker-compose.yml, the .env this role templates, and the values/ Helm values files (the single source of truth for both the ARC controller and every org's runner scale set - this role reads them in place rather than keeping its own copy) all live there. Deliberately left undefined here, not defaulted to `{{ playbook_dir }}/..`: playbook_dir is a control-node path, and using it as a template destination on the target host fails outright the moment the control node's own checkout doesn't sit at the identical path as the target's - confirmed live against node-b, whose real checkout lives at a completely different path than this repo's own worktree on the control node. Every host's own host_vars must set this explicitly (see host_vars/node-b.yml).
 github_runner_arc_values_dir: "{{ github_runner_arc_repo_root }}/values"
