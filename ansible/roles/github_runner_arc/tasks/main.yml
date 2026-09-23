@@ -25,11 +25,10 @@
       host_vars/{{ inventory_hostname }}.yml.
   when: github_runner_arc_secrets_vault | length == 0 or github_runner_arc_secrets_item | length == 0
 
-# Only the etcd-bootstrap host's own gist id matters here (see the heartbeat Deployment's own RBAC/Secret in install_platform.yml for where it's actually consumed) - scripts/heartbeat.sh has its own `:?required` check on HEARTBEAT_GIST_ID at container startup, so an empty gist id here would otherwise only surface as a crash-looping pod discovered after the fact. Bootstraps it the same way the README's own manual instructions do (`gh gist create`, using the control node's own authenticated `gh` session), then fails deliberately: the new gist's id needs recording in TWO places a human must do by hand (this host's own host_vars, and exadev/runner-fallback-action's own action.yml default) - creating it silently and continuing would leave the second half of that undone with no signal that it's needed.
-- name: Bootstrap the heartbeat gist if this host doesn't have one yet
-  when:
-    - github_runner_arc_etcd_bootstrap
-    - github_runner_arc_heartbeat_gist_id | length == 0
+# The fleet-health platform installs from whichever host sets github_runner_arc_heartbeat_gist_id (see install_platform.yml), so the question is whether ANY host in the inventory sets one, not whether a particular host does - checked across groups['all'], which --limit doesn't narrow, so scoping a run to a host without a gist id never triggers this. scripts/heartbeat.sh has its own `:?required` check on HEARTBEAT_GIST_ID at container startup, but that only surfaces as a crash-looping pod after the fact, and with no gist id anywhere the platform isn't installed at all and runner-fallback-action silently routes everything to ubuntu-latest. Bootstraps it the same way the README's own manual instructions do (`gh gist create`, using the control node's own authenticated `gh` session), then fails deliberately: the new gist's id needs recording in TWO places a human must do by hand (a host's own host_vars, and exadev/runner-fallback-action's own action.yml default) - creating it silently and continuing would leave the second half of that undone with no signal that it's needed.
+- name: Bootstrap the heartbeat gist if no host in the fleet has one yet
+  run_once: true
+  when: groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_heartbeat_gist_id', default='') | select | list | length == 0
   block:
     - name: Create the heartbeat status gist
       ansible.builtin.command:
@@ -51,8 +50,8 @@
         msg: >-
           Created a new heartbeat gist: {{ github_runner_arc_new_gist.stdout }}.
           Add its id (the hex tail of the URL) to
-          github_runner_arc_heartbeat_gist_id in
-          host_vars/{{ inventory_hostname }}.yml, AND update
+          github_runner_arc_heartbeat_gist_id in the host_vars of whichever
+          host should install the fleet-health platform, AND update
           exadev/runner-fallback-action's own action.yml gist-id default to
           match, then rerun.
 
