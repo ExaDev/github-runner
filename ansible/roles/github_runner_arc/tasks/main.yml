@@ -162,16 +162,16 @@
       when: not github_runner_arc_etcd_bootstrap and github_runner_arc_join_server_url | length == 0
 
     - name: Fail if this host isn't included in the fleet's own TLS SAN list
-      # Checks the EFFECTIVE node name (github_runner_arc_node_name if set, else inventory_hostname), not raw inventory_hostname - a bootstrap host may deliberately override its own node name (e.g. node-a's own K3S_NODE_NAME stays "k3s-server", not "node-a", to preserve its existing Tailscale device identity - see host_vars/node-a.yml), and checking the wrong string here would incorrectly fail that host.
+      # Checks the EFFECTIVE node name (github_runner_arc_effective_node_name: github_runner_arc_node_name if set, else inventory_hostname), not raw inventory_hostname - a bootstrap host may deliberately override its own node name (e.g. node-a's own K3S_NODE_NAME stays "k3s-server", not "node-a", to preserve its existing Tailscale device identity - see host_vars/node-a.yml), and checking the wrong string here would incorrectly fail that host.
       ansible.builtin.fail:
         msg: >-
           github_runner_arc_tls_sans does not include this host's own
-          effective node name ({{ github_runner_arc_node_name if github_runner_arc_node_name | length > 0 else inventory_hostname }}).
+          effective node name ({{ github_runner_arc_effective_node_name }}).
           Every server needs every server's own hostname on its --tls-san
           list, including its own - add it to github_runner_arc_tls_sans in
           host_vars/{{ inventory_hostname }}.yml (and on every OTHER
           server's own host_vars too).
-      when: (github_runner_arc_node_name if github_runner_arc_node_name | length > 0 else inventory_hostname) not in (github_runner_arc_tls_sans | join(' '))
+      when: github_runner_arc_effective_node_name not in (github_runner_arc_tls_sans | join(' '))
 
     - name: Template .env for this k3s server
       ansible.builtin.template:
@@ -243,7 +243,7 @@
   when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
 
 - name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
-  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password - but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. Confirmed live for an agent - see README's Non-obvious behaviour section - and the same failure mode applies identically to any joining server's own container recreation, since it's the same underlying k3s node-password mechanism regardless of join mode. Only ever touches hosts that are NOT the etcd-bootstrap host: that host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
+  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password - but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. Confirmed live for an agent - see README's Non-obvious behaviour section - and the same failure mode applies identically to any joining server's own container recreation, since it's the same underlying k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_arc_node_name override if set, else its inventory name), since that, not the inventory name, is what k3s names the Node and its node-password Secret after - inlined rather than read from github_runner_arc_effective_node_name, because another host's role defaults aren't reliably visible through hostvars. Only ever touches hosts that are NOT the etcd-bootstrap host: that host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
   block:
     - name: Wait for every node to report Ready
       # --all, not a --limit-scoped single node: once a server/agent has joined, this must wait for it too, not just this host's own control-plane node.
@@ -258,7 +258,7 @@
         state: absent
         kind: Secret
         namespace: kube-system
-        name: "{{ item }}.node-password.k3s"
+        name: "{{ hostvars[item].github_runner_arc_node_name | default('', true) or item }}.node-password.k3s"
       loop: "{{ groups['all'] }}"
       when: not (hostvars[item].github_runner_arc_etcd_bootstrap | default(false))
 
@@ -267,7 +267,7 @@
         kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
         state: absent
         kind: Node
-        name: "{{ item }}"
+        name: "{{ hostvars[item].github_runner_arc_node_name | default('', true) or item }}"
       loop: "{{ groups['all'] }}"
       when: not (hostvars[item].github_runner_arc_etcd_bootstrap | default(false))
 

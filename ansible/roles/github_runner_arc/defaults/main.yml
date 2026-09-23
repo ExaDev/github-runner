@@ -11,6 +11,8 @@ github_runner_arc_etcd_bootstrap: false
 
 # This host's own k3s node name/Tailscale hostname. Empty (the default) means "use inventory_hostname" - every server's own host_vars can leave this unset unless it needs to differ (e.g. to preserve a pre-existing device identity across a role change - see host_vars/node-a.yml's own override and comment).
 github_runner_arc_node_name: ""
+# Derived, never set directly: the name every template and check actually uses for this host (k3s node name, Tailscale device hostname, TLS SAN self-check).
+github_runner_arc_effective_node_name: "{{ github_runner_arc_node_name if github_runner_arc_node_name | length > 0 else inventory_hostname }}"
 
 # Every server node's own Tailscale hostname (every "server"-role host's own, including the bootstrap host's), applied identically to every server's own --tls-san list - a multi-server cluster needs every server's cert to cover every server's own name, not just its own, since a client (kubectl, Ansible) may reach any of them directly. Set identically on every server host's own host_vars. Empty (the default) is only valid for a genuinely single-server setup where nothing else ever joins.
 github_runner_arc_tls_sans: []
