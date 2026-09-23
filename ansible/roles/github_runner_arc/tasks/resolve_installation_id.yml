@@ -6,6 +6,8 @@
 # No delegate_facts anywhere in this file, deliberately: Ansible's own documented default (delegate_facts unset/false) already assigns a delegated task's registered/set facts to inventory_hostname (node-b, the current host), not to the delegated-to host (localhost). Setting delegate_facts: true does the OPPOSITE of what its name suggests at a glance - it sends the fact TO the delegated host instead - which is exactly backwards from what this file needs, confirmed live (twice) by the deployed GitHub App secret's installation_id coming out empty every time delegate_facts: true was set here. github_runner_arc_resolved_installation_id is read directly by name from install_org.yml, with no hostvars indirection needed.
 - name: "{{ org.name }}: resolve installation ID"
   delegate_to: localhost
+  # Read-only apart from a temp file it removes again, and the org's secrets need the result, so it runs under --check too.
+  check_mode: false
   block:
     - name: "{{ org.name }}: write private key to a temp file for signing"
       # Reuses github_runner_arc_secrets.org_private_keys, read once for every org by tasks/main.yml before the org loop starts, rather than reading the same 1Password field a second time here.

@@ -110,6 +110,8 @@
   delegate_to: localhost
   changed_when: false
   no_log: true
+  # Read-only; everything after it needs the secrets, including under --check.
+  check_mode: false
   register: github_runner_arc_secrets_raw
   when:
     - github_runner_arc_provided_secrets | length == 0
@@ -154,6 +156,8 @@
   # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use - confirmed live against node-b, which runs Colima (docker.sock lives under ~/.colima/default/, not /var/run) and failed outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.
   ansible.builtin.command: docker context show
   changed_when: false
+  # Read-only, and every docker_compose_v2 task below depends on its output, so it has to run under --check too - a skipped result leaves cli_context empty and the dry run targets the wrong daemon.
+  check_mode: false
   register: github_runner_arc_docker_context
 
 - name: Set up and start this host as a k3s server, bootstrapping or joining as configured
