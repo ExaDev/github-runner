@@ -1,6 +1,6 @@
 name: test-autoscaler
 
-# Manual traffic generator for the usage-driven autoscaler: dispatches several jobs onto exadev-runners at once so there is real, concurrent memory usage to watch the autoscaler's dry-run output/status react to (see the project README's Autoscaler section). This workflow does not assert anything about the autoscaler itself - it only creates the load; watch `docker compose logs -f autoscaler` and the status file it writes to logs/autoscaler/autoscaler-status.json while this runs.
+# Manual traffic generator for the usage-driven autoscaler: dispatches several jobs onto exadev-runners at once so there is real, concurrent memory usage to watch the autoscaler's dry-run output/status react to (see the project README's Autoscaler section). This workflow does not assert anything about the autoscaler itself - it only creates the load; watch `kubectl logs -n github-runner-platform deploy/autoscaler -f` and `kubectl get configmap autoscaler-status -n github-runner-platform -o jsonpath='{.data.status\.json}'` while this runs.
 on:
   workflow_dispatch:
     inputs:
