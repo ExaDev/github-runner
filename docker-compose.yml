@@ -84,6 +84,8 @@ services:
       args:
         K3S_VERSION: "${K3S_VERSION:-latest}"
     # Joins an EXISTING cluster as an additional control-plane/etcd member - k3s server --server <url>, not k3s agent. Same tailscaled-then-k3s startup as the primary's own k3s service; see that service's own comments for the vpn-auth/resolv-conf/tls-san-list reasoning, all identical here.
+    #
+    # --disable=traefik --disable-network-policy must match the primary's own flags exactly - k3s validates certain flags as "critical configuration" that every server in the cluster must agree on, confirmed live: joining without --disable-network-policy here failed outright with "critical configuration mismatched: disable-network-policy" even though this node was never going to run traefik/network-policy enforcement differently from the primary anyway.
     entrypoint:
       - /bin/sh
       - -c
@@ -92,7 +94,7 @@ services:
         tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
         until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 0.5; done
         printf 'nameserver 100.100.100.100\n' > /etc/k3s-resolv.conf
-        set -- --server "$K3S_JOIN_SERVER_URL" \
+        set -- --disable=traefik --disable-network-policy --server "$K3S_JOIN_SERVER_URL" \
           --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY" \
           --resolv-conf=/etc/k3s-resolv.conf
         for san in $K3S_TLS_SAN_LIST; do set -- "$@" --tls-san "$$san"; done
