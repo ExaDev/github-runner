@@ -1,12 +1,13 @@
 ---
 # ExaDev GitHub Actions runner fleet: ARC (Actions Runner Controller) on k3s.
 #
-# "primary" (the default) runs the full stack: k3s server, heartbeat, the ARC controller, and every org's runner scale set. "agent" joins an existing primary's cluster as a worker only - see docker-compose.yml's own top comment for why this is additive runner-pod capacity, not control-plane HA, and set github_runner_arc_agent_server_url when using it.
+# Three roles: "primary" (the default) bootstraps the cluster (k3s --cluster-init, embedded etcd) and runs the full stack - heartbeat, autoscaler, the ARC controller, every org's runner scale set. "server" joins an EXISTING cluster as an additional control-plane/etcd member (k3s server --server <url>, not k3s agent) - a genuine HA member, not just a worker; set github_runner_arc_join_server_url when using it. "agent" joins as a pure worker with no control-plane role at all - see docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
 github_runner_arc_node_role: "primary"
 github_runner_arc_agent_server_url: ""
+github_runner_arc_join_server_url: ""
 
-# Set on a primary host that a second host will join as a k3s agent, to whatever externally-reachable address that agent will connect through (e.g. a Tailscale MagicDNS name) - k3s's self-signed server cert only auto-includes the container's own hostname/IPs and localhost, so an agent connecting via any other address fails TLS verification unless that address is added as a --tls-san. Left empty (the default) on a primary nothing else ever joins.
-github_runner_arc_primary_tls_san: ""
+# Every server node's own Tailscale hostname (the primary's own, plus every "server"-role host's own), applied identically to every server's own --tls-san list - a multi-server cluster needs every server's cert to cover every server's own name, not just its own, since a client (kubectl, the failover wrapper) may reach any of them directly. Set identically on every primary/server host's own host_vars. Empty (the default) is only valid for a genuinely single-server setup where nothing else ever joins.
+github_runner_arc_tls_sans: []
 
 # github_runner_arc_secrets.tailscale_join_key (read from the shared secrets item's tailscale-join-key field by tasks/main.yml's own combined secrets read - nothing to set here) is what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host once more than one is in play: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic - avoiding an earlier, considerably hackier attempt (--node-external-ip + --flannel-external-ip layered on the HOST's own already-running Tailscale, tunnelled through Docker's own UDP port-publishing) that needed two nested tunnels for the same traffic and was correspondingly fragile.
 #

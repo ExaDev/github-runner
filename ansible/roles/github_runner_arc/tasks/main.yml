@@ -1,12 +1,12 @@
 ---
 # Ports bootstrap.sh's steps 1-4 (start k3s, wait for it, install the ARC controller, install each org) to Ansible. Safe to rerun, same as the script: every mutating task below uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
 #
-# Two node roles, not one: github_runner_arc_node_role selects between "primary" (today's full behaviour - k3s server, heartbeat, the ARC controller, every org's runner scale set) and "agent" (a second host joining the primary's cluster purely as a worker, so its own CPU/RAM become schedulable for runner pods too). See docker-compose.yml's own top comment for why this is additive capacity, not control-plane HA.
+# Three node roles: github_runner_arc_node_role selects between "primary" (bootstraps the cluster - k3s --cluster-init, embedded etcd, heartbeat, the ARC controller, every org's runner scale set), "server" (joins an EXISTING cluster as an additional control-plane/etcd member - k3s server --server <url>, a genuine HA member, not just a worker), and "agent" (joins as a pure worker with no control-plane role). See docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
 
 - name: Fail if the node role is invalid
   ansible.builtin.fail:
-    msg: "github_runner_arc_node_role must be 'primary' or 'agent' (got '{{ github_runner_arc_node_role }}')."
-  when: github_runner_arc_node_role not in ['primary', 'agent']
+    msg: "github_runner_arc_node_role must be 'primary', 'server', or 'agent' (got '{{ github_runner_arc_node_role }}')."
+  when: github_runner_arc_node_role not in ['primary', 'server', 'agent']
 
 - name: Fail if this host's repo root is not set
   ansible.builtin.fail:
@@ -130,6 +130,45 @@
   changed_when: false
   register: github_runner_arc_docker_context
 
+- name: Join as an additional k3s server and stop here (a genuine control-plane/etcd member, but org installs and the ARC controller still only ever run on the primary)
+  when: github_runner_arc_node_role == "server"
+  block:
+    - name: Fail if the join-server URL is not set
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_arc_join_server_url is not set on this server
+          host. It must be an existing cluster member's own
+          https://<address>:6443 - add it to
+          host_vars/{{ inventory_hostname }}.yml.
+      when: github_runner_arc_join_server_url | length == 0
+
+    - name: Fail if this host isn't included in the fleet's own TLS SAN list
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_arc_tls_sans does not include this host's own
+          hostname. Every server needs every server's own hostname on its
+          --tls-san list, including its own - add it to
+          github_runner_arc_tls_sans in host_vars/{{ inventory_hostname }}.yml
+          (and on every OTHER server's own host_vars too).
+      when: inventory_hostname not in (github_runner_arc_tls_sans | join(' '))
+
+    - name: Template .env for the additional k3s server
+      ansible.builtin.template:
+        src: env-server.j2
+        dest: "{{ github_runner_arc_repo_root }}/.env"
+        mode: "0600"
+      no_log: true
+
+    - name: Join the existing cluster as an additional control-plane member
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_arc_repo_root }}"
+        profiles: ["server"]
+        cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
+        state: present
+
+    - name: End the role here - a server host runs no org installs or ARC controller of its own
+      ansible.builtin.meta: end_role
+
 - name: Join as a k3s agent and stop here (nothing else applies to a worker-only node)
   when: github_runner_arc_node_role == "agent"
   block:
@@ -159,7 +198,7 @@
     - name: End the role here - an agent host runs no org installs or ARC controller of its own
       ansible.builtin.meta: end_role
 
-# Everything below only ever runs on the primary: an agent host already ended the role in the block above.
+# Everything below only ever runs on the primary: a server or agent host already ended the role in one of the two blocks above.
 
 - name: Skip the rest of the role when no orgs are configured for this primary host
   ansible.builtin.meta: end_role
@@ -200,17 +239,17 @@
   retries: 60
   delay: 2
 
-- name: Wait for every node to report Ready, self-healing a stale agent node-password registration if any node fails to rejoin
-  # /etc/rancher/node/password lives inside the k3s-agent container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password - but the primary still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. Confirmed live - see README's Non-obvious behaviour section. Only ever touches agent-role hosts by their own known inventory hostname (which is also their registered k8s node name, per env-agent.j2's K3S_AGENT_NODE_NAME): never the primary's own control-plane registration, which fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
+- name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
+  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password - but the primary still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. Confirmed live for an agent - see README's Non-obvious behaviour section - and the same failure mode applies identically to a "server"-role host's own container recreation, since it's the same underlying k3s node-password mechanism regardless of which join mode registered the node. Only ever touches server/agent-role hosts by their own known inventory hostname (which is also their registered k8s node name, per env-server.j2/env-agent.j2's own K3S_SERVER_NODE_NAME/K3S_AGENT_NODE_NAME): never the primary's own control-plane registration, which fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
   block:
     - name: Wait for every node to report Ready
-      # --all, not a --limit-scoped single node: once an agent has joined, this must wait for it too, not just the primary's own control-plane node.
+      # --all, not a --limit-scoped single node: once a server/agent has joined, this must wait for it too, not just the primary's own control-plane node.
       ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
       environment:
         KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
       changed_when: false
   rescue:
-    - name: Clear every agent host's stale node-password secret
+    - name: Clear every server/agent host's stale node-password secret
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
         state: absent
@@ -218,16 +257,16 @@
         namespace: kube-system
         name: "{{ item }}.node-password.k3s"
       loop: "{{ groups['all'] }}"
-      when: hostvars[item].github_runner_arc_node_role | default('primary') == 'agent'
+      when: hostvars[item].github_runner_arc_node_role | default('primary') in ['server', 'agent']
 
-    - name: Clear every agent host's stale Node object to match
+    - name: Clear every server/agent host's stale Node object to match
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
         state: absent
         kind: Node
         name: "{{ item }}"
       loop: "{{ groups['all'] }}"
-      when: hostvars[item].github_runner_arc_node_role | default('primary') == 'agent'
+      when: hostvars[item].github_runner_arc_node_role | default('primary') in ['server', 'agent']
 
     - name: Retry waiting for every node to report Ready now that any stale registration is cleared
       ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
