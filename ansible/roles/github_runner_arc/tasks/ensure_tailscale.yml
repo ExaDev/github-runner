@@ -73,7 +73,10 @@
   delegate_to: localhost
   no_log: true
   register: github_runner_arc_new_join_key
-  when: github_runner_arc_secrets.tailscale_join_key | default('') | length == 0
+  # 1Password mode only: with provided secrets there's nowhere to persist a newly created key for the next run, so the key has to be supplied instead (tasks/main.yml fails fast if it isn't).
+  when:
+    - github_runner_arc_provided_secrets | length == 0
+    - github_runner_arc_secrets.tailscale_join_key | default('') | length == 0
 
 - name: Persist the new join key to 1Password
   ansible.builtin.command:

@@ -27,6 +27,9 @@ github_runner_arc_orgs: []
 # k3s + the fleet-health platform (heartbeat/autoscaler, installed as in-cluster Kubernetes Deployments by install_platform.yml - see tasks/main.yml). k3s-token, ghcr-username, ghcr-token, and heartbeat-gh-token all live as separate fields on this ONE 1Password item, read via a single `op item get` call rather than four separate `op read` calls: confirmed live that 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so four separate reads meant four separate approval prompts for values that live on the exact same item. Never stored in this role or in ansible-vault - see tasks/main.yml.
 github_runner_arc_secrets_vault: ""
 github_runner_arc_secrets_item: ""
+
+# The alternative to 1Password: every secret supplied directly, in the same shape tasks/main.yml's own 1Password read produces - {k3s_token, ghcr_username, ghcr_token, heartbeat_gh_token, tailscale_join_key, tailscale_api_token (optional: only needed for tasks/ensure_tailscale.yml's ACL provisioning), org_private_keys: {<org name>: <PEM content>}}. bootstrap.sh builds this from .env.bootstrap for a host with no control node or 1Password access. Non-empty means the vault/item above are ignored entirely.
+github_runner_arc_provided_secrets: {}
 github_runner_arc_k3s_version: "latest"
 
 # Set github_runner_arc_heartbeat_gist_id in a host's own host_vars to install the fleet-health platform FROM that host (server hosts only; any server host works, same as github_runner_arc_orgs above). Empty (the default) means install_platform.yml no-ops entirely on that host.
