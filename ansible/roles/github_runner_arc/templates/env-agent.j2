@@ -6,3 +6,5 @@ K3S_VERSION={{ github_runner_arc_k3s_version }}
 K3S_AGENT_SERVER_URL={{ github_runner_arc_agent_server_url }}
 K3S_AGENT_NODE_NAME={{ inventory_hostname }}
 K3S_VPN_AUTH_JOIN_KEY={{ github_runner_arc_secrets.tailscale_join_key }}
+# Unused by the k3s-agent service itself, but docker compose validates every service's env interpolation up front regardless of which --profile is active - the primary's own k3s service requires K3S_TLS_SAN_LIST, and an agent host's .env needs to set SOMETHING for that check to pass under `docker compose --profile agent`.
+K3S_TLS_SAN_LIST={{ github_runner_arc_tls_sans | join(' ') }}

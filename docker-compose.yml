@@ -47,7 +47,7 @@ services:
         set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 --cluster-init \
           --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY" \
           --resolv-conf=/etc/k3s-resolv.conf
-        for san in $K3S_TLS_SAN_LIST; do set -- "$@" --tls-san "$san"; done
+        for san in $K3S_TLS_SAN_LIST; do set -- "$@" --tls-san "$$san"; done
         exec /bin/k3s server "$@"
     # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry. This is also the hostname Tailscale registers the container's own new device under, giving it a stable MagicDNS name too.
     hostname: k3s-server
@@ -95,10 +95,12 @@ services:
         set -- --server "$K3S_JOIN_SERVER_URL" \
           --vpn-auth="name=tailscale,joinKey=$K3S_VPN_AUTH_JOIN_KEY" \
           --resolv-conf=/etc/k3s-resolv.conf
-        for san in $K3S_TLS_SAN_LIST; do set -- "$@" --tls-san "$san"; done
+        for san in $K3S_TLS_SAN_LIST; do set -- "$@" --tls-san "$$san"; done
         exec /bin/k3s server "$@"
     # Own stable hostname per joining server (K3S_SERVER_NODE_NAME), not the primary's "k3s-server" - each is a genuinely separate Tailscale device once vpn-auth registers it, and reusing one hostname across multiple devices would be ambiguous for TLS SANs and for anything addressing a specific server by name.
-    hostname: ${K3S_SERVER_NODE_NAME:?K3S_SERVER_NODE_NAME must be set in .env}
+    #
+    # Not `:?required`: docker compose validates every service's env interpolation up front regardless of which --profile is active, confirmed live - a required var on this server-only service broke `docker compose --profile primary up` too, since the primary host's .env never sets it. The Ansible role's own fail-fast check on this host_var is the real enforcement instead - same pattern as K3S_AGENT_SERVER_URL/K3S_AGENT_NODE_NAME on the agent service below.
+    hostname: ${K3S_SERVER_NODE_NAME:-k3s-server-joiner}
     container_name: github-runner-k3s-server
     privileged: true
     restart: unless-stopped
@@ -111,9 +113,10 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    # Not `:?required` for K3S_JOIN_SERVER_URL: same cross-profile interpolation problem as K3S_SERVER_NODE_NAME's own comment above - the primary host's .env never sets it. The Ansible role's own fail-fast check is the real enforcement instead. K3S_TOKEN and K3S_TLS_SAN_LIST stay `:?required`: both the primary's and a server's own .env always set them (env.j2 and env-server.j2 both emit them), so there's no cross-profile gap to work around.
     environment:
       - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - the same shared secret the primary's own K3S_TOKEN uses}
-      - K3S_JOIN_SERVER_URL=${K3S_JOIN_SERVER_URL:?K3S_JOIN_SERVER_URL must be set in .env - an existing server's own https://<address>:6443}
+      - K3S_JOIN_SERVER_URL=${K3S_JOIN_SERVER_URL:-}
       - K3S_TLS_SAN_LIST=${K3S_TLS_SAN_LIST:?K3S_TLS_SAN_LIST must be set in .env - the same space-separated list of every server's own hostname the primary uses}
       - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:?K3S_VPN_AUTH_JOIN_KEY must be set in .env - the same reusable, pre-authorized Tailscale auth key the primary's own K3S_VPN_AUTH_JOIN_KEY uses}
     volumes:
