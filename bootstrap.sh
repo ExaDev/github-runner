@@ -89,8 +89,9 @@ jq -n \
   + opt("github_runner_arc_autoscaler_mem_available_pressure_pct"; "AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT")
   ' >"$vars_file"
 
-# From ansible/ so its ansible.cfg applies. No ansible_python_interpreter here: as an extra var it would override the role's own switch to its kubernetes-client virtualenv.
+# From ansible/ so its ansible.cfg applies. The interpreter is this venv's own Python (it has everything Ansible's modules need, unlike whichever python3 auto-discovery would find first), set through ANSIBLE_PYTHON_INTERPRETER rather than an ansible_python_interpreter extra var: config-level settings sit below the role's own set_fact switch to its kubernetes-client virtualenv, and an extra var would override it.
 log "Running the github_runner_arc role against this machine as ${node_name} (${node_role})..."
 cd ansible
 ANSIBLE_COLLECTIONS_PATH="${venv}/collections" \
+  ANSIBLE_PYTHON_INTERPRETER="${venv}/bin/python3" \
   "${venv}/bin/ansible-playbook" -i localhost, --connection=local playbook.yml -e @"$vars_file" "$@"
