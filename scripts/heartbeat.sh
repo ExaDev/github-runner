@@ -1,26 +1,21 @@
 #!/usr/bin/env bash
-# Runs inside the `heartbeat` docker-compose service (see heartbeat/loop.sh for
-# the ~3-min loop). Checks the local k3s cluster and ARC controller are
-# healthy and, if so, refreshes a single secret gist with a unix timestamp
-# ("healthy until"). ExaDev/runner-fallback-action reads that gist to decide
-# self-hosted vs ubuntu-latest - see this action's docs/spec.md.
+# Runs inside the `heartbeat` in-cluster Deployment (see heartbeat/loop.sh for the ~3-min loop). Checks the k3s cluster and ARC controller are healthy and, if so, refreshes a single secret gist with a unix timestamp ("healthy until"). ExaDev/runner-fallback-action reads that gist to decide self-hosted vs ubuntu-latest - see this action's docs/spec.md.
 #
-# Environment (provided by the compose service):
-# - KUBECONFIG: a kubeconfig whose server reaches k3s (loop.sh rewrites the host kubeconfig to https://k3s:6443)
-# - HEARTBEAT_GH_TOKEN: a GitHub PAT with `gist` scope (write the gist)
+# Environment (provided by the Deployment - see ansible/roles/github_runner_arc/tasks/install_platform.yml):
+# - kubectl needs no KUBECONFIG here: running as a pod with a mounted ServiceAccount token, client-go auto-detects in-cluster config.
+# - HEARTBEAT_GH_TOKEN: a GitHub PAT with `gist` scope (write the gist), from a Secret
 # - HEARTBEAT_GIST_ID: the secret gist id to refresh
-# - HEARTBEAT_STATE_DIR: shared, read-only mount of the autoscaler's own state dir (see scripts/autoscaler.sh)
+# - HEARTBEAT_STATE_NAMESPACE: namespace holding the autoscaler's own status ConfigMap (see scripts/autoscaler.sh)
+# - AUTOSCALER_STATUS_CONFIGMAP: name of that ConfigMap
 set -euo pipefail
 
 HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT with gist scope)}"
 HEARTBEAT_GIST_ID="${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set}"
 GIST_FILE="${GIST_FILE:-arc-healthy-until}"
-HEARTBEAT_STATE_DIR="${HEARTBEAT_STATE_DIR:-/state}"
-AUTOSCALER_STATUS_PATH="$HEARTBEAT_STATE_DIR/autoscaler-status.json"
+HEARTBEAT_STATE_NAMESPACE="${HEARTBEAT_STATE_NAMESPACE:-github-runner-platform}"
+AUTOSCALER_STATUS_CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 AUTOSCALER_STATUS_GIST_FILE="${AUTOSCALER_STATUS_GIST_FILE:-autoscaler-status.json}"
-# How far in the future to set the timestamp: comfortably longer than the
-# loop interval, so a single missed/slow tick doesn't look like an outage,
-# but short enough that a real outage is detected promptly.
+# How far in the future to set the timestamp: comfortably longer than the loop interval, so a single missed/slow tick doesn't look like an outage, but short enough that a real outage is detected promptly.
 HEARTBEAT_WINDOW_SECONDS="${HEARTBEAT_WINDOW_SECONDS:-600}"
 
 healthy=true
@@ -40,11 +35,13 @@ if [ "$healthy" != "true" ]; then
 fi
 
 healthy_until=$(($(date +%s) + HEARTBEAT_WINDOW_SECONDS))
-# PATCH the gist's timestamp file, plus the autoscaler's own status file when one exists (it won't on a fresh cluster before the autoscaler's first poll) - zero new credentials, reusing this service's existing gist-write access rather than giving the autoscaler its own.
+# PATCH the gist's timestamp file, plus the autoscaler's own status ConfigMap when one exists (it won't on a fresh cluster before the autoscaler's first poll) - zero new credentials, reusing this service's existing gist-write access rather than giving the autoscaler its own.
 files_json="$(jq -n --arg content "$healthy_until" --arg file "$GIST_FILE" '{($file): {content: $content}}')"
-if [ -f "$AUTOSCALER_STATUS_PATH" ]; then
-  files_json="$(jq --arg file "$AUTOSCALER_STATUS_GIST_FILE" --slurpfile status "$AUTOSCALER_STATUS_PATH" \
-    '. + {($file): {content: ($status[0] | tostring)}}' <<< "$files_json")"
+status_json="$(kubectl get configmap "$AUTOSCALER_STATUS_CONFIGMAP" -n "$HEARTBEAT_STATE_NAMESPACE" \
+  -o jsonpath='{.data.status\.json}' 2>/dev/null || true)"
+if [ -n "$status_json" ]; then
+  files_json="$(jq --arg file "$AUTOSCALER_STATUS_GIST_FILE" --arg status "$status_json" \
+    '. + {($file): {content: $status}}' <<< "$files_json")"
 fi
 body="$(jq -n --argjson files "$files_json" '{files: $files}')"
 
