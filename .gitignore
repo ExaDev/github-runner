@@ -11,3 +11,4 @@ logs/
 !AGENTS.md
 !**/CLAUDE.md
 !**/AGENTS.md
+.ansible-venv/
