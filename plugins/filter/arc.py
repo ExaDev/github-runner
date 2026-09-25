@@ -118,7 +118,43 @@ def _check_dns_label(kind: str, name: str, where: str, errors: list[str]) -> Non
         errors.append(f"{where}: the derived {kind} '{name}' is not a valid Kubernetes name (lower-case letters, digits and '-', at most {_DNS_LABEL_MAX_LENGTH} characters)")
 
 
-def _expand_profile(org: Mapping[str, Any], org_name: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
+def _optional_name(mapping: Mapping[str, Any], key: str, where: str, errors: list[str]) -> str:
+    """Return an optional name override, or empty when it is unset, recording an error when it is set but not a non-empty string."""
+    value = mapping.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str) or not value:
+        errors.append(f"{where}.{key} must be a non-empty string when set")
+        return ""
+    return value
+
+
+def _scale_set_labels(profile: Mapping[str, Any], default: str, where: str, errors: list[str]) -> list[str]:
+    """Return the scaleSetLabels a profile's release sets: scale_set_labels when given (an empty list sets none), otherwise runs_on_label or the org's pooled default."""
+    if profile.get("scale_set_labels") is None:
+        return [_text(profile, "runs_on_label") or default]
+    if profile.get("runs_on_label") is not None:
+        errors.append(f"{where}: set runs_on_label or scale_set_labels, not both")
+    labels = profile["scale_set_labels"]
+    if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)) or not all(isinstance(label, str) and label for label in labels):
+        errors.append(f"{where}.scale_set_labels must be a list of non-empty strings (empty sets no scaleSetLabels)")
+        return []
+    return list(labels)
+
+
+def _explicit_max_runners(profile: Mapping[str, Any], where: str, errors: list[str]) -> int | None:
+    """Return the profile's own max_runners as a whole number, None when unset, recording an error when it is not a whole number of at least 0."""
+    value = profile.get("max_runners")
+    if value is None:
+        return None
+    number = _decimal(value)
+    if number is None or number < 0 or number != number.to_integral_value():
+        errors.append(f"{where}.max_runners must be a whole number of at least 0 (got {value!r})")
+        return None
+    return int(number)
+
+
+def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
     """Describe one scale-set profile of an org, or record why it cannot be described."""
     where = f"{org_name} scale_set_profiles[{index}]"
     if not isinstance(profile, Mapping):
@@ -139,17 +175,26 @@ def _expand_profile(org: Mapping[str, Any], org_name: str, index: int, profile: 
     if profile.get("sizing") is not None:
         sizing_result = arc_max_runners(profile["sizing"])
         errors.extend(f"{where}: {message}" for message in sizing_result["errors"])
+    explicit_max_runners = _explicit_max_runners(profile, where, errors)
+    # The static maxRunners the role sets on the release: the profile's own max_runners wins; otherwise sizing supplies it, except on the autoscaled profile, whose sizing sets the autoscaler's ceiling rather than its floor.
+    if explicit_max_runners is not None:
+        max_runners = explicit_max_runners
+    elif sizing_result is not None and not sizing_result["errors"] and not autoscale:
+        max_runners = sizing_result["max_runners"]
+    else:
+        max_runners = None
     expanded = {
         "org_name": org_name,
         "suffix": suffix,
-        "namespace": f"arc-runners-{org_lower}{suffix}",
-        "release": f"{org_lower}-runners{suffix}",
-        "app_secret": f"{org_lower}-github-app",
-        "runs_on_label": _text(profile, "runs_on_label") or f"{org_lower}-runners",
+        "namespace": _optional_name(profile, "namespace", where, errors) or f"arc-runners-{org_lower}{suffix}",
+        "release": _optional_name(profile, "release_name", where, errors) or f"{org_lower}-runners{suffix}",
+        "app_secret": app_secret,
+        "scale_set_labels": _scale_set_labels(profile, f"{org_lower}-runners", where, errors),
         "values_file": _text(profile, "values_file"),
         "node_selector": dict(node_selector),
         "autoscale": autoscale,
         "sizing": sizing_result,
+        "max_runners": max_runners,
         "label": f"{org_name}{suffix}",
         "settings": dict(profile),
     }
@@ -167,10 +212,10 @@ def arc_profiles(orgs: Sequence[Any]) -> dict[str, Any]:
     Pass every org configured anywhere in the inventory, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile) see the whole fleet.
 
     Args:
-        orgs: github_runner_arc_orgs entries, each with name, app_id, image and a non-empty scale_set_profiles list, and at most one of private_key and private_key_op_reference.
+        orgs: github_runner_arc_orgs entries, each with name, app_id, image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label.
 
     Returns:
-        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, app_secret, runs_on_label, values_file, node_selector, autoscale, sizing, label and settings, the profile's own keys) and ``autoscaled`` (the one profile flagged autoscale, or None).
+        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, max_runners (the static maxRunners the role sets, or None), label and settings, the profile's own keys) and ``autoscaled`` (the one profile flagged autoscale, or None).
     """
     errors: list[str] = []
     profiles: list[dict[str, Any]] = []
@@ -200,15 +245,22 @@ def arc_profiles(orgs: Sequence[Any]) -> dict[str, Any]:
         if not isinstance(org_profiles, Sequence) or isinstance(org_profiles, (str, bytes)) or not org_profiles:
             errors.append(f"{org_name}: scale_set_profiles must be a non-empty list")
             continue
+        app_secret = _optional_name(org, "app_secret_name", org_name, errors) or f"{org_name.lower()}-github-app"
         for profile_index, profile in enumerate(org_profiles):
-            expanded = _expand_profile(org, org_name, profile_index, profile, errors)
+            expanded = _expand_profile(org_name, app_secret, profile_index, profile, errors)
             if expanded is not None:
                 profiles.append(expanded)
     namespaces: dict[str, str] = {}
+    releases: dict[tuple[str, str], str] = {}
     for profile in profiles:
         if profile["namespace"] in namespaces:
-            errors.append(f"{profile['label']} and {namespaces[profile['namespace']]} both map to namespace '{profile['namespace']}'; give one of them a different suffix")
+            errors.append(f"{profile['label']} and {namespaces[profile['namespace']]} both map to namespace '{profile['namespace']}'; give one of them a different suffix or namespace")
         namespaces.setdefault(profile["namespace"], profile["label"])
+        # The release name is also the scale set's registration name on GitHub, so two of an org's releases sharing it would register a duplicate even from different namespaces.
+        release_key = (profile["org_name"].lower(), profile["release"])
+        if release_key in releases:
+            errors.append(f"{profile['label']} and {releases[release_key]} both use release name '{profile['release']}', which is the scale set's name on GitHub; give one of them a different suffix or release_name")
+        releases.setdefault(release_key, profile["label"])
     autoscaled = [profile for profile in profiles if profile["autoscale"]]
     if len(autoscaled) > 1:
         errors.append(f"At most one scale-set profile may set autoscale: true, because the autoscaler budgets one pool's memory for one scale set; found {', '.join(profile['label'] for profile in autoscaled)}")
