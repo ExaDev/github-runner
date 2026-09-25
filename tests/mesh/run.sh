@@ -256,7 +256,8 @@ scenario_cluster() {
   if [ "$scenario" = in_cluster ]; then
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
     (cd "${repo_root}/ansible" && ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections:${ANSIBLE_COLLECTIONS_PATH:-}" \
-      "$ansible_playbook" -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml")
+      "$ansible_playbook" -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml") \
+      || fail "the recovery playbook did not bring the bootstrap server back"
     assert_cluster
   fi
 }

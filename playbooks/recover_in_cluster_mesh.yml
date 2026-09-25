@@ -89,6 +89,19 @@
               delay: 5
 
           always:
+            - name: Read the temporary Headscale server's log, for a recovery that did not bring the node back
+              ansible.builtin.command:
+                argv: [docker, logs, --tail, "40", "{{ github_runner_cluster_recover_rescue }}"]
+              changed_when: false
+              failed_when: false
+              register: github_runner_cluster_recover_rescue_log
+              when: github_runner_cluster_recover_ready.rc | default(1) != 0
+
+            - name: Show the temporary Headscale server's log
+              ansible.builtin.debug:
+                var: github_runner_cluster_recover_rescue_log.stdout_lines + github_runner_cluster_recover_rescue_log.stderr_lines
+              when: github_runner_cluster_recover_ready.rc | default(1) != 0
+
             - name: Remove the temporary Headscale server, so the static pod can take its port back
               ansible.builtin.command:
                 argv: [docker, rm, --force, "{{ github_runner_cluster_recover_rescue }}"]
