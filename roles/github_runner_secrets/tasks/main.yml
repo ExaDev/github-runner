@@ -81,7 +81,7 @@
   no_log: true
 
 # Only in 1Password mode may the cluster role create a Tailscale join key when none exists: it then persists the new key back to the item through persist_tailscale_join_key.yml. With provided secrets there is nowhere to persist it for the next run, so the key has to be supplied instead.
-- name: Hand the cluster role its own secrets
+- name: Hand the cluster role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
   ansible.builtin.set_fact:
     github_runner_cluster_k3s_token: "{{ github_runner_secrets_values.k3s_token }}"
     github_runner_cluster_tailscale_join_key: "{{ github_runner_secrets_values.tailscale_join_key | default('') }}"
@@ -89,7 +89,7 @@
     github_runner_cluster_create_tailscale_join_key: "{{ github_runner_secrets_provided | length == 0 }}"
   no_log: true
 
-- name: Hand the ARC role its own secrets
+- name: Hand the ARC role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
   ansible.builtin.set_fact:
     github_runner_arc_ghcr_username: "{{ github_runner_secrets_values.ghcr_username }}"
     github_runner_arc_ghcr_token: "{{ github_runner_secrets_values.ghcr_token }}"
