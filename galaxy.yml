@@ -37,7 +37,6 @@ build_ignore:
   - autoscaler
   - heartbeat
   - scripts
-  - values
   - Dockerfile
   - bootstrap.sh
   - kubeconfig

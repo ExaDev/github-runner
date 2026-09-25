@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Syntax-check every playbook
-        # From ansible/ so its ansible.cfg (inventory, roles_path) applies, the same way an operator runs it. Every top-level playbook is checked, so a new one is covered without editing this list.
+        # From ansible/ so its ansible.cfg applies, against an example inventory, since this repository carries no fleet's own. Every top-level playbook is checked, so a new one is covered without editing this list.
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -122,8 +122,15 @@ jobs:
           cd ansible
           for playbook in ../playbooks/*.yml; do
             echo "Syntax-checking ${playbook}"
-            ansible-playbook "${playbook}" --syntax-check
+            ansible-playbook -i ../examples/three-server-tailscale/inventory.yml "${playbook}" --syntax-check
           done
+      - name: Build the collection
+        # Proves galaxy.yml's build_ignore still ships what the roles need at runtime, such as the k3s node's Compose file and build context under roles/github_runner_cluster/files.
+        run: |
+          set -euo pipefail
+          ansible-galaxy collection build --output-path "${RUNNER_TEMP}/collection"
+          tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
+          tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
       - name: Unit-test the cluster role's server selection
         # Ubuntu's ansible package, installed above, puts ansible-core on the system Python the filter plugin imports from.
         run: python3 -m unittest discover -s tests/unit -v

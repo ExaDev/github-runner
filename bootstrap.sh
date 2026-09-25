@@ -33,8 +33,8 @@ if [ -z "$node_name" ]; then
 fi
 
 org_private_key=""
-if [ -n "${EXADEV_APP_ID:-}" ]; then
-  org_private_key="$(cat "$EXADEV_APP_PRIVATE_KEY_PATH")"
+if [ -n "${RUNNER_APP_ID:-}" ]; then
+  org_private_key="$(cat "$RUNNER_APP_PRIVATE_KEY_PATH")"
 fi
 
 # Contains every secret below, so it lives only for this run: created 0600 and removed on exit, however the script exits. This one-host inventory has no groups, so the cluster group is "all"; with no server URL the host is the cluster's only server and bootstraps it, and with one it joins that server, whose cluster lies outside this inventory.
@@ -58,21 +58,21 @@ jq -n \
     github_runner_cluster_k3s_version: (env.K3S_VERSION // "" | if . == "" then "latest" else . end),
     github_runner_arc_heartbeat_gist_id: (env.HEARTBEAT_GIST_ID // ""),
     github_runner_arc_orgs: (
-      if (env.EXADEV_APP_ID // "") == "" then []
+      if (env.RUNNER_APP_ID // "") == "" then []
       else [{
-        name: "ExaDev",
-        app_id: env.EXADEV_APP_ID,
-        installation_id: (env.EXADEV_APP_INSTALLATION_ID // ""),
+        name: env.RUNNER_ORG,
+        app_id: env.RUNNER_APP_ID,
+        installation_id: (env.RUNNER_APP_INSTALLATION_ID // ""),
         private_key: $org_private_key,
-        image: "ghcr.io/exadev/github-runner:latest",
-        scale_set_profiles: [{suffix: "", values_file: "exadev-runners-values.yaml", autoscale: true}]
+        image: env.RUNNER_IMAGE,
+        scale_set_profiles: [
+          {suffix: "", autoscale: ((env.AUTOSCALER_USABLE_BUDGET_GI // "") != "")}
+          + (if (env.RUNNER_VALUES_FILE // "") != "" then {values_file: env.RUNNER_VALUES_FILE} else {max_runners: env.RUNNER_MAX_RUNNERS} end)
+        ]
       }]
       end
     ),
-    github_runner_arc_values_dir: ($repo_root + "/values"),
-    github_runner_arc_autoscaler_usable_budget_gi: (env.AUTOSCALER_USABLE_BUDGET_GI // "" | if . == "" then "24" else . end),
-    github_runner_arc_autoscaler_max_ceiling: (env.AUTOSCALER_MAX_CEILING // "" | if . == "" then "7" else . end),
-    github_runner_arc_autoscaler_floor: (env.AUTOSCALER_FLOOR // "" | if . == "" then "3" else . end),
+    github_runner_arc_values_dir: $repo_root,
     github_runner_cluster_k3s_token: (env.K3S_TOKEN // ""),
     github_runner_cluster_tailscale_join_key: (env.K3S_VPN_AUTH_JOIN_KEY // ""),
     github_runner_cluster_tailscale_api_token: (env.TAILSCALE_API_TOKEN // ""),
@@ -82,6 +82,9 @@ jq -n \
   }
   + opt("github_runner_cluster_dir"; "GITHUB_RUNNER_CLUSTER_DIR")
   + opt("github_runner_cluster_compose_project"; "GITHUB_RUNNER_COMPOSE_PROJECT")
+  + opt("github_runner_arc_autoscaler_usable_budget_gi"; "AUTOSCALER_USABLE_BUDGET_GI")
+  + opt("github_runner_arc_autoscaler_max_ceiling"; "AUTOSCALER_MAX_CEILING")
+  + opt("github_runner_arc_autoscaler_floor"; "AUTOSCALER_FLOOR")
   + opt("github_runner_arc_autoscaler_dry_run"; "AUTOSCALER_DRY_RUN")
   + opt("github_runner_arc_autoscaler_poll_seconds"; "AUTOSCALER_POLL_SECONDS")
   + opt("github_runner_arc_autoscaler_raise_confirm_polls"; "AUTOSCALER_RAISE_CONFIRM_POLLS")

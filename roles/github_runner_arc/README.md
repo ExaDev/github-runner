@@ -67,7 +67,7 @@ ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_o
 
 ```yaml
 # host_vars/<host>.yml, or a vars file for playbooks/arc.yml
-github_runner_arc_values_dir: "{{ playbook_dir }}/../values"
+github_runner_arc_values_dir: "{{ inventory_dir }}/values"
 github_runner_arc_orgs:
   - name: ExampleOrg
     app_id: 123456

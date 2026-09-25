@@ -16,7 +16,6 @@ all:
       hosts:
         node1:
           ansible_host: 100.64.0.1
-          github_runner_arc_values_dir: "{{ playbook_dir }}/../values"
           github_runner_arc_orgs:
             - name: ExampleOrg
               app_id: 123456

@@ -1,5 +1,5 @@
 ---
-# Recovers the bootstrap server of a cluster using the headscale_in_cluster mesh provider when its k3s cannot get back onto the mesh. Run it from ansible/ like site.yml, e.g.: ansible-playbook ../playbooks/recover_in_cluster_mesh.yml
+# Recovers the bootstrap server of a cluster using the headscale_in_cluster mesh provider when its k3s cannot get back onto the mesh. Run it with the same inventory as site.yml, e.g.: ansible-playbook -i inventory.yml exadev.github_runner.recover_in_cluster_mesh
 #
 # Why this can be needed: Headscale runs as a static pod on the bootstrap server, so that server's k3s always starts off the mesh until Headscale answers, then restarts on it (k3s/node-entrypoint.sh). On a single-server cluster that always works. With several servers, starting off the mesh can leave the bootstrap server's etcd member unable to reach the others, and without etcd quorum on that server k3s may never run the static pod, so Headscale never answers and the server never rejoins, even though the other servers keep the cluster running.
 #
