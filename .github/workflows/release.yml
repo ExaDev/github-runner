@@ -108,7 +108,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Derive tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ matrix.image }}
           # value overrides the automatic ref-derived tag: this workflow triggers on a push to main, not a tag push, so there is no git tag for these patterns to derive from on their own. needs.release.outputs.version is the exact version semantic-release just published (no leading v), so it's prefixed here to satisfy each pattern's own parser.
