@@ -1,3 +1,13 @@
+# [1.1.0](https://github.com/ExaDev/github-runner/compare/v1.0.3...v1.1.0) (2026-09-25)
+
+
+### Features
+
+* **arc:** describe the role's variables in an argument spec ([e565cdb](https://github.com/ExaDev/github-runner/commit/e565cdbdf3c33c601ee01f86f1e22c6ab80f707d))
+* **arc:** let orgs and scale-set profiles override their names and labels ([5d2a9b6](https://github.com/ExaDev/github-runner/commit/5d2a9b6f80a43a761ec8052c92a72829f07b1891))
+* **arc:** make the controller's release name and namespace configurable ([619ac9e](https://github.com/ExaDev/github-runner/commit/619ac9e4cac89a0347d2ef2ac74976c9f1b29323))
+* **arc:** use an existing image pull Secret without managing it ([4d2efe6](https://github.com/ExaDev/github-runner/commit/4d2efe61bccb2b4cbd46214e61a18e7aad972564))
+
 ## [1.0.3](https://github.com/ExaDev/github-runner/compare/v1.0.2...v1.0.3) (2026-09-25)
 
 
