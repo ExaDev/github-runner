@@ -22,7 +22,7 @@ dependencies:
   community.general: ">=9.0.0"
 repository: https://github.com/ExaDev/github-runner
 issues: https://github.com/ExaDev/github-runner/issues
-# Everything that is not collection content: the runner and platform container images, Helm values, local inventory configuration, CI, and the standalone bootstrap wrapper. The k3s node's Compose file and image build context ship inside roles/github_runner_cluster/files, so they are collection content.
+# Everything that is not collection content: the runner and platform container images, Helm values, local inventory configuration, CI, the standalone bootstrap wrapper, and the Node-based release tooling (semantic-release, commitlint) that stamps this very file at release time. The k3s node's Compose file and image build context ship inside roles/github_runner_cluster/files, so they are collection content.
 build_ignore:
   - .github
   - .dockerignore
@@ -31,6 +31,7 @@ build_ignore:
   - .yamllint
   - AGENTS.md
   - CLAUDE.md
+  - .ansible
   - .ansible-venv
   - ansible
   - playbooks/collections
@@ -43,3 +44,8 @@ build_ignore:
   - secrets
   - logs
   - "*.tar.gz"
+  - node_modules
+  - package.json
+  - package-lock.json
+  - .releaserc.json
+  - commitlint.config.js
