@@ -32,7 +32,8 @@
 
     - name: Determine the Headscale host's Docker CLI context
       # See the same step in tasks/main.yml for why the context is read rather than assumed.
-      ansible.builtin.command: docker context show
+      # Empty when DOCKER_HOST is set: the Compose module then takes the daemon from DOCKER_HOST itself, and rejects cli_context alongside it ("parameters are mutually exclusive: docker_host|cli_context", as on a Docker-in-Docker CI runner). The docker CLI calls below need neither, since the CLI follows its own context and DOCKER_HOST.
+      ansible.builtin.shell: if [ -z "${DOCKER_HOST:-}" ]; then docker context show; fi
       changed_when: false
       check_mode: false
       register: github_runner_cluster_headscale_docker_context
@@ -42,7 +43,7 @@
       community.docker.docker_compose_v2:
         project_src: "{{ github_runner_cluster_headscale_server_dir }}"
         files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_server_compose_files }}"
-        cli_context: "{{ github_runner_cluster_headscale_docker_context.stdout | trim }}"
+        cli_context: "{{ (github_runner_cluster_headscale_docker_context.stdout | trim) or omit }}"
         state: present
         remove_orphans: true
         recreate: >-
@@ -53,7 +54,7 @@
 
     - name: Look for the follower's copy of the database, left from when this host was the standby
       ansible.builtin.command:
-        argv: [docker, --context, "{{ github_runner_cluster_headscale_docker_context.stdout | trim }}", volume, inspect, "{{ github_runner_cluster_headscale_project }}_headscale-standby"]
+        argv: [docker, volume, inspect, "{{ github_runner_cluster_headscale_project }}_headscale-standby"]
       register: github_runner_cluster_headscale_standby_volume
       changed_when: false
       failed_when: false
@@ -62,7 +63,7 @@
 
     - name: Remove the follower's copy, which a server never reads
       ansible.builtin.command:
-        argv: [docker, --context, "{{ github_runner_cluster_headscale_docker_context.stdout | trim }}", volume, rm, "{{ github_runner_cluster_headscale_project }}_headscale-standby"]
+        argv: [docker, volume, rm, "{{ github_runner_cluster_headscale_project }}_headscale-standby"]
       changed_when: true
       when:
         - not github_runner_cluster_headscale_as_standby | bool
@@ -72,7 +73,7 @@
       # The Headscale image has no shell or cat; the sidecar mounts the same state volume.
       ansible.builtin.command:
         argv: >-
-          {{ ['docker', '--context', github_runner_cluster_headscale_docker_context.stdout | trim, 'compose', '--project-directory', github_runner_cluster_headscale_server_dir]
+          {{ ['docker', 'compose', '--project-directory', github_runner_cluster_headscale_server_dir]
              + (['docker-compose.yml'] + github_runner_cluster_headscale_server_compose_files) | map('regex_replace', '^', '--file=') | list
              + ['exec', '-T', 'litestream', 'cat', '/var/lib/headscale/' ~ item] }}
         # Relative Compose file paths resolve from here, as they do for the Compose module above.
