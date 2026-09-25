@@ -15,9 +15,13 @@
   ansible.builtin.meta: end_role
   when: github_runner_arc_orgs | length == 0 and github_runner_arc_heartbeat_gist_id | length == 0
 
+- name: Check this host's secrets are present before changing anything
+  ansible.builtin.include_tasks: check_secrets.yml
+  when: github_runner_arc_manage_secrets | bool
+
 - name: Prove the pull credential can read every image this host installs
   ansible.builtin.include_tasks: verify_image_pull.yml
-  when: github_runner_arc_verify_image_pull | bool
+  when: github_runner_arc_manage_secrets | bool and github_runner_arc_verify_image_pull | bool
 
 - name: Give this host the kubernetes Python client
   ansible.builtin.include_role:
@@ -30,6 +34,10 @@
     group/kubernetes.core.helm:
       kubeconfig: "{{ github_runner_arc_kubeconfig_path or omit }}"
   block:
+    - name: Check the Secrets this host relies on already exist in the cluster
+      ansible.builtin.include_tasks: check_existing_secrets.yml
+      when: not (github_runner_arc_manage_secrets | bool)
+
     - name: Label the eligible nodes
       ansible.builtin.include_tasks: label_nodes.yml
       when: github_runner_arc_node_label_key | length > 0 and github_runner_arc_labelled_nodes | length > 0

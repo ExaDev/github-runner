@@ -252,11 +252,13 @@
       stringData:
         token: "{{ github_runner_arc_heartbeat_gh_token }}"
   no_log: true
+  when: github_runner_arc_manage_secrets | bool
 
 - name: "Platform: create/update the image pull secret"
   kubernetes.core.k8s:
     definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars={'namespace': github_runner_arc_platform_namespace}) | from_yaml }}"
   no_log: true
+  when: github_runner_arc_manage_secrets | bool
 
 - name: "Platform: install/upgrade the heartbeat Deployment"
   kubernetes.core.k8s:

@@ -33,6 +33,9 @@ github_runner_arc_labelled_nodes: []
 
 # Secrets, normally set by the github_runner_secrets role: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images), github_runner_arc_heartbeat_gh_token (a PAT with gist scope), and github_runner_arc_org_private_keys ({<org name>: <PEM content>}). No defaults.
 
+# false means the role does not write the App or pull Secrets itself, and instead checks before changing anything that each profile's namespace already holds <org>-github-app and the pull secret (and that the platform namespace holds the pull secret and heartbeat-gh-token).
+github_runner_arc_manage_secrets: true
+
 # Registry the pull Secret authenticates to, and its name in each namespace.
 github_runner_arc_image_pull_registry: "ghcr.io"
 github_runner_arc_image_pull_secret_name: "ghcr-pull"
