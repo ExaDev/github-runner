@@ -1,3 +1,10 @@
+## [1.0.2](https://github.com/ExaDev/github-runner/compare/v1.0.1...v1.0.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* **cluster:** clear only the registrations of nodes that have not rejoined ([e789205](https://github.com/ExaDev/github-runner/commit/e7892053e46dac025df0afa5dca00e14d9f05c68))
+
 ## [1.0.1](https://github.com/ExaDev/github-runner/compare/v1.0.0...v1.0.1) (2026-09-25)
 
 
