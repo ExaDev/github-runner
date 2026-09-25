@@ -16,9 +16,10 @@
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-
-      github_runner_cluster_k3s_token is not set. Run the
-      github_runner_secrets role first, or set it directly.
-  when: github_runner_cluster_k3s_token is not defined
+      github_runner_cluster_k3s_token is not set. Set it from any source
+      Ansible reads (ansible-vault, a lookup), or run a secrets adapter
+      such as github_runner_secrets first.
+  when: github_runner_cluster_k3s_token | default('') | length == 0
 
 - name: Set up the mesh the nodes join, and publish its join key and control server
   # Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read the mesh facts it publishes. See tasks/mesh/main.yml for the provider interface.

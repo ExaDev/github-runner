@@ -1,6 +1,15 @@
 ---
 # The tailscale mesh provider: nodes join a Tailscale tailnet through Tailscale's own control plane. With an API token, tailscale_api.yml keeps the tailnet's ACL and a reusable join key provisioned; without one, the ACL is left alone and the join key has to be supplied.
 
+- name: Read the join key kept at github_runner_cluster_join_key_path
+  ansible.builtin.set_fact:
+    github_runner_cluster_tailscale_join_key: "{{ lookup('ansible.builtin.file', github_runner_cluster_join_key_path | expanduser) | trim }}"
+  no_log: true
+  when:
+    - github_runner_cluster_tailscale_join_key | length == 0
+    - github_runner_cluster_join_key_path | length > 0
+    - github_runner_cluster_join_key_path | expanduser is file
+
 - name: Ensure the tailnet's ACL grants cross-node pod traffic and a reusable join key exists
   # run_once, not per-host: this is tailnet-wide, shared-account state (the ACL policy, one reusable join key), not per-host state. Needs a Tailscale API token: without one, the ACL is left as it is and the join key must already be supplied.
   ansible.builtin.include_tasks: mesh/tailscale_api.yml
@@ -12,9 +21,10 @@
     github_runner_cluster_mesh_join_key: "{{ github_runner_cluster_tailscale_join_key }}"
     github_runner_cluster_mesh_control_server_url: ""
     github_runner_cluster_mesh_missing_key_hint: >-
-      Supply github_runner_cluster_tailscale_join_key directly, or a
-      github_runner_cluster_tailscale_api_token so tasks/mesh/tailscale_api.yml
-      can create one.
+      Supply github_runner_cluster_tailscale_join_key, or a
+      github_runner_cluster_tailscale_api_token together with somewhere to keep
+      a new key (github_runner_cluster_join_key_path, or a secrets adapter such
+      as github_runner_secrets) so tasks/mesh/tailscale_api.yml can create one.
   no_log: true
 
 - name: Publish the ACL policy tailscale_api.yml just ensured, for the shared check

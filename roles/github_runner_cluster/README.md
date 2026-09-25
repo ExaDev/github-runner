@@ -17,8 +17,8 @@ Which hosts are servers is decided automatically from the inventory group named 
 
 | Provider | Control server | Policy | Join key |
 | --- | --- | --- | --- |
-| `tailscale` (default) | Tailscale's | With a Tailscale API token, the role adds the tag, route approval and pod grant to the tailnet ACL, leaving every other entry alone; without one, it leaves the ACL alone | Supplied, or created through the API in 1Password mode and stored in the item |
-| `headscale_existing` | A Headscale server someone else runs | Read through the REST API and checked, never written | Supplied, or created through the API when missing, expired or within `github_runner_cluster_headscale_join_key_renew_days` of expiry, in 1Password mode, and stored in the item's `headscale-join-key` field |
+| `tailscale` (default) | Tailscale's | With a Tailscale API token, the role adds the tag, route approval and pod grant to the tailnet ACL, leaving every other entry alone; without one, it leaves the ACL alone | Supplied, or created through the API when it will be kept (see [Join keys](#join-keys)) |
+| `headscale_existing` | A Headscale server someone else runs | Read through the REST API and checked, never written | Supplied, or created through the API when missing, expired or within `github_runner_cluster_headscale_join_key_renew_days` of expiry, when it will be kept (see [Join keys](#join-keys)) |
 | `headscale_hosted` | Headscale under Docker Compose on one host outside k3s | Role-owned (`github_runner_cluster_headscale_policy`) | Created through the API and kept on the Headscale host |
 | `headscale_in_cluster` | Headscale as a static pod on the bootstrap server | Role-owned | Created through the API and kept on the bootstrap server |
 
@@ -26,7 +26,16 @@ For every Headscale provider, `github_runner_cluster_tailnet_domain` is Headscal
 
 ### headscale_existing
 
-Needs `github_runner_cluster_headscale_url` and an API key (`headscale apikeys create --expiration 90d`) in `github_runner_cluster_headscale_api_key`, normally from the secrets role's `headscale-api-key` field. If the server's policy lacks the tag or the route approval, the run stops before creating anything and prints what to add.
+Needs `github_runner_cluster_headscale_url` and an API key (`headscale apikeys create --expiration 90d`) in `github_runner_cluster_headscale_api_key`. If the server's policy lacks the tag or the route approval, the run stops before creating anything and prints what to add.
+
+### Join keys
+
+Neither Tailscale nor Headscale lets a join key be read back after it is created, so the `tailscale` and `headscale_existing` providers create one only when it will be kept for the next run. The new key is set as the fact `github_runner_cluster_new_join_key` (`{mesh: tailscale or headscale, key: ...}`) and kept in either or both of two ways:
+
+- `github_runner_cluster_join_key_path`: a file on the control node. The role writes a new key there (mode 0600) and reads the key from it whenever `github_runner_cluster_tailscale_join_key` or `github_runner_cluster_headscale_join_key` is empty.
+- `github_runner_cluster_join_key_listener: true`: a secrets adapter in the play keeps it. The role notifies `github_runner_cluster join key created` and flushes handlers at once, so the key is stored even if a later task fails. The 1Password adapter does this and writes the key to its item.
+
+With neither set, the role creates nothing, and a run with no join key stops asking for one to be supplied or for somewhere to keep a new one.
 
 ### headscale_hosted
 
@@ -45,7 +54,8 @@ Each site is its own cluster: its own inventory group, bootstrap server and mesh
 ## Variables
 
 - `github_runner_cluster_repo_root` (required): the checkout's absolute path on the target host.
-- `github_runner_cluster_k3s_token` (required), `github_runner_cluster_tailscale_join_key`, `github_runner_cluster_tailscale_api_token`, `github_runner_cluster_headscale_api_key`, `github_runner_cluster_headscale_join_key`: secrets, normally set by `github_runner_secrets`.
+- `github_runner_cluster_k3s_token` (required), `github_runner_cluster_tailscale_join_key`, `github_runner_cluster_tailscale_api_token`, `github_runner_cluster_headscale_api_key`, `github_runner_cluster_headscale_join_key`: secrets, as plain variables from any source Ansible reads.
+- `github_runner_cluster_join_key_path`, `github_runner_cluster_join_key_listener`: where a join key the role creates is kept (see [Join keys](#join-keys)).
 - `github_runner_cluster_group` (default `github_runner_cluster`), `github_runner_cluster_max_servers` (default 5), `github_runner_cluster_api_port` (default 6443), `github_runner_cluster_datastore` (`etcd`, the default, or `sqlite`, which makes the cluster a single server with every other host an agent).
 - `github_runner_cluster_mesh` (default `tailscale`), `github_runner_cluster_mesh_tag` (default `tag:github-runner-node`), `github_runner_cluster_pod_cidr` (default k3s's `10.42.0.0/16`).
 - `github_runner_cluster_tailnet_domain`: the mesh's MagicDNS domain. Each node's address is `<node name>.<domain>`, and join URLs and TLS SANs use it.

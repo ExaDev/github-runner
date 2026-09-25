@@ -49,7 +49,7 @@
 
 # The API token itself has no equivalent bootstrap: creating one requires the Tailscale admin console (Settings -> Keys -> API access tokens), a one-time manual step with no API to automate it (this is inherent to token-based auth - you need a credential to create a credential). Store it as this item's own tailscale-api-token field once created.
 #
-# Key rotation on expiry is likewise still a manual trigger: this task only creates a NEW key when tailscale_join_key is genuinely empty, not when an existing one has expired (an expired key is still a non-empty string in 1Password, so this check alone can't detect it). If k3s's own vpn-auth integration starts failing to authenticate on a working fleet, check the key's expiry in the Tailscale admin console first: if it's expired, clear the tailscale-join-key field in 1Password and rerun.
+# Key rotation on expiry is likewise still a manual trigger: this task only creates a NEW key when tailscale_join_key is genuinely empty, not when an existing one has expired (an expired key is still a non-empty string in 1Password, so this check alone can't detect it). If k3s's own vpn-auth integration starts failing to authenticate on a working fleet, check the key's expiry in the Tailscale admin console first: if it's expired, clear it wherever it is kept (the file at github_runner_cluster_join_key_path, or the 1Password item's tailscale-join-key field) and rerun.
 - name: Create a reusable, pre-authorized Tailscale join key if one isn't already known
   ansible.builtin.uri:
     url: "https://api.tailscale.com/api/v2/tailnet/-/keys"
@@ -74,22 +74,21 @@
     status_code: [200]
   delegate_to: localhost
   no_log: true
-  register: github_runner_cluster_new_join_key
-  # Only where the new key can be persisted for the next run (github_runner_cluster_create_tailscale_join_key, turned on by the github_runner_secrets role in 1Password mode): otherwise the key has to be supplied instead, and tasks/main.yml fails fast if it isn't.
+  register: github_runner_cluster_tailscale_created_key
+  # Only where the new key will be kept for the next run (see github_runner_cluster_join_key_path in defaults/main.yml): otherwise the key has to be supplied instead, and mesh/main.yml fails fast if it isn't.
   when:
-    - github_runner_cluster_create_tailscale_join_key | bool
+    - github_runner_cluster_may_create_join_key | bool
     - github_runner_cluster_tailscale_join_key | length == 0
 
-- name: Persist the new join key through the secrets role
-  ansible.builtin.include_role:
-    name: github_runner_secrets
-    tasks_from: persist_tailscale_join_key
+- name: Keep the new join key for the next run
+  ansible.builtin.include_tasks: mesh/store_join_key.yml
   vars:
-    github_runner_secrets_new_tailscale_join_key: "{{ github_runner_cluster_new_join_key.json.key }}"
-  when: github_runner_cluster_new_join_key is not skipped
+    github_runner_cluster_store_join_key_mesh: tailscale
+    github_runner_cluster_store_join_key: "{{ github_runner_cluster_tailscale_created_key.json.key }}"
+  when: github_runner_cluster_tailscale_created_key is not skipped
 
-- name: Fold the new join key into this run's own in-memory secrets
+- name: Use the new join key in this run
   ansible.builtin.set_fact:
-    github_runner_cluster_tailscale_join_key: "{{ github_runner_cluster_new_join_key.json.key }}"
+    github_runner_cluster_tailscale_join_key: "{{ github_runner_cluster_tailscale_created_key.json.key }}"
   no_log: true
-  when: github_runner_cluster_new_join_key is not skipped
+  when: github_runner_cluster_tailscale_created_key is not skipped

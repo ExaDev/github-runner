@@ -1,27 +1,34 @@
 ---
-# The headscale_existing mesh provider: nodes join through a Headscale server someone else runs. Reads that server's policy through its API and fails with the entries to add if it does not define the node tag or auto-approve the pod routes, but never writes it. Keeps a reusable, tagged join key: the one supplied, or, when that is missing, expired or close to expiry and the secrets role can store a replacement (1Password mode), a new one it creates and stores.
+# The headscale_existing mesh provider: nodes join through a Headscale server someone else runs. Reads that server's policy through its API and fails with the entries to add if it does not define the node tag or auto-approve the pod routes, but never writes it. Keeps a reusable, tagged join key: the one supplied, or, when that is missing, expired or close to expiry and a replacement would be kept (see github_runner_cluster_join_key_path in defaults/main.yml), a new one it creates and keeps.
 
 - name: Fail if the Headscale server or its API key is not set
   ansible.builtin.fail:
     msg: >-
       The headscale_existing mesh provider needs github_runner_cluster_headscale_url (the URL nodes register with) and
-      github_runner_cluster_headscale_api_key (a Headscale API key: headscale apikeys create --expiration 90d), normally from
-      the github_runner_secrets role's headscale-api-key field.
+      github_runner_cluster_headscale_api_key (a Headscale API key: headscale apikeys create --expiration 90d).
   when: github_runner_cluster_headscale_url | length == 0 or github_runner_cluster_headscale_api_key | length == 0
+
+- name: Read the join key kept at github_runner_cluster_join_key_path
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_join_key: "{{ lookup('ansible.builtin.file', github_runner_cluster_join_key_path | expanduser) | trim }}"
+  no_log: true
+  when:
+    - github_runner_cluster_headscale_join_key | length == 0
+    - github_runner_cluster_join_key_path | length > 0
+    - github_runner_cluster_join_key_path | expanduser is file
 
 - name: Check the Headscale server's policy and keep a join key
   ansible.builtin.include_tasks: mesh/headscale_api.yml
   run_once: true
   vars:
     github_runner_cluster_headscale_api_base: "{{ github_runner_cluster_headscale_api_url or github_runner_cluster_headscale_url }}"
-    github_runner_cluster_headscale_may_create_join_key: "{{ github_runner_cluster_create_headscale_join_key }}"
+    github_runner_cluster_headscale_may_create_join_key: "{{ github_runner_cluster_may_create_join_key }}"
 
-- name: Persist a new join key through the secrets role
-  ansible.builtin.include_role:
-    name: github_runner_secrets
-    tasks_from: persist_headscale_join_key
+- name: Keep a new join key for the next run
+  ansible.builtin.include_tasks: mesh/store_join_key.yml
   vars:
-    github_runner_secrets_new_headscale_join_key: "{{ github_runner_cluster_headscale_new_join_key }}"
+    github_runner_cluster_store_join_key_mesh: headscale
+    github_runner_cluster_store_join_key: "{{ github_runner_cluster_headscale_new_join_key }}"
   run_once: true
   when: github_runner_cluster_headscale_new_join_key is defined
 
@@ -29,5 +36,7 @@
   ansible.builtin.set_fact:
     github_runner_cluster_mesh_join_key: "{{ github_runner_cluster_headscale_join_key }}"
     github_runner_cluster_mesh_control_server_url: "{{ github_runner_cluster_headscale_url }}"
-    github_runner_cluster_mesh_missing_key_hint: Supply github_runner_cluster_headscale_join_key, or run with 1Password secrets so the role can create one.
+    github_runner_cluster_mesh_missing_key_hint: >-
+      Supply github_runner_cluster_headscale_join_key, or give a new key somewhere to be kept (github_runner_cluster_join_key_path,
+      or a secrets adapter such as github_runner_secrets) so the role can create one.
   no_log: true

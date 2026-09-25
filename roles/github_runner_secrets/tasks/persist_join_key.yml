@@ -1,0 +1,29 @@
+---
+# Run by this role's handler when the cluster role notifies "github_runner_cluster join key created", on the host that created the key, with github_runner_cluster_new_join_key set to {mesh: tailscale or headscale, key: <key>}. Writes the key to the item's tailscale-join-key or headscale-join-key field (creating the field if the item has none) and refreshes the control node's cache to match, so future runs see it without re-reading 1Password.
+
+- name: Persist the new join key to 1Password
+  ansible.builtin.command:
+    argv:
+      - op
+      - item
+      - edit
+      - "{{ github_runner_secrets_item }}"
+      - --vault
+      - "{{ github_runner_secrets_vault }}"
+      - "{{ github_runner_cluster_new_join_key.mesh }}-join-key[password]={{ github_runner_cluster_new_join_key.key }}"
+  delegate_to: localhost
+  changed_when: true
+  no_log: true
+
+- name: Fold the new join key into this run's own in-memory secrets
+  ansible.builtin.set_fact:
+    github_runner_secrets_values: "{{ github_runner_secrets_values | combine({github_runner_cluster_new_join_key.mesh ~ '_join_key': github_runner_cluster_new_join_key.key}) }}"
+  no_log: true
+
+- name: Refresh the cached secrets read to match, so future runs see the new key without re-reading 1Password
+  ansible.builtin.copy:
+    dest: "{{ github_runner_secrets_cache_path }}"
+    content: "{{ github_runner_secrets_values | to_json }}"
+    mode: "0600"
+  delegate_to: localhost
+  no_log: true

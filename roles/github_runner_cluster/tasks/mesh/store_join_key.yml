@@ -1,0 +1,28 @@
+---
+# Keeps a join key the tailscale or headscale_existing provider just created, for the next run, since neither service lets it be read back later. Included on the one host that created it, with github_runner_cluster_store_join_key_mesh (tailscale or headscale) and github_runner_cluster_store_join_key set. Publishes github_runner_cluster_new_join_key, writes the key to github_runner_cluster_join_key_path when that is set, and hands it to a secrets adapter's handler when github_runner_cluster_join_key_listener is on. The creating task only runs when at least one of those will keep it (github_runner_cluster_may_create_join_key).
+
+- name: Record the new join key
+  ansible.builtin.set_fact:
+    github_runner_cluster_new_join_key:
+      mesh: "{{ github_runner_cluster_store_join_key_mesh }}"
+      key: "{{ github_runner_cluster_store_join_key }}"
+  no_log: true
+
+- name: Write the new join key to github_runner_cluster_join_key_path
+  ansible.builtin.copy:
+    dest: "{{ github_runner_cluster_join_key_path | expanduser }}"
+    content: "{{ github_runner_cluster_store_join_key }}"
+    mode: "0600"
+  delegate_to: localhost
+  no_log: true
+  when: github_runner_cluster_join_key_path | length > 0
+
+- name: Hand the new join key to the secrets adapter
+  ansible.builtin.debug:
+    msg: A new {{ github_runner_cluster_store_join_key_mesh }} join key was created; the secrets adapter stores it.
+  changed_when: true
+  notify: github_runner_cluster join key created
+  when: github_runner_cluster_join_key_listener | bool
+
+- name: Store it now, not at the end of the play, so a later failure cannot lose it
+  ansible.builtin.meta: flush_handlers

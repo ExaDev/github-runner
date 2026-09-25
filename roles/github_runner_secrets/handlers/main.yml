@@ -1,0 +1,4 @@
+---
+- name: Store the new mesh join key in 1Password
+  listen: github_runner_cluster join key created
+  ansible.builtin.include_tasks: persist_join_key.yml

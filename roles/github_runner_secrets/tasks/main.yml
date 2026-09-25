@@ -82,7 +82,7 @@
       }}
   no_log: true
 
-# Only in 1Password mode may the cluster role create a Tailscale or Headscale join key when none exists: it then persists the new key back to the item through persist_tailscale_join_key.yml or persist_headscale_join_key.yml. With provided secrets there is nowhere to persist it for the next run, so the key has to be supplied instead.
+# Only in 1Password mode does this role keep a Tailscale or Headscale join key the cluster role creates: it turns on github_runner_cluster_join_key_listener, and its handler (tasks/persist_join_key.yml) writes the new key back to the item. With provided secrets there is nowhere to keep it, so the cluster role then creates one only if github_runner_cluster_join_key_path is set.
 #
 # The Headscale fields are optional on the item (unlike the Tailscale ones, read above with a bare select that yields nothing when a field is absent), and an empty one leaves any value already set for the cluster role (e.g. in inventory) in place.
 - name: Hand the cluster role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
@@ -90,10 +90,9 @@
     github_runner_cluster_k3s_token: "{{ github_runner_secrets_values.k3s_token }}"
     github_runner_cluster_tailscale_join_key: "{{ github_runner_secrets_values.tailscale_join_key | default('') }}"
     github_runner_cluster_tailscale_api_token: "{{ github_runner_secrets_values.tailscale_api_token | default('') }}"
-    github_runner_cluster_create_tailscale_join_key: "{{ github_runner_secrets_provided | length == 0 }}"
+    github_runner_cluster_join_key_listener: "{{ github_runner_secrets_provided | length == 0 }}"
     github_runner_cluster_headscale_api_key: "{{ github_runner_secrets_values.headscale_api_key | default('', true) or github_runner_cluster_headscale_api_key | default('') }}"
     github_runner_cluster_headscale_join_key: "{{ github_runner_secrets_values.headscale_join_key | default('', true) or github_runner_cluster_headscale_join_key | default('') }}"
-    github_runner_cluster_create_headscale_join_key: "{{ github_runner_secrets_provided | length == 0 }}"
   no_log: true
 
 - name: Hand the ARC role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
