@@ -37,6 +37,9 @@ github_runner_arc_labelled_nodes: []
 github_runner_arc_image_pull_registry: "ghcr.io"
 github_runner_arc_image_pull_secret_name: "ghcr-pull"
 
+# Before writing the pull Secret, prove the credential can read each image this host installs from that registry: exchange it for a registry bearer token and fetch the image's manifest. A token that authenticates but lacks package access is otherwise only found later, as pods stuck in ImagePullBackOff. Uses the registry's /token endpoint, as GHCR provides.
+github_runner_arc_verify_image_pull: true
+
 # Fleet-health platform. Set github_runner_arc_heartbeat_gist_id on one host to install it from there.
 github_runner_arc_heartbeat_gist_id: ""
 github_runner_arc_heartbeat_window_seconds: 600

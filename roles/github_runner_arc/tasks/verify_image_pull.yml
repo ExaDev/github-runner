@@ -1,0 +1,20 @@
+---
+# Proves the pull credential can actually read each image this host installs from github_runner_arc_image_pull_registry, before the credential is written into the cluster. A token can authenticate to the registry and still be denied the package, so this does the registry's own two-step handshake (a bearer token scoped to pull, then a manifest read) against the real image and tag. Runs on the control node; read-only, so it also runs under --check.
+
+- name: List the images this host installs from the pull registry
+  ansible.builtin.set_fact:
+    github_runner_arc_pull_images: >-
+      {{
+        (github_runner_arc_orgs | map(attribute='image') | list
+         + ([github_runner_arc_heartbeat_image] if github_runner_arc_heartbeat_gist_id | length > 0 else [])
+         + ([github_runner_arc_autoscaler_image] if github_runner_arc_heartbeat_gist_id | length > 0 and github_runner_arc_fleet.autoscaled else []))
+        | unique | map('exadev.github_runner.arc_image_ref')
+        | selectattr('registry', 'equalto', github_runner_arc_image_pull_registry) | list
+      }}
+
+- name: Verify the pull credential against each image
+  ansible.builtin.include_tasks: verify_image_pull_one.yml
+  loop: "{{ github_runner_arc_pull_images }}"
+  loop_control:
+    loop_var: image
+    label: "{{ image.registry }}/{{ image.repository }}:{{ image.reference }}"

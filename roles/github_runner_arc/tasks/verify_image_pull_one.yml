@@ -1,0 +1,40 @@
+---
+# Included once per image from verify_image_pull.yml, with `image` set to its registry, repository and reference.
+
+- name: Exchange the pull credential for a registry token scoped to the image
+  ansible.builtin.uri:
+    url: "https://{{ image.registry }}/token?scope=repository:{{ image.repository }}:pull&service={{ image.registry }}"
+    url_username: "{{ github_runner_arc_ghcr_username }}"
+    url_password: "{{ github_runner_arc_ghcr_token }}"
+    force_basic_auth: true
+    return_content: true
+    status_code: [200, 401, 403]
+  delegate_to: localhost
+  check_mode: false
+  register: github_runner_arc_registry_token
+  no_log: true
+
+- name: Read the image manifest with that token
+  ansible.builtin.uri:
+    url: "https://{{ image.registry }}/v2/{{ image.repository }}/manifests/{{ image.reference }}"
+    method: HEAD
+    headers:
+      Authorization: "Bearer {{ (github_runner_arc_registry_token.content | from_json).token | default('') }}"
+      Accept: "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
+    status_code: [200, 401, 403, 404]
+  delegate_to: localhost
+  check_mode: false
+  register: github_runner_arc_manifest
+  when: github_runner_arc_registry_token.status == 200
+  no_log: true
+
+- name: Fail when the credential cannot pull the image
+  ansible.builtin.fail:
+    msg: >-
+      The pull credential for {{ github_runner_arc_ghcr_username }} cannot read
+      {{ image.registry }}/{{ image.repository }}:{{ image.reference }}
+      ({{ 'the registry refused the credential, HTTP ' ~ github_runner_arc_registry_token.status if github_runner_arc_registry_token.status != 200
+          else 'reading the manifest returned HTTP ' ~ github_runner_arc_manifest.status }}).
+      Check the token has package read access (read:packages for a classic token) and that the account can see the package.
+      Refusing to write it into the cluster's pull Secret.
+  when: github_runner_arc_registry_token.status != 200 or github_runner_arc_manifest.status != 200

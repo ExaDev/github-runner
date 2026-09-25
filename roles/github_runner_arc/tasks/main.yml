@@ -15,6 +15,10 @@
   ansible.builtin.meta: end_role
   when: github_runner_arc_orgs | length == 0 and github_runner_arc_heartbeat_gist_id | length == 0
 
+- name: Prove the pull credential can read every image this host installs
+  ansible.builtin.include_tasks: verify_image_pull.yml
+  when: github_runner_arc_verify_image_pull | bool
+
 - name: Give this host the kubernetes Python client
   ansible.builtin.include_role:
     name: github_runner_k8s_client
