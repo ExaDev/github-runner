@@ -1,0 +1,14 @@
+{
+  "name": "github-runner-release-tooling",
+  "private": true,
+  "description": "Release automation for the exadev.github_runner Ansible collection. Not published; devDependencies only.",
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.1",
+    "@commitlint/config-conventional": "^21.2.0",
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^11.0.1",
+    "@semantic-release/github": "^12.0.9",
+    "semantic-release": "^25.0.9"
+  }
+}
