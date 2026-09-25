@@ -33,8 +33,8 @@ class ProfilesTest(unittest.TestCase):
         result = arc.arc_profiles([org(profiles=[{"suffix": "", "max_runners": 1}, {"suffix": "-builder", "values_file": "b.yaml", "runs_on_label": "image-builder", "node_selector": {"kubernetes.io/hostname": "n1"}}])])
         self.assertEqual(result["errors"], [])
         default, builder = result["profiles"]
-        self.assertEqual((default["namespace"], default["release"], default["app_secret"], default["runs_on_label"]), ("arc-runners-example", "example-runners", "example-github-app", "example-runners"))
-        self.assertEqual((builder["namespace"], builder["release"], builder["runs_on_label"]), ("arc-runners-example-builder", "example-runners-builder", "image-builder"))
+        self.assertEqual((default["namespace"], default["release"], default["app_secret"], default["scale_set_labels"]), ("arc-runners-example", "example-runners", "example-github-app", ["example-runners"]))
+        self.assertEqual((builder["namespace"], builder["release"], builder["scale_set_labels"]), ("arc-runners-example-builder", "example-runners-builder", ["image-builder"]))
         self.assertEqual(builder["node_selector"], {"kubernetes.io/hostname": "n1"})
         self.assertEqual(default["node_selector"], {})
         self.assertIsNone(result["autoscaled"])
@@ -51,6 +51,44 @@ class ProfilesTest(unittest.TestCase):
     def test_two_profiles_sharing_a_namespace_is_an_error(self) -> None:
         result = arc.arc_profiles([org(profiles=[{"suffix": "-a"}, {"suffix": "-a"}])])
         self.assertTrue(any("both map to namespace" in message for message in result["errors"]))
+
+    def test_names_can_be_overridden_for_an_existing_install(self) -> None:
+        result = arc.arc_profiles([org("Other-Org", [{"namespace": "arc-runners", "release_name": "ci-runners", "scale_set_labels": [], "values_file": "v.yaml"}], app_secret_name="ci-runners-github-app")])
+        self.assertEqual(result["errors"], [])
+        profile = result["profiles"][0]
+        self.assertEqual((profile["namespace"], profile["release"], profile["app_secret"], profile["scale_set_labels"]), ("arc-runners", "ci-runners", "ci-runners-github-app", []))
+
+    def test_the_app_secret_name_applies_to_every_profile_of_its_org(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"max_runners": 1}, {"suffix": "-b", "max_runners": 1}], app_secret_name="shared-app")])
+        self.assertEqual([profile["app_secret"] for profile in result["profiles"]], ["shared-app", "shared-app"])
+
+    def test_scale_set_labels_can_carry_several_labels(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"max_runners": 1, "scale_set_labels": ["a", "b"]}])])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["profiles"][0]["scale_set_labels"], ["a", "b"])
+
+    def test_invalid_name_overrides_are_errors(self) -> None:
+        cases = [
+            ({"max_runners": 1, "runs_on_label": "a", "scale_set_labels": ["b"]}, {}, "Example scale_set_profiles[0]: set runs_on_label or scale_set_labels, not both"),
+            ({"max_runners": 1, "scale_set_labels": "a"}, {}, "Example scale_set_profiles[0].scale_set_labels must be a list of non-empty strings (empty sets no scaleSetLabels)"),
+            ({"max_runners": 1, "scale_set_labels": [""]}, {}, "Example scale_set_profiles[0].scale_set_labels must be a list of non-empty strings (empty sets no scaleSetLabels)"),
+            ({"max_runners": 1, "namespace": ""}, {}, "Example scale_set_profiles[0].namespace must be a non-empty string when set"),
+            ({"max_runners": 1, "release_name": 5}, {}, "Example scale_set_profiles[0].release_name must be a non-empty string when set"),
+            ({"max_runners": 1}, {"app_secret_name": ""}, "Example.app_secret_name must be a non-empty string when set"),
+        ]
+        for profile, extra, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, arc.arc_profiles([org(profiles=[profile], **extra)])["errors"])
+
+    def test_an_overridden_name_must_still_be_a_valid_kubernetes_name(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"max_runners": 1, "namespace": "Not_Valid"}])])
+        self.assertTrue(any("the derived namespace 'Not_Valid' is not a valid Kubernetes name" in message for message in result["errors"]))
+
+    def test_two_profiles_of_an_org_sharing_a_release_name_is_an_error(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"max_runners": 1, "release_name": "ci"}, {"suffix": "-b", "max_runners": 1, "release_name": "ci"}])])
+        self.assertTrue(any("both use release name 'ci'" in message for message in result["errors"]), result["errors"])
+        other_orgs = arc.arc_profiles([org("A", [{"max_runners": 1, "release_name": "ci"}]), org("B", [{"max_runners": 1, "release_name": "ci", "namespace": "b-ci"}])])
+        self.assertEqual(other_orgs["errors"], [])
 
     def test_one_autoscaled_profile_is_returned(self) -> None:
         result = arc.arc_profiles([org(profiles=[{"suffix": "", "autoscale": True, "max_runners": 1}, {"suffix": "-b", "max_runners": 1}])])
@@ -99,6 +137,21 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(missing, ["Example scale_set_profiles[0]: a profile with no values_file needs max_runners or sizing"])
         autoscaled = arc.arc_profiles([org(profiles=[{"autoscale": True, "sizing": SIZING}])])["errors"]
         self.assertEqual(autoscaled, ["Example scale_set_profiles[0]: a profile with no values_file needs max_runners"])
+
+    def test_an_explicit_max_runners_takes_precedence_over_sizing(self) -> None:
+        profiles = arc.arc_profiles([org(profiles=[{"max_runners": 5, "sizing": SIZING}, {"suffix": "-s", "sizing": SIZING}, {"suffix": "-v", "values_file": "v.yaml"}, {"suffix": "-a", "autoscale": True, "values_file": "v.yaml", "sizing": SIZING}])])["profiles"]
+        self.assertEqual([profile["max_runners"] for profile in profiles], [5, 24, None, None])
+
+    def test_an_explicit_max_runners_applies_with_a_values_file_and_on_the_autoscaled_profile(self) -> None:
+        profiles = arc.arc_profiles([org(profiles=[{"values_file": "v.yaml", "max_runners": 7}, {"suffix": "-a", "autoscale": True, "values_file": "v.yaml", "max_runners": 2, "sizing": SIZING}])])["profiles"]
+        self.assertEqual([profile["max_runners"] for profile in profiles], [7, 2])
+
+    def test_an_invalid_max_runners_is_an_error(self) -> None:
+        for value in (-1, 1.5, "many", True):
+            with self.subTest(value=value):
+                result = arc.arc_profiles([org(profiles=[{"values_file": "v.yaml", "max_runners": value}])])
+                self.assertTrue(any("max_runners must be a whole number of at least 0" in message for message in result["errors"]), result["errors"])
+                self.assertIsNone(result["profiles"][0]["max_runners"])
 
     def test_settings_carries_the_profile_keys(self) -> None:
         profile = {"suffix": "", "max_runners": 4, "container_mode": "dind"}

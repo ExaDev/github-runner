@@ -6,19 +6,22 @@ It runs in two ways. Inside `playbooks/site.yml`, against a k3s server host that
 
 ## Validation
 
-`tasks/validate.yml` checks every input that needs neither secrets nor a cluster: each org's fields, profile names that would collide or make invalid Kubernetes names, the same org configured on two hosts, more than one autoscaled profile, values files that do not exist, the autoscaler's pool settings, sizing inputs, and the controller, probe and node label settings. Both playbooks run it in a play of its own before anything changes; the role runs it itself when included some other way. It also bootstraps the heartbeat gist when `github_runner_arc_heartbeat_bootstrap_gist` is on and no host in the inventory has one: it creates the gist with the control node's `gh` session and stops, printing the id to record.
+`tasks/validate.yml` checks every input that needs neither secrets nor a cluster: each org's fields, profile names (derived or overridden) that would collide or make invalid Kubernetes names, two of an org's profiles sharing a release name, a `max_runners` that is not a whole number, the controller's release name and namespace, the same org configured on two hosts, more than one autoscaled profile, values files that do not exist, the autoscaler's pool settings, sizing inputs, and the controller, probe and node label settings. Both playbooks run it in a play of its own before anything changes; the role runs it itself when included some other way. It also bootstraps the heartbeat gist when `github_runner_arc_heartbeat_bootstrap_gist` is on and no host in the inventory has one: it creates the gist with the control node's `gh` session and stops, printing the id to record.
 
 Before touching the cluster the role then checks the secrets it is about to write (each org's App key looks like a PEM key, the pull credential and heartbeat token are set) and proves the pull credential can read every image it installs from `github_runner_arc_image_pull_registry`, by getting a pull-scoped registry token and fetching each image's manifest.
 
 ## Variables
 
-- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id`, `image`, `private_key` (the App's PEM private key, from any source Ansible reads) or `private_key_op_reference` (an `op://` reference that the `github_runner_secrets_onepassword` adapter resolves into `private_key`), optionally `installation_id` (resolved from the App when empty), and `scale_set_profiles`, a list of profiles:
+- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id`, `image`, `private_key` (the App's PEM private key, from any source Ansible reads) or `private_key_op_reference` (an `op://` reference that the `github_runner_secrets_onepassword` adapter resolves into `private_key`), optionally `installation_id` (resolved from the App when empty), optionally `app_secret_name` (the App Secret's name in each of the org's namespaces, default `<org>-github-app`), and `scale_set_profiles`, a list of profiles:
   - `suffix`: appended to the namespace (`arc-runners-<org><suffix>`) and release (`<org>-runners<suffix>`) names. Default empty.
+  - `namespace`, `release_name`: the profile's namespace and Helm release name, in place of the names derived from the suffix. The release name is also the scale set's name on GitHub, so two profiles of one org cannot share it.
   - `values_file`: Helm values for the release, a Jinja template read from `github_runner_arc_values_dir` on the control node (or an absolute path). Without it the role's `templates/runner-scale-set-values.yaml.j2` is used, driven by the profile's own `max_runners`, `min_runners`, `container_mode` (`dind` for the chart's Docker-in-Docker mode) and `resources` (the runner container's requests and limits).
   - `node_selector`: a nodeSelector for the runner pods, merged over the eligibility label below.
+  - `max_runners`: the release's `maxRunners`. It takes precedence over the values file and over `sizing`; on the autoscaled profile it is the floor the autoscaler starts from.
   - `runs_on_label`: the extra `scaleSetLabels` entry the runners carry. Default `<org>-runners`, which pools every profile of the org under one `runs-on` label; set a different one to keep a profile out of that pool.
+  - `scale_set_labels`: the whole `scaleSetLabels` list, in place of `runs_on_label`. An empty list sets no `scaleSetLabels`, so jobs target the scale set by its release name.
   - `autoscale`: `true` on at most one profile in the whole inventory makes it the scale set the autoscaler manages.
-  - `sizing`: derive a runner ceiling from node capacity (see Sizing). On an ordinary profile it sets `maxRunners`; on the autoscaled profile it sets the autoscaler's ceiling, leaving `maxRunners` as the floor.
+  - `sizing`: derive a runner ceiling from node capacity (see Sizing). On an ordinary profile without `max_runners` it sets `maxRunners`; on the autoscaled profile it sets the autoscaler's ceiling, leaving `maxRunners` as the floor.
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
 - `github_runner_arc_kubeconfig_path`: the kubeconfig on the host the role runs against. Defaults to `github_runner_cluster`'s kubeconfig; empty means `KUBECONFIG` or `~/.kube/config`.
 - `github_runner_arc_controller_chart_version`, `github_runner_arc_scaleset_chart_version`: chart pins; unset installs the latest chart.
@@ -85,4 +88,29 @@ github_runner_arc_orgs:
       - suffix: "-docker"
         values_file: "example-docker-values.yaml"
         runs_on_label: "example-docker"
+```
+
+## Managing an existing install
+
+A cluster whose controller and scale set were installed under other names can be managed by setting those names, rather than getting a second controller and scale set beside them. The role then upgrades the existing releases in place.
+
+```yaml
+github_runner_arc_controller_release_name: "existing-controller"
+github_runner_arc_controller_namespace: "existing-controller-ns"
+# The App Secret and the pull Secret already exist and are kept current elsewhere.
+github_runner_arc_manage_secrets: false
+github_runner_arc_manage_image_pull_secret: false
+github_runner_arc_image_pull_secret_name: "existing-pull-secret"
+github_runner_arc_orgs:
+  - name: ExampleOrg
+    app_id: 123456
+    app_secret_name: "existing-app-secret"
+    image: "ghcr.io/example/github-runner:2026.01.01"
+    scale_set_profiles:
+      - namespace: "existing-runners-ns"
+        release_name: "existing-runners"
+        values_file: "existing-runners-values.yaml"
+        max_runners: 6
+        # Jobs target the release name, so no scaleSetLabels.
+        scale_set_labels: []
 ```
