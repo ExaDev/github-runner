@@ -8,7 +8,7 @@
       {{ github_runner_cluster_mesh_providers | join(', ') }}.
   when: github_runner_cluster_mesh not in github_runner_cluster_mesh_providers
   vars:
-    github_runner_cluster_mesh_providers: [tailscale]
+    github_runner_cluster_mesh_providers: [tailscale, headscale_existing]
 
 - name: Set up the mesh with the provider {{ github_runner_cluster_mesh }}
   ansible.builtin.include_tasks: "mesh/{{ github_runner_cluster_mesh }}.yml"

@@ -1,0 +1,115 @@
+---
+# The Headscale REST API half every headscale_* provider shares, run once from the control node: reads the server's policy and checks it before doing anything else, then makes sure a reusable join key tagged with github_runner_cluster_mesh_tag exists. Never writes the policy. Needs github_runner_cluster_headscale_api_base (the API URL) and github_runner_cluster_headscale_api_key; reads the join key the caller already knows from github_runner_cluster_headscale_join_key, and creates a new one when that key is missing, expired or close to expiry and github_runner_cluster_headscale_may_create_join_key allows it. Publishes github_runner_cluster_headscale_join_key and github_runner_cluster_mesh_policy to every host in the play, and github_runner_cluster_headscale_new_join_key (on this host only) when it created a key, for the caller to persist.
+
+- name: Read the Headscale server's policy
+  # GET /api/v1/policy returns the policy as its HuJSON source in both of Headscale's policy modes (file and database). Read-only, so it runs under --check too.
+  ansible.builtin.uri:
+    url: "{{ github_runner_cluster_headscale_api_base }}/api/v1/policy"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ github_runner_cluster_headscale_api_key }}"
+      Accept: application/json
+    return_content: true
+  delegate_to: localhost
+  check_mode: false
+  no_log: true
+  register: github_runner_cluster_headscale_policy_response
+
+- name: Parse the policy
+  # A server with no policy at all returns an empty string, which parses to an empty policy and so fails the check below with everything it needs.
+  ansible.builtin.set_fact:
+    github_runner_cluster_mesh_policy: "{{ (github_runner_cluster_headscale_policy_response.json.policy | default('') | trim or '{}') | exadev.github_runner.from_hujson }}"
+
+- name: Check the policy before creating anything
+  ansible.builtin.include_tasks: mesh/check_policy.yml
+
+- name: Look up the Headscale user new join keys belong to
+  ansible.builtin.uri:
+    url: "{{ github_runner_cluster_headscale_api_base }}/api/v1/user?name={{ github_runner_cluster_headscale_user | urlencode }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ github_runner_cluster_headscale_api_key }}"
+      Accept: application/json
+    return_content: true
+  delegate_to: localhost
+  check_mode: false
+  no_log: true
+  register: github_runner_cluster_headscale_users
+  when: github_runner_cluster_headscale_user | length > 0
+
+- name: Fail if that user does not exist
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_headscale_user is '{{ github_runner_cluster_headscale_user }}', but the Headscale server has no
+      user by that name. Create it (headscale users create {{ github_runner_cluster_headscale_user }}) or leave the variable
+      empty to create keys owned by the tag alone.
+  when:
+    - github_runner_cluster_headscale_user | length > 0
+    - github_runner_cluster_headscale_users.json.users | default([]) | length == 0
+
+- name: List the server's pre-auth keys
+  ansible.builtin.uri:
+    url: "{{ github_runner_cluster_headscale_api_base }}/api/v1/preauthkey"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ github_runner_cluster_headscale_api_key }}"
+      Accept: application/json
+    return_content: true
+  delegate_to: localhost
+  check_mode: false
+  no_log: true
+  register: github_runner_cluster_headscale_keys
+
+- name: Judge whether the known join key can keep being used
+  # Headscale lists current keys masked to their prefix, so a key can be recognised but never read back; that is why a key this role creates has to be persisted by the caller.
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_join_key_problem: >-
+      {{ github_runner_cluster_headscale_keys.json.preAuthKeys | default([]) | exadev.github_runner.headscale_join_key_problem(github_runner_cluster_headscale_join_key, github_runner_cluster_mesh_tag, now(utc=true), github_runner_cluster_headscale_join_key_renew_days) }}
+  no_log: true
+
+- name: Fail if the join key is unusable and a new one may not be created here
+  ansible.builtin.fail:
+    msg: >-
+      The Headscale join key cannot be used: {{ github_runner_cluster_headscale_join_key_problem }}. Supply a reusable,
+      non-ephemeral pre-auth key tagged {{ github_runner_cluster_mesh_tag }} as github_runner_cluster_headscale_join_key
+      (headscale preauthkeys create --reusable --tags {{ github_runner_cluster_mesh_tag }} --expiration 90d), or run with
+      1Password secrets so the role can create and store one.
+  when:
+    - github_runner_cluster_headscale_join_key_problem | length > 0
+    - not (github_runner_cluster_headscale_may_create_join_key | bool)
+
+- name: Create a reusable, tagged join key
+  ansible.builtin.uri:
+    url: "{{ github_runner_cluster_headscale_api_base }}/api/v1/preauthkey"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ github_runner_cluster_headscale_api_key }}"
+      Content-Type: application/json
+    body_format: json
+    body: >-
+      {{
+        {'reusable': true, 'ephemeral': false, 'aclTags': [github_runner_cluster_mesh_tag],
+         'expiration': now(utc=true) | exadev.github_runner.headscale_expiry(github_runner_cluster_headscale_join_key_days)}
+        | combine({'user': github_runner_cluster_headscale_users.json.users[0].id} if github_runner_cluster_headscale_user | length > 0 else {})
+      }}
+    return_content: true
+  delegate_to: localhost
+  no_log: true
+  register: github_runner_cluster_headscale_created_key
+  when: github_runner_cluster_headscale_join_key_problem | length > 0
+
+- name: Record the new join key for the caller to persist
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_new_join_key: "{{ github_runner_cluster_headscale_created_key.json.preAuthKey.key }}"
+  no_log: true
+  when: github_runner_cluster_headscale_created_key is not skipped
+
+- name: Publish the join key and policy to every host in the play
+  # This file runs once, and a fact set in a run_once include lands only on the host that ran it.
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_join_key: "{{ github_runner_cluster_headscale_new_join_key | default(github_runner_cluster_headscale_join_key) }}"
+    github_runner_cluster_mesh_policy: "{{ github_runner_cluster_mesh_policy }}"
+  delegate_to: "{{ item }}"
+  delegate_facts: true
+  loop: "{{ ansible_play_hosts }}"
+  no_log: true

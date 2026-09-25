@@ -1,10 +1,11 @@
-"""Tests for the github_runner_cluster role's mesh filters: HuJSON parsing and the policy check."""
+"""Tests for the github_runner_cluster role's mesh filters: HuJSON parsing, the policy check and Headscale join key judgement."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[2] / "plugins" / "filter" / "mesh.py"
@@ -15,6 +16,7 @@ _spec.loader.exec_module(mesh)
 
 TAG = "tag:github-runner-node"
 POD_CIDR = "10.42.0.0/16"
+NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 
 
 class HujsonTest(unittest.TestCase):
@@ -64,6 +66,40 @@ class PolicyGapsTest(unittest.TestCase):
         both = json.loads(mesh.mesh_policy_snippet(["tagOwners", "autoApprovers"], POD_CIDR, TAG, "admin@"))
         self.assertEqual(both["tagOwners"], {TAG: ["admin@"]})
         self.assertEqual(mesh.mesh_policy_gaps(both, POD_CIDR, TAG), [])
+
+
+class JoinKeyTest(unittest.TestCase):
+    def key(self, **overrides: object) -> dict:
+        key = {"key": "hskey-auth-abc123-***", "reusable": True, "ephemeral": False, "aclTags": [TAG], "expiration": "2026-12-24T12:00:00.123456789Z"}
+        key.update(overrides)
+        return key
+
+    def test_a_matching_reusable_tagged_key_is_usable(self) -> None:
+        self.assertEqual(mesh.headscale_join_key_problem([self.key()], "hskey-auth-abc123-secretpart", TAG, NOW, 14), "")
+
+    def test_the_masked_prefix_must_match_exactly(self) -> None:
+        self.assertIn("not one of", mesh.headscale_join_key_problem([self.key()], "hskey-auth-abc1234-secret", TAG, NOW, 14))
+
+    def test_a_legacy_plaintext_key_matches_in_full(self) -> None:
+        self.assertEqual(mesh.headscale_join_key_problem([self.key(key="legacyplaintext")], "legacyplaintext", TAG, NOW.isoformat(), 14), "")
+
+    def test_unusable_keys_say_why(self) -> None:
+        cases = {
+            "not reusable": self.key(reusable=False),
+            "ephemeral": self.key(ephemeral=True),
+            "does not apply": self.key(aclTags=["tag:other"]),
+            "expires at": self.key(expiration="2026-10-01T00:00:00Z"),
+        }
+        for reason, key in cases.items():
+            with self.subTest(reason=reason):
+                self.assertIn(reason, mesh.headscale_join_key_problem([key], "hskey-auth-abc123-s", TAG, NOW, 14))
+
+    def test_no_key_and_no_expiry(self) -> None:
+        self.assertEqual(mesh.headscale_join_key_problem([], "", TAG, NOW, 14), "no join key is known")
+        self.assertEqual(mesh.headscale_join_key_problem([self.key(expiration="0001-01-01T00:00:00Z")], "hskey-auth-abc123-s", TAG, NOW, 14), "")
+
+    def test_expiry_is_days_after_now_in_utc(self) -> None:
+        self.assertEqual(mesh.headscale_expiry(NOW, 90), "2026-12-24T12:00:00Z")
 
 
 if __name__ == "__main__":

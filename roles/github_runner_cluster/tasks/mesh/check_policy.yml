@@ -12,7 +12,7 @@
     msg: |
       The {{ github_runner_cluster_mesh }} mesh's policy does not {{ github_runner_cluster_mesh_policy_gaps | map('extract', github_runner_cluster_mesh_gap_descriptions) | join(' or ') }}. This role never edits that policy; add the following to it (merging with any existing tagOwners and autoApprovers entries) and rerun:
 
-      {{ github_runner_cluster_mesh_policy_gaps | exadev.github_runner.mesh_policy_snippet(github_runner_cluster_pod_cidr, github_runner_cluster_mesh_tag, github_runner_cluster_mesh_policy_tag_owner | default('')) }}
+      {{ github_runner_cluster_mesh_policy_gaps | exadev.github_runner.mesh_policy_snippet(github_runner_cluster_pod_cidr, github_runner_cluster_mesh_tag, github_runner_cluster_mesh_policy_tag_owner) }}
   when: github_runner_cluster_mesh_policy_gaps | length > 0
   vars:
     github_runner_cluster_mesh_gap_descriptions:

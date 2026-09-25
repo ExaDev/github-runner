@@ -1,13 +1,17 @@
-"""Filters the github_runner_cluster role's mesh providers share: parsing a HuJSON policy and checking it approves the pod routes."""
+"""Filters the github_runner_cluster role's mesh providers share: parsing a HuJSON policy, checking it approves the pod routes, and judging a Headscale join key."""
 
 from __future__ import annotations
 
 import ipaddress
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ansible.errors import AnsibleFilterError
+
+HEADSCALE_KEY_PREFIX = "hskey-auth-"
+MASKED_KEY_SUFFIX = "-***"
 
 
 def hujson_to_data(text: str) -> Any:
@@ -99,6 +103,71 @@ def mesh_policy_snippet(gaps: Sequence[str], pod_cidr: str, tag: str, tag_owner:
     return json.dumps(snippet, indent=2)
 
 
+def _parse_time(value: Any) -> datetime | None:
+    """Parse an RFC 3339 timestamp from the Headscale API, returning None for an absent or zero one."""
+    if not value:
+        return None
+    text = str(value).replace("Z", "+00:00")
+    # Headscale emits nanosecond precision, which fromisoformat only accepts up to microseconds.
+    if "." in text:
+        head, _, tail = text.partition(".")
+        digits = "".join(ch for ch in tail if ch.isdigit())
+        zone = tail[len(digits) :]
+        text = f"{head}.{digits[:6]}{zone}"
+    parsed = datetime.fromisoformat(text)
+    if parsed.year <= 1:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _identifies(listed_key: str, join_key: str) -> bool:
+    """Return whether a key as the API lists it (masked to its prefix for current keys) is join_key."""
+    if listed_key.endswith(MASKED_KEY_SUFFIX) and listed_key.startswith(HEADSCALE_KEY_PREFIX):
+        return join_key.startswith(listed_key[: -len(MASKED_KEY_SUFFIX)] + "-")
+    return listed_key == join_key
+
+
+def headscale_join_key_problem(keys: Sequence[Mapping[str, Any]], join_key: str, tag: str, now: Any, renew_days: Any) -> str:
+    """Judge whether a known Headscale join key can keep being used for new nodes.
+
+    :param keys: the ``preAuthKeys`` list from GET /api/v1/preauthkey. :param join_key: the key the cluster would use, possibly empty. :param tag: the tag the key must apply. :param now: the current time, a datetime or RFC 3339 string. :param renew_days: how many days before expiry a key is treated as due for replacement. :returns: an empty string when the key is usable, otherwise why it is not. :raises AnsibleFilterError: if renew_days is not an integer.
+    """
+    try:
+        margin = timedelta(days=int(renew_days))
+    except (TypeError, ValueError) as exc:
+        raise AnsibleFilterError(f"github_runner_cluster_headscale_join_key_renew_days must be an integer: {exc}") from exc
+    if not join_key:
+        return "no join key is known"
+    current = now if isinstance(now, datetime) else _parse_time(now)
+    if current is None:
+        raise AnsibleFilterError(f"Cannot parse the current time {now!r}.")
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    match = next((key for key in keys if _identifies(str(key.get("key", "")), join_key)), None)
+    if match is None:
+        return "the join key is not one of this Headscale server's pre-auth keys"
+    if not match.get("reusable"):
+        return "the join key is not reusable"
+    if match.get("ephemeral"):
+        return "the join key is ephemeral"
+    if tag not in (match.get("aclTags") or []):
+        return f"the join key does not apply {tag}"
+    expiry = _parse_time(match.get("expiration"))
+    if expiry is not None and expiry - current < margin:
+        return f"the join key expires at {expiry.isoformat()}, within {margin.days} days"
+    return ""
+
+
+def headscale_expiry(now: Any, days: Any) -> str:
+    """Return the RFC 3339 time days after now, for a new key's expiration."""
+    current = now if isinstance(now, datetime) else _parse_time(now)
+    if current is None:
+        raise AnsibleFilterError(f"Cannot parse the current time {now!r}.")
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return (current + timedelta(days=int(days))).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class FilterModule:
     """Registers the mesh filters with Ansible."""
 
@@ -108,4 +177,6 @@ class FilterModule:
             "from_hujson": hujson_to_data,
             "mesh_policy_gaps": mesh_policy_gaps,
             "mesh_policy_snippet": mesh_policy_snippet,
+            "headscale_join_key_problem": headscale_join_key_problem,
+            "headscale_expiry": headscale_expiry,
         }

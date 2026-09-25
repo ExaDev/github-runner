@@ -1,5 +1,5 @@
 ---
-# Resolves every secret the cluster and ARC roles need, from 1Password or from github_runner_secrets_provided, and hands each role only its own fields: github_runner_cluster_k3s_token, github_runner_cluster_tailscale_join_key and github_runner_cluster_tailscale_api_token for the cluster role; github_runner_arc_ghcr_username, github_runner_arc_ghcr_token, github_runner_arc_heartbeat_gh_token and github_runner_arc_org_private_keys for the ARC role. Either role can be used without this one by setting those variables directly.
+# Resolves every secret the cluster and ARC roles need, from 1Password or from github_runner_secrets_provided, and hands each role only its own fields: github_runner_cluster_k3s_token, github_runner_cluster_tailscale_join_key, github_runner_cluster_tailscale_api_token, github_runner_cluster_headscale_api_key and github_runner_cluster_headscale_join_key for the cluster role; github_runner_arc_ghcr_username, github_runner_arc_ghcr_token, github_runner_arc_heartbeat_gh_token and github_runner_arc_org_private_keys for the ARC role. Either role can be used without this one by setting those variables directly.
 
 - name: Fail if no secrets source is set
   ansible.builtin.fail:
@@ -41,7 +41,9 @@
       ghcr_token: (.fields[] | select(.label=="ghcr-token") | .value),
       heartbeat_gh_token: (.fields[] | select(.label=="heartbeat-gh-token") | .value),
       tailscale_join_key: (.fields[] | select(.label=="tailscale-join-key") | .value),
-      tailscale_api_token: (.fields[] | select(.label=="tailscale-api-token") | .value)
+      tailscale_api_token: (.fields[] | select(.label=="tailscale-api-token") | .value),
+      headscale_api_key: ([.fields[] | select(.label=="headscale-api-key") | .value] | first // ""),
+      headscale_join_key: ([.fields[] | select(.label=="headscale-join-key") | .value] | first // "")
     }')
     org_keys='{}'
     {% for org in github_runner_secrets_all_orgs %}
@@ -80,13 +82,18 @@
       }}
   no_log: true
 
-# Only in 1Password mode may the cluster role create a Tailscale join key when none exists: it then persists the new key back to the item through persist_tailscale_join_key.yml. With provided secrets there is nowhere to persist it for the next run, so the key has to be supplied instead.
+# Only in 1Password mode may the cluster role create a Tailscale or Headscale join key when none exists: it then persists the new key back to the item through persist_tailscale_join_key.yml or persist_headscale_join_key.yml. With provided secrets there is nowhere to persist it for the next run, so the key has to be supplied instead.
+#
+# The Headscale fields are optional on the item (unlike the Tailscale ones, read above with a bare select that yields nothing when a field is absent), and an empty one leaves any value already set for the cluster role (e.g. in inventory) in place.
 - name: Hand the cluster role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
   ansible.builtin.set_fact:
     github_runner_cluster_k3s_token: "{{ github_runner_secrets_values.k3s_token }}"
     github_runner_cluster_tailscale_join_key: "{{ github_runner_secrets_values.tailscale_join_key | default('') }}"
     github_runner_cluster_tailscale_api_token: "{{ github_runner_secrets_values.tailscale_api_token | default('') }}"
     github_runner_cluster_create_tailscale_join_key: "{{ github_runner_secrets_provided | length == 0 }}"
+    github_runner_cluster_headscale_api_key: "{{ github_runner_secrets_values.headscale_api_key | default('', true) or github_runner_cluster_headscale_api_key | default('') }}"
+    github_runner_cluster_headscale_join_key: "{{ github_runner_secrets_values.headscale_join_key | default('', true) or github_runner_cluster_headscale_join_key | default('') }}"
+    github_runner_cluster_create_headscale_join_key: "{{ github_runner_secrets_provided | length == 0 }}"
   no_log: true
 
 - name: Hand the ARC role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
