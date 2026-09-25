@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage-driven maxRunners autoscaler. Runs inside the `autoscaler` in-cluster Deployment (see autoscaler/loop.sh for the poll loop). Never inspects job identity or the GitHub Actions queue: it only watches real, current memory usage and pressure, and adjusts spec.maxRunners on the single AutoscalingRunnerSet (exadev-runners, namespace arc-runners-exadev) accordingly. See the project README's Autoscaler section for the full algorithm and rationale.
 #
-# Environment (provided by the Deployment - see ansible/roles/github_runner_arc/tasks/install_platform.yml):
+# Environment (provided by the Deployment - see roles/github_runner_arc/tasks/install_platform.yml):
 # - kubectl needs no KUBECONFIG here: running as a pod with a mounted ServiceAccount token, client-go auto-detects in-cluster config.
 # - AUTOSCALER_DRY_RUN: "true" computes and logs only, never patches
 # - AUTOSCALER_USABLE_BUDGET_GI: proven-safe memory budget for all runner pods combined (see values/exadev-runners-values.yaml)

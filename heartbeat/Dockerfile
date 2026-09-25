@@ -1,6 +1,6 @@
 # Tiny image for the heartbeat Deployment (an in-cluster Kubernetes pod, not
 # a host-level Docker Compose service - see
-# ansible/roles/github_runner_arc/tasks/install_platform.yml): it only needs
+# roles/github_runner_arc/tasks/install_platform.yml): it only needs
 # kubectl (cluster health check), curl + jq (refresh the gist via the GitHub
 # API), and bash. All available from Alpine's apk, so the image is
 # arch-agnostic (no gh binary to fetch per-arch) and small. Build context is

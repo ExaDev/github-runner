@@ -1,0 +1,46 @@
+---
+# Collection metadata for exadev.github_runner. The version stays 0.0.0 in source: the release process stamps the real version at publish time.
+namespace: exadev
+name: github_runner
+version: 0.0.0
+readme: README.md
+authors:
+  - ExaDev
+description: Self-hosted GitHub Actions runners on k3s joined over Tailscale, using Actions Runner Controller.
+license:
+  - MIT
+tags:
+  - github
+  - actions
+  - runner
+  - kubernetes
+  - k3s
+dependencies:
+  kubernetes.core: ">=5.0.0"
+  community.docker: ">=4.0.0"
+  community.general: ">=9.0.0"
+repository: https://github.com/ExaDev/github-runner
+issues: https://github.com/ExaDev/github-runner/issues
+# Everything that is not collection content: the container images, the Compose stack and Helm values the roles read from a checkout on each target host, this fleet's own inventory and host_vars, CI, and the standalone bootstrap wrapper.
+build_ignore:
+  - .github
+  - .dockerignore
+  - .env*
+  - .gitignore
+  - .yamllint
+  - AGENTS.md
+  - CLAUDE.md
+  - .ansible-venv
+  - ansible
+  - autoscaler
+  - heartbeat
+  - k3s
+  - scripts
+  - values
+  - Dockerfile
+  - docker-compose.yml
+  - bootstrap.sh
+  - kubeconfig
+  - secrets
+  - logs
+  - "*.tar.gz"

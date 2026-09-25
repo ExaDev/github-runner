@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Brings up this machine as a fleet host without an Ansible control node, inventory entry, or 1Password: reads .env.bootstrap (copy .env.bootstrap.example), installs Ansible into a repo-local venv, and runs the same ansible/ role every inventory-managed host runs, against localhost over a local connection. There is deliberately no second implementation of any deployment step here - everything past translating .env.bootstrap into role variables is the role's job. Safe to rerun; extra arguments pass straight through to ansible-playbook (e.g. ./bootstrap.sh --check).
+# Brings up this machine as a fleet host without an Ansible control node, inventory entry, or 1Password: reads .env.bootstrap (copy .env.bootstrap.example), installs Ansible into a repo-local venv, and runs the same Ansible role every inventory-managed host runs, against localhost over a local connection. There is deliberately no second implementation of any deployment step here - everything past translating .env.bootstrap into role variables is the role's job. Safe to rerun; extra arguments pass straight through to ansible-playbook (e.g. ./bootstrap.sh --check).
 set -euo pipefail
 cd "$(dirname "$0")"
 repo_root="$(pwd)"
@@ -94,4 +94,4 @@ log "Running the github_runner_arc role against this machine as ${node_name} (${
 cd ansible
 ANSIBLE_COLLECTIONS_PATH="${venv}/collections" \
   ANSIBLE_PYTHON_INTERPRETER="${venv}/bin/python3" \
-  "${venv}/bin/ansible-playbook" -i localhost, --connection=local playbook.yml -e @"$vars_file" "$@"
+  "${venv}/bin/ansible-playbook" -i localhost, --connection=local ../playbooks/site.yml -e @"$vars_file" "$@"

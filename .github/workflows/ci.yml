@@ -114,16 +114,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Syntax-check the playbook
-        # Guarded inside the step, not via a job-level if: ansible/ doesn't exist on main yet (ExaDev/github-runner#2 is still open), and hashFiles() isn't available in a job-level if anyway (it can only see files after checkout has already run). Safe to leave this guard in place once that PR merges - it just always proceeds.
+        # From ansible/ so its ansible.cfg (inventory, roles_path) applies, the same way an operator runs it.
         run: |
           set -euo pipefail
-          if [ ! -f ansible/playbook.yml ]; then
-            echo "ansible/playbook.yml not present yet - nothing to check."
-            exit 0
-          fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq ansible
-          (cd ansible && ansible-playbook playbook.yml --syntax-check)
+          (cd ansible && ansible-playbook ../playbooks/site.yml --syntax-check)
 
   required-checks:
     name: Required Checks

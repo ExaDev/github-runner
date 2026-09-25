@@ -1,6 +1,6 @@
 # Tiny image for the autoscaler Deployment (an in-cluster Kubernetes pod, not
 # a host-level Docker Compose service - see
-# ansible/roles/github_runner_arc/tasks/install_platform.yml): it only needs
+# roles/github_runner_arc/tasks/install_platform.yml): it only needs
 # kubectl (read/patch the AutoscalingRunnerSet, kubectl top pod/nodes), jq,
 # and bash. Same shape as heartbeat/Dockerfile: Alpine keeps it arch-agnostic
 # and small. Build context is the repo root so it can COPY

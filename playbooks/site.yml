@@ -1,5 +1,5 @@
 ---
-# Single entrypoint. Scope a run to one machine with --limit, e.g.: ansible-playbook playbook.yml --limit node-b
+# Single entrypoint. Run it from ansible/ so that ansible.cfg and the inventory apply, and scope a run to one machine with --limit, e.g.: ansible-playbook ../playbooks/site.yml --limit node-b
 - name: ExaDev GitHub Actions runner fleet
   hosts: all
   gather_facts: true
