@@ -1,4 +1,0 @@
-# Intentionally minimal - the controller chart's own defaults are correct
-# for a single-cluster, single-controller setup shared by every org (the
-# controller watches all namespaces by default, so one install here serves
-# every org's runner scale set release - see values/<org>-runners-values.yaml).

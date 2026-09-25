@@ -1,5 +1,15 @@
 ---
 # Single entrypoint. Run it from ansible/ so that ansible.cfg and the inventory apply, and scope a run to one machine with --limit, e.g.: ansible-playbook ../playbooks/site.yml --limit node-b
+# Checks the ARC configuration before k3s is started or changed, so bad input fails before anything changes. Needs no facts and no secrets.
+- name: Validate the ARC configuration
+  hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
+  gather_facts: false
+  tasks:
+    - name: Validate before anything changes
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_arc
+        tasks_from: validate.yml
+
 - name: ExaDev GitHub Actions runner fleet
   # The cluster group, whose inventory order decides which hosts are k3s servers (see roles/github_runner_cluster/defaults/main.yml). bootstrap.sh sets github_runner_cluster_group to all, since its one-host inventory has no groups.
   hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"

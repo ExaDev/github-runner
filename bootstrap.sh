@@ -65,10 +65,14 @@ jq -n \
         app_id: env.EXADEV_APP_ID,
         installation_id: (env.EXADEV_APP_INSTALLATION_ID // ""),
         image: "ghcr.io/exadev/github-runner:latest",
-        scale_set_profiles: [{suffix: "", values_file: "exadev-runners-values.yaml"}]
+        scale_set_profiles: [{suffix: "", values_file: "exadev-runners-values.yaml", autoscale: true}]
       }]
       end
     ),
+    github_runner_arc_values_dir: ($repo_root + "/values"),
+    github_runner_arc_autoscaler_usable_budget_gi: (env.AUTOSCALER_USABLE_BUDGET_GI // "" | if . == "" then "24" else . end),
+    github_runner_arc_autoscaler_max_ceiling: (env.AUTOSCALER_MAX_CEILING // "" | if . == "" then "7" else . end),
+    github_runner_arc_autoscaler_floor: (env.AUTOSCALER_FLOOR // "" | if . == "" then "3" else . end),
     github_runner_secrets_provided: {
       k3s_token: (env.K3S_TOKEN // ""),
       tailscale_join_key: (env.K3S_VPN_AUTH_JOIN_KEY // ""),
@@ -81,9 +85,6 @@ jq -n \
   }
   + opt("github_runner_arc_autoscaler_dry_run"; "AUTOSCALER_DRY_RUN")
   + opt("github_runner_arc_autoscaler_poll_seconds"; "AUTOSCALER_POLL_SECONDS")
-  + opt("github_runner_arc_autoscaler_usable_budget_gi"; "AUTOSCALER_USABLE_BUDGET_GI")
-  + opt("github_runner_arc_autoscaler_max_ceiling"; "AUTOSCALER_MAX_CEILING")
-  + opt("github_runner_arc_autoscaler_floor"; "AUTOSCALER_FLOOR")
   + opt("github_runner_arc_autoscaler_raise_confirm_polls"; "AUTOSCALER_RAISE_CONFIRM_POLLS")
   + opt("github_runner_arc_autoscaler_mem_available_pressure_pct"; "AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT")
   ' >"$vars_file"

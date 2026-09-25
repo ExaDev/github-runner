@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
-# Usage-driven maxRunners autoscaler. Runs inside the `autoscaler` in-cluster Deployment (see autoscaler/loop.sh for the poll loop). Never inspects job identity or the GitHub Actions queue: it only watches real, current memory usage and pressure, and adjusts spec.maxRunners on the single AutoscalingRunnerSet (exadev-runners, namespace arc-runners-exadev) accordingly. See the project README's Autoscaler section for the full algorithm and rationale.
+# Usage-driven maxRunners autoscaler. Runs inside the `autoscaler` in-cluster Deployment (see autoscaler/loop.sh for the poll loop). Never inspects job identity or the GitHub Actions queue: it only watches real, current memory usage and pressure, and adjusts spec.maxRunners on the single AutoscalingRunnerSet named by AUTOSCALER_NAMESPACE and AUTOSCALER_RELEASE_NAME accordingly. See the project README's Autoscaler section for the full algorithm and rationale.
 #
 # Environment (provided by the Deployment - see roles/github_runner_arc/tasks/install_platform.yml):
 # - kubectl needs no KUBECONFIG here: running as a pod with a mounted ServiceAccount token, client-go auto-detects in-cluster config.
 # - AUTOSCALER_DRY_RUN: "true" computes and logs only, never patches
-# - AUTOSCALER_USABLE_BUDGET_GI: proven-safe memory budget for all runner pods combined (see values/exadev-runners-values.yaml)
+# - AUTOSCALER_USABLE_BUDGET_GI: proven-safe memory budget for all runner pods combined, across every node the scale set can use
 # - AUTOSCALER_MAX_CEILING: hard operator cap on maxRunners, independent of the live arithmetic
 # - AUTOSCALER_FLOOR: the static floor every Helm upgrade reverts to
 # - AUTOSCALER_RAISE_CONFIRM_POLLS: consecutive polls of confirmed headroom before raising
 # - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT: MemAvailable-of-MemTotal percentage treated as real pressure, evaluated as the worst case across all nodes (see the kubectl top nodes block below) - no swap-pressure equivalent, see that block's own comment for why
-# - AUTOSCALER_NAMESPACE, AUTOSCALER_RELEASE_NAME: the AutoscalingRunnerSet to manage
+# - AUTOSCALER_NAMESPACE, AUTOSCALER_RELEASE_NAME: the AutoscalingRunnerSet to manage (the scale-set profile with autoscale: true)
 # - AUTOSCALER_STATE_NAMESPACE, AUTOSCALER_STATUS_CONFIGMAP: the ConfigMap this pod's own status/raise-confirm-count state lives in (shared with scripts/heartbeat.sh, which reads status.json back out to republish in the heartbeat gist)
 set -euo pipefail
 
-NAMESPACE="${AUTOSCALER_NAMESPACE:-arc-runners-exadev}"
-RELEASE_NAME="${AUTOSCALER_RELEASE_NAME:-exadev-runners}"
+# The target and the pool-specific figures have no defaults: they depend on the cluster, and the role always sets them.
+NAMESPACE="${AUTOSCALER_NAMESPACE:?AUTOSCALER_NAMESPACE must be set}"
+RELEASE_NAME="${AUTOSCALER_RELEASE_NAME:?AUTOSCALER_RELEASE_NAME must be set}"
 DRY_RUN="${AUTOSCALER_DRY_RUN:-true}"
-USABLE_BUDGET_GI="${AUTOSCALER_USABLE_BUDGET_GI:-24}"
-MAX_CEILING="${AUTOSCALER_MAX_CEILING:-7}"
-FLOOR="${AUTOSCALER_FLOOR:-3}"
+USABLE_BUDGET_GI="${AUTOSCALER_USABLE_BUDGET_GI:?AUTOSCALER_USABLE_BUDGET_GI must be set}"
+MAX_CEILING="${AUTOSCALER_MAX_CEILING:?AUTOSCALER_MAX_CEILING must be set}"
+FLOOR="${AUTOSCALER_FLOOR:?AUTOSCALER_FLOOR must be set}"
 RAISE_CONFIRM_POLLS="${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}"
 MEM_AVAILABLE_PRESSURE_PCT="${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}"
 STATE_NAMESPACE="${AUTOSCALER_STATE_NAMESPACE:-github-runner-platform}"
@@ -81,7 +82,7 @@ fail_safe() {
 
 # ---- Gather signals ---------------------------------------------------------
 
-# R: the authoritative currently-running count, read from the AutoscalingRunnerSet CRD's own status (not a pod-label guess). arc-runners-exadev holds exactly one scale set by design — see the project's decision not to differentiate runner pools — so no scale-set-specific label selector is even needed for anything below.
+# R: the authoritative currently-running count, read from the AutoscalingRunnerSet CRD's own status (not a pod-label guess). The role gives every scale-set profile its own namespace, so the target namespace holds exactly this one scale set and no scale-set-specific label selector is needed for anything below.
 R="$(kubectl get autoscalingrunnerset "$RELEASE_NAME" -n "$NAMESPACE" -o jsonpath='{.status.currentRunners}' 2>/dev/null)" \
   || fail_safe "could not read ${RELEASE_NAME}'s status.currentRunners"
 case "$R" in ''|*[!0-9]*) fail_safe "status.currentRunners was not a plain integer ('$R')" ;; esac

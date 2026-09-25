@@ -1,7 +1,7 @@
 ---
 galaxy_info:
   author: ExaDev
-  description: Installs GitHub's Actions Runner Controller, runner scale sets and a fleet-health platform into a k3s cluster.
+  description: Installs GitHub's Actions Runner Controller, runner scale sets and a fleet-health platform into a Kubernetes cluster.
   license: MIT
   min_ansible_version: "2.15"
   platforms:

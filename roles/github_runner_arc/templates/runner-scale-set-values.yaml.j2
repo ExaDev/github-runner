@@ -1,0 +1,18 @@
+{# Default values for a gha-runner-scale-set release whose profile names no values_file, rendered on the control node for each such profile. `profile` is the expanded profile (see plugins/filter/arc.py); profile.settings holds the profile's own keys: max_runners, min_runners (default 0), container_mode ("dind" for the chart's built-in Docker-in-Docker) and resources (the runner container's requests and limits). githubConfigUrl, githubConfigSecret, the image, the pull secret and scaleSetLabels are set by the role on every release. #}
+minRunners: {{ profile.settings.min_runners | default(0) | int }}
+{% if profile.settings.max_runners is defined and profile.settings.max_runners is not none %}
+maxRunners: {{ profile.settings.max_runners | int }}
+{% endif %}
+{% if profile.settings.container_mode | default('') | length > 0 %}
+containerMode:
+  type: {{ profile.settings.container_mode | to_json }}
+{% endif %}
+template:
+  spec:
+    containers:
+      - name: runner
+        # Needed even in dind mode: supplying this container replaces the chart's default definition rather than merging into it, and dind mode only appends its own env and mounts, so without a command the container runs a bare shell and exits without registering.
+        command: ["/home/runner/run.sh"]
+{% if profile.settings.resources is defined %}
+        resources: {{ profile.settings.resources | to_json }}
+{% endif %}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs inside the `heartbeat` in-cluster Deployment (see heartbeat/loop.sh for the ~3-min loop). Checks the k3s cluster and ARC controller are healthy and, if so, refreshes a single secret gist with a unix timestamp ("healthy until"). ExaDev/runner-fallback-action reads that gist to decide self-hosted vs ubuntu-latest - see this action's docs/spec.md.
+# Runs inside the `heartbeat` in-cluster Deployment (see heartbeat/loop.sh for the ~3-min loop). Checks the k3s cluster and ARC controller are healthy and, if so, refreshes a single secret gist with a unix timestamp ("healthy until"). A consumer such as a runner fallback action reads that gist to decide between self-hosted and GitHub-hosted runners.
 #
 # Environment (provided by the Deployment - see roles/github_runner_arc/tasks/install_platform.yml):
 # - kubectl needs no KUBECONFIG here: running as a pod with a mounted ServiceAccount token, client-go auto-detects in-cluster config.

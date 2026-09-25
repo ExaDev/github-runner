@@ -1,27 +1,26 @@
 ---
-# Included once per org from tasks/main.yml's loop, with `org` set to that org's entry from github_runner_arc_orgs. Resolves the installation ID once per org, then delegates namespace/secrets/scale-set-release creation to install_scale_set_profile.yml once per entry in org.scale_set_profiles - see that key's own comment in host_vars/node-a.yml for why a single org can need more than one.
+# Included once per org from main.yml, with `org` set to its github_runner_arc_orgs entry. Resolves the installation id once per org, then installs each of the org's scale-set profiles through install_scale_set_profile.yml.
 
-- name: "{{ org.name }}: resolve installation ID"
+- name: Resolve the installation ID of {{ org.name }}
   ansible.builtin.include_tasks: resolve_installation_id.yml
   when: (org.installation_id | default('')) | length == 0
 
-- name: "{{ org.name }}: set the effective installation ID"
-  # Read directly by name, no hostvars indirection: resolve_installation_id.yml sets this via a plain set_fact with no delegate_facts, so - per Ansible's own default - it already attaches to inventory_hostname (node-b, this host), not to the localhost it delegated its own execution to.
+- name: Set the effective installation ID of {{ org.name }}
+  # Read directly by name: resolve_installation_id.yml sets this with a plain set_fact and no delegate_facts, so it attaches to this host, not to the localhost it delegated to.
   ansible.builtin.set_fact:
     github_runner_arc_installation_id: "{{ github_runner_arc_resolved_installation_id | default(org.installation_id) }}"
 
-- name: "{{ org.name }}: install/upgrade each scale-set profile"
+- name: Install/upgrade each scale-set profile of {{ org.name }}
   ansible.builtin.include_tasks: install_scale_set_profile.yml
-  loop: "{{ org.scale_set_profiles }}"
+  loop: "{{ github_runner_arc_local.profiles | selectattr('org_name', 'equalto', org.name) }}"
   loop_control:
     loop_var: profile
-    label: "{{ profile.suffix | default('(default)') }}"
+    label: "{{ profile.label }}"
 
-- name: "{{ org.name }}: trigger an immediate autoscaler reconcile"
-  # kubectl exec, not docker compose exec: the autoscaler runs as an in-cluster Deployment now, genuinely unpinned to any one host, so this has to go through the API server rather than a local Docker socket - it also means this step now actually works when Ansible is run against a host other than wherever the autoscaler pod happens to be scheduled, unlike the docker-compose-exec equivalent it replaces, which silently no-op'd from any host but the one pinned to run it.
+- name: Trigger an immediate autoscaler reconcile after upgrading {{ org.name }}
+  # Every Helm upgrade above reverts maxRunners to its values file's floor; this shrinks that window to seconds instead of waiting for the autoscaler's next poll. Goes through the API server (kubectl exec) because the autoscaler is an unpinned in-cluster Deployment. Best-effort: the poll loop catches up regardless, including when the Deployment does not exist yet.
   ansible.builtin.command: kubectl exec deploy/autoscaler -n {{ github_runner_arc_platform_namespace }} -- /app/scripts/autoscaler.sh
-  environment:
-    KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
+  environment: "{{ {'KUBECONFIG': github_runner_arc_kubeconfig_path} if github_runner_arc_kubeconfig_path | length > 0 else {} }}"
   changed_when: false
   failed_when: false
-  # Every Helm upgrade above reverts maxRunners to its values file's safe floor. This shrinks that safe-floor window to seconds instead of waiting for the autoscaler's own next poll tick. Best-effort: the autoscaler is exadev-specific today, and the ordinary poll loop catches this regardless if the exec fails for any reason (including the Deployment not existing yet).
+  when: github_runner_arc_fleet.autoscaled is not none and github_runner_arc_fleet.autoscaled.org_name == org.name

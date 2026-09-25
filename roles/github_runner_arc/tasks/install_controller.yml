@@ -1,0 +1,11 @@
+---
+# The controller's values are rendered on the control node and handed to the helm module as a mapping, which writes them to a temporary values file wherever the module runs, so no values file needs to exist on the target host.
+
+- name: Install/upgrade the ARC controller release
+  kubernetes.core.helm:
+    name: arc
+    chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+    chart_version: "{{ github_runner_arc_controller_chart_version | default(omit) }}"
+    release_namespace: actions-runner-controller
+    create_namespace: true
+    values: "{{ lookup('ansible.builtin.template', 'controller-values.yaml.j2') | from_yaml | default({}, true) }}"

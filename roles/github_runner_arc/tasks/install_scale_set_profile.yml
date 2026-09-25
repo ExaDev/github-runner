@@ -1,96 +1,83 @@
 ---
-# Included once per entry in org.scale_set_profiles, with `org` and `profile` already set by install_org.yml's own loop. Each profile gets its own namespace, not a shared one: the chart names some resources (e.g. the ServiceAccount) after runnerScaleSetName rather than the Helm release name, so two releases sharing one runnerScaleSetName collide outright if they land in the same namespace - confirmed live. Namespacing per profile also means each needs its own copy of the org's secrets, since Kubernetes Secrets are namespace-scoped.
+# Included once per scale-set profile, with `org` and `profile` (the expanded profile from plugins/filter/arc.py) set by install_org.yml. Each profile gets its own namespace: the chart names some resources (the ServiceAccount, for one) after runnerScaleSetName rather than the release, so two releases in one namespace collide. Secrets are namespace-scoped, so each namespace needs its own copy of the org's.
 
-- name: "{{ org.name }}{{ profile.suffix }}: create namespace"
+- name: Create the namespace for {{ profile.label }}
   kubernetes.core.k8s:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
     definition:
       apiVersion: v1
       kind: Namespace
       metadata:
-        name: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
+        name: "{{ profile.namespace }}"
 
-- name: "{{ org.name }}{{ profile.suffix }}: create/update GitHub App secret"
+- name: Create/update the GitHub App secret for {{ profile.label }}
   kubernetes.core.k8s:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
     definition:
       apiVersion: v1
       kind: Secret
       type: Opaque
       metadata:
-        name: "{{ org.name | lower }}-github-app"
-        namespace: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
+        name: "{{ profile.app_secret }}"
+        namespace: "{{ profile.namespace }}"
       stringData:
         github_app_id: "{{ org.app_id | string }}"
         github_app_installation_id: "{{ github_runner_arc_installation_id }}"
         github_app_private_key: "{{ github_runner_arc_org_private_keys[org.name] }}"
   no_log: true
 
-- name: "{{ org.name }}{{ profile.suffix }}: create/update GHCR pull secret"
+- name: Create/update the image pull secret for {{ profile.label }}
   kubernetes.core.k8s:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-    definition:
-      apiVersion: v1
-      kind: Secret
-      type: kubernetes.io/dockerconfigjson
-      metadata:
-        name: ghcr-pull
-        namespace: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
-      data:
-        .dockerconfigjson: >-
-          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_ghcr_username,
-                                      'password': github_runner_arc_ghcr_token,
-                                      'auth': (github_runner_arc_ghcr_username ~ ':' ~ github_runner_arc_ghcr_token) | b64encode}}})
-             | to_json | b64encode }}
+    definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars={'namespace': profile.namespace}) | from_yaml }}"
   no_log: true
 
-- name: "{{ org.name }}{{ profile.suffix }}: install/upgrade scale-set release"
-  # runnerScaleSetName is deliberately left unset, not forced to the same value across profiles: it defaults to the Helm release name and IS the scale set's own unique registration identity on GitHub's side (not just a label) - confirmed live, forcing two releases to share it made the second one's listener crash-loop trying to register a duplicate. scaleSetLabels is the correct mechanism for pooling: an ADDITIONAL label every profile's runners also carry, alongside their own already-unique default label, letting runs-on: <label> match every profile sharing it without any of them colliding on identity. Most profiles want the org's own shared label (the default below); a profile can set its own runs_on_label instead when it deliberately should NOT pool with the others - e.g. a dedicated image-building profile that ordinary CI jobs have no business landing on.
+- name: Install/upgrade the scale-set release for {{ profile.label }}
+  # runnerScaleSetName is left to default to the release name: it is the scale set's registration identity on GitHub, so two releases sharing it make the second one's listener crash-loop registering a duplicate. scaleSetLabels is the pooling mechanism instead: an extra label every profile's runners carry alongside their own unique one, so runs-on: <label> matches every profile sharing it. A profile sets its own runs_on_label to stay out of the shared pool.
   kubernetes.core.helm:
-    name: "{{ org.name | lower }}-runners{{ profile.suffix }}"
+    name: "{{ profile.release }}"
     chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
     chart_version: "{{ github_runner_arc_scaleset_chart_version | default(omit) }}"
-    release_namespace: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
-    values_files:
-      - "{{ github_runner_arc_values_dir }}/{{ profile.values_file }}"
-    # --set-equivalent overrides only for containers[]: a nested `values:` dict would replace it wholesale (Helm does not deep-merge lists), silently dropping the values file's own command/resources for that container.
+    release_namespace: "{{ profile.namespace }}"
+    # Rendered on the control node: the profile's values file (or the role's default template), with the role's own overlay merged over it. Helm merges nested mappings the same way, so this is the same as passing the two as separate values files.
+    values: >-
+      {{
+        (lookup('ansible.builtin.template', github_runner_arc_values_source) | from_yaml | default({}, true))
+        | combine(lookup('ansible.builtin.template', 'scale-set-overlay.yaml.j2') | from_yaml, recursive=true)
+      }}
+    # --set rather than values for containers[]: Helm replaces lists wholesale, so a values mapping naming containers would drop the values file's own command and resources for that container.
     set_values:
       - value: "githubConfigUrl=https://github.com/{{ org.name }}"
-      - value: "githubConfigSecret={{ org.name | lower }}-github-app"
-      - value: "template.spec.imagePullSecrets[0].name=ghcr-pull"
+      - value: "githubConfigSecret={{ profile.app_secret }}"
+      - value: "template.spec.imagePullSecrets[0].name={{ github_runner_arc_image_pull_secret_name }}"
       - value: "template.spec.containers[0].image={{ org.image }}"
-      - value: "scaleSetLabels[0]={{ profile.runs_on_label | default(org.name | lower ~ '-runners') }}"
-    # nodeSelector is a map, not a list, so a nested `values:` dict merges it safely (no wholesale-replacement risk the comment above warns about for containers[]) - simpler and more robust than building a --set path string with escaped dots for a key like kubernetes.io/hostname.
-    values:
-      template:
-        spec:
-          nodeSelector: "{{ profile.node_selector | default({}) }}"
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
+      - value: "scaleSetLabels[0]={{ profile.runs_on_label }}"
+  vars:
+    github_runner_arc_values_source: >-
+      {{
+        'runner-scale-set-values.yaml.j2' if profile.values_file | length == 0
+        else profile.values_file if profile.values_file is abs
+        else github_runner_arc_values_dir ~ '/' ~ profile.values_file
+      }}
 
-# A Helm upgrade that changes the pod template (resource limits, nodeSelector, and similar) renames the EphemeralRunnerSet the release owns - it carries a spec-hash suffix. The AutoscalingListener is supposed to track the rename, but can be left pointing at the old, now-deleted name: it then crash-loops every second or two failing to patch a runner set that no longer exists, and the scale set's own job queue never gets serviced. Confirmed live - see README's Non-obvious behaviour section. Self-heal by deleting the stale listener; the controller recreates it immediately against whichever EphemeralRunnerSet actually exists now.
-- name: "{{ org.name }}{{ profile.suffix }}: check for a stale AutoscalingListener referencing a deleted EphemeralRunnerSet"
+# A Helm upgrade that changes the pod template renames the EphemeralRunnerSet the release owns (it carries a spec-hash suffix). The AutoscalingListener should follow the rename but can be left pointing at the deleted name, crash-looping on every patch while the scale set's queue goes unserviced; see the README's Non-obvious behaviour section. Deleting the stale listener makes the controller recreate it against the EphemeralRunnerSet that exists now.
+- name: Find the AutoscalingListener for {{ profile.label }}
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
     api_version: actions.github.com/v1alpha1
     kind: AutoscalingListener
     namespace: actions-runner-controller
     label_selectors:
-      - "actions.github.com/scale-set-name={{ org.name | lower }}-runners{{ profile.suffix }}"
+      - "actions.github.com/scale-set-name={{ profile.release }}"
   register: github_runner_arc_listener
 
-- name: "{{ org.name }}{{ profile.suffix }}: check the EphemeralRunnerSet the listener actually points at still exists"
+- name: Check the EphemeralRunnerSet the listener points at still exists for {{ profile.label }}
   kubernetes.core.k8s_info:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
     api_version: actions.github.com/v1alpha1
     kind: EphemeralRunnerSet
-    namespace: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
+    namespace: "{{ profile.namespace }}"
     name: "{{ github_runner_arc_listener.resources[0].spec.ephemeralRunnerSetName }}"
   register: github_runner_arc_ephemeral_runner_set
   when: github_runner_arc_listener.resources | length > 0
 
-- name: "{{ org.name }}{{ profile.suffix }}: delete the stale listener so the controller recreates it against the current EphemeralRunnerSet"
+- name: Delete a stale listener so the controller recreates it for {{ profile.label }}
   kubernetes.core.k8s:
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
     state: absent
     api_version: actions.github.com/v1alpha1
     kind: AutoscalingListener

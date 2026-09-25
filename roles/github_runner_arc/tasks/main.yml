@@ -1,78 +1,42 @@
 ---
-# Installs the ARC controller, the fleet-health platform, and each org's runner scale sets into the k3s cluster the github_runner_cluster role brought up. Inventory-managed hosts run it over SSH, and bootstrap.sh runs it locally against a single machine. Safe to rerun: every mutating task below uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
+# Installs the ARC controller, the fleet-health platform, and each org's runner scale sets into the cluster github_runner_arc_kubeconfig_path reaches. Safe to rerun: every mutating task uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
 
-# The fleet-health platform installs from whichever host sets github_runner_arc_heartbeat_gist_id (see install_platform.yml), so the question is whether ANY host in the inventory sets one, not whether a particular host does: checked across groups['all'], which --limit doesn't narrow, so scoping a run to a host without a gist id never triggers this. scripts/heartbeat.sh has its own `:?required` check on HEARTBEAT_GIST_ID at container startup, but that only surfaces as a crash-looping pod after the fact, and with no gist id anywhere the platform isn't installed at all and runner-fallback-action silently routes everything to ubuntu-latest. Bootstraps it the same way the README's own manual instructions do (`gh gist create`, using the control node's own authenticated `gh` session), then fails deliberately: the new gist's id needs recording in TWO places a human must do by hand (a host's own host_vars, and exadev/runner-fallback-action's own action.yml default), and creating it silently and continuing would leave the second half of that undone with no signal that it's needed.
-- name: Bootstrap the heartbeat gist if no host in the fleet has one yet
-  run_once: true
-  when: groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_heartbeat_gist_id', default='') | select | list | length == 0
-  block:
-    - name: Create the heartbeat status gist
-      ansible.builtin.command:
-        argv:
-          - gh
-          - gist
-          - create
-          - --filename
-          - arc-healthy-until
-          - --desc
-          - "ExaDev ARC fleet health heartbeat"
-          - "-"
-        stdin: "{{ (ansible_date_time.epoch | int + 600) | string }}"
-      delegate_to: localhost
-      register: github_runner_arc_new_gist
-
-    - name: Fail, printing the new gist's id for the operator to record
-      ansible.builtin.fail:
-        msg: >-
-          Created a new heartbeat gist: {{ github_runner_arc_new_gist.stdout }}.
-          Add its id (the hex tail of the URL) to
-          github_runner_arc_heartbeat_gist_id in the host_vars of whichever
-          host should install the fleet-health platform, AND update
-          exadev/runner-fallback-action's own action.yml gist-id default to
-          match, then rerun.
-
-# Installs are driven purely by per-host config presence rather than a single designated "primary", so two or more server hosts could in principle both configure the same org name, and kubernetes.core.helm (one release, one namespace) would then race against itself from two hosts under Ansible's default parallel-per-task execution. The convention is exactly one host per org, enforced here rather than left as an unwritten assumption.
-- name: Fail if the same org name is configured on more than one host
-  ansible.builtin.fail:
-    msg: >-
-      Org '{{ item }}' is configured in github_runner_arc_orgs on more than
-      one host. Each org's Helm release must be installed from exactly one
-      host. Remove the duplicate from every host_vars file but one.
-  loop: "{{ github_runner_arc_all_org_names | unique }}"
-  when: github_runner_arc_all_org_names | select('equalto', item) | list | length > 1
-  vars:
-    github_runner_arc_all_org_names: "{{ groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_orgs', default=[]) | flatten | map(attribute='name') | list }}"
+# playbooks/site.yml runs validate.yml in an earlier play so that bad input fails before anything changes; this covers a play that includes the role on its own.
+- name: Validate the ARC configuration
+  ansible.builtin.include_tasks: validate.yml
+  when: not (github_runner_arc_validated | default(false))
 
 # github_runner_cluster_effective_node_role is published by the github_runner_cluster role; a host that role made an agent has no kubeconfig of its own and installs nothing, whatever its own orgs or gist id say.
 - name: End the role here on an agent host
   ansible.builtin.meta: end_role
   when: (github_runner_cluster_effective_node_role | default('server')) == 'agent'
 
+- name: End the role here on a host that installs nothing
+  ansible.builtin.meta: end_role
+  when: github_runner_arc_orgs | length == 0 and github_runner_arc_heartbeat_gist_id | length == 0
+
 - name: Give this host the kubernetes Python client
-  # Only needed on a host that actually talks to the Kubernetes API (kubernetes.core.k8s/k8s_info/helm, used below, in install_platform.yml, and in install_org.yml): a server host with neither orgs nor the fleet-health platform configured never needs it.
   ansible.builtin.include_role:
     name: github_runner_k8s_client
-  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
 
-- name: Ensure the fleet-health platform (heartbeat + autoscaler) is installed
-  ansible.builtin.include_tasks: install_platform.yml
-  when: github_runner_arc_heartbeat_gist_id | length > 0
+- name: Install into the cluster
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ github_runner_arc_kubeconfig_path or omit }}"
+    group/kubernetes.core.helm:
+      kubeconfig: "{{ github_runner_arc_kubeconfig_path or omit }}"
+  block:
+    - name: Ensure the fleet-health platform (heartbeat and autoscaler) is installed
+      ansible.builtin.include_tasks: install_platform.yml
+      when: github_runner_arc_heartbeat_gist_id | length > 0
 
-- name: Install/upgrade the ARC controller (shared by every org on this host)
-  kubernetes.core.helm:
-    name: arc
-    chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
-    chart_version: "{{ github_runner_arc_controller_chart_version | default(omit) }}"
-    release_namespace: actions-runner-controller
-    create_namespace: true
-    values_files:
-      - "{{ github_runner_arc_values_dir }}/controller-values.yaml"
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-  when: github_runner_arc_orgs | length > 0
+    - name: Install/upgrade the ARC controller (shared by every org on this host)
+      ansible.builtin.include_tasks: install_controller.yml
+      when: github_runner_arc_orgs | length > 0
 
-- name: Install/upgrade each org's runner scale set
-  ansible.builtin.include_tasks: install_org.yml
-  loop: "{{ github_runner_arc_orgs }}"
-  loop_control:
-    loop_var: org
-    label: "{{ org.name }}"
+    - name: Install/upgrade each org's runner scale sets
+      ansible.builtin.include_tasks: install_org.yml
+      loop: "{{ github_runner_arc_orgs }}"
+      loop_control:
+        loop_var: org
+        label: "{{ org.name }}"

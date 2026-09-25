@@ -1,35 +1,40 @@
 ---
-# ARC (Actions Runner Controller) on an existing k3s cluster: the controller, each org's runner scale sets, and the fleet-health platform (heartbeat/autoscaler). None of it is tied to a node role: each part is gated purely on whether THIS host's own github_runner_arc_orgs or github_runner_arc_heartbeat_gist_id is set, so any server host can be the one Ansible installs against. On a host the github_runner_cluster role made an agent, this role installs nothing.
+# ARC (Actions Runner Controller) in an existing Kubernetes cluster: the controller, each org's runner scale sets, and the fleet-health platform (heartbeat and autoscaler). Each part is gated on this host's own github_runner_arc_orgs or github_runner_arc_heartbeat_gist_id, so any host that can reach the cluster's API can be the one Ansible installs from: a k3s server host brought up by github_runner_cluster, or localhost with a kubeconfig. On a host github_runner_cluster made an agent, this role installs nothing.
 
-# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets FROM that host (server hosts only; any server host works, not just a specific designated one). Each entry becomes one namespace per scale-set profile, two Kubernetes Secrets per namespace, and one Helm release per profile. Empty (the default) means the role no-ops that part entirely on that host. See ansible/host_vars/node-a.yml for a real, working example.
+# Orgs whose runner scale sets this host installs. Each entry: name, app_id, image, optionally installation_id (resolved from the App when empty) and private_key_op_reference (for github_runner_secrets), and scale_set_profiles, a list of {suffix, values_file?, node_selector?, runs_on_label?, autoscale?, sizing?}. Each profile becomes one namespace (arc-runners-<org><suffix>), two Secrets in it, and one Helm release (<org>-runners<suffix>). See the README for every profile key.
 github_runner_arc_orgs: []
 
-# Set github_runner_arc_heartbeat_gist_id in a host's own host_vars to install the fleet-health platform FROM that host (server hosts only; any server host works, same as github_runner_arc_orgs above). Empty (the default) means install_platform.yml no-ops entirely on that host.
+# Directory on the control node that a relative scale_set_profiles[].values_file is read from. Values files are Jinja templates rendered on the control node, so the target host needs no checkout. A profile with no values_file uses the role's own templates/runner-scale-set-values.yaml.j2.
+github_runner_arc_values_dir: ""
+
+# Kubeconfig path on the host the role runs against. Empty means the Kubernetes modules' own default (KUBECONFIG, then ~/.kube/config); a host brought up by github_runner_cluster uses the kubeconfig that role writes.
+github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path | default('') }}"
+
+# Helm chart version pins, left undefined so the tasks omit --version and Helm installs the latest chart. Set github_runner_arc_controller_chart_version and/or github_runner_arc_scaleset_chart_version (e.g. "0.14.2") to hold a chart back.
+
+# Secrets, normally set by the github_runner_secrets role: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images), github_runner_arc_heartbeat_gh_token (a PAT with gist scope), and github_runner_arc_org_private_keys ({<org name>: <PEM content>}). No defaults.
+
+# Registry the pull Secret authenticates to, and its name in each namespace.
+github_runner_arc_image_pull_registry: "ghcr.io"
+github_runner_arc_image_pull_secret_name: "ghcr-pull"
+
+# Fleet-health platform. Set github_runner_arc_heartbeat_gist_id on one host to install it from there.
 github_runner_arc_heartbeat_gist_id: ""
 github_runner_arc_heartbeat_window_seconds: 600
 github_runner_arc_heartbeat_interval_seconds: 180
+# When no host in the inventory has a gist id, create one with the control node's `gh` session and stop so the operator can record it. false skips that, and the platform is simply not installed.
+github_runner_arc_heartbeat_bootstrap_gist: true
+github_runner_arc_heartbeat_gist_description: "GitHub Actions runner fleet health heartbeat"
+# Anything else that must be told the new gist's id (for example a fallback action's gist-id default), named in the bootstrap failure message. Empty names nothing.
+github_runner_arc_heartbeat_gist_consumer: ""
 
-# Secrets, normally set by the github_runner_secrets role: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a GHCR pull token for the runner and platform images), github_runner_arc_heartbeat_gh_token (a PAT with gist scope), and github_runner_arc_org_private_keys ({<org name>: <PEM content>}, one per entry in github_runner_arc_orgs). No defaults: a host that installs an org or the platform needs them.
-
-# Namespace and image refs for the fleet-health platform's own Deployments (see install_platform.yml). Built and pushed the same manual multi-arch way as the main runner image - see the README's Build/test section.
+# Namespace and images for the platform's own Deployments (see install_platform.yml).
 github_runner_arc_platform_namespace: "github-runner-platform"
 github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:latest"
 github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:latest"
 
-# Usage-driven autoscaler tunables - see scripts/autoscaler.sh and the README's Autoscaler section for the full algorithm. AUTOSCALER_SWAP_PRESSURE_PCT has no equivalent here: swap pressure is dropped as a signal now that the autoscaler pod can be scheduled on any node (no cluster-wide swap metric exists via kubectl top nodes/metrics-server) - see scripts/autoscaler.sh's own comment.
+# Usage-driven autoscaler for the one scale-set profile that sets autoscale: true (see scripts/autoscaler.sh and the README's Autoscaler section). It is installed only when such a profile exists and this host installs the platform. The memory budget, ceiling and floor have no defaults because they depend on the pool: the budget is the memory runner pods may use across every node, the ceiling caps maxRunners (the autoscaled profile's sizing, when set, supplies it instead), and the floor must equal the maxRunners in that profile's values, which every Helm upgrade reverts to.
 github_runner_arc_autoscaler_dry_run: true
 github_runner_arc_autoscaler_poll_seconds: 45
-# 24Gi: node-b's ~20.9Gi usable plus node-a's ~3.8Gi usable (see values/exadev-runners-values.yaml's own derivation), rounded down slightly for margin - the autoscaler manages one AutoscalingRunnerSet spanning the whole unpinned pool, not just one node.
-github_runner_arc_autoscaler_usable_budget_gi: 24
-# 7: floor(20.9/3) + floor(3.8/3) at the values file's own 3Gi Guaranteed-QoS pod size - the real bin-packing-safe ceiling across the pool, not an arbitrary cap.
-github_runner_arc_autoscaler_max_ceiling: 7
-# Matches values/exadev-runners-values.yaml's own static maxRunners - the same proven-safe floor, enforced by two mechanisms (Helm's persisted value, the autoscaler's own fail-safe patch target).
-github_runner_arc_autoscaler_floor: 3
 github_runner_arc_autoscaler_raise_confirm_polls: 2
 github_runner_arc_autoscaler_mem_available_pressure_pct: 15
-
-# The values/ Helm values files (the single source of truth for both the ARC controller and every org's runner scale set) are read in place from the checkout on the target host, and the kubeconfig is the one the cluster's own k3s container writes there, so both default to paths under the github_runner_cluster role's repo root.
-github_runner_arc_values_dir: "{{ github_runner_cluster_repo_root }}/values"
-github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path }}"
-
-# Helm chart version pins, left undefined (not set to "") so that `| default(omit)` in tasks/main.yml and tasks/install_scale_set_profile.yml drops the --version flag entirely rather than passing an empty string. To hold a chart back, set github_runner_arc_controller_chart_version and/or github_runner_arc_scaleset_chart_version (e.g. "0.12.1") in a host's group_vars or host_vars.

@@ -1,0 +1,9 @@
+{# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With sizing off it holds only the profile's nodeSelector. `profile` is the expanded profile from plugins/filter/arc.py. #}
+{% set node_selector = profile.node_selector %}
+{% if profile.sizing and not profile.autoscale %}
+# Derived from the profile's sizing: {{ profile.sizing.per_node }} per node ({{ profile.sizing.per_node_by_cpu }} by CPU, {{ profile.sizing.per_node_by_memory }} by memory) across the nodes, {{ profile.sizing.theoretical }} in theory, less the safety margin.
+maxRunners: {{ profile.sizing.max_runners }}
+{% endif %}
+template:
+  spec:
+    nodeSelector: {{ node_selector | to_json }}

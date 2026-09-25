@@ -1,0 +1,75 @@
+---
+# Checks every ARC input that can be checked without secrets or a cluster, so that playbooks/site.yml can run it in a pre-flight play before k3s is started or changed. Reads nothing from the target host and changes nothing, apart from bootstrapping the heartbeat gist on GitHub (see below). Cross-host checks read github_runner_arc_orgs from every host in the inventory, which --limit does not narrow.
+
+- name: Expand every org configured anywhere in the inventory into its scale-set profiles
+  ansible.builtin.set_fact:
+    github_runner_arc_fleet: "{{ groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_orgs', default=[]) | flatten | exadev.github_runner.arc_profiles }}"
+    github_runner_arc_local: "{{ github_runner_arc_orgs | exadev.github_runner.arc_profiles }}"
+
+- name: Fail on invalid orgs or scale-set profiles
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_fleet.errors | union(github_runner_arc_local.errors) }}"
+  when: (github_runner_arc_fleet.errors | union(github_runner_arc_local.errors)) | length > 0
+
+- name: Fail when a profile's values file is missing on the control node
+  ansible.builtin.fail:
+    msg: >-
+      {{ item.label }}: values file {{ github_runner_arc_values_path }} does not exist on the control node.
+      A relative values_file is read from github_runner_arc_values_dir{{ ' (not set)' if github_runner_arc_values_dir | length == 0 else '' }}.
+  loop: "{{ github_runner_arc_local.profiles | selectattr('values_file') }}"
+  loop_control:
+    label: "{{ item.label }}"
+  vars:
+    github_runner_arc_values_path: "{{ item.values_file if item.values_file is abs else github_runner_arc_values_dir ~ '/' ~ item.values_file }}"
+  when: github_runner_arc_values_path is not file or (item.values_file is not abs and github_runner_arc_values_dir | length == 0)
+
+# The autoscaler runs from whichever host installs the platform, which need not be the host that installs the autoscaled profile, so these are checked on the platform host against the whole fleet's profiles.
+- name: Fail when the autoscaler's pool settings are missing or inconsistent
+  ansible.builtin.fail:
+    msg: >-
+      The autoscaled profile {{ github_runner_arc_fleet.autoscaled.label }} needs
+      github_runner_arc_autoscaler_usable_budget_gi, github_runner_arc_autoscaler_floor and, unless the profile sets sizing,
+      github_runner_arc_autoscaler_max_ceiling, all whole numbers, with the floor no higher than the ceiling.
+  vars:
+    github_runner_arc_ceiling: "{{ github_runner_arc_fleet.autoscaled.sizing.max_runners if github_runner_arc_fleet.autoscaled.sizing else (github_runner_arc_autoscaler_max_ceiling | default('')) }}"
+  when:
+    - github_runner_arc_fleet.autoscaled is not none
+    - github_runner_arc_heartbeat_gist_id | length > 0
+    - >-
+      github_runner_arc_autoscaler_usable_budget_gi | default('') | string is not match('^[0-9]+$')
+      or github_runner_arc_autoscaler_floor | default('') | string is not match('^[0-9]+$')
+      or github_runner_arc_ceiling | string is not match('^[0-9]+$')
+      or (github_runner_arc_autoscaler_floor | int) > (github_runner_arc_ceiling | int)
+
+# The platform installs from whichever host sets github_runner_arc_heartbeat_gist_id, so the question is whether ANY host in the inventory sets one. scripts/heartbeat.sh checks HEARTBEAT_GIST_ID at container start, but that only shows up as a crash-looping pod, and with no gist id anywhere the platform is not installed at all. This creates the gist the same way the README's manual instructions do, then fails on purpose: its id has to be recorded by hand in a host's host_vars (and in any consumer named in github_runner_arc_heartbeat_gist_consumer), and carrying on silently would leave that undone.
+- name: Bootstrap the heartbeat gist if no host in the fleet has one yet
+  run_once: true
+  when:
+    - github_runner_arc_heartbeat_bootstrap_gist | bool
+    - groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_heartbeat_gist_id', default='') | select | list | length == 0
+  block:
+    - name: Create the heartbeat status gist
+      ansible.builtin.command:
+        argv:
+          - gh
+          - gist
+          - create
+          - --filename
+          - arc-healthy-until
+          - --desc
+          - "{{ github_runner_arc_heartbeat_gist_description }}"
+          - "-"
+        stdin: "{{ (now(utc=true).timestamp() | int + github_runner_arc_heartbeat_window_seconds | int) | string }}"
+      delegate_to: localhost
+      register: github_runner_arc_new_gist
+      changed_when: true
+
+    - name: Fail, printing the new gist's id for the operator to record
+      ansible.builtin.fail:
+        msg: >-
+          Created a new heartbeat gist: {{ github_runner_arc_new_gist.stdout }}.
+          Add its id (the hex tail of the URL) to github_runner_arc_heartbeat_gist_id in the host_vars of whichever host should install the fleet-health platform{{ ', AND update ' ~ github_runner_arc_heartbeat_gist_consumer ~ ' to match' if github_runner_arc_heartbeat_gist_consumer | length > 0 else '' }}, then rerun.
+
+- name: Record that this host's ARC configuration is valid
+  ansible.builtin.set_fact:
+    github_runner_arc_validated: true
