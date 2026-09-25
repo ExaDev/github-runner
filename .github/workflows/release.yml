@@ -18,21 +18,9 @@ permissions:
   contents: read
 
 jobs:
-  determine-runner:
-    name: Determine runner
-    runs-on: exadev-runners
-    timeout-minutes: 5
-    outputs:
-      selected-runner: ${{ steps.fallback.outputs.selected-runner || '["ubuntu-latest"]' }}
-      preferred-available: ${{ steps.fallback.outputs.preferred-available || 'false' }}
-    steps:
-      - id: fallback
-        uses: ExaDev/runner-fallback-action@b774d51ff5360bf53705b2eb34ff019afd4d7f07
-
   release:
     name: Release
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write  # to push the release commit/tag and create the GitHub Release
@@ -68,8 +56,8 @@ jobs:
     name: Build and push (${{ matrix.name }})
     needs: [release]
     if: needs.release.outputs.published == 'true'
-    # Not routed through determine-runner/runner-fallback-action: this is the fleet's own dedicated Docker-in-Docker builder profile (see the README's Ansible section). An image build has no GitHub-hosted fallback that reliably works for this org, and the ordinary exadev-runners pods have no Docker daemon to build with anyway.
-    runs-on: exadev-image-builder
+    # GitHub-hosted, like the rest of this repository's CI, so a release never depends on the fleet it ships images for. QEMU builds the arm64 half of each multi-arch image.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
