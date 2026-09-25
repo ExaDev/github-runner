@@ -264,7 +264,7 @@
         name: heartbeat-gh-token
         namespace: "{{ github_runner_arc_platform_namespace }}"
       stringData:
-        token: "{{ github_runner_arc_secrets.heartbeat_gh_token }}"
+        token: "{{ github_runner_arc_heartbeat_gh_token }}"
   no_log: true
 
 - name: "platform: create/update GHCR pull secret"
@@ -279,9 +279,9 @@
         namespace: "{{ github_runner_arc_platform_namespace }}"
       data:
         .dockerconfigjson: >-
-          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_secrets.ghcr_username,
-                                      'password': github_runner_arc_secrets.ghcr_token,
-                                      'auth': (github_runner_arc_secrets.ghcr_username ~ ':' ~ github_runner_arc_secrets.ghcr_token) | b64encode}}})
+          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_ghcr_username,
+                                      'password': github_runner_arc_ghcr_token,
+                                      'auth': (github_runner_arc_ghcr_username ~ ':' ~ github_runner_arc_ghcr_token) | b64encode}}})
              | to_json | b64encode }}
   no_log: true
 

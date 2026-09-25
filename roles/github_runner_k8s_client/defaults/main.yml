@@ -1,0 +1,3 @@
+---
+# kubernetes.core.k8s/k8s_info need the kubernetes Python package on the target host, which a stock macOS Homebrew Python treats as an externally-managed environment (PEP 668): a plain pip install fails outright. A dedicated virtualenv sidesteps that without weakening the system Python's own protections.
+github_runner_k8s_client_venv_path: "{{ ansible_facts['env']['HOME'] }}/.ansible-github-runner-venv"

@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  author: ExaDev
+  description: Resolves the cluster and ARC roles' secrets from 1Password or from supplied values.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions: [all]
+    - name: Ubuntu
+      versions: [all]
+    - name: Debian
+      versions: [all]
+dependencies: []

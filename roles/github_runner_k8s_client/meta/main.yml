@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  author: ExaDev
+  description: Installs the kubernetes Python client into a dedicated virtualenv and makes it the host's module interpreter.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions: [all]
+    - name: Ubuntu
+      versions: [all]
+    - name: Debian
+      versions: [all]
+dependencies: []

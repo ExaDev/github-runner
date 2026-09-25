@@ -1,0 +1,17 @@
+---
+# Gives this host a Python that can talk to the Kubernetes API, and switches every later module task on the host to it. Included by the cluster role before it waits for nodes and by the ARC role before it installs anything, each only on a host that actually talks to the API; the guard below makes the second include a no-op, so the pip task never runs under the virtualenv's own Python (which carries no packages beyond the kubernetes client).
+
+- name: Install the kubernetes Python client and switch to it, unless this host already has
+  when: ansible_python_interpreter | default('') != github_runner_k8s_client_venv_path ~ '/bin/python3'
+  block:
+    - name: Ensure a dedicated virtualenv has the kubernetes Python client
+      ansible.builtin.pip:
+        name: kubernetes
+        virtualenv: "{{ github_runner_k8s_client_venv_path }}"
+        virtualenv_command: python3 -m venv
+        # Same reason as bootstrap.sh's own ansible-core install: prefer the newest version that has a wheel for this platform over compiling a newer one from source (e.g. cryptography, which publishes no Intel macOS wheels after 48.0.1).
+        extra_args: --prefer-binary
+
+    - name: Use that virtualenv's Python for every module task on this host from here on
+      ansible.builtin.set_fact:
+        ansible_python_interpreter: "{{ github_runner_k8s_client_venv_path }}/bin/python3"

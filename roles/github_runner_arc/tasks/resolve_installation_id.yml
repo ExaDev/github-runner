@@ -1,5 +1,5 @@
 ---
-# Included once per org, only when that org's installation_id isn't already known (see install_org.yml). Signs a short-lived JWT per GitHub's documented App authentication flow and queries /app/installations to find this org's installation id, using the private key tasks/main.yml already resolved for every org (from 1Password, or github_runner_arc_provided_secrets) before the org loop starts.
+# Included once per org, only when that org's installation_id isn't already known (see install_org.yml). Signs a short-lived JWT per GitHub's documented App authentication flow and queries /app/installations to find this org's installation id, using the private key already resolved for every org in github_runner_arc_org_private_keys (normally by the github_runner_secrets role) before the org loop starts.
 #
 # The whole block delegates to the control node: none of the JWT-signing/API-call steps have any actual dependency on the target host - it is a pure temp-file-then-network-call sequence, and delegating all of it keeps the temp private-key file off the target host entirely rather than writing then immediately deleting it there.
 #
@@ -10,7 +10,7 @@
   check_mode: false
   block:
     - name: "{{ org.name }}: write private key to a temp file for signing"
-      # Reuses github_runner_arc_secrets.org_private_keys, read once for every org by tasks/main.yml before the org loop starts, rather than reading the same 1Password field a second time here.
+      # Reuses github_runner_arc_org_private_keys, resolved once for every org before the org loop starts, rather than reading the same 1Password field a second time here.
       ansible.builtin.tempfile:
         state: file
         suffix: ".pem"
@@ -18,7 +18,7 @@
 
     - name: "{{ org.name }}: persist the private key to the temp file"
       ansible.builtin.copy:
-        content: "{{ github_runner_arc_secrets.org_private_keys[org.name] }}"
+        content: "{{ github_runner_arc_org_private_keys[org.name] }}"
         dest: "{{ github_runner_arc_resolve_private_key_tempfile.path }}"
         mode: "0600"
       no_log: true

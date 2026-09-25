@@ -21,4 +21,9 @@
         state: present
 
   roles:
+    - github_runner_secrets
+    # Only the hosts that go on to install ARC or the fleet-health platform wait for the cluster's nodes to be Ready: they are the ones that talk to the Kubernetes API, and waiting needs the kubernetes Python client the others never install.
+    - role: github_runner_cluster
+      vars:
+        github_runner_cluster_wait_for_nodes: "{{ github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0 }}"
     - github_runner_arc

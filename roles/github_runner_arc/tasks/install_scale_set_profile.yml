@@ -23,7 +23,7 @@
       stringData:
         github_app_id: "{{ org.app_id | string }}"
         github_app_installation_id: "{{ github_runner_arc_installation_id }}"
-        github_app_private_key: "{{ github_runner_arc_secrets.org_private_keys[org.name] }}"
+        github_app_private_key: "{{ github_runner_arc_org_private_keys[org.name] }}"
   no_log: true
 
 - name: "{{ org.name }}{{ profile.suffix }}: create/update GHCR pull secret"
@@ -38,9 +38,9 @@
         namespace: "arc-runners-{{ org.name | lower }}{{ profile.suffix }}"
       data:
         .dockerconfigjson: >-
-          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_secrets.ghcr_username,
-                                      'password': github_runner_arc_secrets.ghcr_token,
-                                      'auth': (github_runner_arc_secrets.ghcr_username ~ ':' ~ github_runner_arc_secrets.ghcr_token) | b64encode}}})
+          {{ ({'auths': {'ghcr.io': {'username': github_runner_arc_ghcr_username,
+                                      'password': github_runner_arc_ghcr_token,
+                                      'auth': (github_runner_arc_ghcr_username ~ ':' ~ github_runner_arc_ghcr_token) | b64encode}}})
              | to_json | b64encode }}
   no_log: true
 

@@ -1,33 +1,7 @@
 ---
-# Starts k3s, waits for it, then installs the ARC controller, the fleet-health platform, and each org. The one implementation of every deployment step: inventory-managed hosts run it over SSH, and bootstrap.sh runs it locally against a single machine. Safe to rerun: every mutating task below uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
-#
-# Two node roles: github_runner_arc_node_role selects between "server" (a control-plane/etcd member - k3s server, either bootstrapping the cluster or joining an existing one, see github_runner_arc_etcd_bootstrap below) and "agent" (joins as a pure worker with no control-plane role). Whether a server host bootstraps (k3s --cluster-init, embedded etcd) or joins is decided by the orthogonal per-host boolean github_runner_arc_etcd_bootstrap - a one-time distinction, irrelevant to how the host operates once past first boot, not a separate role. Installing the ARC controller and each org's runner scale set is likewise not tied to a role at all: it's driven purely by whether THIS host's own github_runner_arc_orgs is non-empty, so any server host can be the one Ansible installs against, not just whichever host happened to bootstrap etcd. See docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
+# Installs the ARC controller, the fleet-health platform, and each org's runner scale sets into the k3s cluster the github_runner_cluster role brought up. Inventory-managed hosts run it over SSH, and bootstrap.sh runs it locally against a single machine. Safe to rerun: every mutating task below uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
 
-- name: Fail if the node role is invalid
-  ansible.builtin.fail:
-    msg: "github_runner_arc_node_role must be 'server' or 'agent' (got '{{ github_runner_arc_node_role }}')."
-  when: github_runner_arc_node_role not in ['server', 'agent']
-
-- name: Fail if this host's repo root is not set
-  ansible.builtin.fail:
-    msg: >-
-      github_runner_arc_repo_root is not set on this host. It must be the
-      absolute path of the github-runner checkout on this target host
-      itself (not the control node) - add it to
-      host_vars/{{ inventory_hostname }}.yml.
-  when: github_runner_arc_repo_root is not defined
-
-- name: Fail if no secrets source is set
-  ansible.builtin.fail:
-    msg: >-
-      Either github_runner_arc_secrets_vault and github_runner_arc_secrets_item
-      (read from 1Password) or github_runner_arc_provided_secrets must be set
-      on this host. Add the former to host_vars/{{ inventory_hostname }}.yml.
-  when:
-    - github_runner_arc_provided_secrets | length == 0
-    - github_runner_arc_secrets_vault | length == 0 or github_runner_arc_secrets_item | length == 0
-
-# The fleet-health platform installs from whichever host sets github_runner_arc_heartbeat_gist_id (see install_platform.yml), so the question is whether ANY host in the inventory sets one, not whether a particular host does - checked across groups['all'], which --limit doesn't narrow, so scoping a run to a host without a gist id never triggers this. scripts/heartbeat.sh has its own `:?required` check on HEARTBEAT_GIST_ID at container startup, but that only surfaces as a crash-looping pod after the fact, and with no gist id anywhere the platform isn't installed at all and runner-fallback-action silently routes everything to ubuntu-latest. Bootstraps it the same way the README's own manual instructions do (`gh gist create`, using the control node's own authenticated `gh` session), then fails deliberately: the new gist's id needs recording in TWO places a human must do by hand (a host's own host_vars, and exadev/runner-fallback-action's own action.yml default) - creating it silently and continuing would leave the second half of that undone with no signal that it's needed.
+# The fleet-health platform installs from whichever host sets github_runner_arc_heartbeat_gist_id (see install_platform.yml), so the question is whether ANY host in the inventory sets one, not whether a particular host does: checked across groups['all'], which --limit doesn't narrow, so scoping a run to a host without a gist id never triggers this. scripts/heartbeat.sh has its own `:?required` check on HEARTBEAT_GIST_ID at container startup, but that only surfaces as a crash-looping pod after the fact, and with no gist id anywhere the platform isn't installed at all and runner-fallback-action silently routes everything to ubuntu-latest. Bootstraps it the same way the README's own manual instructions do (`gh gist create`, using the control node's own authenticated `gh` session), then fails deliberately: the new gist's id needs recording in TWO places a human must do by hand (a host's own host_vars, and exadev/runner-fallback-action's own action.yml default), and creating it silently and continuing would leave the second half of that undone with no signal that it's needed.
 - name: Bootstrap the heartbeat gist if no host in the fleet has one yet
   run_once: true
   when: groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_heartbeat_gist_id', default='') | select | list | length == 0
@@ -57,247 +31,27 @@
           exadev/runner-fallback-action's own action.yml gist-id default to
           match, then rerun.
 
-# Delegated to the control node, not this host: 1Password access (desktop-app integration, or a signed-in CLI session) belongs to whichever machine an operator is actually running Ansible from, not to every fleet host. No delegate_facts: a plain `register:` result already attaches to inventory_hostname regardless of where the task's execution was delegated to - only `set_fact`'s own fact-namespace assignment is sensitive to delegate_facts (see resolve_installation_id.yml's git history for the one place that mattered, and why delegate_facts: true there was backwards).
-#
-# Cached on the CONTROL NODE (never in this repo, never on a fleet host) after the first successful read, keyed by the secrets item name - a repeated debugging session running this playbook dozens of times otherwise means dozens of separate 1Password desktop-app approval prompts, one per run, even though the underlying secrets rarely change between runs. `lookup('env', 'HOME')`, not `ansible_facts`: inside a delegated task, ansible_facts still refers to the CURRENT (target) host's own gathered facts, not localhost's - the exact same subtlety already documented for delegate_facts above. Delete the cache file to force a fresh read (e.g. after rotating a secret).
-- name: Check for a cached 1Password secrets read
-  ansible.builtin.stat:
-    path: "{{ lookup('env', 'HOME') }}/.cache/github-runner-arc/secrets-{{ github_runner_arc_secrets_item }}.json"
-  delegate_to: localhost
-  register: github_runner_arc_secrets_cache_file
-  when: github_runner_arc_provided_secrets | length == 0
-
-# The cache above is shared by every host that uses this exact secrets item, but github_runner_arc_orgs is host-specific (an agent host defines none at all). Building org_private_keys from only the TRIGGERING host's own org list means whichever host happens to populate the cache first determines what's in it forever after - confirmed live: an agent-only test run seeded the cache with an empty org_private_keys, silently breaking a later GitHub App secret creation once another host read that same cache back. Aggregating across every host sharing this item makes the cached content correct regardless of which host writes it first.
-- name: Compute every org configured anywhere in the fleet that shares this secrets item
-  ansible.builtin.set_fact:
-    github_runner_arc_all_orgs: >-
-      {{
-        groups['all']
-        | map('extract', hostvars)
-        | selectattr('github_runner_arc_secrets_item', 'defined')
-        | selectattr('github_runner_arc_secrets_item', 'equalto', github_runner_arc_secrets_item)
-        | map(attribute='github_runner_arc_orgs', default=[])
-        | list | flatten | unique(attribute='name')
-      }}
-
-# Now that ARC/org installs are driven purely by per-host config presence rather than a single designated "primary", two or more server hosts could in principle both configure the same org name - kubernetes.core.helm (one release, one namespace) would then race against itself from two hosts under Ansible's default parallel-per-task execution. This fleet's own convention is exactly one host per org (see host_vars/node-a.yml), enforced here rather than left as an unwritten assumption.
+# Installs are driven purely by per-host config presence rather than a single designated "primary", so two or more server hosts could in principle both configure the same org name, and kubernetes.core.helm (one release, one namespace) would then race against itself from two hosts under Ansible's default parallel-per-task execution. The convention is exactly one host per org, enforced here rather than left as an unwritten assumption.
 - name: Fail if the same org name is configured on more than one host
   ansible.builtin.fail:
     msg: >-
       Org '{{ item }}' is configured in github_runner_arc_orgs on more than
       one host. Each org's Helm release must be installed from exactly one
-      host - remove the duplicate from every host_vars file but one.
-  loop: "{{ github_runner_arc_all_orgs | map(attribute='name') | list }}"
-  when: (github_runner_arc_all_orgs | map(attribute='name') | list | select('equalto', item) | list | length) > 1
+      host. Remove the duplicate from every host_vars file but one.
+  loop: "{{ github_runner_arc_all_org_names | unique }}"
+  when: github_runner_arc_all_org_names | select('equalto', item) | list | length > 1
+  vars:
+    github_runner_arc_all_org_names: "{{ groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_orgs', default=[]) | flatten | map(attribute='name') | list }}"
 
-- name: Read every 1Password secret this host needs in one shell invocation
-  ansible.builtin.shell: |
-    set -euo pipefail
-    secrets=$(op item get '{{ github_runner_arc_secrets_item }}' --vault '{{ github_runner_arc_secrets_vault }}' --format json --reveal | jq -c '{
-      k3s_token: (.fields[] | select(.label=="k3s-token") | .value),
-      ghcr_username: (.fields[] | select(.label=="ghcr-username") | .value),
-      ghcr_token: (.fields[] | select(.label=="ghcr-token") | .value),
-      heartbeat_gh_token: (.fields[] | select(.label=="heartbeat-gh-token") | .value),
-      tailscale_join_key: (.fields[] | select(.label=="tailscale-join-key") | .value),
-      tailscale_api_token: (.fields[] | select(.label=="tailscale-api-token") | .value)
-    }')
-    org_keys='{}'
-    {% for org in github_runner_arc_all_orgs %}
-    key_{{ loop.index }}=$(op read '{{ org.private_key_op_reference }}')
-    org_keys=$(jq -n --argjson prev "$org_keys" --arg name '{{ org.name }}' --arg key "$key_{{ loop.index }}" '$prev + {($name): $key}')
-    {% endfor %}
-    jq -n --argjson secrets "$secrets" --argjson org_keys "$org_keys" '$secrets + {org_private_keys: $org_keys}'
-  delegate_to: localhost
-  changed_when: false
-  no_log: true
-  # Read-only; everything after it needs the secrets, including under --check.
-  check_mode: false
-  register: github_runner_arc_secrets_raw
-  when:
-    - github_runner_arc_provided_secrets | length == 0
-    - not github_runner_arc_secrets_cache_file.stat.exists
+# github_runner_cluster_node_role belongs to the github_runner_cluster role; a host that role made an agent has no kubeconfig of its own and installs nothing, whatever its own orgs or gist id say.
+- name: End the role here on an agent host
+  ansible.builtin.meta: end_role
+  when: (github_runner_cluster_node_role | default('server')) == 'agent'
 
-- name: Cache this read for future runs
-  ansible.builtin.copy:
-    dest: "{{ lookup('env', 'HOME') }}/.cache/github-runner-arc/secrets-{{ github_runner_arc_secrets_item }}.json"
-    content: "{{ github_runner_arc_secrets_raw.stdout }}"
-    mode: "0600"
-  delegate_to: localhost
-  no_log: true
-  when:
-    - github_runner_arc_provided_secrets | length == 0
-    - not github_runner_arc_secrets_cache_file.stat.exists
-
-- name: Use the provided secrets, or parse the 1Password read (from cache, or the read just above)
-  ansible.builtin.set_fact:
-    github_runner_arc_secrets: >-
-      {{
-        github_runner_arc_provided_secrets if github_runner_arc_provided_secrets | length > 0
-        else ((lookup('file', github_runner_arc_secrets_cache_file.stat.path) if github_runner_arc_secrets_cache_file.stat.exists
-               else github_runner_arc_secrets_raw.stdout) | from_json)
-      }}
-  no_log: true
-
-- name: Ensure the tailnet's ACL grants cross-node pod traffic and a reusable join key exists
-  # run_once, not per-host: this is tailnet-wide, shared-account state (the ACL policy, one reusable join key), not per-host state. Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read github_runner_arc_secrets.tailscale_join_key. Needs a Tailscale API token: without one (possible only with provided secrets), the ACL is left as it is and the join key must already be supplied.
-  ansible.builtin.include_tasks: ensure_tailscale.yml
-  run_once: true
-  when: github_runner_arc_secrets.tailscale_api_token | default('') | length > 0
-
-- name: Fail if no Tailscale join key is available
-  # Otherwise this only surfaces later, as docker compose's own :?required error on K3S_VPN_AUTH_JOIN_KEY.
-  ansible.builtin.fail:
-    msg: >-
-      No Tailscale join key: supply tailscale_join_key directly, or a
-      tailscale_api_token so ensure_tailscale.yml can create one.
-  when: github_runner_arc_secrets.tailscale_join_key | default('') | length == 0
-
-- name: Determine the active Docker CLI context
-  # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use - confirmed live against node-b, which runs Colima (docker.sock lives under ~/.colima/default/, not /var/run) and failed outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.
-  ansible.builtin.command: docker context show
-  changed_when: false
-  # Read-only, and every docker_compose_v2 task below depends on its output, so it has to run under --check too - a skipped result leaves cli_context empty and the dry run targets the wrong daemon.
-  check_mode: false
-  register: github_runner_arc_docker_context
-
-- name: Set up and start this host as a k3s server, bootstrapping or joining as configured
-  when: github_runner_arc_node_role == "server"
-  block:
-    - name: Fail if bootstrap and join-server-url are both set (contradictory - can't bootstrap AND join)
-      ansible.builtin.fail:
-        msg: >-
-          github_runner_arc_etcd_bootstrap is true AND
-          github_runner_arc_join_server_url is set on this host - a host
-          either bootstraps the cluster or joins an existing one, not both.
-          Fix host_vars/{{ inventory_hostname }}.yml.
-      when: github_runner_arc_etcd_bootstrap and github_runner_arc_join_server_url | length > 0
-
-    - name: Fail if neither bootstrapping nor a join-server-url is set (nothing for this host to do)
-      ansible.builtin.fail:
-        msg: >-
-          Neither github_runner_arc_etcd_bootstrap nor
-          github_runner_arc_join_server_url is set on this server host - it
-          must either bootstrap the cluster or join an existing one. Add one
-          of them to host_vars/{{ inventory_hostname }}.yml.
-      when: not github_runner_arc_etcd_bootstrap and github_runner_arc_join_server_url | length == 0
-
-    - name: Fail if this host isn't included in the fleet's own TLS SAN list
-      # Checks the EFFECTIVE node name (github_runner_arc_effective_node_name: github_runner_arc_node_name if set, else inventory_hostname), not raw inventory_hostname - a bootstrap host may deliberately override its own node name (e.g. node-a's own K3S_NODE_NAME stays "k3s-server", not "node-a", to preserve its existing Tailscale device identity - see host_vars/node-a.yml), and checking the wrong string here would incorrectly fail that host.
-      ansible.builtin.fail:
-        msg: >-
-          github_runner_arc_tls_sans does not include this host's own
-          effective node name ({{ github_runner_arc_effective_node_name }}).
-          Every server needs every server's own hostname on its --tls-san
-          list, including its own - add it to github_runner_arc_tls_sans in
-          host_vars/{{ inventory_hostname }}.yml (and on every OTHER
-          server's own host_vars too).
-      when: github_runner_arc_effective_node_name not in (github_runner_arc_tls_sans | join(' '))
-
-    - name: Template .env for this k3s server
-      ansible.builtin.template:
-        src: env.j2
-        dest: "{{ github_runner_arc_repo_root }}/.env"
-        mode: "0600"
-      no_log: true
-
-    - name: Start k3s via docker compose (bootstrapping or joining, per this host's own .env)
-      community.docker.docker_compose_v2:
-        project_src: "{{ github_runner_arc_repo_root }}"
-        profiles: ["server"]
-        cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
-        state: present
-
-- name: Join as a k3s agent and stop here (nothing else applies to a worker-only node)
-  when: github_runner_arc_node_role == "agent"
-  block:
-    - name: Fail if the join server URL is not set
-      ansible.builtin.fail:
-        msg: >-
-          github_runner_arc_agent_server_url is not set on this agent
-          host. It must be an existing server host's own
-          https://<address>:6443 - add it to
-          host_vars/{{ inventory_hostname }}.yml.
-      when: github_runner_arc_agent_server_url | length == 0
-
-    - name: Template .env for the k3s agent
-      ansible.builtin.template:
-        src: env-agent.j2
-        dest: "{{ github_runner_arc_repo_root }}/.env"
-        mode: "0600"
-      no_log: true
-
-    - name: Join the cluster as an agent
-      community.docker.docker_compose_v2:
-        project_src: "{{ github_runner_arc_repo_root }}"
-        profiles: ["agent"]
-        cli_context: "{{ github_runner_arc_docker_context.stdout | trim }}"
-        state: present
-
-    - name: End the role here - an agent host runs no org installs or ARC controller of its own
-      ansible.builtin.meta: end_role
-
-# Everything below only ever runs on a server-role host, gated per-task on whether THIS host has orgs configured - an agent host already ended the role above.
-
-- name: Ensure a dedicated virtualenv has the kubernetes Python client
-  # Only needed on a host that actually talks to the Kubernetes API (kubernetes.core.k8s/k8s_info/helm, used below, in install_platform.yml, and in install_org.yml) - a server host with neither orgs nor the fleet-health platform configured (e.g. node-b, node-c) never needs this.
-  ansible.builtin.pip:
-    name: kubernetes
-    virtualenv: "{{ github_runner_arc_venv_path }}"
-    virtualenv_command: python3 -m venv
-    # Same reason as bootstrap.sh's own ansible-core install: prefer the newest version that has a wheel for this platform over compiling a newer one from source (e.g. cryptography, which publishes no Intel macOS wheels after 48.0.1).
-    extra_args: --prefer-binary
-  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
-
-- name: Use that virtualenv's Python for every module task on this host from here on
-  ansible.builtin.set_fact:
-    ansible_python_interpreter: "{{ github_runner_arc_venv_path }}/bin/python3"
-  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
-
-- name: Wait for the k3s node to register (an empty node list is still a successful API response)
-  # default([]) on resources, not just a bare .resources access: the very first poll can hit the API before it's actually listening yet (the container has only just started), and that attempt's own result dict has no `resources` key at all - confirmed live on a fresh node-a bootstrap, where the bare access threw "object of type 'dict' has no attribute 'resources'" and aborted the whole `until` loop outright instead of retrying, even though the exact same module call succeeded cleanly moments later once the API was actually up.
-  kubernetes.core.k8s_info:
-    kind: Node
-    kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-  register: github_runner_arc_nodes
-  until: github_runner_arc_nodes.resources | default([]) | length > 0
-  retries: 60
-  delay: 2
-  when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
-
-- name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
-  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password - but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. Confirmed live for an agent - see README's Non-obvious behaviour section - and the same failure mode applies identically to any joining server's own container recreation, since it's the same underlying k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_arc_node_name override if set, else its inventory name), since that, not the inventory name, is what k3s names the Node and its node-password Secret after - inlined rather than read from github_runner_arc_effective_node_name, because another host's role defaults aren't reliably visible through hostvars. Only ever touches hosts that are NOT the etcd-bootstrap host: that host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
-  block:
-    - name: Wait for every node to report Ready
-      # --all, not a --limit-scoped single node: once a server/agent has joined, this must wait for it too, not just this host's own control-plane node.
-      ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
-      environment:
-        KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
-      changed_when: false
-  rescue:
-    - name: Clear every non-bootstrap host's stale node-password secret
-      kubernetes.core.k8s:
-        kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-        state: absent
-        kind: Secret
-        namespace: kube-system
-        name: "{{ hostvars[item].github_runner_arc_node_name | default('', true) or item }}.node-password.k3s"
-      loop: "{{ groups['all'] }}"
-      when: not (hostvars[item].github_runner_arc_etcd_bootstrap | default(false))
-
-    - name: Clear every non-bootstrap host's stale Node object to match
-      kubernetes.core.k8s:
-        kubeconfig: "{{ github_runner_arc_kubeconfig_path }}"
-        state: absent
-        kind: Node
-        name: "{{ hostvars[item].github_runner_arc_node_name | default('', true) or item }}"
-      loop: "{{ groups['all'] }}"
-      when: not (hostvars[item].github_runner_arc_etcd_bootstrap | default(false))
-
-    - name: Retry waiting for every node to report Ready now that any stale registration is cleared
-      ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
-      environment:
-        KUBECONFIG: "{{ github_runner_arc_kubeconfig_path }}"
-      changed_when: false
+- name: Give this host the kubernetes Python client
+  # Only needed on a host that actually talks to the Kubernetes API (kubernetes.core.k8s/k8s_info/helm, used below, in install_platform.yml, and in install_org.yml): a server host with neither orgs nor the fleet-health platform configured never needs it.
+  ansible.builtin.include_role:
+    name: github_runner_k8s_client
   when: github_runner_arc_orgs | length > 0 or github_runner_arc_heartbeat_gist_id | length > 0
 
 - name: Ensure the fleet-health platform (heartbeat + autoscaler) is installed

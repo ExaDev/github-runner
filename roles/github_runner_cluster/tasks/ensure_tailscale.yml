@@ -7,7 +7,7 @@
   ansible.builtin.uri:
     url: "https://api.tailscale.com/api/v2/tailnet/-/acl"
     method: GET
-    url_username: "{{ github_runner_arc_secrets.tailscale_api_token }}"
+    url_username: "{{ github_runner_cluster_tailscale_api_token }}"
     url_password: ""
     force_basic_auth: true
     headers:
@@ -17,17 +17,17 @@
   no_log: true
   # A read-only GET, so safe under --check - and without it uri skips in check mode, leaving the next task nothing to compute the desired policy from.
   check_mode: false
-  register: github_runner_arc_acl_current
+  register: github_runner_cluster_acl_current
 
 - name: Compute the ACL policy with the github-runner-node grant/tagOwner/autoApprover ensured
   # combine() on tagOwners/autoApprovers is naturally idempotent - re-adding an identical key/value is a no-op. The grant itself has no natural key to combine on, so it's appended only when an identical entry isn't already present (exact-list-equality on `src`, since this task always constructs the same literal list in the same order).
   ansible.builtin.set_fact:
-    github_runner_arc_acl_desired: >-
+    github_runner_cluster_acl_desired: >-
       {{
-        github_runner_arc_acl_current.json
-        | combine({'tagOwners': (github_runner_arc_acl_current.json.tagOwners | default({}) | combine({'tag:github-runner-node': ['autogroup:admin']}))})
-        | combine({'autoApprovers': (github_runner_arc_acl_current.json.autoApprovers | default({}) | combine({'routes': (github_runner_arc_acl_current.json.autoApprovers.routes | default({}) | combine({'10.42.0.0/16': ['tag:github-runner-node']}))}, recursive=True))}, recursive=True)
-        | combine({'grants': (github_runner_arc_acl_current.json.grants | default([]) + ([{'src': ['tag:github-runner-node', '10.42.0.0/16'], 'dst': ['tag:github-runner-node', '10.42.0.0/16'], 'ip': ['*']}] if ([{'src': ['tag:github-runner-node', '10.42.0.0/16'], 'dst': ['tag:github-runner-node', '10.42.0.0/16'], 'ip': ['*']}] | difference(github_runner_arc_acl_current.json.grants | default([])) | length > 0) else []))})
+        github_runner_cluster_acl_current.json
+        | combine({'tagOwners': (github_runner_cluster_acl_current.json.tagOwners | default({}) | combine({'tag:github-runner-node': ['autogroup:admin']}))})
+        | combine({'autoApprovers': (github_runner_cluster_acl_current.json.autoApprovers | default({}) | combine({'routes': (github_runner_cluster_acl_current.json.autoApprovers.routes | default({}) | combine({'10.42.0.0/16': ['tag:github-runner-node']}))}, recursive=True))}, recursive=True)
+        | combine({'grants': (github_runner_cluster_acl_current.json.grants | default([]) + ([{'src': ['tag:github-runner-node', '10.42.0.0/16'], 'dst': ['tag:github-runner-node', '10.42.0.0/16'], 'ip': ['*']}] if ([{'src': ['tag:github-runner-node', '10.42.0.0/16'], 'dst': ['tag:github-runner-node', '10.42.0.0/16'], 'ip': ['*']}] | difference(github_runner_cluster_acl_current.json.grants | default([])) | length > 0) else []))})
       }}
   no_log: true
 
@@ -35,26 +35,26 @@
   ansible.builtin.uri:
     url: "https://api.tailscale.com/api/v2/tailnet/-/acl"
     method: POST
-    url_username: "{{ github_runner_arc_secrets.tailscale_api_token }}"
+    url_username: "{{ github_runner_cluster_tailscale_api_token }}"
     url_password: ""
     force_basic_auth: true
     headers:
       Content-Type: application/json
     body_format: json
-    body: "{{ github_runner_arc_acl_desired }}"
+    body: "{{ github_runner_cluster_acl_desired }}"
     status_code: [200]
   delegate_to: localhost
   no_log: true
-  when: github_runner_arc_acl_desired != github_runner_arc_acl_current.json
+  when: github_runner_cluster_acl_desired != github_runner_cluster_acl_current.json
 
 # The API token itself has no equivalent bootstrap: creating one requires the Tailscale admin console (Settings -> Keys -> API access tokens), a one-time manual step with no API to automate it (this is inherent to token-based auth - you need a credential to create a credential). Store it as this item's own tailscale-api-token field once created.
 #
-# Key rotation on expiry is likewise still a manual trigger: this task only creates a NEW key when tailscale_join_key is genuinely empty, not when an existing one has expired (an expired key is still a non-empty string in 1Password, so this check alone can't detect it). If k3s's own vpn-auth integration starts failing to authenticate on a working fleet, check the key's expiry in the Tailscale admin console first - if it's expired, clear the tailscale-join-key field in 1Password and rerun.
+# Key rotation on expiry is likewise still a manual trigger: this task only creates a NEW key when tailscale_join_key is genuinely empty, not when an existing one has expired (an expired key is still a non-empty string in 1Password, so this check alone can't detect it). If k3s's own vpn-auth integration starts failing to authenticate on a working fleet, check the key's expiry in the Tailscale admin console first: if it's expired, clear the tailscale-join-key field in 1Password and rerun.
 - name: Create a reusable, pre-authorized Tailscale join key if one isn't already known
   ansible.builtin.uri:
     url: "https://api.tailscale.com/api/v2/tailnet/-/keys"
     method: POST
-    url_username: "{{ github_runner_arc_secrets.tailscale_api_token }}"
+    url_username: "{{ github_runner_cluster_tailscale_api_token }}"
     url_password: ""
     force_basic_auth: true
     headers:
@@ -74,37 +74,22 @@
     status_code: [200]
   delegate_to: localhost
   no_log: true
-  register: github_runner_arc_new_join_key
-  # 1Password mode only: with provided secrets there's nowhere to persist a newly created key for the next run, so the key has to be supplied instead (tasks/main.yml fails fast if it isn't).
+  register: github_runner_cluster_new_join_key
+  # Only where the new key can be persisted for the next run (github_runner_cluster_create_tailscale_join_key, turned on by the github_runner_secrets role in 1Password mode): otherwise the key has to be supplied instead, and tasks/main.yml fails fast if it isn't.
   when:
-    - github_runner_arc_provided_secrets | length == 0
-    - github_runner_arc_secrets.tailscale_join_key | default('') | length == 0
+    - github_runner_cluster_create_tailscale_join_key | bool
+    - github_runner_cluster_tailscale_join_key | length == 0
 
-- name: Persist the new join key to 1Password
-  ansible.builtin.command:
-    argv:
-      - op
-      - item
-      - edit
-      - "{{ github_runner_arc_secrets_item }}"
-      - --vault
-      - "{{ github_runner_arc_secrets_vault }}"
-      - "tailscale-join-key[password]={{ github_runner_arc_new_join_key.json.key }}"
-  delegate_to: localhost
-  no_log: true
-  when: github_runner_arc_new_join_key is not skipped
+- name: Persist the new join key through the secrets role
+  ansible.builtin.include_role:
+    name: github_runner_secrets
+    tasks_from: persist_tailscale_join_key
+  vars:
+    github_runner_secrets_new_tailscale_join_key: "{{ github_runner_cluster_new_join_key.json.key }}"
+  when: github_runner_cluster_new_join_key is not skipped
 
 - name: Fold the new join key into this run's own in-memory secrets
   ansible.builtin.set_fact:
-    github_runner_arc_secrets: "{{ github_runner_arc_secrets | combine({'tailscale_join_key': github_runner_arc_new_join_key.json.key}) }}"
+    github_runner_cluster_tailscale_join_key: "{{ github_runner_cluster_new_join_key.json.key }}"
   no_log: true
-  when: github_runner_arc_new_join_key is not skipped
-
-- name: Refresh the cached secrets read to match, so future runs see the new key without re-reading 1Password
-  ansible.builtin.copy:
-    dest: "{{ lookup('env', 'HOME') }}/.cache/github-runner-arc/secrets-{{ github_runner_arc_secrets_item }}.json"
-    content: "{{ github_runner_arc_secrets | to_json }}"
-    mode: "0600"
-  delegate_to: localhost
-  no_log: true
-  when: github_runner_arc_new_join_key is not skipped
+  when: github_runner_cluster_new_join_key is not skipped

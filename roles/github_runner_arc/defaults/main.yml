@@ -1,41 +1,15 @@
 ---
-# ExaDev GitHub Actions runner fleet: ARC (Actions Runner Controller) on k3s.
-#
-# Two roles: "server" (the default) is a control-plane/etcd member (k3s server) - a genuine HA member, not just a worker. Whether a server host bootstraps the cluster (k3s --cluster-init, embedded etcd) or joins an EXISTING one is an orthogonal, one-time per-host decision (github_runner_arc_etcd_bootstrap below), not a separate role: set it true on exactly one host (whichever bootstrapped the cluster originally), and set github_runner_arc_join_server_url on every other server host instead. "agent" joins as a pure worker with no control-plane role at all. Installing the ARC controller, each org's runner scale set, and the fleet-health platform (heartbeat/autoscaler) is likewise not tied to a role - see tasks/main.yml, where each is gated purely on whether THIS host's own github_runner_arc_orgs/github_runner_arc_heartbeat_gist_id is set, so any server host can be the one Ansible installs against. See docker-compose.yml's own top comment for the full reasoning, including why 3 servers is the right minimum for etcd quorum.
-github_runner_arc_node_role: "server"
-github_runner_arc_agent_server_url: ""
-github_runner_arc_join_server_url: ""
+# ARC (Actions Runner Controller) on an existing k3s cluster: the controller, each org's runner scale sets, and the fleet-health platform (heartbeat/autoscaler). None of it is tied to a node role: each part is gated purely on whether THIS host's own github_runner_arc_orgs or github_runner_arc_heartbeat_gist_id is set, so any server host can be the one Ansible installs against. On a host the github_runner_cluster role made an agent, this role installs nothing.
 
-# One-time, per-host: true on exactly the one server host that originally ran k3s --cluster-init to bootstrap the cluster's embedded etcd; false (the default) on every other server, which instead joins via github_runner_arc_join_server_url. Irrelevant to how a host operates once past first boot - kept only because a host needs to know which one to pass at startup, and because the node-password self-heal rescue block in tasks/main.yml uses it to know which host owns the node-password Secret store versus which hosts must re-authenticate against a remote peer's copy of it.
-github_runner_arc_etcd_bootstrap: false
-
-# This host's own k3s node name/Tailscale hostname. Empty (the default) means "use inventory_hostname" - every server's own host_vars can leave this unset unless it needs to differ (e.g. to preserve a pre-existing device identity across a role change - see host_vars/node-a.yml's own override and comment).
-github_runner_arc_node_name: ""
-# Derived, never set directly: the name every template and check actually uses for this host (k3s node name, Tailscale device hostname, TLS SAN self-check).
-github_runner_arc_effective_node_name: "{{ github_runner_arc_node_name if github_runner_arc_node_name | length > 0 else inventory_hostname }}"
-
-# Every server node's own Tailscale hostname (every "server"-role host's own, including the bootstrap host's), applied identically to every server's own --tls-san list - a multi-server cluster needs every server's cert to cover every server's own name, not just its own, since a client (kubectl, Ansible) may reach any of them directly. Set identically on every server host's own host_vars. Empty (the default) is only valid for a genuinely single-server setup where nothing else ever joins.
-github_runner_arc_tls_sans: []
-
-# github_runner_arc_secrets.tailscale_join_key (read from the shared secrets item's tailscale-join-key field by tasks/main.yml's own combined secrets read - nothing to set here) is what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host once more than one is in play: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic - avoiding an earlier, considerably hackier attempt (--node-external-ip + --flannel-external-ip layered on the HOST's own already-running Tailscale, tunnelled through Docker's own UDP port-publishing) that needed two nested tunnels for the same traffic and was correspondingly fragile.
-#
-# tasks/ensure_tailscale.yml uses the shared secrets item's tailscale-api-token field to keep the tailnet's ACL grant and this join key themselves provisioned - see that file's own comments for what it manages and the one manual step (creating the API token itself) that has no API to automate.
-
-# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets FROM that host (server hosts only - ignored on an agent; any server host works, not just a specific designated one). Each entry becomes one namespace, two Kubernetes Secrets, and one Helm release. Empty (the default) means the role no-ops that part entirely on that host. See host_vars/node-a.yml for a real, working example of the full set of variables this role needs.
+# Set github_runner_arc_orgs in a host's own host_vars to install one or more orgs' runner scale sets FROM that host (server hosts only; any server host works, not just a specific designated one). Each entry becomes one namespace per scale-set profile, two Kubernetes Secrets per namespace, and one Helm release per profile. Empty (the default) means the role no-ops that part entirely on that host. See ansible/host_vars/node-a.yml for a real, working example.
 github_runner_arc_orgs: []
-
-# k3s + the fleet-health platform (heartbeat/autoscaler, installed as in-cluster Kubernetes Deployments by install_platform.yml - see tasks/main.yml). k3s-token, ghcr-username, ghcr-token, and heartbeat-gh-token all live as separate fields on this ONE 1Password item, read via a single `op item get` call rather than four separate `op read` calls: confirmed live that 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so four separate reads meant four separate approval prompts for values that live on the exact same item. Never stored in this role or in ansible-vault - see tasks/main.yml.
-github_runner_arc_secrets_vault: ""
-github_runner_arc_secrets_item: ""
-
-# The alternative to 1Password: every secret supplied directly, in the same shape tasks/main.yml's own 1Password read produces - {k3s_token, ghcr_username, ghcr_token, heartbeat_gh_token, tailscale_join_key, tailscale_api_token (optional: only needed for tasks/ensure_tailscale.yml's ACL provisioning), org_private_keys: {<org name>: <PEM content>}}. bootstrap.sh builds this from .env.bootstrap for a host with no control node or 1Password access. Non-empty means the vault/item above are ignored entirely.
-github_runner_arc_provided_secrets: {}
-github_runner_arc_k3s_version: "latest"
 
 # Set github_runner_arc_heartbeat_gist_id in a host's own host_vars to install the fleet-health platform FROM that host (server hosts only; any server host works, same as github_runner_arc_orgs above). Empty (the default) means install_platform.yml no-ops entirely on that host.
 github_runner_arc_heartbeat_gist_id: ""
 github_runner_arc_heartbeat_window_seconds: 600
 github_runner_arc_heartbeat_interval_seconds: 180
+
+# Secrets, normally set by the github_runner_secrets role: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a GHCR pull token for the runner and platform images), github_runner_arc_heartbeat_gh_token (a PAT with gist scope), and github_runner_arc_org_private_keys ({<org name>: <PEM content>}, one per entry in github_runner_arc_orgs). No defaults: a host that installs an org or the platform needs them.
 
 # Namespace and image refs for the fleet-health platform's own Deployments (see install_platform.yml). Built and pushed the same manual multi-arch way as the main runner image - see the README's Build/test section.
 github_runner_arc_platform_namespace: "github-runner-platform"
@@ -54,13 +28,8 @@ github_runner_arc_autoscaler_floor: 3
 github_runner_arc_autoscaler_raise_confirm_polls: 2
 github_runner_arc_autoscaler_mem_available_pressure_pct: 15
 
-# Repo root ON THE TARGET HOST itself: docker-compose.yml, the .env this role templates, and the values/ Helm values files (the single source of truth for both the ARC controller and every org's runner scale set - this role reads them in place rather than keeping its own copy) all live there. Deliberately left undefined here, not defaulted to `{{ playbook_dir }}/..`: playbook_dir is a control-node path, and using it as a template destination on the target host fails outright the moment the control node's own checkout doesn't sit at the identical path as the target's - confirmed live against node-b, whose real checkout lives at a completely different path than this repo's own worktree on the control node. Every host's own host_vars must set this explicitly (see host_vars/node-b.yml).
-github_runner_arc_values_dir: "{{ github_runner_arc_repo_root }}/values"
-github_runner_arc_kubeconfig_path: "{{ github_runner_arc_repo_root }}/kubeconfig/kubeconfig.yaml"
+# The values/ Helm values files (the single source of truth for both the ARC controller and every org's runner scale set) are read in place from the checkout on the target host, and the kubeconfig is the one the cluster's own k3s container writes there, so both default to paths under the github_runner_cluster role's repo root.
+github_runner_arc_values_dir: "{{ github_runner_cluster_repo_root }}/values"
+github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path }}"
 
-# kubernetes.core.k8s/k8s_info need the kubernetes Python package on the target host, which a stock macOS Homebrew Python treats as an externally-managed environment (PEP 668) - a plain pip install fails outright, confirmed live against node-b. A dedicated virtualenv sidesteps that without weakening the system Python's own protections.
-github_runner_arc_venv_path: "{{ ansible_facts['env']['HOME'] }}/.ansible-github-runner-venv"
-
-# Helm chart version pins. Left undefined (not set to ""), so that
-# `| default(omit)` in tasks/main.yml and tasks/install_org.yml correctly
-# drops the --version flag entirely rather than passing an empty string. Uncomment and pin in a host's group_vars/host_vars to hold a chart back: github_runner_arc_controller_chart_version: "0.12.1" github_runner_arc_scaleset_chart_version: "0.12.1"
+# Helm chart version pins, left undefined (not set to "") so that `| default(omit)` in tasks/main.yml and tasks/install_scale_set_profile.yml drops the --version flag entirely rather than passing an empty string. To hold a chart back, set github_runner_arc_controller_chart_version and/or github_runner_arc_scaleset_chart_version (e.g. "0.12.1") in a host's group_vars or host_vars.

@@ -1,0 +1,10 @@
+---
+# Where the fleet's secrets come from. Either a 1Password vault and item, read on the control node with a single `op item get` (plus one `op read` per org's App private key), or github_runner_secrets_provided below. Every field this role reads lives on the ONE item, read through a single `op item get` rather than one `op read` per field: 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so separate reads would mean separate approval prompts for values that live on the same item. Never stored in this role or in ansible-vault.
+github_runner_secrets_vault: ""
+github_runner_secrets_item: ""
+
+# The alternative to 1Password: every secret supplied directly, in the same shape the 1Password read produces: {k3s_token, ghcr_username, ghcr_token, heartbeat_gh_token, tailscale_join_key, tailscale_api_token (optional: only needed for the cluster role's tailnet ACL provisioning), org_private_keys: {<org name>: <PEM content>}}. bootstrap.sh builds this from .env.bootstrap for a host with no control node or 1Password access. Non-empty means the vault and item above are ignored entirely.
+github_runner_secrets_provided: {}
+
+# Cached on the CONTROL NODE (never in this repo, never on a fleet host) after the first successful 1Password read, keyed by the item name, so a repeated debugging session does not mean one desktop-app approval prompt per run. `lookup('env', 'HOME')`, not `ansible_facts`: inside a delegated task, ansible_facts still refers to the CURRENT (target) host's own gathered facts, not localhost's. Delete the file to force a fresh read (e.g. after rotating a secret).
+github_runner_secrets_cache_path: "{{ lookup('env', 'HOME') }}/.cache/github-runner-arc/secrets-{{ github_runner_secrets_item }}.json"

@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  author: ExaDev
+  description: Runs a k3s cluster under Docker Compose on each host, with embedded etcd and Tailscale inside each node's k3s container.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions: [all]
+    - name: Ubuntu
+      versions: [all]
+    - name: Debian
+      versions: [all]
+dependencies: []

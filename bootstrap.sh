@@ -50,14 +50,14 @@ jq -n \
   '
   def opt($name; $var): if (env[$var] // "") != "" then {($name): env[$var]} else {} end;
   {
-    github_runner_arc_repo_root: $repo_root,
-    github_runner_arc_node_role: $node_role,
-    github_runner_arc_node_name: $node_name,
-    github_runner_arc_etcd_bootstrap: ($node_role == "server" and (env.K3S_JOIN_SERVER_URL // "") == ""),
-    github_runner_arc_join_server_url: (env.K3S_JOIN_SERVER_URL // ""),
-    github_runner_arc_agent_server_url: (env.K3S_AGENT_SERVER_URL // ""),
-    github_runner_arc_tls_sans: ((env.K3S_TLS_SAN_LIST // "") | split(" ") | map(select(. != ""))),
-    github_runner_arc_k3s_version: (env.K3S_VERSION // "" | if . == "" then "latest" else . end),
+    github_runner_cluster_repo_root: $repo_root,
+    github_runner_cluster_node_role: $node_role,
+    github_runner_cluster_node_name: $node_name,
+    github_runner_cluster_bootstrap: ($node_role == "server" and (env.K3S_JOIN_SERVER_URL // "") == ""),
+    github_runner_cluster_join_server_url: (env.K3S_JOIN_SERVER_URL // ""),
+    github_runner_cluster_agent_server_url: (env.K3S_AGENT_SERVER_URL // ""),
+    github_runner_cluster_tls_sans: ((env.K3S_TLS_SAN_LIST // "") | split(" ") | map(select(. != ""))),
+    github_runner_cluster_k3s_version: (env.K3S_VERSION // "" | if . == "" then "latest" else . end),
     github_runner_arc_heartbeat_gist_id: (env.HEARTBEAT_GIST_ID // ""),
     github_runner_arc_orgs: (
       if (env.EXADEV_APP_ID // "") == "" then []
@@ -70,7 +70,7 @@ jq -n \
       }]
       end
     ),
-    github_runner_arc_provided_secrets: {
+    github_runner_secrets_provided: {
       k3s_token: (env.K3S_TOKEN // ""),
       tailscale_join_key: (env.K3S_VPN_AUTH_JOIN_KEY // ""),
       tailscale_api_token: (env.TAILSCALE_API_TOKEN // ""),
@@ -90,7 +90,7 @@ jq -n \
   ' >"$vars_file"
 
 # From ansible/ so its ansible.cfg applies. The interpreter is this venv's own Python (it has everything Ansible's modules need, unlike whichever python3 auto-discovery would find first), set through ANSIBLE_PYTHON_INTERPRETER rather than an ansible_python_interpreter extra var: config-level settings sit below the role's own set_fact switch to its kubernetes-client virtualenv, and an extra var would override it.
-log "Running the github_runner_arc role against this machine as ${node_name} (${node_role})..."
+log "Running the playbook against this machine as ${node_name} (${node_role})..."
 cd ansible
 ANSIBLE_COLLECTIONS_PATH="${venv}/collections" \
   ANSIBLE_PYTHON_INTERPRETER="${venv}/bin/python3" \

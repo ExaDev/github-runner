@@ -1,0 +1,32 @@
+---
+# A k3s cluster run under Docker Compose on each host, with embedded etcd and Tailscale inside each node's k3s container (k3s --vpn-auth).
+#
+# Two node roles: "server" (the default) is a control-plane/etcd member (k3s server), a genuine HA member, not just a worker. Whether a server host bootstraps the cluster (k3s --cluster-init, embedded etcd) or joins an EXISTING one is an orthogonal, one-time per-host decision (github_runner_cluster_bootstrap below), not a separate role: set it true on exactly one host, and set github_runner_cluster_join_server_url on every other server host instead. "agent" joins as a pure worker with no control-plane role at all. See docker-compose.yml's own top comment for why 3 servers is the right minimum for etcd quorum.
+github_runner_cluster_node_role: "server"
+github_runner_cluster_agent_server_url: ""
+github_runner_cluster_join_server_url: ""
+
+# One-time, per-host: true on exactly the one server host that ran k3s --cluster-init to bootstrap the cluster's embedded etcd; false (the default) on every other server, which instead joins via github_runner_cluster_join_server_url. Irrelevant to how a host operates once past first boot: kept because a host needs to know which one to pass at startup, and because the node-password self-heal rescue block in tasks/main.yml uses it to know which host owns the node-password Secret store versus which hosts must re-authenticate against a remote peer's copy of it.
+github_runner_cluster_bootstrap: false
+
+# This host's own k3s node name and Tailscale hostname. Empty (the default) means "use inventory_hostname"; set it only where a host needs a different name, e.g. to keep a pre-existing Tailscale device identity.
+github_runner_cluster_node_name: ""
+# Derived, never set directly: the name every template and check actually uses for this host (k3s node name, Tailscale device hostname, TLS SAN self-check).
+github_runner_cluster_effective_node_name: "{{ github_runner_cluster_node_name if github_runner_cluster_node_name | length > 0 else inventory_hostname }}"
+
+# Every server node's own Tailscale hostname (every "server"-role host's own, including the bootstrap host's), applied identically to every server's own --tls-san list: a multi-server cluster needs every server's cert to cover every server's own name, not just its own, since a client (kubectl, Ansible) may reach any of them directly. Set identically on every server host. Empty (the default) is only valid for a genuinely single-server setup where nothing else ever joins.
+github_runner_cluster_tls_sans: []
+
+github_runner_cluster_k3s_version: "latest"
+
+# Secrets, normally set by the github_runner_secrets role. github_runner_cluster_k3s_token is the shared node-join secret and has no default. github_runner_cluster_tailscale_join_key is what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic. github_runner_cluster_tailscale_api_token, when set, lets tasks/ensure_tailscale.yml keep the tailnet's ACL grant and the join key itself provisioned; see that file's comments for what it manages and the one manual step (creating the API token) that has no API to automate.
+github_runner_cluster_tailscale_join_key: ""
+github_runner_cluster_tailscale_api_token: ""
+# Whether ensure_tailscale.yml may create a join key when none is supplied. Only safe where the new key can be persisted for the next run; the github_runner_secrets role turns it on in 1Password mode and persists the key itself.
+github_runner_cluster_create_tailscale_join_key: false
+
+# Repo root ON THE TARGET HOST itself: docker-compose.yml and the .env this role templates live there. Deliberately left undefined here, not defaulted to `{{ playbook_dir }}/..`: playbook_dir is a control-node path, and using it as a template destination on the target host fails outright the moment the control node's own checkout doesn't sit at the identical path as the target's. Every host must set this explicitly.
+github_runner_cluster_kubeconfig_path: "{{ github_runner_cluster_repo_root }}/kubeconfig/kubeconfig.yaml"
+
+# Whether this host waits for every node to report Ready (self-healing stale node-password registrations on the way). Needs the kubernetes Python client, which this role installs through github_runner_k8s_client only when this is true, so it is off by default and turned on for the hosts that go on to talk to the Kubernetes API (see playbooks/site.yml).
+github_runner_cluster_wait_for_nodes: false
