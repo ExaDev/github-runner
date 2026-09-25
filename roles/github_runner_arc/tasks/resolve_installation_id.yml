@@ -1,56 +1,56 @@
 ---
-# Included once per org, only when that org's installation_id isn't already known (see install_org.yml). Signs a short-lived JWT per GitHub's documented App authentication flow and queries /app/installations to find this org's installation id, using the private key already resolved for every org in github_runner_arc_org_private_keys (normally by the github_runner_secrets role) before the org loop starts.
+# Included once per org whose installation_id is not set (see install_org.yml). Signs a short-lived App JWT with files/generate_app_jwt.py and finds this org's installation in GET /app/installations, using the private key already in github_runner_arc_org_private_keys.
 #
-# The whole block delegates to the control node: none of the JWT-signing/API-call steps have any actual dependency on the target host - it is a pure temp-file-then-network-call sequence, and delegating all of it keeps the temp private-key file off the target host entirely rather than writing then immediately deleting it there.
+# Runs entirely on the control node: nothing here needs the target host, and delegating keeps the temporary key file off it.
 #
-# No delegate_facts anywhere in this file, deliberately: Ansible's own documented default (delegate_facts unset/false) already assigns a delegated task's registered/set facts to inventory_hostname (node-b, the current host), not to the delegated-to host (localhost). Setting delegate_facts: true does the OPPOSITE of what its name suggests at a glance - it sends the fact TO the delegated host instead - which is exactly backwards from what this file needs, confirmed live (twice) by the deployed GitHub App secret's installation_id coming out empty every time delegate_facts: true was set here. github_runner_arc_resolved_installation_id is read directly by name from install_org.yml, with no hostvars indirection needed.
-- name: "{{ org.name }}: resolve installation ID"
+# No delegate_facts anywhere, deliberately: with it unset, a delegated task's facts attach to inventory_hostname, which is what install_org.yml reads. delegate_facts: true would send them to localhost instead, which once left the deployed App Secret's installation_id empty.
+- name: Resolve the installation ID via a signed App JWT
   delegate_to: localhost
   # Read-only apart from a temp file it removes again, and the org's secrets need the result, so it runs under --check too.
   check_mode: false
   block:
-    - name: "{{ org.name }}: write private key to a temp file for signing"
-      # Reuses github_runner_arc_org_private_keys, resolved once for every org before the org loop starts, rather than reading the same 1Password field a second time here.
+    - name: Create a temporary file for the private key of {{ org.name }}
       ansible.builtin.tempfile:
         state: file
         suffix: ".pem"
       register: github_runner_arc_resolve_private_key_tempfile
 
-    - name: "{{ org.name }}: persist the private key to the temp file"
+    - name: Write the private key to the temporary file for {{ org.name }}
       ansible.builtin.copy:
         content: "{{ github_runner_arc_org_private_keys[org.name] }}"
         dest: "{{ github_runner_arc_resolve_private_key_tempfile.path }}"
         mode: "0600"
       no_log: true
 
-    - name: "{{ org.name }}: resolve installation ID via a signed App JWT"
-      ansible.builtin.shell: |
-        set -euo pipefail
-        now=$(date +%s)
-        iat=$((now - 60))
-        exp=$((now + 600))
-        header='{"alg":"RS256","typ":"JWT"}'
-        payload=$(jq -c -n --arg iat "$iat" --arg exp "$exp" --arg iss "{{ org.app_id }}" \
-          '{iat: ($iat | tonumber), exp: ($exp | tonumber), iss: ($iss | tonumber)}')
-        signing_input="$(printf '%s' "$header" | base64 | tr -d '=\n' | tr '+/' '-_').$(printf '%s' "$payload" | base64 | tr -d '=\n' | tr '+/' '-_')"
-        signature=$(printf '%s' "$signing_input" | openssl dgst -binary -sha256 -sign "{{ github_runner_arc_resolve_private_key_tempfile.path }}" | base64 | tr -d '=\n' | tr '+/' '-_')
-        jwt="${signing_input}.${signature}"
-        curl -sX GET -H "Authorization: Bearer ${jwt}" -H "Accept: application/vnd.github+json" https://api.github.com/app/installations \
-          | jq -r --arg login "{{ org.name }}" '.[] | select(.account.login == $login) | .id'
+    - name: Sign an App JWT for {{ org.name }}
+      ansible.builtin.script:
+        cmd: "generate_app_jwt.py {{ org.app_id | quote }} {{ github_runner_arc_resolve_private_key_tempfile.path | quote }}"
+        executable: python3
       changed_when: false
       no_log: true
-      register: github_runner_arc_resolve_installation_id_raw
+      register: github_runner_arc_resolve_jwt
 
-    - name: "{{ org.name }}: remove the private key temp file"
+    - name: List the App's installations for {{ org.name }}
+      ansible.builtin.uri:
+        url: https://api.github.com/app/installations?per_page=100
+        headers:
+          Authorization: "Bearer {{ github_runner_arc_resolve_jwt.stdout | trim }}"
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+      no_log: true
+      register: github_runner_arc_resolve_installations
+
+    - name: Record the installation ID of {{ org.name }}
+      ansible.builtin.set_fact:
+        github_runner_arc_resolved_installation_id: "{{ github_runner_arc_resolve_installations.json | selectattr('account.login', 'equalto', org.name) | map(attribute='id') | map('string') | first | default('') }}"
+
+    - name: Fail if the App has no installation on {{ org.name }}
+      ansible.builtin.fail:
+        msg: "Could not resolve an installation id for {{ org.name }}. Is the GitHub App installed on that org?"
+      when: github_runner_arc_resolved_installation_id | length == 0
+  always:
+    - name: Remove the private key temporary file for {{ org.name }}
       ansible.builtin.file:
         path: "{{ github_runner_arc_resolve_private_key_tempfile.path }}"
         state: absent
-
-    - name: "{{ org.name }}: fail if no installation was found"
-      ansible.builtin.fail:
-        msg: "Could not resolve an installation id for {{ org.name }} — is the GitHub App installed on that org?"
-      when: github_runner_arc_resolve_installation_id_raw.stdout | trim | length == 0
-
-    - name: "{{ org.name }}: record the resolved installation ID"
-      ansible.builtin.set_fact:
-        github_runner_arc_resolved_installation_id: "{{ github_runner_arc_resolve_installation_id_raw.stdout | trim }}"
+      when: github_runner_arc_resolve_private_key_tempfile.path is defined
