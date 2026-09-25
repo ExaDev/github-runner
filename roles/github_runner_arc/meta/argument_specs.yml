@@ -1,0 +1,206 @@
+---
+# The role's variables, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it; plugins/filter/arc.py checks the structure of each org and scale-set profile, so the org entries are described here but not restricted key by key.
+argument_specs:
+  main:
+    short_description: Installs Actions Runner Controller, runner scale sets and the fleet-health platform into a Kubernetes cluster.
+    options:
+      github_runner_arc_orgs:
+        type: list
+        elements: dict
+        default: []
+        description:
+          - Orgs whose runner scale sets this host installs. Each entry has name, app_id, image, private_key or private_key_op_reference, and optionally installation_id and app_secret_name (the App Secret's name, default <org>-github-app).
+          - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, autoscale and sizing.
+          - max_runners, when set, is the release's maxRunners and takes precedence over its values file and its sizing.
+          - scale_set_labels replaces runs_on_label with the whole list of scaleSetLabels; an empty list sets none, so jobs target the release name.
+      github_runner_arc_values_dir:
+        type: str
+        default: ""
+        description: Directory on the control node that a relative values_file is read from.
+      github_runner_arc_kubeconfig_path:
+        type: str
+        description: Kubeconfig on the host the role runs against. Empty means KUBECONFIG, then ~/.kube/config.
+      github_runner_arc_controller_chart_version:
+        type: str
+        description: Pins the controller chart. Unset installs the latest chart.
+      github_runner_arc_scaleset_chart_version:
+        type: str
+        description: Pins the scale-set chart. Unset installs the latest chart.
+      github_runner_arc_controller_release_name:
+        type: str
+        default: arc
+        description: Helm release name of the ARC controller.
+      github_runner_arc_controller_namespace:
+        type: str
+        default: actions-runner-controller
+        description: Namespace of the ARC controller, where its listeners run and where the heartbeat checks its Deployment.
+      github_runner_arc_controller_replicas:
+        type: int
+        default: 1
+        description: Controller replicas. Above 1 turns on leader election and a preferred anti-affinity across nodes.
+      github_runner_arc_controller_extra_values:
+        type: dict
+        default: {}
+        description: Values merged over the role's own controller values.
+      github_runner_arc_metrics_enabled:
+        type: bool
+        default: false
+        description: Prometheus metrics for the controller and every listener.
+      github_runner_arc_controller_metrics_addr:
+        type: str
+        default: ":8080"
+        description: The controller's metrics listen address.
+      github_runner_arc_listener_metrics_addr:
+        type: str
+        default: ":8080"
+        description: Each listener's metrics listen address.
+      github_runner_arc_listener_metrics_endpoint:
+        type: str
+        default: /metrics
+        description: Each listener's metrics path.
+      github_runner_arc_listener_probes_enabled:
+        type: bool
+        default: false
+        description: Readiness and liveness probes on each listener's metrics endpoint. Needs metrics on.
+      github_runner_arc_listener_probe_port:
+        type: int
+        default: 8080
+        description: Port the listener probes poll.
+      github_runner_arc_node_label_key:
+        type: str
+        default: ""
+        description: When set, the controller, listeners and runner pods are restricted to nodes with this label.
+      github_runner_arc_node_label_value:
+        type: raw
+        default: "true"
+        description: Value of the eligibility label.
+      github_runner_arc_labelled_nodes:
+        type: list
+        elements: str
+        default: []
+        description: Nodes the role gives the eligibility label.
+      github_runner_arc_ghcr_username:
+        type: str
+        description: Registry user for the pull Secret. Required when the role writes the pull Secret.
+      github_runner_arc_ghcr_token:
+        type: str
+        no_log: true
+        description: Registry token for the pull Secret. Required when the role writes the pull Secret.
+      github_runner_arc_heartbeat_gh_token:
+        type: str
+        no_log: true
+        description: GitHub token with gist scope for the heartbeat. Required when the role writes heartbeat-gh-token.
+      github_runner_arc_manage_secrets:
+        type: bool
+        default: true
+        description: Whether the role writes the App Secrets and heartbeat-gh-token. false checks they already exist instead.
+      github_runner_arc_manage_image_pull_secret:
+        type: bool
+        description:
+          - Whether the role writes the pull Secret. false uses an existing Secret named github_runner_arc_image_pull_secret_name, which something else keeps current, and checks it exists.
+          - Follows github_runner_arc_manage_secrets unless set.
+      github_runner_arc_image_pull_registry:
+        type: str
+        default: ghcr.io
+        description: Registry the pull Secret authenticates to.
+      github_runner_arc_image_pull_secret_name:
+        type: str
+        default: ghcr-pull
+        description: Name of the pull Secret in each namespace, whether the role writes it or uses an existing one.
+      github_runner_arc_verify_image_pull:
+        type: bool
+        default: true
+        description: Prove the pull credential can read each image before writing the pull Secret.
+      github_runner_arc_heartbeat_gist_id:
+        type: str
+        default: ""
+        description: Installs the fleet-health platform from this host, refreshing this gist.
+      github_runner_arc_heartbeat_window_seconds:
+        type: int
+        default: 600
+        description: How far ahead the heartbeat sets its timestamp.
+      github_runner_arc_heartbeat_interval_seconds:
+        type: int
+        default: 180
+        description: How often the heartbeat checks the cluster.
+      github_runner_arc_heartbeat_bootstrap_gist:
+        type: bool
+        default: true
+        description: Create a heartbeat gist and stop when no host in the inventory has one.
+      github_runner_arc_heartbeat_gist_description:
+        type: str
+        default: GitHub Actions runner fleet health heartbeat
+        description: Description of a bootstrapped gist.
+      github_runner_arc_heartbeat_gist_consumer:
+        type: str
+        default: ""
+        description: Anything else that must be told a new gist's id, named in the bootstrap failure message.
+      github_runner_arc_platform_namespace:
+        type: str
+        default: github-runner-platform
+        description: Namespace of the heartbeat and autoscaler.
+      github_runner_arc_heartbeat_image:
+        type: str
+        description: Heartbeat image.
+      github_runner_arc_autoscaler_image:
+        type: str
+        description: Autoscaler image.
+      github_runner_arc_autoscaler_dry_run:
+        type: bool
+        default: true
+        description: Report the autoscaler's decisions without applying them.
+      github_runner_arc_autoscaler_poll_seconds:
+        type: int
+        default: 45
+        description: Autoscaler poll interval.
+      github_runner_arc_autoscaler_raise_confirm_polls:
+        type: int
+        default: 2
+        description: Consecutive polls that must agree before the autoscaler raises maxRunners.
+      github_runner_arc_autoscaler_mem_available_pressure_pct:
+        type: int
+        default: 15
+        description: Available memory percentage below which the autoscaler treats a node as under pressure.
+      github_runner_arc_autoscaler_usable_budget_gi:
+        type: int
+        description: Memory runner pods may use across every node. Required for an autoscaled profile.
+      github_runner_arc_autoscaler_max_ceiling:
+        type: int
+        description: The autoscaler's ceiling, unless the autoscaled profile sets sizing.
+      github_runner_arc_autoscaler_floor:
+        type: int
+        description: The autoscaler's floor, equal to the autoscaled profile's maxRunners.
+      github_runner_arc_app_setup_org:
+        type: str
+        default: ""
+        description: Organisation the App setup creates the App on.
+      github_runner_arc_app_setup_name:
+        type: str
+        default: ""
+        description: The App's display name.
+      github_runner_arc_app_setup_description:
+        type: str
+        description: The App's description.
+      github_runner_arc_app_setup_homepage_url:
+        type: str
+        default: ""
+        description: The App's homepage and redirect page. Empty means the organisation's GitHub page.
+      github_runner_arc_app_setup_permissions:
+        type: dict
+        description: The App's permissions.
+      github_runner_arc_app_manifest_code:
+        type: str
+        default: ""
+        description: The one-time code from the App setup's first phase.
+      github_runner_arc_app_private_key_path:
+        type: str
+        default: ""
+        description: New file the App setup writes the private key to.
+      github_runner_arc_app_setup_install_retries:
+        type: int
+        default: 40
+        description: How many times the App setup checks for the installation.
+      github_runner_arc_app_setup_install_delay:
+        type: int
+        default: 15
+        description: Seconds between those checks.
