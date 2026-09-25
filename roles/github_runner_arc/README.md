@@ -22,6 +22,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
 - `github_runner_arc_kubeconfig_path`: the kubeconfig on the host the role runs against. Defaults to `github_runner_cluster`'s kubeconfig; empty means `KUBECONFIG` or `~/.kube/config`.
 - `github_runner_arc_controller_chart_version`, `github_runner_arc_scaleset_chart_version`: chart pins; unset installs the latest chart.
+- `github_runner_arc_controller_release_name`, `github_runner_arc_controller_namespace`: the controller's Helm release and namespace, default `arc` in `actions-runner-controller`. The stale-listener check, the heartbeat's RBAC and the heartbeat's controller check use them too.
 - `github_runner_arc_controller_replicas`: above 1, the chart turns on leader election and the role adds a preferred pod anti-affinity across nodes. `github_runner_arc_controller_extra_values` is merged over the role's controller values.
 - `github_runner_arc_metrics_enabled` (and the `_addr`/`_endpoint` settings): Prometheus metrics for the controller and every listener; the 0.14 chart only enables them together.
 - `github_runner_arc_listener_probes_enabled`: readiness and liveness probes on each listener's metrics endpoint, so a listener that starts and then fails its GitHub authentication is not counted ready during a rollout. Needs metrics on.

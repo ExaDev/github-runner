@@ -11,7 +11,7 @@ affinity:
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: gha-rs-controller
-              app.kubernetes.io/instance: arc
+              app.kubernetes.io/instance: {{ github_runner_arc_controller_release_name | to_json }}
 {% endif %}
 {% if github_runner_arc_node_label_key | length > 0 %}
 nodeSelector:

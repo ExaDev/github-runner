@@ -9,7 +9,7 @@
       kind: Namespace
       metadata:
         name: "{{ item }}"
-  loop: "{{ [github_runner_arc_platform_namespace, 'actions-runner-controller'] + ([github_runner_arc_fleet.autoscaled.namespace] if github_runner_arc_fleet.autoscaled else []) }}"
+  loop: "{{ [github_runner_arc_platform_namespace, github_runner_arc_controller_namespace] + ([github_runner_arc_fleet.autoscaled.namespace] if github_runner_arc_fleet.autoscaled else []) }}"
 
 - name: "Platform: create heartbeat/autoscaler service accounts"
   kubernetes.core.k8s:
@@ -58,7 +58,7 @@
       kind: Role
       metadata:
         name: github-runner-heartbeat-controller-reader
-        namespace: actions-runner-controller
+        namespace: "{{ github_runner_arc_controller_namespace }}"
       rules:
         - apiGroups: ["apps"]
           resources: ["deployments"]
@@ -71,7 +71,7 @@
       kind: RoleBinding
       metadata:
         name: github-runner-heartbeat-controller-reader
-        namespace: actions-runner-controller
+        namespace: "{{ github_runner_arc_controller_namespace }}"
       subjects:
         - kind: ServiceAccount
           name: heartbeat
@@ -284,20 +284,7 @@
             containers:
               - name: heartbeat
                 image: "{{ github_runner_arc_heartbeat_image }}"
-                env:
-                  - name: HEARTBEAT_GIST_ID
-                    value: "{{ github_runner_arc_heartbeat_gist_id }}"
-                  - name: HEARTBEAT_WINDOW_SECONDS
-                    value: "{{ github_runner_arc_heartbeat_window_seconds | string }}"
-                  - name: HEARTBEAT_INTERVAL_SECONDS
-                    value: "{{ github_runner_arc_heartbeat_interval_seconds | string }}"
-                  - name: HEARTBEAT_STATE_NAMESPACE
-                    value: "{{ github_runner_arc_platform_namespace }}"
-                  - name: HEARTBEAT_GH_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: heartbeat-gh-token
-                        key: token
+                env: "{{ github_runner_arc_heartbeat_env + github_runner_arc_heartbeat_controller_env }}"
                 resources:
                   requests:
                     cpu: "50m"
@@ -305,6 +292,27 @@
                   limits:
                     cpu: "200m"
                     memory: "64Mi"
+  vars:
+    github_runner_arc_heartbeat_env:
+      - name: HEARTBEAT_GIST_ID
+        value: "{{ github_runner_arc_heartbeat_gist_id }}"
+      - name: HEARTBEAT_WINDOW_SECONDS
+        value: "{{ github_runner_arc_heartbeat_window_seconds | string }}"
+      - name: HEARTBEAT_INTERVAL_SECONDS
+        value: "{{ github_runner_arc_heartbeat_interval_seconds | string }}"
+      - name: HEARTBEAT_STATE_NAMESPACE
+        value: "{{ github_runner_arc_platform_namespace }}"
+      - name: HEARTBEAT_GH_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: heartbeat-gh-token
+            key: token
+    # Where the heartbeat looks for the controller's Deployment. Passed only when it differs from scripts/heartbeat.sh's own default, so that a heartbeat Deployment installed before this setting existed is not rolled by an unchanged configuration.
+    github_runner_arc_heartbeat_controller_env: >-
+      {{
+        [{'name': 'HEARTBEAT_CONTROLLER_NAMESPACE', 'value': github_runner_arc_controller_namespace}]
+        if github_runner_arc_controller_namespace != 'actions-runner-controller' else []
+      }}
 
 - name: "Platform: install/upgrade the autoscaler Deployment"
   when: github_runner_arc_fleet.autoscaled is not none

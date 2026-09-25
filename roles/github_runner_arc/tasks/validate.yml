@@ -29,6 +29,12 @@
   loop:
     - msg: github_runner_arc_controller_replicas must be a whole number of at least 1.
       failed: "{{ github_runner_arc_controller_replicas | string is not match('^[1-9][0-9]*$') }}"
+    - msg: github_runner_arc_controller_release_name and github_runner_arc_controller_namespace must be valid Kubernetes names (lower-case letters, digits and '-', at most 63 characters).
+      failed: >-
+        {{
+          [github_runner_arc_controller_release_name, github_runner_arc_controller_namespace]
+          | reject('match', '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$') | list | length > 0
+        }}
     - msg: github_runner_arc_controller_extra_values must be a mapping.
       failed: "{{ github_runner_arc_controller_extra_values is not mapping }}"
     - msg: github_runner_arc_listener_probes_enabled needs github_runner_arc_metrics_enabled, since the probes poll the listener's metrics endpoint.
