@@ -2,7 +2,7 @@ self-hosted-runner:
   labels:
     # The ARC runner scale set label every ordinary job in this repo (and every consumer of ExaDev/runner-fallback-action) targets - see the project README's Architecture section.
     - exadev-runners
-    # The dedicated, separately-labelled, Docker-in-Docker scale-set profile build-runner-image.yml runs on - see ExaDev/github-runner-fleet's host_vars/node-a.yml and values/exadev-runners-values-builder.yaml.
+    # The dedicated, separately-labelled, Docker-in-Docker scale-set profile that release.yml's build-images job and mesh-integration.yml run on - see the README's Ansible section.
     - exadev-image-builder
 
 # Configuration variables in array of strings defined in your repository or
