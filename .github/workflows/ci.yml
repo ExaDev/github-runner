@@ -120,6 +120,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ansible
           (cd ansible && ansible-playbook ../playbooks/site.yml --syntax-check)
+      - name: Unit-test the cluster role's server selection
+        # Ubuntu's ansible package, installed above, puts ansible-core on the system Python the filter plugin imports from.
+        run: python3 -m unittest discover -s tests/unit -v
 
   required-checks:
     name: Required Checks

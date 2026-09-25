@@ -43,10 +43,10 @@
   vars:
     github_runner_arc_all_org_names: "{{ groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_orgs', default=[]) | flatten | map(attribute='name') | list }}"
 
-# github_runner_cluster_node_role belongs to the github_runner_cluster role; a host that role made an agent has no kubeconfig of its own and installs nothing, whatever its own orgs or gist id say.
+# github_runner_cluster_effective_node_role is published by the github_runner_cluster role; a host that role made an agent has no kubeconfig of its own and installs nothing, whatever its own orgs or gist id say.
 - name: End the role here on an agent host
   ansible.builtin.meta: end_role
-  when: (github_runner_cluster_node_role | default('server')) == 'agent'
+  when: (github_runner_cluster_effective_node_role | default('server')) == 'agent'
 
 - name: Give this host the kubernetes Python client
   # Only needed on a host that actually talks to the Kubernetes API (kubernetes.core.k8s/k8s_info/helm, used below, in install_platform.yml, and in install_org.yml): a server host with neither orgs nor the fleet-health platform configured never needs it.

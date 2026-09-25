@@ -37,7 +37,7 @@ if [ -n "${EXADEV_APP_ID:-}" ]; then
   org_private_key="$(cat "$EXADEV_APP_PRIVATE_KEY_PATH")"
 fi
 
-# Contains every secret below, so it lives only for this run: created 0600 and removed on exit, however the script exits.
+# Contains every secret below, so it lives only for this run: created 0600 and removed on exit, however the script exits. This one-host inventory has no groups, so the cluster group is "all"; with no server URL the host is the cluster's only server and bootstraps it, and with one it joins that server, whose cluster lies outside this inventory.
 vars_file="$(mktemp)"
 trap 'rm -f "$vars_file"' EXIT
 chmod 600 "$vars_file"
@@ -50,12 +50,11 @@ jq -n \
   '
   def opt($name; $var): if (env[$var] // "") != "" then {($name): env[$var]} else {} end;
   {
+    github_runner_cluster_group: "all",
     github_runner_cluster_repo_root: $repo_root,
     github_runner_cluster_node_role: $node_role,
     github_runner_cluster_node_name: $node_name,
-    github_runner_cluster_bootstrap: ($node_role == "server" and (env.K3S_JOIN_SERVER_URL // "") == ""),
-    github_runner_cluster_join_server_url: (env.K3S_JOIN_SERVER_URL // ""),
-    github_runner_cluster_agent_server_url: (env.K3S_AGENT_SERVER_URL // ""),
+    github_runner_cluster_server_url: (if $node_role == "agent" then env.K3S_AGENT_SERVER_URL else (env.K3S_JOIN_SERVER_URL // "") end),
     github_runner_cluster_tls_sans: ((env.K3S_TLS_SAN_LIST // "") | split(" ") | map(select(. != ""))),
     github_runner_cluster_k3s_version: (env.K3S_VERSION // "" | if . == "" then "latest" else . end),
     github_runner_arc_heartbeat_gist_id: (env.HEARTBEAT_GIST_ID // ""),

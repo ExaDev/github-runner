@@ -1,10 +1,8 @@
 ---
-# Brings this host up as a k3s node under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, per github_runner_cluster_node_role and github_runner_cluster_bootstrap. Safe to rerun: the .env is templated and docker compose converges to it.
+# Brings this host up as a k3s node under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, as tasks/topology.yml decides from the cluster group. Safe to rerun: the .env is templated and docker compose converges to it.
 
-- name: Fail if the node role is invalid
-  ansible.builtin.fail:
-    msg: "github_runner_cluster_node_role must be 'server' or 'agent' (got '{{ github_runner_cluster_node_role }}')."
-  when: github_runner_cluster_node_role not in ['server', 'agent']
+- name: Decide this host's part in the cluster
+  ansible.builtin.include_tasks: topology.yml
 
 - name: Fail if this host's repo root is not set
   ansible.builtin.fail:
@@ -45,38 +43,20 @@
   check_mode: false
   register: github_runner_cluster_docker_context
 
-- name: Set up and start this host as a k3s server, bootstrapping or joining as configured
-  when: github_runner_cluster_node_role == "server"
+- name: Set up and start this host as a k3s server, bootstrapping or joining
+  when: github_runner_cluster_effective_node_role == "server"
   block:
-    - name: Fail if bootstrap and join-server-url are both set (contradictory - can't bootstrap AND join)
-      ansible.builtin.fail:
-        msg: >-
-          github_runner_cluster_bootstrap is true AND
-          github_runner_cluster_join_server_url is set on this host. A host
-          either bootstraps the cluster or joins an existing one, not both.
-          Fix host_vars/{{ inventory_hostname }}.yml.
-      when: github_runner_cluster_bootstrap and github_runner_cluster_join_server_url | length > 0
-
-    - name: Fail if neither bootstrapping nor a join-server-url is set (nothing for this host to do)
-      ansible.builtin.fail:
-        msg: >-
-          Neither github_runner_cluster_bootstrap nor
-          github_runner_cluster_join_server_url is set on this server host. It
-          must either bootstrap the cluster or join an existing one. Add one
-          of them to host_vars/{{ inventory_hostname }}.yml.
-      when: not github_runner_cluster_bootstrap and github_runner_cluster_join_server_url | length == 0
-
     - name: Fail if this host isn't included in the fleet's own TLS SAN list
-      # Checks the EFFECTIVE node name (github_runner_cluster_node_name if set, else inventory_hostname), not raw inventory_hostname: a host may deliberately override its own node name, and checking the wrong string here would incorrectly fail that host.
+      # Only an overridden list can miss it, since the automatic one names every server. Checks the EFFECTIVE node name (github_runner_cluster_node_name if set, else inventory_hostname), not raw inventory_hostname: a host may deliberately override its own node name, and checking the wrong string here would incorrectly fail that host.
       ansible.builtin.fail:
         msg: >-
-          github_runner_cluster_tls_sans does not include this host's own
-          effective node name ({{ github_runner_cluster_effective_node_name }}).
-          Every server needs every server's own hostname on its --tls-san
-          list, including its own. Add it to github_runner_cluster_tls_sans in
-          host_vars/{{ inventory_hostname }}.yml (and on every OTHER
-          server's own host_vars too).
-      when: github_runner_cluster_effective_node_name not in (github_runner_cluster_tls_sans | join(' '))
+          This host's TLS SAN list does not include its own effective node
+          name ({{ github_runner_cluster_effective_node_name }}). Every server
+          needs every server's own hostname on its --tls-san list, including
+          its own. Fix github_runner_cluster_tls_sans in
+          host_vars/{{ inventory_hostname }}.yml, or remove it to use the
+          automatic list.
+      when: github_runner_cluster_effective_node_name not in (github_runner_cluster_effective_tls_sans | join(' '))
 
     - name: Template .env for this k3s server
       ansible.builtin.template:
@@ -93,17 +73,8 @@
         state: present
 
 - name: Join as a k3s agent
-  when: github_runner_cluster_node_role == "agent"
+  when: github_runner_cluster_effective_node_role == "agent"
   block:
-    - name: Fail if the join server URL is not set
-      ansible.builtin.fail:
-        msg: >-
-          github_runner_cluster_agent_server_url is not set on this agent
-          host. It must be an existing server host's own
-          https://<address>:6443. Add it to
-          host_vars/{{ inventory_hostname }}.yml.
-      when: github_runner_cluster_agent_server_url | length == 0
-
     - name: Template .env for the k3s agent
       ansible.builtin.template:
         src: env-agent.j2
@@ -138,7 +109,7 @@
   when: github_runner_cluster_wait_for_nodes | bool
 
 - name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
-  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See README's Non-obvious behaviour section; the same failure mode applies to a joining server's own container recreation, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name), since that, not the inventory name, is what k3s names the Node and its node-password Secret after; inlined rather than read from github_runner_cluster_effective_node_name, because another host's role defaults aren't reliably visible through hostvars. Only ever touches hosts that are NOT the etcd-bootstrap host: that host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
+  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See README's Non-obvious behaviour section; the same failure mode applies to a joining server's own container recreation, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name, as tasks/topology.yml recorded it), since that, not the inventory name, is what k3s names the Node and its node-password Secret after. Only ever touches cluster members that are NOT the bootstrap host (as tasks/topology.yml decided it): that host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
   when: github_runner_cluster_wait_for_nodes | bool
   block:
     - name: Wait for every node to report Ready
@@ -154,18 +125,16 @@
         state: absent
         kind: Secret
         namespace: kube-system
-        name: "{{ hostvars[item].github_runner_cluster_node_name | default('', true) or item }}.node-password.k3s"
-      loop: "{{ groups['all'] }}"
-      when: not (hostvars[item].github_runner_cluster_bootstrap | default(false))
+        name: "{{ github_runner_cluster_topology.hosts[item].node_name }}.node-password.k3s"
+      loop: "{{ github_runner_cluster_topology.hosts | dict2items | rejectattr('value.bootstrap') | map(attribute='key') | list }}"
 
     - name: Clear every non-bootstrap host's stale Node object to match
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_cluster_kubeconfig_path }}"
         state: absent
         kind: Node
-        name: "{{ hostvars[item].github_runner_cluster_node_name | default('', true) or item }}"
-      loop: "{{ groups['all'] }}"
-      when: not (hostvars[item].github_runner_cluster_bootstrap | default(false))
+        name: "{{ github_runner_cluster_topology.hosts[item].node_name }}"
+      loop: "{{ github_runner_cluster_topology.hosts | dict2items | rejectattr('value.bootstrap') | map(attribute='key') | list }}"
 
     - name: Retry waiting for every node to report Ready now that any stale registration is cleared
       ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s

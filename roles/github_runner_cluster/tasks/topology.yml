@@ -1,0 +1,27 @@
+---
+# Decides this host's part in the cluster from the cluster group's inventory order and any per-host overrides (see defaults/main.yml), and publishes it as facts: github_runner_cluster_effective_node_role, github_runner_cluster_effective_bootstrap, github_runner_cluster_effective_server_url and github_runner_cluster_effective_tls_sans, plus github_runner_cluster_topology for the whole group. Every host computes the same result, since it depends only on inventory variables, never on which hosts --limit leaves in the play.
+
+- name: Fail if this host is not in the cluster group
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} is not in the inventory group
+      '{{ github_runner_cluster_group }}' (github_runner_cluster_group).
+      Every node of the cluster must be in that group, in the order that
+      decides which hosts are servers.
+  when: inventory_hostname not in (groups[github_runner_cluster_group] | default([]))
+
+- name: Work out every host's part in the cluster
+  ansible.builtin.set_fact:
+    github_runner_cluster_topology: "{{ groups[github_runner_cluster_group] | exadev.github_runner.cluster_topology(hostvars, github_runner_cluster_max_servers, github_runner_cluster_api_port) }}"
+
+- name: Fail if the cluster's servers and bootstrap host don't add up
+  ansible.builtin.fail:
+    msg: "{{ github_runner_cluster_topology.errors | join(' ') }}"
+  when: github_runner_cluster_topology.errors | length > 0
+
+- name: Record this host's own part
+  ansible.builtin.set_fact:
+    github_runner_cluster_effective_node_role: "{{ github_runner_cluster_topology.hosts[inventory_hostname].role }}"
+    github_runner_cluster_effective_bootstrap: "{{ github_runner_cluster_topology.hosts[inventory_hostname].bootstrap }}"
+    github_runner_cluster_effective_server_url: "{{ github_runner_cluster_topology.hosts[inventory_hostname].server_url }}"
+    github_runner_cluster_effective_tls_sans: "{{ github_runner_cluster_topology.hosts[inventory_hostname].tls_sans }}"

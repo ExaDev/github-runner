@@ -12,3 +12,4 @@ logs/
 !**/CLAUDE.md
 !**/AGENTS.md
 .ansible-venv/
+__pycache__/

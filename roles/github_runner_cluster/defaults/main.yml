@@ -1,21 +1,20 @@
 ---
 # A k3s cluster run under Docker Compose on each host, with embedded etcd and Tailscale inside each node's k3s container (k3s --vpn-auth).
 #
-# Two node roles: "server" (the default) is a control-plane/etcd member (k3s server), a genuine HA member, not just a worker. Whether a server host bootstraps the cluster (k3s --cluster-init, embedded etcd) or joins an EXISTING one is an orthogonal, one-time per-host decision (github_runner_cluster_bootstrap below), not a separate role: set it true on exactly one host, and set github_runner_cluster_join_server_url on every other server host instead. "agent" joins as a pure worker with no control-plane role at all. See docker-compose.yml's own top comment for why 3 servers is the right minimum for etcd quorum.
-github_runner_cluster_node_role: "server"
-github_runner_cluster_agent_server_url: ""
-github_runner_cluster_join_server_url: ""
+# Server and agent selection is automatic. The hosts in github_runner_cluster_group, in inventory order, are the cluster: the first N are servers, where N is the largest odd number no greater than both the number of hosts and github_runner_cluster_max_servers (1 or 2 hosts give 1 server, 3 or 4 give 3, 5 or more give 5), since etcd needs a majority and an even member count tolerates no more failures than the odd count below it. The first server bootstraps the cluster (k3s --cluster-init, embedded etcd); every other server joins it as a further control-plane/etcd member, and the remaining hosts join it as agents (pure workers). The group rather than the play's hosts, because --limit narrows the play but must never change which host bootstraps or how many servers there are. See tasks/topology.yml and the collection's plugins/filter/cluster_topology.py.
+github_runner_cluster_group: github_runner_cluster
+github_runner_cluster_max_servers: 5
+github_runner_cluster_api_port: 6443
 
-# One-time, per-host: true on exactly the one server host that ran k3s --cluster-init to bootstrap the cluster's embedded etcd; false (the default) on every other server, which instead joins via github_runner_cluster_join_server_url. Irrelevant to how a host operates once past first boot: kept because a host needs to know which one to pass at startup, and because the node-password self-heal rescue block in tasks/main.yml uses it to know which host owns the node-password Secret store versus which hosts must re-authenticate against a remote peer's copy of it.
-github_runner_cluster_bootstrap: false
+# Per-host overrides, deliberately not defaulted here: they are read for every host in the group through hostvars, which only sees inventory, host and extra variables. github_runner_cluster_node_role ("server" or "agent") overrides the automatic choice for that host. github_runner_cluster_bootstrap: true makes that host the one that bootstraps the cluster (it becomes a server), and false stops it from being picked. github_runner_cluster_server_url (https://<address>:<port>) makes the host join that server instead, for joining a cluster whose servers are outside this inventory. github_runner_cluster_tls_sans replaces the automatic --tls-san list for that host. github_runner_cluster_node_address replaces the address the other nodes and the TLS SAN list use for that host.
+
+# The tailnet's MagicDNS domain (e.g. example.ts.net). A node's address is its node name followed by this domain, which is the name Tailscale registers the node's own k3s container under; empty means the bare node name. Usually set once for the whole group in the inventory.
+github_runner_cluster_tailnet_domain: ""
 
 # This host's own k3s node name and Tailscale hostname. Empty (the default) means "use inventory_hostname"; set it only where a host needs a different name, e.g. to keep a pre-existing Tailscale device identity.
 github_runner_cluster_node_name: ""
 # Derived, never set directly: the name every template and check actually uses for this host (k3s node name, Tailscale device hostname, TLS SAN self-check).
 github_runner_cluster_effective_node_name: "{{ github_runner_cluster_node_name if github_runner_cluster_node_name | length > 0 else inventory_hostname }}"
-
-# Every server node's own Tailscale hostname (every "server"-role host's own, including the bootstrap host's), applied identically to every server's own --tls-san list: a multi-server cluster needs every server's cert to cover every server's own name, not just its own, since a client (kubectl, Ansible) may reach any of them directly. Set identically on every server host. Empty (the default) is only valid for a genuinely single-server setup where nothing else ever joins.
-github_runner_cluster_tls_sans: []
 
 github_runner_cluster_k3s_version: "latest"
 

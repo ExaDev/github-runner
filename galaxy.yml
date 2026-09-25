@@ -10,6 +10,7 @@ description: Self-hosted GitHub Actions runners on k3s joined over Tailscale, us
 license:
   - MIT
 tags:
+  - infrastructure
   - github
   - actions
   - runner
@@ -32,6 +33,7 @@ build_ignore:
   - CLAUDE.md
   - .ansible-venv
   - ansible
+  - playbooks/collections
   - autoscaler
   - heartbeat
   - k3s
