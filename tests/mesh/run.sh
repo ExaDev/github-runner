@@ -80,14 +80,12 @@ reset_environment() {
   docker network create --subnet "${subnet_prefix}.0/24" "$network" >/dev/null
 }
 
-# Each node gets its own copy of the Compose project, plus an override that renames its container, drops the host port every node would otherwise publish, and puts it on the shared test network at a fixed address.
+# Each node gets its own cluster directory, which the role fills with the Compose file and k3s build context, plus an override that renames its container, drops the host port every node would otherwise publish, and puts it on the shared test network at a fixed address.
 prepare_nodes() {
   local scenario="$1" index dir
   for index in $(seq 1 "$node_count"); do
     dir="${work}/$(node_name "$index")"
-    mkdir -p "${dir}/k3s" "${dir}/kubeconfig"
-    cp "${repo_root}/docker-compose.yml" "$dir/"
-    cp "${repo_root}/k3s/Dockerfile" "${repo_root}/k3s/node-entrypoint.sh" "${dir}/k3s/"
+    mkdir -p "$dir"
     {
       echo "services:"
       echo "  k3s:"
@@ -143,10 +141,15 @@ EOF
     echo "        github_runner_cluster_headscale_compose_files: [${work}/headscale-grtest.yml]"
     echo "        github_runner_cluster_compose_files: [compose.grtest.yml]"
     echo "        github_runner_cluster_k3s_token: ${k3s_token}"
+    # Litestream has its own test (tests/litestream); this one exercises the in-cluster bootstrap on node-local state, which the role only allows once acknowledged.
+    if [ "$scenario" = in_cluster ]; then
+      echo "        github_runner_cluster_headscale_accept_node_local_state: true"
+    fi
     echo "      hosts:"
     for index in $(seq 1 "$node_count"); do
       echo "        $(node_name "$index"):"
-      echo "          github_runner_cluster_repo_root: ${work}/$(node_name "$index")"
+      echo "          github_runner_cluster_dir: ${work}/$(node_name "$index")"
+      echo "          github_runner_cluster_compose_project: $(node_name "$index")"
       echo "          github_runner_cluster_container_name: $(container "$index")"
     done
   } > "${work}/inventory.yml"
