@@ -1,7 +1,7 @@
 #!/bin/sh
 # Entry point for the k3s and k3s-agent services in docker-compose.yml: starts Tailscale inside the node's own container, then k3s with its --vpn-auth integration, so each node joins the mesh as its own device. Bind-mounted from the checkout rather than baked into the k3s image, so a host picks up a change to it with the Compose file that uses it, without rebuilding an image Compose would not otherwise rebuild.
 #
-# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL and K3S_TLS_SAN_LIST (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below).
+# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST and K3S_DATASTORE (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below).
 # No set -e: a failed `tailscale up` falls through to waiting for an address, as it always has, rather than exiting and restarting the container.
 set -u
 
@@ -59,7 +59,7 @@ wait_for_join_server() {
 #
 # --node-ip forces etcd's peer-advertise address onto this node's mesh IP. k3s builds etcd's --initial-cluster from config.PrivateIP, which is populated from --node-ip before --vpn-auth's own executor code rebuilds NodeIP from its Tailscale detection (traced through pkg/cli/server/server.go and pkg/executor/embed/embed.go). Without it PrivateIP stays the container's bridge IP, which no other machine can reach, and joining a second server failed with "MemberAdd request timed out". An --etcd-arg override is not a substitute: it also applies to the temporary etcd k3s starts on every restart to reconcile with its datastore, which has no TLS certificates for a 0.0.0.0:2380 listener and failed with "cannot listen on TLS for [::]:2380: KeyFile and CertFile are not presented".
 #
-# --cluster-init (only when K3S_JOIN_SERVER_URL is unset) bootstraps embedded etcd, or converts an existing single-node SQLite datastore to it, the one migration k3s documents; once initialised, k3s ignores it on restart, so it stays in place permanently. A host with K3S_JOIN_SERVER_URL set passes --server <url> instead and joins as another control-plane/etcd member.
+# --cluster-init (only when K3S_JOIN_SERVER_URL is unset, and K3S_DATASTORE is not sqlite) bootstraps embedded etcd, or converts an existing single-node SQLite datastore to it, the one migration k3s documents; once initialised, k3s ignores it on restart, so it stays in place permanently. A host with K3S_JOIN_SERVER_URL set passes --server <url> instead and joins as another control-plane/etcd member.
 #
 # --tls-san is added once per entry of K3S_TLS_SAN_LIST: every server's certificate must cover every server's own mesh name, since a client reaching any server directly by that name needs the certificate to match it.
 mesh_server_args() {
@@ -69,7 +69,7 @@ mesh_server_args() {
     --node-ip="$mesh_ip"
   if [ -n "${K3S_JOIN_SERVER_URL:-}" ]; then
     set -- "$@" --server "$K3S_JOIN_SERVER_URL"
-  else
+  elif [ "${K3S_DATASTORE:-etcd}" != sqlite ]; then
     set -- "$@" --cluster-init
   fi
   for san in ${K3S_TLS_SAN_LIST:-}; do set -- "$@" --tls-san "$san"; done

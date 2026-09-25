@@ -5,6 +5,8 @@
 github_runner_cluster_group: github_runner_cluster
 github_runner_cluster_max_servers: 5
 github_runner_cluster_api_port: 6443
+# The bootstrap server's datastore. etcd (the default) is embedded etcd, which any number of servers share. sqlite is k3s's default single-node datastore, lighter for a cluster with one server: the cluster then has exactly one server, whatever github_runner_cluster_max_servers says, and every other host joins it as an agent. Switching from sqlite to etcd later is k3s's own supported migration (the server restarts with --cluster-init); the reverse is not.
+github_runner_cluster_datastore: etcd
 
 # Per-host overrides, deliberately not defaulted here: they are read for every host in the group through hostvars, which only sees inventory, host and extra variables. github_runner_cluster_node_role ("server" or "agent") overrides the automatic choice for that host. github_runner_cluster_bootstrap: true makes that host the one that bootstraps the cluster (it becomes a server), and false stops it from being picked. github_runner_cluster_server_url (https://<address>:<port>) makes the host join that server instead, for joining a cluster whose servers are outside this inventory. github_runner_cluster_tls_sans replaces the automatic --tls-san list for that host. github_runner_cluster_node_address replaces the address the other nodes and the TLS SAN list use for that host.
 

@@ -10,9 +10,24 @@
       decides which hosts are servers.
   when: inventory_hostname not in (groups[github_runner_cluster_group] | default([]))
 
+- name: Fail if the datastore is unknown
+  ansible.builtin.fail:
+    msg: github_runner_cluster_datastore is '{{ github_runner_cluster_datastore }}'; it must be etcd or sqlite.
+  when: github_runner_cluster_datastore not in ['etcd', 'sqlite']
+
 - name: Work out every host's part in the cluster
+  # SQLite serves exactly one server, so it caps the automatic server count at one.
   ansible.builtin.set_fact:
-    github_runner_cluster_topology: "{{ groups[github_runner_cluster_group] | exadev.github_runner.cluster_topology(hostvars, github_runner_cluster_max_servers, github_runner_cluster_api_port) }}"
+    github_runner_cluster_topology: "{{ groups[github_runner_cluster_group] | exadev.github_runner.cluster_topology(hostvars, github_runner_cluster_max_servers if github_runner_cluster_datastore == 'etcd' else 1, github_runner_cluster_api_port) }}"
+
+- name: Fail if a SQLite cluster would have more than one server
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_datastore is sqlite, which serves one server, but {{ github_runner_cluster_topology.servers | join(', ') }}
+      would all be servers. Make all but one of them agents (github_runner_cluster_node_role: agent), or use etcd.
+  when:
+    - github_runner_cluster_datastore == 'sqlite'
+    - github_runner_cluster_topology.servers | length > 1
 
 - name: Fail if the cluster's servers and bootstrap host don't add up
   ansible.builtin.fail:

@@ -43,6 +43,8 @@ services:
       - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:-}
       # Empty for Tailscale's own control plane; a Headscale server's URL otherwise.
       - K3S_VPN_AUTH_CONTROL_SERVER_URL=${K3S_VPN_AUTH_CONTROL_SERVER_URL:-}
+      # sqlite keeps a single-server cluster on k3s's default SQLite datastore instead of embedded etcd; anything else (the default) bootstraps etcd.
+      - K3S_DATASTORE=${K3S_DATASTORE:-etcd}
       # Set only on the bootstrap server of a cluster that runs its own Headscale server (the Ansible role's headscale_in_cluster mesh provider, through its own Compose override file): the address k3s/node-entrypoint.sh polls to tell whether that server answers yet.
       - K3S_MESH_SELF_HOSTED_HEALTH_URL=${K3S_MESH_SELF_HOSTED_HEALTH_URL:-}
       # Empty (not :?required) on the bootstrap host - the one server with nothing to join. Every OTHER server host's own .env sets this to the bootstrap host's own URL.
