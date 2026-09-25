@@ -13,6 +13,10 @@ affinity:
               app.kubernetes.io/name: gha-rs-controller
               app.kubernetes.io/instance: arc
 {% endif %}
+{% if github_runner_arc_node_label_key | length > 0 %}
+nodeSelector:
+  {{ github_runner_arc_node_label_key | to_json }}: {{ github_runner_arc_node_label_value | string | to_json }}
+{% endif %}
 {% if github_runner_arc_metrics_enabled | bool %}
 # Without a metrics block the chart turns every metrics server off, the listeners' included; the listener probes poll the listener one.
 metrics:

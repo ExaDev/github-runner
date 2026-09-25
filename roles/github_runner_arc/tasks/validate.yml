@@ -23,7 +23,7 @@
     github_runner_arc_values_path: "{{ item.values_file if item.values_file is abs else github_runner_arc_values_dir ~ '/' ~ item.values_file }}"
   when: github_runner_arc_values_path is not file or (item.values_file is not abs and github_runner_arc_values_dir | length == 0)
 
-- name: Fail on invalid controller, metrics or probe settings
+- name: Fail on invalid controller, metrics, probe or node label settings
   ansible.builtin.fail:
     msg: "{{ item.msg }}"
   loop:
@@ -35,6 +35,10 @@
       failed: "{{ github_runner_arc_listener_probes_enabled | bool and not (github_runner_arc_metrics_enabled | bool) }}"
     - msg: github_runner_arc_listener_probe_port must match the port in github_runner_arc_listener_metrics_addr.
       failed: "{{ github_runner_arc_listener_probes_enabled | bool and github_runner_arc_listener_metrics_addr is not match('.*:' ~ github_runner_arc_listener_probe_port ~ '$') }}"
+    - msg: github_runner_arc_labelled_nodes needs github_runner_arc_node_label_key.
+      failed: "{{ github_runner_arc_labelled_nodes | length > 0 and github_runner_arc_node_label_key | length == 0 }}"
+    - msg: github_runner_arc_node_label_value must be set when github_runner_arc_node_label_key is.
+      failed: "{{ github_runner_arc_node_label_key | length > 0 and github_runner_arc_node_label_value | string | length == 0 }}"
   loop_control:
     label: "{{ item.msg }}"
   when: item.failed | bool

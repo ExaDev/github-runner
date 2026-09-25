@@ -26,6 +26,10 @@
     group/kubernetes.core.helm:
       kubeconfig: "{{ github_runner_arc_kubeconfig_path or omit }}"
   block:
+    - name: Label the eligible nodes
+      ansible.builtin.include_tasks: label_nodes.yml
+      when: github_runner_arc_node_label_key | length > 0 and github_runner_arc_labelled_nodes | length > 0
+
     - name: Ensure the fleet-health platform (heartbeat and autoscaler) is installed
       ansible.builtin.include_tasks: install_platform.yml
       when: github_runner_arc_heartbeat_gist_id | length > 0

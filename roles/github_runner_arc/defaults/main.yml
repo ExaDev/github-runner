@@ -26,6 +26,11 @@ github_runner_arc_listener_metrics_endpoint: "/metrics"
 github_runner_arc_listener_probes_enabled: false
 github_runner_arc_listener_probe_port: 8080
 
+# Node eligibility by label. When the key is set, the controller, every listener and every runner pod get a nodeSelector for key=value, and the role labels each node named in github_runner_arc_labelled_nodes with it (nodes labelled some other way need not be listed). A label rather than a taint keeps the cluster's other workloads unaffected. A profile's own node_selector is merged over this.
+github_runner_arc_node_label_key: ""
+github_runner_arc_node_label_value: "true"
+github_runner_arc_labelled_nodes: []
+
 # Secrets, normally set by the github_runner_secrets role: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images), github_runner_arc_heartbeat_gh_token (a PAT with gist scope), and github_runner_arc_org_private_keys ({<org name>: <PEM content>}). No defaults.
 
 # Registry the pull Secret authenticates to, and its name in each namespace.

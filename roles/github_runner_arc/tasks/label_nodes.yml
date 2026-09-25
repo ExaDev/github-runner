@@ -1,0 +1,13 @@
+---
+# Labels each node in github_runner_arc_labelled_nodes so the controller, listeners and runner pods, all of which get a nodeSelector for the label, can be scheduled there. Patching a label to the value it already has changes nothing. A node that does not exist fails the patch here, rather than leaving every pod Pending later.
+
+- name: Apply the eligibility label to each listed node
+  kubernetes.core.k8s:
+    kind: Node
+    name: "{{ item }}"
+    state: patched
+    definition:
+      metadata:
+        # Built inside one expression: Ansible templates mapping values but not mapping keys, so a YAML key written as a template would reach the API as the literal "{{ ... }}" text.
+        labels: "{{ {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} }}"
+  loop: "{{ github_runner_arc_labelled_nodes }}"
