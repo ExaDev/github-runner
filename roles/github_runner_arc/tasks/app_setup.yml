@@ -1,0 +1,125 @@
+---
+# Creates the GitHub App the runner scale sets authenticate as, through GitHub's App manifest flow, in two runs of playbooks/github_app_setup.yml on the control node. Without github_runner_arc_app_manifest_code it renders a local HTML form that posts the manifest to GitHub; a person submits it and copies the one-time code GitHub returns. With the code it exchanges it for the App's credentials, writes the private key to github_runner_arc_app_private_key_path, waits while the person installs the App on the organisation, and prints the values to record. Touches no cluster.
+
+- name: Fail when the organisation or App name is missing
+  ansible.builtin.fail:
+    msg: github_runner_arc_app_setup_org (the organisation login) and github_runner_arc_app_setup_name (the App's display name) are both required.
+  when: github_runner_arc_app_setup_org | length == 0 or github_runner_arc_app_setup_name | length == 0
+
+- name: Build the App manifest
+  ansible.builtin.set_fact:
+    github_runner_arc_app_manifest:
+      name: "{{ github_runner_arc_app_setup_name }}"
+      url: "{{ github_runner_arc_app_setup_homepage_url or 'https://github.com/' ~ github_runner_arc_app_setup_org }}"
+      # There is no server to receive GitHub's redirect: the person copies the code from the address bar, so any stable page will do.
+      redirect_url: "{{ github_runner_arc_app_setup_homepage_url or 'https://github.com/' ~ github_runner_arc_app_setup_org }}"
+      description: "{{ github_runner_arc_app_setup_description }}"
+      public: false
+      hook_attributes:
+        url: "{{ github_runner_arc_app_setup_homepage_url or 'https://github.com/' ~ github_runner_arc_app_setup_org }}"
+        active: false
+      default_permissions: "{{ github_runner_arc_app_setup_permissions }}"
+
+- name: Render the manifest form (phase 1)
+  when: github_runner_arc_app_manifest_code | length == 0
+  block:
+    - name: Generate a state token for the form
+      ansible.builtin.set_fact:
+        github_runner_arc_app_manifest_state: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) }}"
+
+    - name: Create a file for the form
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .html
+      register: github_runner_arc_app_form
+
+    - name: Render the form
+      ansible.builtin.template:
+        src: github-app-manifest-form.html.j2
+        dest: "{{ github_runner_arc_app_form.path }}"
+        mode: "0600"
+
+    - name: Explain the remaining steps
+      ansible.builtin.debug:
+        msg:
+          - "Open {{ github_runner_arc_app_form.path }} in a browser and follow its steps."
+          - "It posts the manifest to GitHub for {{ github_runner_arc_app_setup_org }}; you must be an owner of that organisation."
+          - "Then rerun with -e github_runner_arc_app_manifest_code=<code> -e github_runner_arc_app_private_key_path=<new file for the key>."
+
+- name: Exchange the code and wait for the installation (phase 2)
+  when: github_runner_arc_app_manifest_code | length > 0
+  block:
+    # Checked before the exchange: the code works once, and GitHub never shows the private key again, so a failure after the exchange would lose the key with it.
+    - name: Check where the private key will be written
+      ansible.builtin.stat:
+        path: "{{ github_runner_arc_app_private_key_path | expanduser }}"
+      register: github_runner_arc_app_key_stat
+      when: github_runner_arc_app_private_key_path | length > 0
+
+    - name: Check the private key's directory exists
+      ansible.builtin.stat:
+        path: "{{ github_runner_arc_app_private_key_path | expanduser | dirname }}"
+      register: github_runner_arc_app_key_dir_stat
+      when: github_runner_arc_app_private_key_path | length > 0
+
+    - name: Fail unless the private key path is a new file in an existing directory
+      ansible.builtin.fail:
+        msg: github_runner_arc_app_private_key_path must name a file that does not exist yet, in a directory that does. It is checked before the one-time code is used.
+      when: >-
+        github_runner_arc_app_private_key_path | length == 0
+        or github_runner_arc_app_key_stat.stat.exists
+        or not (github_runner_arc_app_key_dir_stat.stat.isdir | default(false))
+
+    # Not no_log, so that GitHub's own error is visible when the exchange fails. The registered result holds the key, so -v output would show it; nothing unattended runs this.
+    - name: Exchange the manifest code for the App's credentials
+      ansible.builtin.uri:
+        url: "https://api.github.com/app-manifests/{{ github_runner_arc_app_manifest_code | urlencode }}/conversions"
+        method: POST
+        headers:
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+        status_code: [201]
+      register: github_runner_arc_app_conversion
+
+    - name: Write the App's private key
+      ansible.builtin.copy:
+        content: "{{ github_runner_arc_app_conversion.json.pem }}"
+        dest: "{{ github_runner_arc_app_private_key_path | expanduser }}"
+        mode: "0600"
+        force: false
+      no_log: true
+
+    - name: Sign an App JWT
+      ansible.builtin.script:
+        cmd: "generate_app_jwt.py {{ github_runner_arc_app_conversion.json.id | string | quote }} {{ github_runner_arc_app_private_key_path | expanduser | quote }}"
+        executable: python3
+      changed_when: false
+      no_log: true
+      register: github_runner_arc_app_jwt
+
+    # A manifest with a redirect_url means GitHub skips its install prompt, so the new App has no installation yet. Waiting here lets the person install it now; running phase 2 again with a new code would register a second App instead.
+    - name: Ask for the App to be installed
+      ansible.builtin.debug:
+        msg:
+          - "App {{ github_runner_arc_app_setup_name }} (id {{ github_runner_arc_app_conversion.json.id }}) exists but is not installed."
+          - "Install it on {{ github_runner_arc_app_setup_org }}, for all repositories: {{ github_runner_arc_app_conversion.json.html_url }}/installations/new"
+          - "Waiting up to {{ (github_runner_arc_app_setup_install_retries * github_runner_arc_app_setup_install_delay) // 60 }} minutes for the installation to appear."
+
+    - name: Wait for the App's installation on the organisation
+      ansible.builtin.uri:
+        url: https://api.github.com/app/installations?per_page=100
+        headers:
+          Authorization: "Bearer {{ github_runner_arc_app_jwt.stdout | trim }}"
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+      register: github_runner_arc_app_installations
+      until: github_runner_arc_app_installations.json | default([]) | selectattr('account.login', 'equalto', github_runner_arc_app_setup_org) | list | length > 0
+      retries: "{{ github_runner_arc_app_setup_install_retries }}"
+      delay: "{{ github_runner_arc_app_setup_install_delay }}"
+      no_log: true
+
+    - name: Print the values to record
+      ansible.builtin.debug:
+        msg:
+          - "Private key written to {{ github_runner_arc_app_private_key_path }}; store it in your secret store and point the org's private_key_op_reference (or github_runner_arc_org_private_keys) at it."
+          - "github_runner_arc_orgs entry: name {{ github_runner_arc_app_setup_org }}, app_id {{ github_runner_arc_app_conversion.json.id }}, installation_id {{ (github_runner_arc_app_installations.json | selectattr('account.login', 'equalto', github_runner_arc_app_setup_org) | first).id }}"

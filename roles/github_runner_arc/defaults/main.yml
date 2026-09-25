@@ -63,3 +63,17 @@ github_runner_arc_autoscaler_dry_run: true
 github_runner_arc_autoscaler_poll_seconds: 45
 github_runner_arc_autoscaler_raise_confirm_polls: 2
 github_runner_arc_autoscaler_mem_available_pressure_pct: 15
+
+# GitHub App creation through the manifest flow (tasks/app_setup.yml, run by playbooks/github_app_setup.yml). The App needs only organisation self-hosted runner write access; add packages: read to the permissions if its installation token should also pull private packages.
+github_runner_arc_app_setup_org: ""
+github_runner_arc_app_setup_name: ""
+github_runner_arc_app_setup_description: "Registers self-hosted GitHub Actions runners through Actions Runner Controller."
+# The App's homepage and the page GitHub redirects to with the one-time code. Empty means the organisation's GitHub page.
+github_runner_arc_app_setup_homepage_url: ""
+github_runner_arc_app_setup_permissions:
+  organization_self_hosted_runners: write
+github_runner_arc_app_manifest_code: ""
+github_runner_arc_app_private_key_path: ""
+# How long phase 2 waits for the App to be installed: retries times delay seconds.
+github_runner_arc_app_setup_install_retries: 40
+github_runner_arc_app_setup_install_delay: 15

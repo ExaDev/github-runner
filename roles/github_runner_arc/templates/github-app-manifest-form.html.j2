@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<!-- Rendered by the github_runner_arc role's app_setup.yml. Submitting the form posts the manifest to GitHub's own App manifest flow and contacts no other server. It holds no credentials. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Create GitHub App: {{ github_runner_arc_app_setup_name | e }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  pre { background: #f0f0f0; padding: 0.75rem; overflow-x: auto; }
+  button { font-size: 1rem; padding: 0.5rem 1.25rem; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<h1>Create the &ldquo;{{ github_runner_arc_app_setup_name | e }}&rdquo; GitHub App</h1>
+
+<p>This page submits a pre-filled App manifest to GitHub for the <strong>{{ github_runner_arc_app_setup_org | e }}</strong> organisation. The button below is its only network action, and it goes to github.com.</p>
+
+<h2>Manifest</h2>
+<pre>{{ github_runner_arc_app_manifest | to_nice_json | e }}</pre>
+
+<h2>Steps</h2>
+<ol>
+<li>Check the manifest above, especially its permissions.</li>
+<li>Click &ldquo;Create GitHub App&rdquo;, signed in to GitHub as an owner of {{ github_runner_arc_app_setup_org | e }}, and confirm on GitHub's page.</li>
+<li>GitHub then redirects to <code>{{ github_runner_arc_app_manifest.redirect_url | e }}</code> with a <code>code</code> query parameter. Copy its value from the address bar.</li>
+<li>Run the second phase straight away, because the code works once and expires quickly:
+<pre>ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org={{ github_runner_arc_app_setup_org | e }} -e '{"github_runner_arc_app_setup_name": "{{ github_runner_arc_app_setup_name | e }}"}' -e github_runner_arc_app_manifest_code=&lt;code&gt; -e github_runner_arc_app_private_key_path=&lt;path for the key&gt;</pre>
+</li>
+<li>That run creates the App and waits while you install it on the organisation, at organisation level rather than on selected repositories.</li>
+</ol>
+
+<form id="manifest-form" action="https://github.com/organizations/{{ github_runner_arc_app_setup_org | urlencode }}/settings/apps/new?state={{ github_runner_arc_app_manifest_state | urlencode }}" method="post">
+<input type="hidden" name="manifest" id="manifest-input">
+<button type="submit">Create GitHub App</button>
+</form>
+
+<script>
+  // Assigned as a JSON string literal so the posted manifest and the one shown above come from the same variable; '<' is escaped so no manifest text can close this script element.
+  document.getElementById('manifest-input').value = {{ (github_runner_arc_app_manifest | to_json | to_json) | replace('<', '\\u003c') }};
+</script>
+
+</body>
+</html>

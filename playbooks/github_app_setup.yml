@@ -1,0 +1,13 @@
+---
+# Creates the GitHub App the runner scale sets authenticate as, through GitHub's App manifest flow. Run it twice on the control node: first with the organisation and App name, to render a form a person submits in their browser; then again with the one-time code GitHub returns and a new file path for the private key. See roles/github_runner_arc/tasks/app_setup.yml.
+#   ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org=<org> -e '{"github_runner_arc_app_setup_name": "<App name>"}'
+#   ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org=<org> -e '{"github_runner_arc_app_setup_name": "<App name>"}' -e github_runner_arc_app_manifest_code=<code> -e github_runner_arc_app_private_key_path=<path>
+- name: Create the runner GitHub App
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Run the App manifest flow
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_arc
+        tasks_from: app_setup.yml
