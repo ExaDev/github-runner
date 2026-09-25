@@ -32,8 +32,19 @@ printf 'nameserver 100.100.100.100\n' > /etc/k3s-resolv.conf
 
 # Brings Tailscale up ourselves, ahead of k3s's own --vpn-auth doing the same thing, to learn this node's Tailscale IP for --node-ip before starting k3s. Confirmed against k3s's own vpn.go source: StartVPN checks the backend state first and skips its own `tailscale up` once the state is already "Running", so k3s's own call becomes a no-op rather than a second registration.
 #
-# Only calls `tailscale up` if the daemon isn't already authenticated from its persisted state volume. Confirmed live: calling it unconditionally on every container restart re-registered a brand new device each time under the reusable join key instead of reconnecting the existing one, leaving a growing trail of stale devices on the tailnet.
+# Only calls `tailscale up` if the daemon isn't already authenticated from its persisted state volume. Confirmed live: calling it unconditionally on every container restart re-registered a brand new device each time under the reusable join key instead of reconnecting the existing one, leaving a growing trail of stale devices on the tailnet. A persisted login needs a moment to reconnect after tailscaled starts (its backend passes through NoState and Starting first), so this waits for the backend to settle before deciding; registering again during that window re-authenticates a node that was about to reconnect by itself.
+backend_state() {
+  tailscale status --json 2>/dev/null | sed -n 's/^ *"BackendState": *"\([A-Za-z]*\)".*/\1/p'
+}
+
 join_mesh() {
+  settle=0
+  while [ "$settle" -lt 60 ]; do
+    case "$(backend_state)" in
+      "" | NoState | Starting) settle=$((settle + 1)); sleep 0.5 ;;
+      *) break ;;
+    esac
+  done
   if ! mesh_ip=$(tailscale ip -4 2>/dev/null) || [ -z "$mesh_ip" ]; then
     if [ -n "$control_server_url" ]; then
       tailscale up --auth-key="$join_key" --hostname="$(hostname)" --login-server="$control_server_url"
@@ -44,12 +55,12 @@ join_mesh() {
   fi
 }
 
-# A joining server has to resolve K3S_JOIN_SERVER_URL's hostname (the bootstrap host's MagicDNS name) before k3s can even attempt to bootstrap against it. Confirmed live: k3s failed outright with "dial tcp: lookup <bootstrap host>: no such host" immediately after `tailscale ip -4` had returned a real address, because Tailscale assigns the IP and wires up its MagicDNS resolver as two separate steps. Only when joining; the bootstrap host has nothing to resolve.
+# A joining server has to resolve K3S_JOIN_SERVER_URL's hostname (the bootstrap host's MagicDNS name) before k3s can even attempt to bootstrap against it. Confirmed live: k3s failed outright with "dial tcp: lookup <bootstrap host>: no such host" immediately after `tailscale ip -4` had returned a real address, because Tailscale assigns the IP and wires up its MagicDNS resolver as two separate steps. Waits for the bootstrap host to be a peer in this node's network map (`tailscale ip -4 <name>`) and for MagicDNS itself to answer for it, asking 100.100.100.100 directly: a bare nslookup goes to whatever /etc/resolv.conf names at that moment, which may not yet be Tailscale's resolver. Confirmed in the mesh integration test: a bare nslookup passed, k3s then failed to resolve the same name seconds later and exited, and every restart of the container repeated it before Tailscale had delivered its peers. Only when joining; the bootstrap host has nothing to resolve.
 wait_for_join_server() {
   if [ -n "${K3S_JOIN_SERVER_URL:-}" ]; then
     join_host=${K3S_JOIN_SERVER_URL#https://}
     join_host=${join_host%%:*}
-    until nslookup "$join_host" >/dev/null 2>&1; do sleep 0.5; done
+    until tailscale ip -4 "$join_host" >/dev/null 2>&1 && nslookup "$join_host" 100.100.100.100 >/dev/null 2>&1; do sleep 0.5; done
   fi
 }
 
