@@ -20,20 +20,9 @@
       github_runner_secrets role first, or set it directly.
   when: github_runner_cluster_k3s_token is not defined
 
-- name: Ensure the tailnet's ACL grants cross-node pod traffic and a reusable join key exists
-  # run_once, not per-host: this is tailnet-wide, shared-account state (the ACL policy, one reusable join key), not per-host state. Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read github_runner_cluster_tailscale_join_key. Needs a Tailscale API token: without one, the ACL is left as it is and the join key must already be supplied.
-  ansible.builtin.include_tasks: ensure_tailscale.yml
-  run_once: true
-  when: github_runner_cluster_tailscale_api_token | length > 0
-
-- name: Fail if no Tailscale join key is available
-  # Otherwise this only surfaces later, as docker compose's own :?required error on K3S_VPN_AUTH_JOIN_KEY.
-  ansible.builtin.fail:
-    msg: >-
-      No Tailscale join key: supply github_runner_cluster_tailscale_join_key
-      directly, or a github_runner_cluster_tailscale_api_token so
-      ensure_tailscale.yml can create one.
-  when: github_runner_cluster_tailscale_join_key | length == 0
+- name: Set up the mesh the nodes join, and publish its join key and control server
+  # Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read the mesh facts it publishes. See tasks/mesh/main.yml for the provider interface.
+  ansible.builtin.include_tasks: mesh/main.yml
 
 - name: Determine the active Docker CLI context
   # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use, so a host running Colima (whose docker.sock lives under ~/.colima/default/, not /var/run) fails outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.

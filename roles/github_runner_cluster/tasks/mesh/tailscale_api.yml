@@ -1,5 +1,5 @@
 ---
-# Ensures the tailnet's ACL grants the github-runner fleet's own cross-node pod traffic (see k3s-io/k3s#8372 - Tailscale evaluates a subnet-routed packet's actual embedded source IP, so a grant scoped to the node tag alone silently blocks pod-to-pod traffic), and that a reusable, pre-authorized join key exists for k3s's own --vpn-auth integration (see docker-compose.yml). Runs once per playbook invocation (run_once, delegate_to localhost): this is tailnet-wide, shared-account state, not per-host state.
+# The tailscale provider's API half, included from tailscale.yml when a Tailscale API token is available. Ensures the tailnet's ACL grants the github-runner fleet's own cross-node pod traffic (see k3s-io/k3s#8372 - Tailscale evaluates a subnet-routed packet's actual embedded source IP, so a grant scoped to the node tag alone silently blocks pod-to-pod traffic), and that a reusable, pre-authorized join key exists for k3s's own --vpn-auth integration (see docker-compose.yml). Runs once per playbook invocation (run_once, delegate_to localhost): this is tailnet-wide, shared-account state, not per-host state.
 #
 # Surgical, never wholesale: this tailnet also carries other, unrelated rules for the account's own personal devices and other projects (confirmed live - the policy already has an autogroup:member/self grant and an unrelated tagged project predating this fleet). Every check below only ever adds a missing entry to the existing policy and writes the whole policy back; it never replaces it outright, and no-ops entirely once the entries already exist.
 
@@ -19,15 +19,15 @@
   check_mode: false
   register: github_runner_cluster_acl_current
 
-- name: Compute the ACL policy with the github-runner-node grant/tagOwner/autoApprover ensured
+- name: Compute the ACL policy with the node tag's grant/tagOwner/autoApprover ensured
   # combine() on tagOwners/autoApprovers is naturally idempotent - re-adding an identical key/value is a no-op. The grant itself has no natural key to combine on, so it's appended only when an identical entry isn't already present (exact-list-equality on `src`, since this task always constructs the same literal list in the same order).
   ansible.builtin.set_fact:
     github_runner_cluster_acl_desired: >-
       {{
         github_runner_cluster_acl_current.json
-        | combine({'tagOwners': (github_runner_cluster_acl_current.json.tagOwners | default({}) | combine({'tag:github-runner-node': ['autogroup:admin']}))})
-        | combine({'autoApprovers': (github_runner_cluster_acl_current.json.autoApprovers | default({}) | combine({'routes': (github_runner_cluster_acl_current.json.autoApprovers.routes | default({}) | combine({'10.42.0.0/16': ['tag:github-runner-node']}))}, recursive=True))}, recursive=True)
-        | combine({'grants': (github_runner_cluster_acl_current.json.grants | default([]) + ([{'src': ['tag:github-runner-node', '10.42.0.0/16'], 'dst': ['tag:github-runner-node', '10.42.0.0/16'], 'ip': ['*']}] if ([{'src': ['tag:github-runner-node', '10.42.0.0/16'], 'dst': ['tag:github-runner-node', '10.42.0.0/16'], 'ip': ['*']}] | difference(github_runner_cluster_acl_current.json.grants | default([])) | length > 0) else []))})
+        | combine({'tagOwners': (github_runner_cluster_acl_current.json.tagOwners | default({}) | combine({github_runner_cluster_mesh_tag: ['autogroup:admin']}))})
+        | combine({'autoApprovers': (github_runner_cluster_acl_current.json.autoApprovers | default({}) | combine({'routes': (github_runner_cluster_acl_current.json.autoApprovers.routes | default({}) | combine({github_runner_cluster_pod_cidr: [github_runner_cluster_mesh_tag]}))}, recursive=True))}, recursive=True)
+        | combine({'grants': (github_runner_cluster_acl_current.json.grants | default([]) + ([{'src': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'dst': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'ip': ['*']}] if ([{'src': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'dst': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'ip': ['*']}] | difference(github_runner_cluster_acl_current.json.grants | default([])) | length > 0) else []))})
       }}
   no_log: true
 
@@ -67,7 +67,7 @@
             reusable: true
             ephemeral: false
             preauthorized: true
-            tags: ["tag:github-runner-node"]
+            tags: ["{{ github_runner_cluster_mesh_tag }}"]
       # 90 days: comfortably under this tailnet's own observed maxKeyDuration (180 days), and short enough that a compromised key doesn't stay valid indefinitely - rotation itself is the manual step documented above.
       expirySeconds: 7776000
       description: "github-runner fleet vpn-auth join key (Ansible-managed)"

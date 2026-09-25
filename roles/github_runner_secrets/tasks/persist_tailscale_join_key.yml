@@ -1,5 +1,5 @@
 ---
-# Included by the cluster role's ensure_tailscale.yml, with github_runner_secrets_new_tailscale_join_key set, right after it creates a new Tailscale join key in 1Password mode. Writes the key back to the item and refreshes the control node's cache to match, so future runs see it without re-reading 1Password.
+# Included by the cluster role's tasks/mesh/tailscale_api.yml, with github_runner_secrets_new_tailscale_join_key set, right after it creates a new Tailscale join key in 1Password mode. Writes the key back to the item and refreshes the control node's cache to match, so future runs see it without re-reading 1Password.
 
 - name: Persist the new join key to 1Password
   ansible.builtin.command:

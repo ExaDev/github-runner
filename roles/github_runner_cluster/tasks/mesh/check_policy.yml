@@ -1,0 +1,20 @@
+---
+# Shared by every mesh provider: fails, with the exact JSON to add, unless github_runner_cluster_mesh_policy lets nodes register with github_runner_cluster_mesh_tag and auto-approves the pod routes each node advertises. Never writes the policy: providers that own their policy (tailscale with an API token, and the hosted and in-cluster Headscale providers) have already written it by now, so for them this only confirms it; for headscale_existing the policy belongs to whoever runs that server.
+#
+# Without auto-approval every node's pod route waits for manual approval, and until it gets it, pod traffic between nodes silently goes nowhere even though the nodes themselves are connected.
+
+- name: Find what the policy is missing
+  ansible.builtin.set_fact:
+    github_runner_cluster_mesh_policy_gaps: "{{ github_runner_cluster_mesh_policy | exadev.github_runner.mesh_policy_gaps(github_runner_cluster_pod_cidr, github_runner_cluster_mesh_tag) }}"
+
+- name: Fail with the policy entries to add
+  ansible.builtin.fail:
+    msg: |
+      The {{ github_runner_cluster_mesh }} mesh's policy does not {{ github_runner_cluster_mesh_policy_gaps | map('extract', github_runner_cluster_mesh_gap_descriptions) | join(' or ') }}. This role never edits that policy; add the following to it (merging with any existing tagOwners and autoApprovers entries) and rerun:
+
+      {{ github_runner_cluster_mesh_policy_gaps | exadev.github_runner.mesh_policy_snippet(github_runner_cluster_pod_cidr, github_runner_cluster_mesh_tag, github_runner_cluster_mesh_policy_tag_owner | default('')) }}
+  when: github_runner_cluster_mesh_policy_gaps | length > 0
+  vars:
+    github_runner_cluster_mesh_gap_descriptions:
+      tagOwners: "define {{ github_runner_cluster_mesh_tag }} in tagOwners"
+      autoApprovers: "auto-approve the {{ github_runner_cluster_pod_cidr }} routes for {{ github_runner_cluster_mesh_tag }}"

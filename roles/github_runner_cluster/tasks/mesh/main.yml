@@ -1,0 +1,39 @@
+---
+# The mesh provider interface. Each provider file (tailscale.yml, and the headscale_*.yml files) sets up or checks its control server and publishes three facts for every host: github_runner_cluster_mesh_join_key (a reusable, pre-authorised join key that tags nodes with github_runner_cluster_mesh_tag), github_runner_cluster_mesh_control_server_url (the --vpn-auth controlServerURL, empty for Tailscale's own control plane) and github_runner_cluster_mesh_policy (the tailnet policy as the provider knows it, or undefined when it cannot read it). This file then runs the checks every provider shares, so the rest of the role reads only those facts and never which provider produced them.
+
+- name: Fail if the mesh provider is unknown
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_mesh is '{{ github_runner_cluster_mesh }}'; it must be one of
+      {{ github_runner_cluster_mesh_providers | join(', ') }}.
+  when: github_runner_cluster_mesh not in github_runner_cluster_mesh_providers
+  vars:
+    github_runner_cluster_mesh_providers: [tailscale]
+
+- name: Set up the mesh with the provider {{ github_runner_cluster_mesh }}
+  ansible.builtin.include_tasks: "mesh/{{ github_runner_cluster_mesh }}.yml"
+
+- name: Share a join key that a run-once provider step created with every other host
+  # A fact set inside a run_once include lands only on the host that ran it, so without this a freshly created key reaches just the first host in the play and every other host fails the check below on its first run.
+  ansible.builtin.set_fact:
+    github_runner_cluster_mesh_join_key: "{{ ansible_play_hosts | map('extract', hostvars) | map(attribute='github_runner_cluster_mesh_join_key', default='') | select | first | default('') }}"
+  no_log: true
+  when: github_runner_cluster_mesh_join_key | length == 0
+
+- name: Check the tailnet policy lets nodes register with the tag and auto-approves their pod routes
+  ansible.builtin.include_tasks: mesh/check_policy.yml
+  when: github_runner_cluster_mesh_policy is defined
+
+- name: Fail if no join key is available
+  # Otherwise this only surfaces later, from inside the node's container, as a Tailscale client that cannot log in.
+  ansible.builtin.fail:
+    msg: >-
+      The {{ github_runner_cluster_mesh }} mesh provider has no join key. {{ github_runner_cluster_mesh_missing_key_hint }}
+  when: github_runner_cluster_mesh_join_key | length == 0
+
+- name: Derive the k3s --vpn-auth value from the join key and control server
+  # For reference and for anything that needs the whole value; docker-compose.yml builds the same string from K3S_VPN_AUTH_JOIN_KEY and K3S_VPN_AUTH_CONTROL_SERVER_URL in .env. k3s splits the value on commas and each pair on "=", so neither may appear inside the key or the URL.
+  ansible.builtin.set_fact:
+    github_runner_cluster_mesh_vpn_auth: >-
+      name=tailscale,joinKey={{ github_runner_cluster_mesh_join_key }}{{ (',controlServerURL=' + github_runner_cluster_mesh_control_server_url) if github_runner_cluster_mesh_control_server_url | length > 0 else '' }}
+  no_log: true

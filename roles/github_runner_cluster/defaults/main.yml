@@ -18,11 +18,18 @@ github_runner_cluster_effective_node_name: "{{ github_runner_cluster_node_name i
 
 github_runner_cluster_k3s_version: "latest"
 
-# Secrets, normally set by the github_runner_secrets role. github_runner_cluster_k3s_token is the shared node-join secret and has no default. github_runner_cluster_tailscale_join_key is what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic. github_runner_cluster_tailscale_api_token, when set, lets tasks/ensure_tailscale.yml keep the tailnet's ACL grant and the join key itself provisioned; see that file's comments for what it manages and the one manual step (creating the API token) that has no API to automate.
+# Secrets, normally set by the github_runner_secrets role. github_runner_cluster_k3s_token is the shared node-join secret and has no default. github_runner_cluster_tailscale_join_key is, with the default tailscale mesh provider, what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic. github_runner_cluster_tailscale_api_token, when set, lets tasks/mesh/tailscale_api.yml keep the tailnet's ACL grant and the join key itself provisioned; see that file's comments for what it manages and the one manual step (creating the API token) that has no API to automate.
 github_runner_cluster_tailscale_join_key: ""
 github_runner_cluster_tailscale_api_token: ""
-# Whether ensure_tailscale.yml may create a join key when none is supplied. Only safe where the new key can be persisted for the next run; the github_runner_secrets role turns it on in 1Password mode and persists the key itself.
+# Whether tasks/mesh/tailscale_api.yml may create a join key when none is supplied. Only safe where the new key can be persisted for the next run; the github_runner_secrets role turns it on in 1Password mode and persists the key itself.
 github_runner_cluster_create_tailscale_join_key: false
+
+# The mesh every node's k3s joins through --vpn-auth, and so the control server its Tailscale client registers with. tailscale (Tailscale's own control plane; the tailscale_* variables above) is the only provider so far. Every provider publishes the same facts, so nothing outside tasks/mesh/ depends on which one is in use: github_runner_cluster_mesh_join_key (the reusable join key), github_runner_cluster_mesh_control_server_url (empty for Tailscale), github_runner_cluster_mesh_vpn_auth (the resulting k3s --vpn-auth value) and github_runner_cluster_mesh_policy (the tailnet policy the route and tag check in tasks/mesh/check_policy.yml reads). See tasks/mesh/main.yml.
+github_runner_cluster_mesh: tailscale
+# The tag every node registers with, and that the policy must let register and auto-approve the pod routes for.
+github_runner_cluster_mesh_tag: "tag:github-runner-node"
+# k3s's own default cluster CIDR. Each node advertises its slice of it as a Tailscale subnet route (flannel's tailscale backend), so the policy has to auto-approve it. Only change it alongside k3s's own --cluster-cidr.
+github_runner_cluster_pod_cidr: "10.42.0.0/16"
 
 # Repo root ON THE TARGET HOST itself: docker-compose.yml and the .env this role templates live there. Deliberately left undefined here, not defaulted to `{{ playbook_dir }}/..`: playbook_dir is a control-node path, and using it as a template destination on the target host fails outright the moment the control node's own checkout doesn't sit at the identical path as the target's. Every host must set this explicitly.
 github_runner_cluster_kubeconfig_path: "{{ github_runner_cluster_repo_root }}/kubeconfig/kubeconfig.yaml"
