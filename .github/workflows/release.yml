@@ -2,11 +2,7 @@ name: Release
 
 # Runs semantic-release against every push to main. Almost every conventional-commit type triggers at least a patch release (see .releaserc.json's commit-analyzer releaseRules), so in practice this fires on nearly every push, stamping the collection version into galaxy.yml and the arc role's heartbeat/autoscaler image defaults, building the collection tarball, and, if a release was actually published, building and pushing all three container images (runner, heartbeat, autoscaler) tagged with the exact new version alongside floating major and latest tags on the same manifest. This replaces build-runner-image.yml, whose own job now lives here as build-images: the runner image no longer has a separate push-triggered build.
 #
-# The release commit is pushed with a token from a GitHub App, not the default GITHUB_TOKEN: this repo has no branch ruleset today, but the default GITHUB_TOKEN has no way to bypass one if a ruleset is added later (GitHub doesn't support naming the github-actions[bot] identity as a ruleset bypass actor at all), so the App token is the mechanism that keeps working regardless - mirrors ExaDev/documents.js's own release job. Only the checkout step (and so, only the
-# @semantic-release/git push that reuses its persisted credentials) uses the App token; the
-# semantic-release process itself uses the ordinary secrets.GITHUB_TOKEN for the GitHub API calls
-# @semantic-release/github makes (creating the Release, uploading the collection tarball) since
-# those don't need to bypass anything.
+# The release commit and tag are pushed over SSH with a write-enabled deploy key (secret RELEASE_DEPLOY_KEY): actions/checkout loads it for every later git command, and .releaserc.json's repositoryUrl is the SSH remote, so @semantic-release/git pushes with it. A deploy key is scoped to this one repository and can be listed as a ruleset bypass actor. It can't call the GitHub API, so the semantic-release process uses the ordinary secrets.GITHUB_TOKEN for creating the Release and uploading the collection tarball, which need no bypass.
 #
 # The release commit message carries [skip ci]: the image build happens in this same job/run immediately after semantic-release publishes, using the exact version it just decided, so there is nothing useful for a second, separately-triggered run of this workflow (or of ci.yml) to do against that commit - ci.yml's own lint jobs already ran against every commit before it reached main, and re-running them again against a commit that only changed a version stamp and a changelog is pure cost.
 
@@ -46,17 +42,11 @@ jobs:
       published: ${{ steps.before.outputs.version != steps.after.outputs.version }}
       version: ${{ steps.after.outputs.version }}
     steps:
-      - name: Generate a token for the release push
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v7
         with:
           # semantic-release analyses the full commit history since the last release.
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
       - uses: actions/setup-node@v7
         with:
           node-version: '22'

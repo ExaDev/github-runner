@@ -75,7 +75,7 @@ The `[skip ci]` in the release commit message is deliberate: the image build alr
 
 **No release has ever run yet, so no tag exists on this repo.** The next push to `main` that reaches the release job will make semantic-release fall back to its own default first-release version, `1.0.0`, since there is nothing to bump from. If a smaller starting point is wanted (matching `galaxy.yml`'s own `0.0.0` convention, for example), tag the current tip `v0.0.0` before that push lands - see this collection's own migration plan for when that seed tag is created; this workflow doesn't create it itself.
 
-**What the release push needs, none of which this change creates:** a GitHub App (any existing org-wide release App can be reused, or a repo-specific one created) with `contents: write` permission, installed on `ExaDev/github-runner`, with its App ID and private key stored as the `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY` repository secrets `release.yml` reads. Publishing to Ansible Galaxy additionally needs a `GALAXY_API_KEY` repository secret (an API key from `https://galaxy.ansible.com/me/preferences`); without it, the publish step logs that it's skipping and the release still completes.
+**What the release push needs:** a deploy key with write access on `ExaDev/github-runner`, whose private key is the `RELEASE_DEPLOY_KEY` repository secret `release.yml` checks out with. If `main` gains a ruleset, add deploy keys as its bypass actor so the release commit can land. Publishing to Ansible Galaxy additionally needs a `GALAXY_API_KEY` repository secret (an API key from `https://galaxy.ansible.com/me/preferences`); without it, the publish step logs that it's skipping and the release still completes.
 
 ## Architecture
 
