@@ -31,6 +31,11 @@ github_runner_cluster_mesh_tag: "tag:github-runner-node"
 # k3s's own default cluster CIDR. Each node advertises its slice of it as a Tailscale subnet route (flannel's tailscale backend), so the policy has to auto-approve it. Only change it alongside k3s's own --cluster-cidr.
 github_runner_cluster_pod_cidr: "10.42.0.0/16"
 
+# Extra Compose files merged after docker-compose.yml for this host's k3s project, as paths relative to github_runner_cluster_repo_root or absolute. Nothing needs them in normal use; the mesh integration tests use one to put several nodes on one Docker host.
+github_runner_cluster_compose_files: []
+# Derived, never set directly: every Compose file for this host's k3s project, in merge order. With no extra files the role passes none at all and Compose reads docker-compose.yml by itself, exactly as a plain `docker compose up` in the checkout would.
+github_runner_cluster_compose_file_list: "{{ ['docker-compose.yml'] + github_runner_cluster_compose_files }}"
+
 # Repo root ON THE TARGET HOST itself: docker-compose.yml and the .env this role templates live there. Deliberately left undefined here, not defaulted to `{{ playbook_dir }}/..`: playbook_dir is a control-node path, and using it as a template destination on the target host fails outright the moment the control node's own checkout doesn't sit at the identical path as the target's. Every host must set this explicitly.
 github_runner_cluster_kubeconfig_path: "{{ github_runner_cluster_repo_root }}/kubeconfig/kubeconfig.yaml"
 

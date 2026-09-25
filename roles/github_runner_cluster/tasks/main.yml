@@ -59,6 +59,7 @@
         project_src: "{{ github_runner_cluster_repo_root }}"
         profiles: ["server"]
         cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
+        files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
         state: present
 
 - name: Join as a k3s agent
@@ -76,6 +77,7 @@
         project_src: "{{ github_runner_cluster_repo_root }}"
         profiles: ["agent"]
         cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
+        files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
         state: present
 
     - name: End the role here, since an agent host has no API of its own to wait on
