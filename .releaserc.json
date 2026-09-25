@@ -47,7 +47,7 @@
       {
         "assets": [
           {
-            "path": "exadev-github_runner-${nextRelease.version}.tar.gz",
+            "path": "exadev-github_runner-*.tar.gz",
             "label": "Ansible collection tarball"
           }
         ]
