@@ -133,9 +133,55 @@ jobs:
         # playbooks/collections/ansible_collections/exadev/github_runner is a symlink back to this checkout's own root, for local FQCN resolution (see ansible/ansible.cfg's comment on roles_path). Excluding it stops ansible-lint's own directory walk from following that symlink back into the tree it is already linting, which otherwise relints the whole collection a second time under a growing path on every recursion.
         run: ansible-lint --profile production --exclude playbooks/collections
 
+  collection-build:
+    name: Collection build check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ansible
+      - name: Build the collection tarball
+        run: ansible-galaxy collection build --force
+      - name: Install the built tarball and verify its content
+        run: |
+          set -euo pipefail
+          tarball=$(ls exadev-github_runner-*.tar.gz)
+          install_path="$(mktemp -d)"
+          ansible-galaxy collection install "$tarball" -p "$install_path"
+          export ANSIBLE_COLLECTIONS_PATH="$install_path"
+          echo "Roles shipped in the built collection:"
+          ls "$install_path/ansible_collections/exadev/github_runner/roles"
+          echo "Filter plugins shipped in the built collection:"
+          ansible-doc -t filter -l exadev.github_runner | cat
+
+  commitlint:
+    name: commitlint
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: wagoid/commitlint-github-action@v6
+
+  commitlint-pr-title:
+    name: Lint PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   required-checks:
     name: Required Checks
-    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, ansible-lint]
+    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, ansible-lint, collection-build, commitlint, commitlint-pr-title]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
     runs-on: ubuntu-latest
