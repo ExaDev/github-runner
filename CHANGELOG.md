@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/ExaDev/github-runner/compare/v1.0.0...v1.0.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **release:** attach the collection tarball to the GitHub release ([32cafd5](https://github.com/ExaDev/github-runner/commit/32cafd5055ef4220ff6f7e6c4d933591cf5a920d))
+
 # 1.0.0 (2026-09-25)
 
 
