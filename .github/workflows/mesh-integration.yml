@@ -2,7 +2,7 @@ name: Mesh integration
 
 # Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check. Only on changes that can affect how nodes join the mesh.
 #
-# Routes through ExaDev/runner-fallback-action like ci.yml, but prefers the exadev-image-builder profile rather than exadev-runners: this job needs a Docker daemon that can run privileged containers (k3s, and Tailscale inside it), which only that profile's Docker-in-Docker sidecar provides. It falls back to ubuntu-latest, which has one natively. The work directory sits under runner.temp because the DinD daemon resolves Compose bind mounts on its own filesystem, and only the runner's _work volume is shared with it.
+# Runs on GitHub-hosted ubuntu-latest, whose Docker daemon runs the privileged containers the test needs (k3s, and Tailscale inside it). The work directory sits under runner.temp, which the job always has write access to.
 
 on:
   pull_request:
@@ -24,27 +24,12 @@ permissions:
   contents: read
 
 jobs:
-  determine-runner:
-    name: Determine runner
-    runs-on: exadev-runners
-    timeout-minutes: 5
-    outputs:
-      selected-runner: ${{ steps.fallback.outputs.selected-runner || '["ubuntu-latest"]' }}
-    steps:
-      - id: fallback
-        uses: ExaDev/runner-fallback-action@b774d51ff5360bf53705b2eb34ff019afd4d7f07
-        with:
-          preferred-labels: exadev-image-builder
-
   mesh:
     name: Mesh (${{ matrix.scenario }})
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      # The builder profile runs one job at a time anyway; this keeps the scenarios from queueing behind each other's timeouts on ubuntu-latest too.
-      max-parallel: 1
       matrix:
         scenario: [existing, hosted, in_cluster]
     env:
@@ -92,10 +77,9 @@ jobs:
 
   required-checks:
     name: Mesh integration result
-    needs: [determine-runner, mesh]
+    needs: [mesh]
     if: always()
-    # The ordinary pool, like determine-runner: this job only reads results, so it has no reason to wait for the single builder runner.
-    runs-on: exadev-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Fail if any scenario failed or was cancelled
