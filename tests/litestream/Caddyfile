@@ -1,0 +1,10 @@
+# TLS in front of Headscale for tests/litestream/run.sh, as a reverse proxy would in production: a Tailscale client pins itself to HTTPS on port 443 after its first failed control connection, so a failover test against plain HTTP on another port would never see it reconnect.
+{
+	admin off
+	auto_https disable_redirects
+}
+
+headscale.grtest.internal:443 {
+	tls /certs/server.crt /certs/server.key
+	reverse_proxy headscale:18080
+}

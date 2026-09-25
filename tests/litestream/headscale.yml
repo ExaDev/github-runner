@@ -1,0 +1,10 @@
+---
+# Runs only the cluster role's mesh step, for tests/litestream/run.sh: enough to bring up the headscale_hosted server, its Litestream sidecar and its warm standby, create the keys and check the policy, without starting any k3s node.
+- name: Set up the mesh the way site.yml does, without the cluster
+  hosts: github_runner_cluster
+  gather_facts: false
+  tasks:
+    - name: Set up the mesh
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: mesh/main
