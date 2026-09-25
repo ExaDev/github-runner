@@ -19,6 +19,14 @@ work="${GRTEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/grtest-mesh.XXXXXX")}"
 k3s_token="grtest-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 
 log() { echo "==> $*"; }
+# The network state of the Docker daemon's own namespace (on a CI runner, the runner's), read through the node image already present, so it works without pulling anything.
+host_network_state() {
+  local image
+  image=$(docker inspect --format '{{.Config.Image}}' "$(container 2)" 2>/dev/null) || return 0
+  echo "----- Docker host network state at $(date -u +%H:%M:%S)"
+  docker run --rm --network host --entrypoint sh "$image" -c 'ip -brief addr; ip rule; ip route show table all | grep -v "^local\|^broadcast\|fe80\|ff00" ; iptables-save 2>/dev/null | grep -vE "^#|^:" | head -80' 2>&1 || true
+}
+
 # Whether this machine reaches the URL Headscale fetches its DERP map from on start, which it cannot start without.
 egress() {
   echo "----- egress at $(date -u +%H:%M:%S): $(curl -sS -m 15 -o /dev/null -w '%{http_code}' "$derp_map_url" 2>&1 || true)"
@@ -42,6 +50,7 @@ diagnose() {
     docker logs --tail 60 "$(container "$index")" 2>&1 | cut -c1-400 || true
   done
   egress
+  host_network_state
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
     docker exec grtest-headscale headscale nodes list </dev/null 2>&1 || true
@@ -276,6 +285,7 @@ scenario_cluster() {
   assert_cluster
   if [ "$scenario" = in_cluster ]; then
     egress
+    host_network_state
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
     # Probes the egress Headscale needs throughout the recovery, so a failure shows when it was lost.
     (while :; do egress; sleep 30; done) &
