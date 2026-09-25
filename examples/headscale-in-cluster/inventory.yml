@@ -1,5 +1,5 @@
 ---
-# Three servers joining through a Headscale server that runs inside the cluster itself, as a static pod on the bootstrap server (node1), published on that host's port 443 with its own Let's Encrypt certificate. No machine outside the cluster is needed, at the cost of the control server living on one node of the cluster it serves: see the role README's headscale_in_cluster section and playbooks/recover_in_cluster_mesh.yml.
+# Three servers joining through a Headscale server that runs inside the cluster itself, as a static pod on the bootstrap server (node1), published on that host's port 443 with its own Let's Encrypt certificate. No machine outside the cluster is needed, at the cost of the control server living on one node of the cluster it serves: see the role README's headscale_in_cluster section and playbooks/recover_in_cluster_mesh.yml. The provider requires Litestream, since Headscale's database lives on node1's k3s data volume: the replica below lets a rebuilt node1 restore it.
 all:
   vars:
     # Secrets from one 1Password item, through the adapter role playbooks/site.yml adds for this source. See examples/ansible-vault and examples/env for the same variables from other sources.
@@ -14,6 +14,17 @@ all:
         github_runner_cluster_headscale_url: https://headscale.example.com
         github_runner_cluster_headscale_acme_email: ops@example.com
         github_runner_cluster_tailnet_domain: mesh.example.com
+        # Litestream's replica, here SFTP to another host. The SSH key and the Noise key are placeholders; supply them from wherever you keep secrets.
+        github_runner_cluster_headscale_litestream_replica:
+          type: sftp
+          host: backup.example.com:22
+          user: litestream
+          path: /srv/backups/headscale
+          key-path: /etc/github-runner-litestream/sftp_key
+        github_runner_cluster_headscale_litestream_files:
+          sftp_key: "<private key for the litestream user on backup.example.com>"
+        # So a replacement for node1 is the same Headscale server to every node.
+        github_runner_cluster_headscale_noise_private_key: "<contents of node1's headscale/keys/noise_private.key>"
       hosts:
         node1:
           ansible_host: 203.0.113.11

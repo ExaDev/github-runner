@@ -1,5 +1,5 @@
 ---
-# Three servers joining through a Headscale server the role runs under Docker Compose on a small dedicated machine outside the cluster, so the control server does not depend on the cluster it serves. Headscale gets its own Let's Encrypt certificate, so headscale.example.com must resolve to that machine and its port 443 must reach it from the internet. Leave github_runner_cluster_headscale_host unset to run Headscale on the bootstrap server instead (still outside k3s).
+# Three servers joining through a Headscale server the role runs under Docker Compose on a small dedicated machine outside the cluster, so the control server does not depend on the cluster it serves. Litestream streams Headscale's database to S3-compatible storage, and a second small machine keeps a warm standby that playbooks/promote_headscale_standby.yml can promote; keep headscale.example.com's DNS TTL short so nodes follow a promotion quickly. Headscale gets its own Let's Encrypt certificate, so headscale.example.com must resolve to that machine and its port 443 must reach it from the internet. Leave github_runner_cluster_headscale_host unset to run Headscale on the bootstrap server instead (still outside k3s).
 all:
   vars:
     # Secrets from one 1Password item, through the adapter role playbooks/site.yml adds for this source. See examples/ansible-vault and examples/env for the same variables from other sources.
@@ -15,6 +15,15 @@ all:
         github_runner_cluster_headscale_acme_email: ops@example.com
         # Headscale's MagicDNS base domain; it must not be headscale.example.com itself or a parent of it.
         github_runner_cluster_tailnet_domain: mesh.example.com
+        # Litestream's replica: any S3-compatible bucket. The credentials are placeholders; supply them from wherever you keep secrets.
+        github_runner_cluster_headscale_litestream_replica:
+          url: s3://example-headscale-backups/headscale
+          endpoint: https://s3.example.com
+          region: auto
+        github_runner_cluster_headscale_litestream_env:
+          LITESTREAM_ACCESS_KEY_ID: "<replica access key id>"
+          LITESTREAM_SECRET_ACCESS_KEY: "<replica secret access key>"
+        github_runner_cluster_headscale_standby_host: standby
       hosts:
         node1:
           ansible_host: 100.64.0.1
@@ -25,9 +34,13 @@ all:
         node3:
           ansible_host: 100.64.0.3
           github_runner_cluster_repo_root: /srv/github-runner
-    # Outside the cluster group: it runs Headscale and nothing else. It needs Docker with Compose, and a directory for Headscale's files, since it has no checkout of this repository.
+    # Outside the cluster group: these run Headscale and nothing else. It needs Docker with Compose, and a directory for Headscale's files, since it has no checkout of this repository.
     headscale:
       hosts:
         control:
           ansible_host: 203.0.113.10
+          github_runner_cluster_headscale_dir: /srv/headscale
+        # The warm standby: same requirements as control. Promotion prints the DNS change that moves headscale.example.com here.
+        standby:
+          ansible_host: 203.0.113.20
           github_runner_cluster_headscale_dir: /srv/headscale
