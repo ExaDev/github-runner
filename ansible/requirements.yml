@@ -2,4 +2,4 @@
 collections:
   - name: kubernetes.core   # k8s, k8s_info, helm
   - name: community.docker  # docker_compose_v2
-  - name: community.general # homebrew (host prerequisites: helm, kubectl, docker)
+  - name: community.general  # homebrew (host prerequisites: helm, kubectl, docker)
