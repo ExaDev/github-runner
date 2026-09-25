@@ -17,11 +17,11 @@
 
 - name: Check this host's secrets are present before changing anything
   ansible.builtin.include_tasks: check_secrets.yml
-  when: github_runner_arc_manage_secrets | bool
+  when: github_runner_arc_manage_secrets | bool or github_runner_arc_manage_image_pull_secret | bool
 
 - name: Prove the pull credential can read every image this host installs
   ansible.builtin.include_tasks: verify_image_pull.yml
-  when: github_runner_arc_manage_secrets | bool and github_runner_arc_verify_image_pull | bool
+  when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_verify_image_pull | bool
 
 - name: Give this host the kubernetes Python client
   ansible.builtin.include_role:
@@ -36,7 +36,7 @@
   block:
     - name: Check the Secrets this host relies on already exist in the cluster
       ansible.builtin.include_tasks: check_existing_secrets.yml
-      when: not (github_runner_arc_manage_secrets | bool)
+      when: not (github_runner_arc_manage_secrets | bool and github_runner_arc_manage_image_pull_secret | bool)
 
     - name: Label the eligible nodes
       ansible.builtin.include_tasks: label_nodes.yml

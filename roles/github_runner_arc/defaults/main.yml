@@ -37,10 +37,13 @@ github_runner_arc_labelled_nodes: []
 
 # Secrets, as plain variables from any source Ansible reads: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images) and github_runner_arc_heartbeat_gh_token (a PAT with gist scope), plus each org's private_key above. No defaults.
 
-# false means the role does not write the App or pull Secrets itself, and instead checks before changing anything that each profile's namespace already holds <org>-github-app and the pull secret (and that the platform namespace holds the pull secret and heartbeat-gh-token).
+# false means the role does not write the App Secrets or heartbeat-gh-token itself (and needs no private_key or installation_id), and instead checks before changing anything that each profile's namespace already holds its App Secret (and that the platform namespace holds heartbeat-gh-token).
 github_runner_arc_manage_secrets: true
 
-# Registry the pull Secret authenticates to, and its name in each namespace.
+# Whether the role writes the image pull Secret named below into each namespace from github_runner_arc_ghcr_username and github_runner_arc_ghcr_token. false uses a pull Secret something else creates and keeps current, such as one minted from a GitHub App installation token: the role then needs no pull credential, skips the image pull check, and only checks the Secret exists before changing anything. Follows github_runner_arc_manage_secrets unless set.
+github_runner_arc_manage_image_pull_secret: "{{ github_runner_arc_manage_secrets }}"
+
+# Registry the pull Secret authenticates to, and its name in each namespace, whether the role writes it or uses an existing one.
 github_runner_arc_image_pull_registry: "ghcr.io"
 github_runner_arc_image_pull_secret_name: "ghcr-pull"
 

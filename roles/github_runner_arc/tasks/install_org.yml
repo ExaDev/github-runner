@@ -1,14 +1,16 @@
 ---
 # Included once per org from main.yml, with `org` set to its github_runner_arc_orgs entry. Resolves the installation id once per org, then installs each of the org's scale-set profiles through install_scale_set_profile.yml.
 
+# The installation ID only goes into the App Secret, so it is not resolved when the role does not write that Secret.
 - name: Resolve the installation ID of {{ org.name }}
   ansible.builtin.include_tasks: resolve_installation_id.yml
-  when: (org.installation_id | default('')) | length == 0
+  when: github_runner_arc_manage_secrets | bool and (org.installation_id | default('')) | length == 0
 
 - name: Set the effective installation ID of {{ org.name }}
   # Read directly by name: resolve_installation_id.yml sets this with a plain set_fact and no delegate_facts, so it attaches to this host, not to the localhost it delegated to.
   ansible.builtin.set_fact:
     github_runner_arc_installation_id: "{{ github_runner_arc_resolved_installation_id | default(org.installation_id) }}"
+  when: github_runner_arc_manage_secrets | bool
 
 - name: Install/upgrade each scale-set profile of {{ org.name }}
   ansible.builtin.include_tasks: install_scale_set_profile.yml

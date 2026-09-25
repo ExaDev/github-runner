@@ -29,7 +29,7 @@
   kubernetes.core.k8s:
     definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars={'namespace': profile.namespace}) | from_yaml }}"
   no_log: true
-  when: github_runner_arc_manage_secrets | bool
+  when: github_runner_arc_manage_image_pull_secret | bool
 
 - name: Install/upgrade the scale-set release for {{ profile.label }}
   # runnerScaleSetName is left to default to the release name: it is the scale set's registration identity on GitHub, so two releases sharing it make the second one's listener crash-loop registering a duplicate. scaleSetLabels is the pooling mechanism instead: an extra label every profile's runners carry alongside their own unique one, so runs-on: <label> matches every profile sharing it. A profile sets its own runs_on_label to stay out of the shared pool.
