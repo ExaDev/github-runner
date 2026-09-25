@@ -103,6 +103,18 @@
       check_mode: false
       register: github_runner_cluster_docker_context
 
+    - name: Keep the Headscale image in the bootstrap host's own Docker, for recovery
+      # playbooks/recover_in_cluster_mesh.yml runs a temporary Headscale container from this image when the node cannot rejoin, which is exactly when pulling it may not work; kubelet's copy inside k3s is in a different image store. Confirmed in CI: the recovery's own pull timed out against Docker Hub.
+      ansible.builtin.shell: |
+        if docker image inspect "$image" >/dev/null 2>&1; then echo present; else docker pull --quiet "$image"; fi
+      environment:
+        image: "docker.io/headscale/headscale:v{{ github_runner_cluster_headscale_version }}"
+      register: github_runner_cluster_headscale_image
+      changed_when: github_runner_cluster_headscale_image.stdout != 'present'
+      until: github_runner_cluster_headscale_image.rc == 0
+      retries: 5
+      delay: 10
+
     - name: Ask whether Headscale answers inside the bootstrap server's k3s container
       ansible.builtin.command:
         argv: [docker, exec, "{{ github_runner_cluster_container_name }}", wget, -q, -T, "5", -O, /dev/null, "http://127.0.0.1:9090/metrics"]

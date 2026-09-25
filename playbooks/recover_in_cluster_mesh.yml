@@ -70,6 +70,9 @@
                   - "container:{{ github_runner_cluster_container_name }}"
                   - --volume
                   - "{{ github_runner_cluster_recover_headscale_dir }}/config:/etc/headscale:ro"
+                  # The role keeps this image in the host's Docker on every run, so this does not depend on reaching a registry during an outage.
+                  - --pull
+                  - never
                   - --mount
                   - "type=volume,src={{ github_runner_cluster_recover_volume.stdout | trim }},dst=/var/lib/headscale,volume-subpath=github-runner-headscale"
                   - "docker.io/headscale/headscale:v{{ github_runner_cluster_headscale_version }}"
