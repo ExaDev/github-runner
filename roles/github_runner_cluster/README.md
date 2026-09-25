@@ -67,7 +67,7 @@ Each site is its own cluster: its own inventory group, bootstrap server and mesh
 
 ## Examples
 
-`examples/` in this repository has inventories for a single host on SQLite, three servers on Tailscale, each Headscale provider, and two sites. The smallest:
+`examples/` in this repository has inventories for a single host on SQLite, three servers on Tailscale, each Headscale provider, and two sites, and for secrets from ansible-vault (`examples/ansible-vault/`), environment and file lookups (`examples/env/`) or 1Password (`examples/onepassword/`). The smallest:
 
 ```yaml
 # inventory.yml

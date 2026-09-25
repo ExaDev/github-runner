@@ -1,0 +1,31 @@
+---
+# Secrets from one 1Password item, read on the control node by the github_runner_secrets_onepassword adapter role, which playbooks/site.yml adds when github_runner_secrets_source is onepassword. The item holds k3s-token, tailscale-join-key, tailscale-api-token, ghcr-username, ghcr-token and heartbeat-gh-token (and headscale-api-key, headscale-join-key for Headscale); a field the play's roles do not use may be left out. Each org names its App private key with an op:// reference, which the adapter reads and puts in the org's private_key. A join key the cluster role creates is written back to the item.
+all:
+  vars:
+    github_runner_secrets_source: onepassword
+    github_runner_secrets_onepassword_vault: Example
+    github_runner_secrets_onepassword_item: github-runner
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_tailnet_domain: example-tailnet.ts.net
+      hosts:
+        node1:
+          ansible_host: 100.64.0.1
+          github_runner_cluster_repo_root: /srv/github-runner
+          github_runner_arc_values_dir: "{{ playbook_dir }}/../values"
+          github_runner_arc_heartbeat_gist_id: 0123456789abcdef0123456789abcdef
+          github_runner_arc_orgs:
+            - name: ExampleOrg
+              app_id: 123456
+              private_key_op_reference: "op://Example/example-org-app-private-key/private key"
+              image: ghcr.io/example/github-runner:latest
+              scale_set_profiles:
+                - suffix: ""
+                  max_runners: 4
+        node2:
+          ansible_host: 100.64.0.2
+          github_runner_cluster_repo_root: /srv/github-runner
+        node3:
+          ansible_host: 100.64.0.3
+          github_runner_cluster_repo_root: /srv/github-runner

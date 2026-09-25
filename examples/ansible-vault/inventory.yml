@@ -1,0 +1,33 @@
+---
+# Secrets from ansible-vault, with no 1Password at all: the roles read plain variables, so the inventory points each one at a vault_* variable kept encrypted in group_vars/all/vault.yml next to this file (see README.md here). SOPS, via the community.sops vars plugin, works the same way. Run with the vault password, e.g.: ansible-playbook -i examples/ansible-vault/inventory.yml playbooks/site.yml --ask-vault-pass
+all:
+  vars:
+    github_runner_cluster_k3s_token: "{{ vault_k3s_token }}"
+    github_runner_cluster_tailscale_join_key: "{{ vault_tailscale_join_key }}"
+    github_runner_arc_ghcr_username: "{{ vault_ghcr_username }}"
+    github_runner_arc_ghcr_token: "{{ vault_ghcr_token }}"
+    github_runner_arc_heartbeat_gh_token: "{{ vault_heartbeat_gh_token }}"
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_tailnet_domain: example-tailnet.ts.net
+      hosts:
+        node1:
+          ansible_host: 100.64.0.1
+          github_runner_cluster_repo_root: /srv/github-runner
+          github_runner_arc_values_dir: "{{ playbook_dir }}/../values"
+          github_runner_arc_heartbeat_gist_id: 0123456789abcdef0123456789abcdef
+          github_runner_arc_orgs:
+            - name: ExampleOrg
+              app_id: 123456
+              private_key: "{{ vault_example_org_app_private_key }}"
+              image: ghcr.io/example/github-runner:latest
+              scale_set_profiles:
+                - suffix: ""
+                  max_runners: 4
+        node2:
+          ansible_host: 100.64.0.2
+          github_runner_cluster_repo_root: /srv/github-runner
+        node3:
+          ansible_host: 100.64.0.3
+          github_runner_cluster_repo_root: /srv/github-runner

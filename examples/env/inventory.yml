@@ -1,0 +1,28 @@
+---
+# Secrets from the control node's environment and files, with no secret store at all: each variable is a lookup, read on the control node when a task first uses it. The same pattern works for any lookup plugin, such as community.hashi_vault.vault_kv2_get for HashiCorp Vault or amazon.aws.aws_ssm for AWS SSM Parameter Store.
+#
+# There is no join key to start with: with a Tailscale API token and github_runner_cluster_join_key_path set, the role creates one on the first run, writes it to that file (mode 0600) and reads it from there on later runs.
+all:
+  vars:
+    github_runner_cluster_k3s_token: "{{ lookup('ansible.builtin.env', 'K3S_TOKEN') }}"
+    github_runner_cluster_tailscale_api_token: "{{ lookup('ansible.builtin.env', 'TAILSCALE_API_TOKEN') }}"
+    github_runner_cluster_join_key_path: ~/.config/github-runner/tailscale-join-key
+    github_runner_arc_ghcr_username: "{{ lookup('ansible.builtin.env', 'GHCR_USERNAME') }}"
+    github_runner_arc_ghcr_token: "{{ lookup('ansible.builtin.env', 'GHCR_TOKEN') }}"
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_tailnet_domain: example-tailnet.ts.net
+      hosts:
+        node1:
+          ansible_host: 100.64.0.1
+          github_runner_cluster_repo_root: /srv/github-runner
+          github_runner_arc_values_dir: "{{ playbook_dir }}/../values"
+          github_runner_arc_orgs:
+            - name: ExampleOrg
+              app_id: 123456
+              private_key: "{{ lookup('ansible.builtin.file', '~/.config/github-runner/example-org-app.pem') }}"
+              image: ghcr.io/example/github-runner:latest
+              scale_set_profiles:
+                - suffix: ""
+                  max_runners: 4
