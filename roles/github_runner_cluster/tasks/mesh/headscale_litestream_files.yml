@@ -1,0 +1,45 @@
+---
+# Writes Litestream's files for a Headscale server this role runs, under github_runner_cluster_headscale_server_dir: its configuration and environment (mode 0600, since they may hold the replica's credentials), the script its containers run, any extra files, and the server keys in github_runner_cluster_headscale_server_key_files ({file name: content}). Registers whether each changed, for the caller to restart what reads them.
+
+- name: Write Litestream's configuration and environment
+  ansible.builtin.template:
+    src: "headscale/litestream/{{ item }}.j2"
+    dest: "{{ github_runner_cluster_headscale_server_dir }}/litestream/{{ item }}"
+    mode: "0600"
+  loop: [litestream.yml, litestream.env]
+  no_log: true
+  register: github_runner_cluster_headscale_litestream_config
+
+- name: Install the script Litestream's containers run
+  ansible.builtin.copy:
+    src: headscale/litestream.sh
+    dest: "{{ github_runner_cluster_headscale_server_dir }}/litestream/litestream.sh"
+    mode: "0755"
+  register: github_runner_cluster_headscale_litestream_script
+
+- name: Write the extra files Litestream needs
+  ansible.builtin.copy:
+    dest: "{{ github_runner_cluster_headscale_server_dir }}/litestream/{{ item.key }}"
+    content: "{{ item.value }}"
+    mode: "0600"
+  loop: "{{ github_runner_cluster_headscale_litestream_files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+  register: github_runner_cluster_headscale_litestream_extra
+
+- name: Install the server's keys
+  ansible.builtin.copy:
+    dest: "{{ github_runner_cluster_headscale_server_dir }}/keys/{{ item.key }}"
+    content: "{{ item.value }}"
+    mode: "0600"
+  loop: "{{ github_runner_cluster_headscale_server_key_files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+
+- name: Record whether anything Litestream reads at start changed
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_litestream_changed: >-
+      {{ github_runner_cluster_headscale_litestream_config is changed or github_runner_cluster_headscale_litestream_script is changed
+         or github_runner_cluster_headscale_litestream_extra is changed }}

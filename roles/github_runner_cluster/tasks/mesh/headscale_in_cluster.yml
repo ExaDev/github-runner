@@ -1,5 +1,16 @@
 ---
-# The headscale_in_cluster mesh provider: the role runs Headscale inside the cluster itself, as a static pod on the bootstrap server, published on that host's port so every node reaches it at github_runner_cluster_headscale_url. The bootstrap server's k3s starts off the mesh until Headscale answers and then restarts on it (k3s/node-entrypoint.sh, K3S_MESH_SELF_HOSTED_HEALTH_URL), and every other node joins through it. The control server lives on one node of the cluster it serves: see the role README for what that means for recovery, and playbooks/recover_in_cluster_mesh.yml.
+# The headscale_in_cluster mesh provider: the role runs Headscale inside the cluster itself, as a static pod on the bootstrap server, published on that host's port so every node reaches it at github_runner_cluster_headscale_url. The bootstrap server's k3s starts off the mesh until Headscale answers and then restarts on it (k3s/node-entrypoint.sh, K3S_MESH_SELF_HOSTED_HEALTH_URL), and every other node joins through it. The control server lives on one node of the cluster it serves: see the role README for what that means for recovery, and playbooks/recover_in_cluster_mesh.yml. Its database lives on that node's k3s data volume, so the provider requires a Litestream replica (or an explicit acknowledgement of the risk), which the pod streams to and a rebuilt node restores from.
+
+- name: Fail unless Headscale's state survives losing the bootstrap server's data volume
+  ansible.builtin.fail:
+    msg: >-
+      headscale_in_cluster keeps Headscale's database on the bootstrap server's k3s data volume, and a static pod cannot use a
+      replicated persistent volume instead (kubelet runs it with no API server to bind a claim). Configure a Litestream replica
+      (github_runner_cluster_headscale_litestream_replica), or set github_runner_cluster_headscale_accept_node_local_state: true
+      to accept that losing that volume loses every registration.
+  when:
+    - not github_runner_cluster_headscale_litestream | bool
+    - not github_runner_cluster_headscale_accept_node_local_state | bool
 
 - name: Decide where Headscale's files live on the bootstrap server
   ansible.builtin.set_fact:
@@ -31,8 +42,8 @@
       ansible.builtin.file:
         path: "{{ github_runner_cluster_headscale_host_dir }}/{{ item }}"
         state: directory
-        mode: "{{ '0700' if item == 'secrets' else '0755' }}"
-      loop: ["", config, manifests, secrets]
+        mode: "{{ '0700' if item in ['secrets', 'litestream', 'keys'] else '0755' }}"
+      loop: "{{ ['', 'config', 'manifests', 'secrets'] + (['litestream', 'keys'] if github_runner_cluster_headscale_litestream | bool else []) }}"
 
     - name: Read the stored join key
       ansible.builtin.slurp:
@@ -51,8 +62,16 @@
         src: "headscale/{{ item }}.j2"
         dest: "{{ github_runner_cluster_headscale_host_dir }}/config/{{ item }}"
         mode: "0644"
-      loop: [config.yaml, policy.hujson]
+      loop: "{{ ['config.yaml', 'policy.hujson'] + (['derp.yaml'] if github_runner_cluster_headscale_derp_map | length > 0 else []) }}"
       register: github_runner_cluster_headscale_config_files
+
+    - name: Write Litestream's configuration, environment, script and the server's keys
+      ansible.builtin.include_tasks: mesh/headscale_litestream_files.yml
+      vars:
+        github_runner_cluster_headscale_server_dir: "{{ github_runner_cluster_headscale_host_dir }}"
+        github_runner_cluster_headscale_server_key_files: >-
+          {{ {'noise_private.key': github_runner_cluster_headscale_noise_private_key} if github_runner_cluster_headscale_noise_private_key | length > 0 else {} }}
+      when: github_runner_cluster_headscale_litestream | bool
 
     - name: Write the Headscale static pod
       ansible.builtin.template:
@@ -60,7 +79,13 @@
         dest: "{{ github_runner_cluster_headscale_host_dir }}/manifests/github-runner-headscale.yaml"
         mode: "0644"
       vars:
-        github_runner_cluster_headscale_config_checksum: "{{ github_runner_cluster_headscale_config_files.results | map(attribute='checksum') | join('') | hash('sha1') }}"
+        # Litestream's files count too, so a changed replica or credential restarts the pod; their checksums, never their content.
+        github_runner_cluster_headscale_config_checksum: >-
+          {{ (github_runner_cluster_headscale_config_files.results
+              + (github_runner_cluster_headscale_litestream_config.results | default([]))
+              + [github_runner_cluster_headscale_litestream_script | default({})]
+              + (github_runner_cluster_headscale_litestream_extra.results | default([])))
+             | map(attribute='checksum', default='') | join('') | hash('sha1') }}
 
     - name: Write the bootstrap server's Compose override
       ansible.builtin.template:
@@ -111,6 +136,50 @@
       until: github_runner_cluster_headscale_wait.rc == 0
       retries: 120
       delay: 5
+
+    - name: Read the running server's keys through the Litestream sidecar
+      # The Headscale image has no shell or cat; the sidecar mounts the same state.
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ github_runner_cluster_container_name }}"
+          - sh
+          - -c
+          - exec crictl exec "$(crictl ps -q --name '^litestream$' --state running | head -n 1)" cat "/var/lib/headscale/$1"
+          - read-key
+          - "{{ item }}"
+      loop: "{{ ['noise_private.key'] + (['derp_server_private.key'] if github_runner_cluster_headscale_derp == 'embedded' else []) }}"
+      changed_when: false
+      check_mode: false
+      no_log: true
+      register: github_runner_cluster_headscale_live_key_reads
+      until: github_runner_cluster_headscale_live_key_reads.rc == 0
+      retries: 30
+      delay: 2
+      when: github_runner_cluster_headscale_litestream | bool
+
+    - name: Fail if the running server's Noise key is not the one supplied
+      # Changing it would cut every node off from the server, so it is never replaced here.
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_cluster_headscale_noise_private_key does not match the Noise key the in-cluster Headscale server is running
+          with. Set it to that server's key ({{ github_runner_cluster_headscale_host_dir }}/keys/noise_private.key) or leave it empty.
+      when:
+        - github_runner_cluster_headscale_live_key_reads is not skipped
+        - github_runner_cluster_headscale_noise_private_key | length > 0
+        - github_runner_cluster_headscale_live_key_reads.results[0].stdout | trim != github_runner_cluster_headscale_noise_private_key | trim
+
+    - name: Keep a copy of the running server's keys beside its configuration, for a rebuilt node's restore
+      ansible.builtin.copy:
+        dest: "{{ github_runner_cluster_headscale_host_dir }}/keys/{{ item.item }}"
+        content: "{{ item.stdout }}"
+        mode: "0600"
+      loop: "{{ github_runner_cluster_headscale_live_key_reads.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      no_log: true
+      when: github_runner_cluster_headscale_live_key_reads is not skipped
 
 - name: Keep the API key and join key for the Headscale server in the cluster
   ansible.builtin.include_tasks: mesh/headscale_server_keys.yml

@@ -21,8 +21,11 @@ derp:
     stun_listen_addr: 0.0.0.0:3478
     private_key_path: /var/lib/headscale/derp_server_private.key
     automatically_add_embedded_derp_region: true
-  urls:
-    - https://controlplane.tailscale.com/derpmap/default
+  urls: {{ github_runner_cluster_headscale_derp_urls | to_json }}
+{% if github_runner_cluster_headscale_derp_map | length > 0 %}
+  paths:
+    - /etc/headscale/derp.yaml
+{% endif %}
   auto_update_enabled: true
   update_frequency: 3h
 disable_check_updates: true
@@ -31,6 +34,10 @@ database:
   sqlite:
     path: /var/lib/headscale/db.sqlite
     write_ahead_log: true
+{% if github_runner_cluster_headscale_litestream | bool %}
+    # Litestream checkpoints the database itself, after copying each WAL page to the replica (https://litestream.io/tips).
+    wal_autocheckpoint: 0
+{% endif %}
 {% if github_runner_cluster_headscale_tls == 'letsencrypt' %}
 acme_url: https://acme-v02.api.letsencrypt.org/directory
 acme_email: "{{ github_runner_cluster_headscale_acme_email }}"

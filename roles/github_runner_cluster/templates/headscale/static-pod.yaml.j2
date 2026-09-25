@@ -9,13 +9,32 @@ metadata:
   labels:
     app.kubernetes.io/name: github-runner-headscale
   annotations:
-    # Changes whenever the configuration or policy does, so kubelet replaces the pod and Headscale reads them again.
+    # Changes whenever the configuration, policy or Litestream's files do, so kubelet replaces the pod and Headscale reads them again.
     github-runner.exadev.dev/config-checksum: "{{ github_runner_cluster_headscale_config_checksum }}"
 spec:
   hostNetwork: true
   dnsPolicy: Default
   priorityClassName: system-node-critical
+{% if github_runner_cluster_headscale_litestream | bool %}
+{% set ns = namespace(mounts=[{'name': 'state', 'mountPath': '/var/lib/headscale'}, {'name': 'litestream', 'mountPath': '/etc/github-runner-litestream', 'readOnly': true}, {'name': 'keys', 'mountPath': '/etc/github-runner-headscale-keys', 'readOnly': true}]) %}
+{% for mount in github_runner_cluster_headscale_litestream_mounts %}
+{% set ns.mounts = ns.mounts + [{'name': 'litestream-mount-' ~ loop.index, 'mountPath': mount}] %}
+{% endfor %}
+{% set litestream_mounts = ns.mounts %}
+  # Restores the database from the replica when the node has none (a rebuilt node), before Headscale starts.
+  initContainers:
+    - name: litestream-restore
+      image: docker.io/litestream/litestream:{{ github_runner_cluster_headscale_litestream_version }}
+      command: ["/bin/sh", "/etc/github-runner-litestream/litestream.sh", "restore"]
+      volumeMounts: {{ litestream_mounts | to_json }}
+{% endif %}
   containers:
+{% if github_runner_cluster_headscale_litestream | bool %}
+    - name: litestream
+      image: docker.io/litestream/litestream:{{ github_runner_cluster_headscale_litestream_version }}
+      command: ["/bin/sh", "/etc/github-runner-litestream/litestream.sh", "replicate"]
+      volumeMounts: {{ litestream_mounts | to_json }}
+{% endif %}
     - name: headscale
       image: docker.io/headscale/headscale:v{{ github_runner_cluster_headscale_version }}
       args: ["serve"]
@@ -32,3 +51,14 @@ spec:
       hostPath: {path: /var/lib/rancher/k3s/github-runner-headscale, type: DirectoryOrCreate}
     - name: run
       emptyDir: {}
+{% if github_runner_cluster_headscale_litestream | bool %}
+    # Bind-mounted into the k3s container from the host like the configuration; mode 0700 there, since they may hold the replica's credentials and the server's keys.
+    - name: litestream
+      hostPath: {path: /etc/github-runner-litestream, type: Directory}
+    - name: keys
+      hostPath: {path: /etc/github-runner-headscale-keys, type: Directory}
+{% for mount in github_runner_cluster_headscale_litestream_mounts %}
+    - name: litestream-mount-{{ loop.index }}
+      hostPath: {path: "{{ mount }}", type: Directory}
+{% endfor %}
+{% endif %}

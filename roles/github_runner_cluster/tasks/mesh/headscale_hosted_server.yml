@@ -1,0 +1,121 @@
+---
+# Writes one headscale_hosted Compose project and starts it, on github_runner_cluster_headscale_server_host in github_runner_cluster_headscale_server_dir: the server itself, or, with github_runner_cluster_headscale_as_standby, the warm standby, where only Litestream's follower runs until promotion. github_runner_cluster_headscale_server_key_files holds server keys to install beside the configuration, as {file name: content}; with Litestream on, the server's run publishes its live keys as github_runner_cluster_headscale_live_keys.
+
+- name: Write and start the Headscale project on {{ github_runner_cluster_headscale_server_host }}
+  run_once: true
+  delegate_to: "{{ github_runner_cluster_headscale_server_host }}"
+  block:
+    - name: Create Headscale's directories
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_headscale_server_dir }}/{{ item }}"
+        state: directory
+        mode: "{{ '0700' if item in ['secrets', 'litestream', 'keys'] else '0755' }}"
+      loop: "{{ ['', 'config', 'secrets'] + (['litestream', 'keys'] if github_runner_cluster_headscale_litestream | bool else []) }}"
+
+    - name: Write Headscale's configuration and policy
+      ansible.builtin.template:
+        src: "headscale/{{ item.src }}"
+        dest: "{{ github_runner_cluster_headscale_server_dir }}/{{ item.dest }}"
+        mode: "0644"
+      loop: >-
+        {{ [{'src': 'config.yaml.j2', 'dest': 'config/config.yaml'}, {'src': 'policy.hujson.j2', 'dest': 'config/policy.hujson'}, {'src': 'docker-compose.yml.j2', 'dest': 'docker-compose.yml'}]
+           + ([{'src': 'derp.yaml.j2', 'dest': 'config/derp.yaml'}] if github_runner_cluster_headscale_derp_map | length > 0 else []) }}
+      register: github_runner_cluster_headscale_files
+
+    - name: Write Litestream's configuration, environment, script and the server's keys
+      ansible.builtin.include_tasks:
+        file: mesh/headscale_litestream_files.yml
+        apply:
+          run_once: true
+          delegate_to: "{{ github_runner_cluster_headscale_server_host }}"
+      when: github_runner_cluster_headscale_litestream | bool
+
+    - name: Determine the Headscale host's Docker CLI context
+      # See the same step in tasks/main.yml for why the context is read rather than assumed.
+      ansible.builtin.command: docker context show
+      changed_when: false
+      check_mode: false
+      register: github_runner_cluster_headscale_docker_context
+
+    - name: Start the project, recreating it when its configuration, policy or Litestream settings changed
+      # The configuration is a bind mount each container reads only at start, so a changed file needs a new container to take effect. On a standby only the services outside the active profile start.
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_cluster_headscale_server_dir }}"
+        files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_server_compose_files }}"
+        cli_context: "{{ github_runner_cluster_headscale_docker_context.stdout | trim }}"
+        state: present
+        remove_orphans: true
+        recreate: >-
+          {{ 'always' if github_runner_cluster_headscale_files is changed
+             or (github_runner_cluster_headscale_litestream | bool and github_runner_cluster_headscale_litestream_changed | bool) else 'auto' }}
+        wait: true
+        wait_timeout: 120
+
+    - name: Look for the follower's copy of the database, left from when this host was the standby
+      ansible.builtin.command:
+        argv: [docker, --context, "{{ github_runner_cluster_headscale_docker_context.stdout | trim }}", volume, inspect, "{{ github_runner_cluster_headscale_project }}_headscale-standby"]
+      register: github_runner_cluster_headscale_standby_volume
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: not github_runner_cluster_headscale_as_standby | bool
+
+    - name: Remove the follower's copy, which a server never reads
+      ansible.builtin.command:
+        argv: [docker, --context, "{{ github_runner_cluster_headscale_docker_context.stdout | trim }}", volume, rm, "{{ github_runner_cluster_headscale_project }}_headscale-standby"]
+      changed_when: true
+      when:
+        - not github_runner_cluster_headscale_as_standby | bool
+        - github_runner_cluster_headscale_standby_volume.rc == 0
+
+    - name: Read the running server's keys through the Litestream sidecar
+      # The Headscale image has no shell or cat; the sidecar mounts the same state volume.
+      ansible.builtin.command:
+        argv: >-
+          {{ ['docker', '--context', github_runner_cluster_headscale_docker_context.stdout | trim, 'compose', '--project-directory', github_runner_cluster_headscale_server_dir]
+             + (['docker-compose.yml'] + github_runner_cluster_headscale_server_compose_files) | map('regex_replace', '^', '--file=') | list
+             + ['exec', '-T', 'litestream', 'cat', '/var/lib/headscale/' ~ item] }}
+        # Relative Compose file paths resolve from here, as they do for the Compose module above.
+        chdir: "{{ github_runner_cluster_headscale_server_dir }}"
+      loop: "{{ ['noise_private.key'] + (['derp_server_private.key'] if github_runner_cluster_headscale_derp == 'embedded' else []) }}"
+      changed_when: false
+      check_mode: false
+      no_log: true
+      register: github_runner_cluster_headscale_live_key_reads
+      # Headscale writes its keys on first start, a moment after the sidecar is up.
+      until: github_runner_cluster_headscale_live_key_reads.rc == 0
+      retries: 30
+      delay: 2
+      when:
+        - github_runner_cluster_headscale_litestream | bool
+        - not github_runner_cluster_headscale_as_standby | bool
+
+    - name: Publish the running server's keys
+      ansible.builtin.set_fact:
+        github_runner_cluster_headscale_live_keys: >-
+          {{ dict(github_runner_cluster_headscale_live_key_reads.results | map(attribute='item') | zip(github_runner_cluster_headscale_live_key_reads.results | map(attribute='stdout'))) }}
+      no_log: true
+      when: github_runner_cluster_headscale_live_key_reads is not skipped
+
+    - name: Fail if the running server's Noise key is not the one supplied
+      # Changing it would cut every node off from the server, so it is never replaced here.
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_cluster_headscale_noise_private_key does not match the Noise key the Headscale server on
+          {{ github_runner_cluster_headscale_server_host }} is running with. Set it to that server's key
+          ({{ github_runner_cluster_headscale_server_dir }}/keys/noise_private.key) or leave it empty.
+      when:
+        - github_runner_cluster_headscale_live_key_reads is not skipped
+        - github_runner_cluster_headscale_noise_private_key | length > 0
+        - github_runner_cluster_headscale_live_keys['noise_private.key'] | trim != github_runner_cluster_headscale_noise_private_key | trim
+
+    - name: Keep a copy of the running server's keys beside its configuration
+      ansible.builtin.copy:
+        dest: "{{ github_runner_cluster_headscale_server_dir }}/keys/{{ item.key }}"
+        content: "{{ item.value }}"
+        mode: "0600"
+      loop: "{{ github_runner_cluster_headscale_live_keys | default({}) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      no_log: true
+      when: github_runner_cluster_headscale_live_key_reads is not skipped

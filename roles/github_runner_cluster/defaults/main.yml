@@ -65,7 +65,7 @@ github_runner_cluster_headscale_acme_email: ""
 github_runner_cluster_headscale_port: 8080
 # Derived, never set directly: the port Headscale listens on and the host publishes.
 github_runner_cluster_headscale_listen_port: "{{ 443 if github_runner_cluster_headscale_tls == 'letsencrypt' else github_runner_cluster_headscale_port }}"
-# DERP relays, for nodes that cannot reach each other directly. public uses Tailscale's public DERP map; embedded also runs Headscale's own DERP server, which needs the letsencrypt TLS mode and STUN (UDP 3478) reachable from every node.
+# DERP relays, for nodes that cannot reach each other directly. public uses the maps in github_runner_cluster_headscale_derp_urls (Tailscale's public DERP map by default); embedded also runs Headscale's own DERP server, which needs the letsencrypt TLS mode and STUN (UDP 3478) reachable from every node.
 github_runner_cluster_headscale_derp: public
 # Upstream resolvers for the tailnet's DNS. Empty leaves each node's own resolver in place for every name outside the tailnet domain; a list overrides it with these servers.
 github_runner_cluster_headscale_nameservers: []
@@ -76,9 +76,31 @@ github_runner_cluster_headscale_policy: >-
      'autoApprovers': {'routes': {github_runner_cluster_pod_cidr: [github_runner_cluster_mesh_tag]}},
      'grants': [{'src': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'dst': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'ip': ['*']}]}
   }}
-# Extra Compose files for the headscale_hosted Headscale project, merged after the role's own (e.g. to attach it to a Docker network), as paths on the Headscale host.
+# Extra Compose files for the headscale_hosted Headscale project, merged after the role's own (e.g. to attach it to a Docker network), as paths on the Headscale host. Like the container name below, a value set on the Headscale host or the standby host itself applies to that host's project.
 github_runner_cluster_headscale_compose_files: []
 github_runner_cluster_headscale_container_name: github-runner-headscale
+# The DERP map Headscale serves to nodes: the map URLs it fetches (Tailscale's public map by default) and, when github_runner_cluster_headscale_derp_map is non-empty, a DERP map of its own in Headscale's derp.paths format (a dict with a regions key), written beside the configuration.
+github_runner_cluster_headscale_derp_urls: [https://controlplane.tailscale.com/derpmap/default]
+github_runner_cluster_headscale_derp_map: {}
+
+# Litestream, for the headscale_hosted and headscale_in_cluster providers: a sidecar that streams Headscale's SQLite database to github_runner_cluster_headscale_litestream_replica, plus a step before Headscale starts that restores the database from the replica when the host has none (a rebuilt host). The replica is Litestream's single replica block as a dict, e.g. {url: "s3://bucket/headscale", endpoint: "https://s3.example.com", region: auto} for S3 or anything S3-compatible, {type: sftp, host: "backup.example.com:22", user: litestream, path: /srv/headscale, key-path: /etc/github-runner-litestream/sftp_key} for another host, or {path: /mnt/backup/headscale} for a file replica on a mounted path (see github_runner_cluster_headscale_litestream_mounts). See https://litestream.io/reference/config for every field.
+github_runner_cluster_headscale_litestream_replica: {}
+# On whenever a replica is configured: a destination with no sidecar would leave a configured backup silently unused, and a sidecar with no destination has nothing to do, so turning it on without a replica fails.
+github_runner_cluster_headscale_litestream: "{{ github_runner_cluster_headscale_litestream_replica | length > 0 }}"
+# Pinned for the same reason as Headscale: Litestream's configuration and replica format changed between 0.3 and 0.5.
+github_runner_cluster_headscale_litestream_version: "0.5.17"
+# Environment for Litestream, typically the replica's credentials (LITESTREAM_ACCESS_KEY_ID and LITESTREAM_SECRET_ACCESS_KEY for S3), written to a file only root on the Headscale host can read. The replica dict can also refer to any of them as ${NAME}, which Litestream expands.
+github_runner_cluster_headscale_litestream_env: {}
+# Extra files Litestream needs, such as an SFTP private key, as {file name: content}; written next to its configuration (mode 0600) and readable inside the containers under /etc/github-runner-litestream/.
+github_runner_cluster_headscale_litestream_files: {}
+# Host paths mounted at the same path into Litestream's containers, for a file replica on storage the host mounts (NFS, another disk).
+github_runner_cluster_headscale_litestream_mounts: []
+# Headscale's Noise private key (the "privkey:..." text of noise_private.key), which identifies the control server to every node and is not in the database. With Litestream on, the role keeps a copy beside the configuration and a restored server starts with it; set this (from a secret store) so a server rebuilt on a new host, with no standby, keeps the identity its nodes know. When set, a running server whose key differs fails the run rather than being changed.
+github_runner_cluster_headscale_noise_private_key: ""
+# headscale_hosted only: an inventory host kept as a warm standby. It gets the same configuration, keys and a Compose project that follows the replica continuously but leaves Headscale stopped until playbooks/promote_headscale_standby.yml promotes it. Needs Litestream, and the same kind of host as github_runner_cluster_headscale_host.
+github_runner_cluster_headscale_standby_host: ""
+# headscale_in_cluster keeps Headscale's state on the bootstrap server's k3s data volume, which a static pod cannot replace with a replicated persistent volume (kubelet runs it with no API server, so it cannot bind a claim), so the provider requires Litestream. Set this to true to run without it and accept that losing that volume loses every registration.
+github_runner_cluster_headscale_accept_node_local_state: false
 
 # Extra Compose files merged after docker-compose.yml for this host's k3s project, as paths relative to github_runner_cluster_repo_root or absolute. Nothing needs them in normal use; the mesh integration tests use one to put several nodes on one Docker host.
 github_runner_cluster_compose_files: []

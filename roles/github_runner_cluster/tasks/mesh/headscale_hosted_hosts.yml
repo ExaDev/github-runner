@@ -1,0 +1,48 @@
+---
+# Decides which hosts run headscale_hosted's server and its warm standby, and each one's directory, Compose project and extra Compose files. A value set on that host itself (github_runner_cluster_headscale_dir, _container_name, _compose_files) applies to that host, since the two hosts need not be alike. Shared by headscale_hosted.yml and headscale_promote.yml.
+
+- name: Decide which host runs Headscale and which one stands by
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_host_name: "{{ github_runner_cluster_headscale_host or github_runner_cluster_topology.bootstrap }}"
+    github_runner_cluster_headscale_standby_name: "{{ github_runner_cluster_headscale_standby_host }}"
+
+- name: Record each Headscale host's directory, Compose project and extra Compose files
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_host_dir: >-
+      {{ github_runner_cluster_headscale_dir or hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_headscale_dir | default('', true)
+         or ((hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_repo_root ~ '/headscale') if hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_repo_root is defined else '') }}
+    github_runner_cluster_headscale_host_project: "{{ hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_headscale_container_name | default(github_runner_cluster_headscale_container_name) }}"
+    github_runner_cluster_headscale_host_compose_files: "{{ hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_headscale_compose_files | default(github_runner_cluster_headscale_compose_files) }}"
+
+- name: Fail if the standby is set up inconsistently
+  ansible.builtin.fail:
+    msg: "{{ item.msg }}"
+  when: item.failed
+  loop:
+    - failed: "{{ github_runner_cluster_headscale_standby_name | length > 0 and not github_runner_cluster_headscale_litestream | bool }}"
+      msg: github_runner_cluster_headscale_standby_host needs Litestream, since the standby restores from its replica; set github_runner_cluster_headscale_litestream_replica.
+    - failed: "{{ github_runner_cluster_headscale_standby_name | length > 0 and github_runner_cluster_headscale_standby_name not in hostvars }}"
+      msg: github_runner_cluster_headscale_standby_host is '{{ github_runner_cluster_headscale_standby_name }}', which is not a host in the inventory.
+    - failed: "{{ github_runner_cluster_headscale_standby_name | length > 0 and github_runner_cluster_headscale_standby_name == github_runner_cluster_headscale_host_name }}"
+      msg: The Headscale standby must be a different host from the one running Headscale ({{ github_runner_cluster_headscale_host_name }}).
+  loop_control:
+    label: "{{ item.msg | truncate(60) }}"
+
+- name: Record the standby's directory, Compose project and extra Compose files
+  # Its own directory setting only, never the play's: a global github_runner_cluster_headscale_dir describes the server's host.
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_standby_dir: >-
+      {{ hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_headscale_dir | default('', true)
+         or ((hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_repo_root ~ '/headscale') if hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_repo_root is defined else '') }}
+    github_runner_cluster_headscale_standby_project: "{{ hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_headscale_container_name | default(github_runner_cluster_headscale_container_name) }}"
+    github_runner_cluster_headscale_standby_compose_files: "{{ hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_headscale_compose_files | default(github_runner_cluster_headscale_compose_files) }}"
+  when: github_runner_cluster_headscale_standby_name | length > 0
+
+- name: Fail if the standby has no directory for Headscale's files
+  ansible.builtin.fail:
+    msg: >-
+      No directory for Headscale's files on the standby {{ github_runner_cluster_headscale_standby_name }}: set github_runner_cluster_headscale_dir
+      on that host (it has no github_runner_cluster_repo_root to default it from).
+  when:
+    - github_runner_cluster_headscale_standby_name | length > 0
+    - github_runner_cluster_headscale_standby_dir | length == 0
