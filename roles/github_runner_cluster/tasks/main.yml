@@ -36,7 +36,8 @@
 
 - name: Determine the active Docker CLI context
   # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use, so a host running Colima (whose docker.sock lives under ~/.colima/default/, not /var/run) fails outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.
-  ansible.builtin.command: docker context show
+  # Empty when DOCKER_HOST is set: the module then takes the daemon from DOCKER_HOST itself, and rejects cli_context alongside it ("parameters are mutually exclusive: docker_host|cli_context", as on a Docker-in-Docker CI runner).
+  ansible.builtin.shell: if [ -z "${DOCKER_HOST:-}" ]; then docker context show; fi
   changed_when: false
   # Read-only, and every docker_compose_v2 task below depends on its output, so it has to run under --check too: a skipped result leaves cli_context empty and the dry run targets the wrong daemon.
   check_mode: false
@@ -69,7 +70,7 @@
         project_src: "{{ github_runner_cluster_dir }}"
         project_name: "{{ github_runner_cluster_compose_project }}"
         profiles: ["server"]
-        cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
+        cli_context: "{{ (github_runner_cluster_docker_context.stdout | trim) or omit }}"
         files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
         state: present
 
@@ -88,7 +89,7 @@
         project_src: "{{ github_runner_cluster_dir }}"
         project_name: "{{ github_runner_cluster_compose_project }}"
         profiles: ["agent"]
-        cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
+        cli_context: "{{ (github_runner_cluster_docker_context.stdout | trim) or omit }}"
         files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
         state: present
 

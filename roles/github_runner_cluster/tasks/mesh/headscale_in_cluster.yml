@@ -97,7 +97,8 @@
         mode: "0644"
 
     - name: Determine the active Docker CLI context
-      ansible.builtin.command: docker context show
+      # Empty when DOCKER_HOST is set: the module then takes the daemon from DOCKER_HOST itself, and rejects cli_context alongside it ("parameters are mutually exclusive: docker_host|cli_context", as on a Docker-in-Docker CI runner).
+      ansible.builtin.shell: if [ -z "${DOCKER_HOST:-}" ]; then docker context show; fi
       changed_when: false
       check_mode: false
       register: github_runner_cluster_docker_context
@@ -126,7 +127,7 @@
             project_src: "{{ github_runner_cluster_dir }}"
             project_name: "{{ github_runner_cluster_compose_project }}"
             profiles: ["server"]
-            cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
+            cli_context: "{{ (github_runner_cluster_docker_context.stdout | trim) or omit }}"
             files: "{{ github_runner_cluster_compose_file_list }}"
             state: present
 
