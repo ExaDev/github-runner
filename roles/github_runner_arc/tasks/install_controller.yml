@@ -8,4 +8,4 @@
     chart_version: "{{ github_runner_arc_controller_chart_version | default(omit) }}"
     release_namespace: actions-runner-controller
     create_namespace: true
-    values: "{{ lookup('ansible.builtin.template', 'controller-values.yaml.j2') | from_yaml | default({}, true) }}"
+    values: "{{ lookup('ansible.builtin.template', 'controller-values.yaml.j2') | from_yaml | default({}, true) | combine(github_runner_arc_controller_extra_values, recursive=true) }}"

@@ -12,6 +12,10 @@ github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path | d
 
 # Helm chart version pins, left undefined so the tasks omit --version and Helm installs the latest chart. Set github_runner_arc_controller_chart_version and/or github_runner_arc_scaleset_chart_version (e.g. "0.14.2") to hold a chart back.
 
+# ARC controller. Replicas above 1 turn on the chart's leader election and spread the pods across nodes with a preferred pod anti-affinity. Extra values are merged over the role's own controller values.
+github_runner_arc_controller_replicas: 1
+github_runner_arc_controller_extra_values: {}
+
 # Secrets, normally set by the github_runner_secrets role: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images), github_runner_arc_heartbeat_gh_token (a PAT with gist scope), and github_runner_arc_org_private_keys ({<org name>: <PEM content>}). No defaults.
 
 # Registry the pull Secret authenticates to, and its name in each namespace.

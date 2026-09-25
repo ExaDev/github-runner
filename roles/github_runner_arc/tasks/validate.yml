@@ -23,6 +23,18 @@
     github_runner_arc_values_path: "{{ item.values_file if item.values_file is abs else github_runner_arc_values_dir ~ '/' ~ item.values_file }}"
   when: github_runner_arc_values_path is not file or (item.values_file is not abs and github_runner_arc_values_dir | length == 0)
 
+- name: Fail on invalid controller settings
+  ansible.builtin.fail:
+    msg: "{{ item.msg }}"
+  loop:
+    - msg: github_runner_arc_controller_replicas must be a whole number of at least 1.
+      failed: "{{ github_runner_arc_controller_replicas | string is not match('^[1-9][0-9]*$') }}"
+    - msg: github_runner_arc_controller_extra_values must be a mapping.
+      failed: "{{ github_runner_arc_controller_extra_values is not mapping }}"
+  loop_control:
+    label: "{{ item.msg }}"
+  when: item.failed | bool
+
 # The autoscaler runs from whichever host installs the platform, which need not be the host that installs the autoscaled profile, so these are checked on the platform host against the whole fleet's profiles.
 - name: Fail when the autoscaler's pool settings are missing or inconsistent
   ansible.builtin.fail:

@@ -1,1 +1,15 @@
-{# Values for the gha-runner-scale-set-controller chart, rendered on the control node by install_controller.yml. With every option at its default this renders to an empty document, so the chart's own defaults apply: one controller, watching every namespace, which serves every org's scale sets. #}
+{# Values for the gha-runner-scale-set-controller chart, rendered on the control node by install_controller.yml and merged under github_runner_arc_controller_extra_values. With every option at its default this renders to an empty document, so the chart's own defaults apply: one controller, watching every namespace, which serves every org's scale sets. #}
+{% if github_runner_arc_controller_replicas | int > 1 %}
+# More than one replica makes the chart pass --enable-leader-election, so only one controller reconciles at a time; the anti-affinity prefers putting each replica on a different node, so losing one node does not lose them all.
+replicaCount: {{ github_runner_arc_controller_replicas | int }}
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: gha-rs-controller
+              app.kubernetes.io/instance: arc
+{% endif %}
