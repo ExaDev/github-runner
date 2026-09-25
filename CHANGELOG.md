@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/ExaDev/github-runner/compare/v1.0.2...v1.0.3) (2026-09-25)
+
+
+### Bug Fixes
+
+* **cluster:** never delete a server's Node object when clearing a stale registration ([826b66e](https://github.com/ExaDev/github-runner/commit/826b66e4ba1302bc36f5b64be4b0b81f9c72d260))
+
 ## [1.0.2](https://github.com/ExaDev/github-runner/compare/v1.0.1...v1.0.2) (2026-09-25)
 
 
