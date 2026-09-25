@@ -73,6 +73,12 @@ class ProfilesTest(unittest.TestCase):
         self.assertIn("github_runner_arc_orgs[1] has no name", result["errors"])
         self.assertIn("Y: scale_set_profiles must be a non-empty list", result["errors"])
 
+    def test_a_private_key_and_a_1password_reference_together_are_an_error(self) -> None:
+        both = dict(org(), private_key="pem", private_key_op_reference="op://v/i/f")
+        self.assertIn("Example: set private_key or private_key_op_reference, not both (the 1Password adapter fills private_key from the reference)", arc.arc_profiles([both])["errors"])
+        self.assertEqual(arc.arc_profiles([dict(org(), private_key="pem")])["errors"], [])
+        self.assertEqual(arc.arc_profiles([dict(org(), private_key_op_reference="op://v/i/f")])["errors"], [])
+
     def test_an_invalid_kubernetes_name_is_an_error(self) -> None:
         result = arc.arc_profiles([org(profiles=[{"suffix": "_bad"}])])
         self.assertTrue(any("not a valid Kubernetes name" in message for message in result["errors"]))

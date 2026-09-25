@@ -12,7 +12,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 
 ## Variables
 
-- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id`, `image`, optionally `installation_id` (resolved from the App when empty) and `private_key_op_reference` (for `github_runner_secrets`), and `scale_set_profiles`, a list of profiles:
+- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id`, `image`, `private_key` (the App's PEM private key, from any source Ansible reads) or `private_key_op_reference` (an `op://` reference that the 1Password secrets role resolves into `private_key`), optionally `installation_id` (resolved from the App when empty), and `scale_set_profiles`, a list of profiles:
   - `suffix`: appended to the namespace (`arc-runners-<org><suffix>`) and release (`<org>-runners<suffix>`) names. Default empty.
   - `values_file`: Helm values for the release, a Jinja template read from `github_runner_arc_values_dir` on the control node (or an absolute path). Without it the role's `templates/runner-scale-set-values.yaml.j2` is used, driven by the profile's own `max_runners`, `min_runners`, `container_mode` (`dind` for the chart's Docker-in-Docker mode) and `resources` (the runner container's requests and limits).
   - `node_selector`: a nodeSelector for the runner pods, merged over the eligibility label below.
@@ -26,7 +26,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 - `github_runner_arc_metrics_enabled` (and the `_addr`/`_endpoint` settings): Prometheus metrics for the controller and every listener; the 0.14 chart only enables them together.
 - `github_runner_arc_listener_probes_enabled`: readiness and liveness probes on each listener's metrics endpoint, so a listener that starts and then fails its GitHub authentication is not counted ready during a rollout. Needs metrics on.
 - `github_runner_arc_node_label_key`, `github_runner_arc_node_label_value`: when the key is set, the controller, listeners and runner pods are restricted to nodes carrying the label. The role labels the nodes named in `github_runner_arc_labelled_nodes`.
-- `github_runner_arc_ghcr_username`, `github_runner_arc_ghcr_token`, `github_runner_arc_heartbeat_gh_token`, `github_runner_arc_org_private_keys`: secrets, normally set by `github_runner_secrets`.
+- `github_runner_arc_ghcr_username`, `github_runner_arc_ghcr_token`, `github_runner_arc_heartbeat_gh_token`: secrets, as plain variables.
 - `github_runner_arc_manage_secrets`: `false` stops the role writing the App and pull Secrets, and instead checks before any change that each namespace already holds them.
 - `github_runner_arc_image_pull_registry`, `github_runner_arc_image_pull_secret_name`, `github_runner_arc_verify_image_pull`: the pull Secret's registry and name, and whether to prove the credential before writing it.
 - `github_runner_arc_heartbeat_gist_id`: install the fleet-health platform from this host, refreshing this gist. `github_runner_arc_heartbeat_bootstrap_gist`, `github_runner_arc_heartbeat_gist_description` and `github_runner_arc_heartbeat_gist_consumer` control the bootstrap described above.

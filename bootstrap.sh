@@ -64,6 +64,7 @@ jq -n \
         name: "ExaDev",
         app_id: env.EXADEV_APP_ID,
         installation_id: (env.EXADEV_APP_INSTALLATION_ID // ""),
+        private_key: $org_private_key,
         image: "ghcr.io/exadev/github-runner:latest",
         scale_set_profiles: [{suffix: "", values_file: "exadev-runners-values.yaml", autoscale: true}]
       }]
@@ -79,8 +80,7 @@ jq -n \
       tailscale_api_token: (env.TAILSCALE_API_TOKEN // ""),
       ghcr_username: (env.GHCR_PULL_USERNAME // ""),
       ghcr_token: (env.GHCR_PULL_TOKEN // ""),
-      heartbeat_gh_token: (env.HEARTBEAT_GH_TOKEN // ""),
-      org_private_keys: (if $org_private_key == "" then {} else {ExaDev: $org_private_key} end)
+      heartbeat_gh_token: (env.HEARTBEAT_GH_TOKEN // "")
     }
   }
   + opt("github_runner_arc_autoscaler_dry_run"; "AUTOSCALER_DRY_RUN")

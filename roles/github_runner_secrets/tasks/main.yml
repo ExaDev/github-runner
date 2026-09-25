@@ -1,5 +1,5 @@
 ---
-# Resolves every secret the cluster and ARC roles need, from 1Password or from github_runner_secrets_provided, and hands each role only its own fields: github_runner_cluster_k3s_token, github_runner_cluster_tailscale_join_key, github_runner_cluster_tailscale_api_token, github_runner_cluster_headscale_api_key and github_runner_cluster_headscale_join_key for the cluster role; github_runner_arc_ghcr_username, github_runner_arc_ghcr_token, github_runner_arc_heartbeat_gh_token and github_runner_arc_org_private_keys for the ARC role. Either role can be used without this one by setting those variables directly.
+# Resolves every secret the cluster and ARC roles need, from 1Password or from github_runner_secrets_provided, and hands each role only its own fields: github_runner_cluster_k3s_token, github_runner_cluster_tailscale_join_key, github_runner_cluster_tailscale_api_token, github_runner_cluster_headscale_api_key and github_runner_cluster_headscale_join_key for the cluster role; github_runner_arc_ghcr_username, github_runner_arc_ghcr_token, github_runner_arc_heartbeat_gh_token and each org's private_key in github_runner_arc_orgs for the ARC role. Either role can be used without this one by setting those variables directly.
 
 - name: Fail if no secrets source is set
   ansible.builtin.fail:
@@ -29,7 +29,7 @@
         | selectattr('github_runner_secrets_item', 'defined')
         | selectattr('github_runner_secrets_item', 'equalto', github_runner_secrets_item)
         | map(attribute='github_runner_arc_orgs', default=[])
-        | list | flatten | unique(attribute='name')
+        | list | flatten | selectattr('private_key_op_reference', 'defined') | unique(attribute='name')
       }}
 
 - name: Read every 1Password secret this host needs in one shell invocation
@@ -101,5 +101,10 @@
     github_runner_arc_ghcr_username: "{{ github_runner_secrets_values.ghcr_username }}"
     github_runner_arc_ghcr_token: "{{ github_runner_secrets_values.ghcr_token }}"
     github_runner_arc_heartbeat_gh_token: "{{ github_runner_secrets_values.heartbeat_gh_token }}"
-    github_runner_arc_org_private_keys: "{{ github_runner_secrets_values.org_private_keys }}"
   no_log: true
+
+- name: Give each of this host's orgs that names its App key by 1Password reference the key itself  # noqa: var-naming[no-role-prefix] - the ARC role's own input
+  ansible.builtin.set_fact:
+    github_runner_arc_orgs: "{{ github_runner_arc_orgs | exadev.github_runner.onepassword_fill_org_keys(github_runner_secrets_values.org_private_keys) }}"
+  no_log: true
+  when: github_runner_arc_orgs | default([]) | selectattr('private_key_op_reference', 'defined') | list | length > 0

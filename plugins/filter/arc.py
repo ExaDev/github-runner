@@ -167,7 +167,7 @@ def arc_profiles(orgs: Sequence[Any]) -> dict[str, Any]:
     Pass every org configured anywhere in the inventory, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile) see the whole fleet.
 
     Args:
-        orgs: github_runner_arc_orgs entries, each with name, app_id, image and a non-empty scale_set_profiles list.
+        orgs: github_runner_arc_orgs entries, each with name, app_id, image and a non-empty scale_set_profiles list, and at most one of private_key and private_key_op_reference.
 
     Returns:
         A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, app_secret, runs_on_label, values_file, node_selector, autoscale, sizing, label and settings, the profile's own keys) and ``autoscaled`` (the one profile flagged autoscale, or None).
@@ -189,6 +189,9 @@ def arc_profiles(orgs: Sequence[Any]) -> dict[str, Any]:
         for key in ("app_id", "image"):
             if not _text(org, key):
                 errors.append(f"{org_name}: {key} is required")
+        # Presence only: reading the value would decrypt an ansible-vault string for no reason.
+        if org.get("private_key") is not None and org.get("private_key_op_reference") is not None:
+            errors.append(f"{org_name}: set private_key or private_key_op_reference, not both (the 1Password adapter fills private_key from the reference)")
         if org_name.lower() in seen_orgs:
             errors.append(f"Org '{org_name}' is configured more than once in github_runner_arc_orgs across the inventory (also as '{seen_orgs[org_name.lower()]}'). Each org's Helm releases must be installed from exactly one host; remove the duplicate.")
             continue

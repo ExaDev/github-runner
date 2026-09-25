@@ -121,5 +121,5 @@
     - name: Print the values to record
       ansible.builtin.debug:
         msg:
-          - "Private key written to {{ github_runner_arc_app_private_key_path }}; store it in your secret store and point the org's private_key_op_reference (or github_runner_arc_org_private_keys) at it."
+          - "Private key written to {{ github_runner_arc_app_private_key_path }}; store it in your secret store and set the org's private_key from it (or its private_key_op_reference, with the 1Password adapter)."
           - "github_runner_arc_orgs entry: name {{ github_runner_arc_app_setup_org }}, app_id {{ github_runner_arc_app_conversion.json.id }}, installation_id {{ (github_runner_arc_app_installations.json | selectattr('account.login', 'equalto', github_runner_arc_app_setup_org) | first).id }}"

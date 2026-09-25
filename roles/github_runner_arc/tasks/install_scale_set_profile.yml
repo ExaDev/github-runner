@@ -21,7 +21,7 @@
       stringData:
         github_app_id: "{{ org.app_id | string }}"
         github_app_installation_id: "{{ github_runner_arc_installation_id }}"
-        github_app_private_key: "{{ github_runner_arc_org_private_keys[org.name] }}"
+        github_app_private_key: "{{ org.private_key }}"
   no_log: true
   when: github_runner_arc_manage_secrets | bool
 

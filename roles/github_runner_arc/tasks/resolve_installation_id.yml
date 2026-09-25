@@ -1,5 +1,5 @@
 ---
-# Included once per org whose installation_id is not set (see install_org.yml). Signs a short-lived App JWT with files/generate_app_jwt.py and finds this org's installation in GET /app/installations, using the private key already in github_runner_arc_org_private_keys.
+# Included once per org whose installation_id is not set (see install_org.yml). Signs a short-lived App JWT with files/generate_app_jwt.py and finds this org's installation in GET /app/installations, using the org's own private_key.
 #
 # Runs entirely on the control node: nothing here needs the target host, and delegating keeps the temporary key file off it.
 #
@@ -17,7 +17,7 @@
 
     - name: Write the private key to the temporary file for {{ org.name }}
       ansible.builtin.copy:
-        content: "{{ github_runner_arc_org_private_keys[org.name] }}"
+        content: "{{ org.private_key }}"
         dest: "{{ github_runner_arc_resolve_private_key_tempfile.path }}"
         mode: "0600"
       no_log: true
