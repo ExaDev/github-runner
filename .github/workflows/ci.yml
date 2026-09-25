@@ -2,13 +2,9 @@ name: CI
 
 # Lints every shell script, workflow file, YAML file, and Dockerfile in the repo. There is no application test suite here (this repo is fleet infrastructure config, not application code) - these checks are its actual verification surface, matching the README's Build/test/lint section.
 #
-# Dogfoods the fleet: every job after determine-runner routes through ExaDev/runner-fallback-action, preferring exadev-runners and falling back to ubuntu-latest only if the fleet's heartbeat gist reports it unhealthy (or the run is a fork PR / Dependabot - that guard lives inside the action). See the README's Heartbeat section for how the gist is kept fresh, and ExaDev/runner-fallback-action's own README for the routing design.
-#
-# determine-runner itself is deliberately anchored on exadev-runners directly, not ubuntu-latest as the action's README recommends as the general-purpose default: this is the fleet's own repo, and it should dogfood the fleet fully rather than hedge on it. This does forgo the fallback safety net for this one bootstrap job specifically - if the fleet is entirely down, determine-runner cannot schedule and cannot hand off to ubuntu-latest either - but that trade is the whole point here, not a workaround to revert later.
+# Runs on GitHub-hosted runners, which are free for a public repository, so the checks of the fleet's own configuration don't depend on the fleet being up. The fleet's own behaviour is tested by test-arc-runner.yml and test-autoscaler.yml, which target it directly.
 #
 # required-checks is the single required status check in this repo's ruleset (never the individual job names), so adding or renaming a lint job never needs a ruleset update - matching ExaDev/eslint-config and ExaDev/wire-mesh's own ci.yml.
-#
-# The action is pinned to a commit SHA, not @main - bump deliberately when it changes. (b774d51 = the secret-gist redesign, the current HEAD of main as of the day this workflow was written.)
 
 on:
   push:
@@ -23,21 +19,9 @@ permissions:
   contents: read
 
 jobs:
-  determine-runner:
-    name: Determine runner
-    runs-on: exadev-runners
-    timeout-minutes: 5
-    outputs:
-      selected-runner: ${{ steps.fallback.outputs.selected-runner || '["ubuntu-latest"]' }}
-      preferred-available: ${{ steps.fallback.outputs.preferred-available || 'false' }}
-    steps:
-      - id: fallback
-        uses: ExaDev/runner-fallback-action@b774d51ff5360bf53705b2eb34ff019afd4d7f07
-
   shellcheck:
     name: Shellcheck
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -54,8 +38,7 @@ jobs:
 
   actionlint:
     name: actionlint
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -66,8 +49,7 @@ jobs:
 
   yamllint:
     name: YAML lint
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -80,13 +62,12 @@ jobs:
 
   hadolint:
     name: hadolint
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - name: Install hadolint
-        # Detect arch rather than assume amd64: exadev-runners pods are arm64 (the M3's own architecture), confirmed by a real CI run against this very workflow - an assumption that turned out wrong the first time it actually ran on the fleet instead of just being read as a comment. Downloads into the workspace (no sudo, no system path) - actions-runner pods run the workflow user without write access to /usr/local/bin.
+        # Detect arch rather than assume amd64, so the step also works on an arm64 runner such as this project's own fleet. Downloads into the workspace (no sudo, no system path) - actions-runner pods run the workflow user without write access to /usr/local/bin.
         run: |
           set -euo pipefail
           case "$(uname -m)" in
@@ -108,8 +89,7 @@ jobs:
 
   ansible-syntax-check:
     name: Ansible syntax check
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -137,8 +117,7 @@ jobs:
 
   ansible-lint:
     name: ansible-lint
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -156,11 +135,10 @@ jobs:
 
   required-checks:
     name: Required Checks
-    needs: [determine-runner, shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, ansible-lint]
+    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, ansible-lint]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
-    # Not ubuntu-latest: confirmed live (ExaDev/github-runner#7) that ExaDev's GitHub-hosted runners currently can't schedule at all (runner_id: 0, never assigned) - a bare ubuntu-latest job here would fail every run regardless of every other job's own result. Routes through the same fallback as everything else instead.
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Fail if any required job failed or was cancelled

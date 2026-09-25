@@ -2,7 +2,7 @@ name: Headscale Litestream
 
 # Runs tests/litestream/run.sh: the headscale_hosted provider with Litestream and a warm standby against an S3-compatible store, a real Tailscale client, promotion of the standby, and the headscale_in_cluster guard. Only on changes that can affect them.
 #
-# Routes through ExaDev/runner-fallback-action like ci.yml, preferring the exadev-image-builder profile: the test needs a Docker daemon, which only that profile's Docker-in-Docker sidecar provides, and ubuntu-latest has one natively. The work directory sits under runner.temp because the DinD daemon resolves Compose bind mounts on its own filesystem, and only the runner's _work volume is shared with it.
+# Runs on GitHub-hosted ubuntu-latest, which has the Docker daemon the test needs. The work directory sits under runner.temp, which the job always has write access to.
 
 on:
   pull_request:
@@ -25,22 +25,9 @@ permissions:
   contents: read
 
 jobs:
-  determine-runner:
-    name: Determine runner
-    runs-on: exadev-runners
-    timeout-minutes: 5
-    outputs:
-      selected-runner: ${{ steps.fallback.outputs.selected-runner || '["ubuntu-latest"]' }}
-    steps:
-      - id: fallback
-        uses: ExaDev/runner-fallback-action@b774d51ff5360bf53705b2eb34ff019afd4d7f07
-        with:
-          preferred-labels: exadev-image-builder
-
   litestream:
     name: Litestream and standby promotion
-    needs: determine-runner
-    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       COMPOSE_VERSION: v5.5.1
@@ -87,10 +74,9 @@ jobs:
 
   required-checks:
     name: Headscale Litestream result
-    needs: [determine-runner, litestream]
+    needs: [litestream]
     if: always()
-    # The ordinary pool, like determine-runner: this job only reads results.
-    runs-on: exadev-runners
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Fail if the test failed or was cancelled
