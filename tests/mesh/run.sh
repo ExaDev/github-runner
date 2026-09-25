@@ -14,23 +14,10 @@ etcd_image=gcr.io/etcd-development/etcd:v3.5.21
 busybox_image=busybox:1.37
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
-derp_map_url=https://controlplane.tailscale.com/derpmap/default
 work="${GRTEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/grtest-mesh.XXXXXX")}"
 k3s_token="grtest-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 
 log() { echo "==> $*"; }
-# The network state of the Docker daemon's own namespace (on a CI runner, the runner's), read through the node image already present, so it works without pulling anything.
-host_network_state() {
-  local image
-  image=$(docker inspect --format '{{.Config.Image}}' "$(container 2)" 2>/dev/null) || return 0
-  echo "----- Docker host network state at $(date -u +%H:%M:%S)"
-  docker run --rm --network host --entrypoint sh "$image" -c 'ip -brief addr; ip rule; ip route show table all | grep -v "^local\|^broadcast\|fe80\|ff00" ; iptables-save 2>/dev/null | grep -vE "^#|^:" | head -80' 2>&1 || true
-}
-
-# Whether this machine reaches the URL Headscale fetches its DERP map from on start, which it cannot start without.
-egress() {
-  echo "----- egress at $(date -u +%H:%M:%S): $(curl -sS -m 15 -o /dev/null -w '%{http_code}' "$derp_map_url" 2>&1 || true)"
-}
 fail() {
   echo "FAIL: $*" >&2
   diagnose >&2 || true
@@ -44,13 +31,9 @@ diagnose() {
     docker inspect "$(container "$index")" >/dev/null 2>&1 || continue
     echo "----- $(container "$index"): tailscale status"
     docker exec "$(container "$index")" tailscale status </dev/null 2>&1 | head -n 20 || true
-    echo "----- $(container "$index"): resolv.conf"
-    docker exec "$(container "$index")" cat /etc/resolv.conf </dev/null 2>&1 || true
     echo "----- $(container "$index"): last log lines"
     docker logs --tail 60 "$(container "$index")" 2>&1 | cut -c1-400 || true
   done
-  egress
-  host_network_state
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
     docker exec grtest-headscale headscale nodes list </dev/null 2>&1 || true
@@ -271,7 +254,6 @@ started_at() {
 scenario_cluster() {
   local scenario="$1"
   reset_environment
-  egress
   prepare_nodes "$scenario"
   write_inventory "$scenario"
   run_role
@@ -284,16 +266,10 @@ scenario_cluster() {
   [ "$before" = "$after" ] || fail "rerunning the role restarted a node container: ${before} -> ${after}"
   assert_cluster
   if [ "$scenario" = in_cluster ]; then
-    egress
-    host_network_state
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
-    # Probes the egress Headscale needs throughout the recovery, so a failure shows when it was lost.
-    (while :; do egress; sleep 30; done) &
-    local prober=$!
     (cd "${repo_root}/ansible" && ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections:${ANSIBLE_COLLECTIONS_PATH:-}" \
       "$ansible_playbook" -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml") \
-      || { kill "$prober"; fail "the recovery playbook did not bring the bootstrap server back"; }
-    kill "$prober"
+      || fail "the recovery playbook did not bring the bootstrap server back"
     assert_cluster
   fi
 }
