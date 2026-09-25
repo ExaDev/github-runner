@@ -12,6 +12,10 @@ headscale_ip="${subnet_prefix}.10"
 node_count=3
 etcd_image=gcr.io/etcd-development/etcd:v3.5.21
 busybox_image=busybox:1.37
+curl_image=curlimages/curl:8.16.0
+# Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
+reach_attempts=8
+derp_map_url=https://controlplane.tailscale.com/derpmap/default
 work="${GRTEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/grtest-mesh.XXXXXX")}"
 k3s_token="grtest-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 
@@ -29,9 +33,17 @@ diagnose() {
     docker inspect "$(container "$index")" >/dev/null 2>&1 || continue
     echo "----- $(container "$index"): tailscale status"
     docker exec "$(container "$index")" tailscale status </dev/null 2>&1 | head -n 20 || true
+    echo "----- $(container "$index"): resolv.conf"
+    docker exec "$(container "$index")" cat /etc/resolv.conf </dev/null 2>&1 || true
     echo "----- $(container "$index"): last log lines"
     docker logs --tail 60 "$(container "$index")" 2>&1 | cut -c1-400 || true
   done
+  # Whether the internet is reachable from the bootstrap server's own network namespace and from a fresh container on the test network: Headscale fetches its DERP map from there on start.
+  if docker inspect "$(container 1)" >/dev/null 2>&1; then
+    echo "----- egress from $(container 1)'s namespace, then from a fresh container on ${network}"
+    docker run --rm --network "container:$(container 1)" "$curl_image" -sS -m 15 -o /dev/null -w '%{http_code}\n' "$derp_map_url" 2>&1 || true
+    docker run --rm --network "$network" "$curl_image" -sS -m 15 -o /dev/null -w '%{http_code}\n' "$derp_map_url" 2>&1 || true
+  fi
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
     docker exec grtest-headscale headscale nodes list </dev/null 2>&1 || true
@@ -217,7 +229,7 @@ EOF
   while IFS=, read -r pod node _; do
     while IFS=, read -r _ other ip; do
       [ "$node" = "$other" ] && continue
-      kubectl_on 1 exec "$pod" -- wget -q -T 10 -O - "http://${ip}:8080/" </dev/null | grep -q . || fail "pod ${pod} on ${node} cannot reach ${ip} on ${other}"
+      reaches "$pod" "$ip" || fail "pod ${pod} on ${node} cannot reach ${ip} on ${other}"
       echo "  ${node} -> ${other} (${ip}) ok"
       pairs=$((pairs + 1))
     done <<< "$pods"
@@ -232,6 +244,16 @@ EOF
     done <<< "$pods"
   done
   log "Pod-to-pod traffic crosses the mesh"
+}
+
+# Whether a pod reaches another pod's echo server, allowing the mesh time to converge: after a node restarts, its peers take a while to learn its new endpoints and routes again.
+reaches() {
+  local _
+  for _ in $(seq 1 "$reach_attempts"); do
+    kubectl_on 1 exec "$1" -- wget -q -T 10 -O - "http://$2:8080/" </dev/null 2>/dev/null | grep -q . && return 0
+    sleep 5
+  done
+  return 1
 }
 
 started_at() {
