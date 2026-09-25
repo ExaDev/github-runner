@@ -113,13 +113,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Syntax-check the playbook
-        # From ansible/ so its ansible.cfg (inventory, roles_path) applies, the same way an operator runs it.
+      - name: Syntax-check every playbook
+        # From ansible/ so its ansible.cfg (inventory, roles_path) applies, the same way an operator runs it. Every top-level playbook is checked, so a new one is covered without editing this list.
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq ansible
-          (cd ansible && ansible-playbook ../playbooks/site.yml --syntax-check)
+          cd ansible
+          for playbook in ../playbooks/*.yml; do
+            echo "Syntax-checking ${playbook}"
+            ansible-playbook "${playbook}" --syntax-check
+          done
       - name: Unit-test the cluster role's server selection
         # Ubuntu's ansible package, installed above, puts ansible-core on the system Python the filter plugin imports from.
         run: python3 -m unittest discover -s tests/unit -v
