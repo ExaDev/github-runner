@@ -128,9 +128,28 @@ jobs:
         # Ubuntu's ansible package, installed above, puts ansible-core on the system Python the filter plugin imports from.
         run: python3 -m unittest discover -s tests/unit -v
 
+  ansible-lint:
+    name: ansible-lint
+    needs: determine-runner
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install ansible-lint
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-pip
+          python3 -m pip install --user --break-system-packages 'ansible-lint>=25'
+          # pip --user puts the console script in ~/.local/bin, which isn't on the runner's PATH by default.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Lint the collection
+        # playbooks/collections/ansible_collections/exadev/github_runner is a symlink back to this checkout's own root, for local FQCN resolution (see ansible/ansible.cfg's comment on roles_path). Excluding it stops ansible-lint's own directory walk from following that symlink back into the tree it is already linting, which otherwise relints the whole collection a second time under a growing path on every recursion.
+        run: ansible-lint --profile production --exclude playbooks/collections
+
   required-checks:
     name: Required Checks
-    needs: [determine-runner, shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check]
+    needs: [determine-runner, shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, ansible-lint]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
     # Not ubuntu-latest: confirmed live (ExaDev/github-runner#7) that ExaDev's GitHub-hosted runners currently can't schedule at all (runner_id: 0, never assigned) - a bare ubuntu-latest job here would fail every run regardless of every other job's own result. Routes through the same fallback as everything else instead.
