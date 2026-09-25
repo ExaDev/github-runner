@@ -35,9 +35,9 @@ jobs:
     runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
     timeout-minutes: 15
     permissions:
-      contents: write # to push the release commit/tag and create the GitHub Release
-      issues: write # to comment on released issues
-      pull-requests: write # to comment on released pull requests
+      contents: write  # to push the release commit/tag and create the GitHub Release
+      issues: write  # to comment on released issues
+      pull-requests: write  # to comment on released pull requests
     outputs:
       published: ${{ steps.before.outputs.version != steps.after.outputs.version }}
       version: ${{ steps.after.outputs.version }}
