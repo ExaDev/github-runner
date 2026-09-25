@@ -27,14 +27,12 @@ all:
       hosts:
         node1:
           ansible_host: 100.64.0.1
-          github_runner_cluster_repo_root: /srv/github-runner
         node2:
           ansible_host: 100.64.0.2
-          github_runner_cluster_repo_root: /srv/github-runner
         node3:
           ansible_host: 100.64.0.3
-          github_runner_cluster_repo_root: /srv/github-runner
-    # Outside the cluster group: these run Headscale and nothing else. It needs Docker with Compose, and a directory for Headscale's files, since it has no checkout of this repository.
+          github_runner_cluster_dir: /srv/github-runner
+    # Outside the cluster group: these run Headscale and nothing else. They need Docker with Compose, and a directory for Headscale's files, since they are not cluster nodes and so have no github_runner_cluster_dir to default it from.
     headscale:
       hosts:
         control:

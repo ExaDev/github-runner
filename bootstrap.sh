@@ -51,7 +51,6 @@ jq -n \
   def opt($name; $var): if (env[$var] // "") != "" then {($name): env[$var]} else {} end;
   {
     github_runner_cluster_group: "all",
-    github_runner_cluster_repo_root: $repo_root,
     github_runner_cluster_node_role: $node_role,
     github_runner_cluster_node_name: $node_name,
     github_runner_cluster_server_url: (if $node_role == "agent" then env.K3S_AGENT_SERVER_URL else (env.K3S_JOIN_SERVER_URL // "") end),
@@ -81,6 +80,8 @@ jq -n \
     github_runner_arc_ghcr_token: (env.GHCR_PULL_TOKEN // ""),
     github_runner_arc_heartbeat_gh_token: (env.HEARTBEAT_GH_TOKEN // "")
   }
+  + opt("github_runner_cluster_dir"; "GITHUB_RUNNER_CLUSTER_DIR")
+  + opt("github_runner_cluster_compose_project"; "GITHUB_RUNNER_COMPOSE_PROJECT")
   + opt("github_runner_arc_autoscaler_dry_run"; "AUTOSCALER_DRY_RUN")
   + opt("github_runner_arc_autoscaler_poll_seconds"; "AUTOSCALER_POLL_SECONDS")
   + opt("github_runner_arc_autoscaler_raise_confirm_polls"; "AUTOSCALER_RAISE_CONFIRM_POLLS")

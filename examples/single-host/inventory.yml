@@ -10,7 +10,6 @@ all:
       hosts:
         node1:
           ansible_host: 100.64.0.1
-          github_runner_cluster_repo_root: /srv/github-runner
           # Secrets from one 1Password item; see examples/ansible-vault and examples/env for other sources.
           github_runner_secrets_source: onepassword
           github_runner_secrets_onepassword_vault: Example

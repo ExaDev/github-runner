@@ -28,10 +28,7 @@ all:
       hosts:
         node1:
           ansible_host: 203.0.113.11
-          github_runner_cluster_repo_root: /srv/github-runner
         node2:
           ansible_host: 100.64.0.2
-          github_runner_cluster_repo_root: /srv/github-runner
         node3:
           ansible_host: 100.64.0.3
-          github_runner_cluster_repo_root: /srv/github-runner

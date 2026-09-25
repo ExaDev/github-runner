@@ -1,6 +1,6 @@
 # github_runner_cluster
 
-Runs a k3s cluster under Docker Compose on each host, from the `docker-compose.yml` in a checkout of this repository on the target host: embedded etcd across the server nodes (or SQLite for a single server), and a Tailscale client inside each node's k3s container (k3s `--vpn-auth`) so nodes on different networks can reach one another over a mesh. It templates the checkout's `.env` and starts the `server` or `agent` Compose profile. The mesh's control server is pluggable: Tailscale's own, or Headscale in one of three arrangements (see [Mesh providers](#mesh-providers)).
+Runs a k3s cluster under Docker Compose on each host, from the `docker-compose.yml` and k3s image build context the role ships in `files/` and copies to `github_runner_cluster_dir` on the target host: embedded etcd across the server nodes (or SQLite for a single server), and a Tailscale client inside each node's k3s container (k3s `--vpn-auth`) so nodes on different networks can reach one another over a mesh. It templates that directory's `.env` and starts the `server` or `agent` Compose profile. The mesh's control server is pluggable: Tailscale's own, or Headscale in one of three arrangements (see [Mesh providers](#mesh-providers)).
 
 Which hosts are servers is decided automatically from the inventory group named by `github_runner_cluster_group`, in inventory order. The first N hosts are servers, where N is the largest odd number no greater than both the number of hosts and `github_runner_cluster_max_servers`: 1 or 2 hosts give 1 server, 3 or 4 give 3, and 5 or more give 5. The first server bootstraps the cluster, the other servers join it, and the remaining hosts join it as agents. The group is used rather than the play's hosts so that `--limit` never changes the result. The logic lives in `tasks/topology.yml` and the collection's `exadev.github_runner.cluster_topology` filter (`plugins/filter/cluster_topology.py`), and publishes `github_runner_cluster_effective_node_role`, `github_runner_cluster_effective_bootstrap`, `github_runner_cluster_effective_server_url` and `github_runner_cluster_effective_tls_sans` for each host.
 
@@ -73,7 +73,8 @@ Each site is its own cluster: its own inventory group, bootstrap server and mesh
 
 ## Variables
 
-- `github_runner_cluster_repo_root` (required): the checkout's absolute path on the target host.
+- `github_runner_cluster_dir` (default `~/.github-runner` on the target host): the directory the role manages as the host's Compose project. It copies the collection's `docker-compose.yml` and `k3s/` build context there, templates `.env` there, and k3s writes the kubeconfig to its `kubeconfig/` subdirectory, so the host needs no checkout of this repository.
+- `github_runner_cluster_compose_project` (default `github-runner`): the Compose project name. Compose prefixes the node's named volumes with it, and those volumes hold the k3s datastore and the node's mesh identity, so changing it on a running host brings up a new, empty node. Because it is pinned rather than taken from the directory's name, `github_runner_cluster_dir` can move without losing the cluster.
 - `github_runner_cluster_k3s_token` (required), `github_runner_cluster_tailscale_join_key`, `github_runner_cluster_tailscale_api_token`, `github_runner_cluster_headscale_api_key`, `github_runner_cluster_headscale_join_key`: secrets, as plain variables from any source Ansible reads.
 - `github_runner_cluster_join_key_path`, `github_runner_cluster_join_key_listener`: where a join key the role creates is kept (see [Join keys](#join-keys)).
 - `github_runner_cluster_group` (default `github_runner_cluster`), `github_runner_cluster_max_servers` (default 5), `github_runner_cluster_api_port` (default 6443), `github_runner_cluster_datastore` (`etcd`, the default, or `sqlite`, which makes the cluster a single server with every other host an agent).
@@ -82,7 +83,7 @@ Each site is its own cluster: its own inventory group, bootstrap server and mesh
 - `github_runner_cluster_headscale_*`: the Headscale providers' settings, documented in `defaults/main.yml`.
 - `github_runner_cluster_node_name`: the k3s node name and mesh hostname, defaulting to the inventory name.
 - Per-host overrides: `github_runner_cluster_node_role` (`server` or `agent`), `github_runner_cluster_bootstrap` (true picks the bootstrap host, false excludes a host), `github_runner_cluster_server_url` (join this server instead, for a cluster whose servers are outside the inventory), `github_runner_cluster_tls_sans`, `github_runner_cluster_node_address`. The run fails if the result has an even number of servers, no servers, or more than one bootstrap host.
-- `github_runner_cluster_compose_files`: extra Compose files for the host's k3s project, merged after `docker-compose.yml`.
+- `github_runner_cluster_compose_files`: extra Compose files for the host's k3s project, merged after `docker-compose.yml`, as paths relative to `github_runner_cluster_dir` or absolute. Several nodes on one Docker host each need their own `github_runner_cluster_dir` and `github_runner_cluster_compose_project`.
 - `github_runner_cluster_wait_for_nodes`: wait for every node to be Ready afterwards, clearing stale node-password registrations if a node fails to rejoin (installs the kubernetes Python client through `github_runner_k8s_client`).
 
 ## Examples

@@ -6,7 +6,9 @@
 # What it does, on the bootstrap server only: restarts the k3s container, so k3s starts off the mesh again, and waits for Headscale to answer. If it does not, it runs a temporary Headscale container in the k3s container's network namespace, on the same configuration and the same state as the static pod, which lets k3s restart on the mesh and rejoin the cluster; once the node is Ready it removes the temporary container, and the static pod takes over again.
 - name: Recover the in-cluster Headscale mesh on the bootstrap server
   hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
-  gather_facts: false
+  # Only the minimal facts, for the HOME that github_runner_cluster_dir defaults under.
+  gather_facts: true
+  gather_subset: ["!all"]
   vars:
     github_runner_cluster_recover_answer_retries: 36
     github_runner_cluster_recover_rejoin_retries: 120
@@ -27,7 +29,7 @@
 
         - name: Record where Headscale's files live
           ansible.builtin.set_fact:
-            github_runner_cluster_recover_headscale_dir: "{{ github_runner_cluster_headscale_dir or github_runner_cluster_repo_root ~ '/headscale' }}"
+            github_runner_cluster_recover_headscale_dir: "{{ github_runner_cluster_headscale_dir or github_runner_cluster_dir ~ '/headscale' }}"
             github_runner_cluster_recover_probe: [docker, exec, "{{ github_runner_cluster_container_name }}", wget, -q, -T, "5", -O, /dev/null, "http://127.0.0.1:9090/metrics"]
             github_runner_cluster_recover_rescue: "{{ github_runner_cluster_container_name }}-headscale-rescue"
 

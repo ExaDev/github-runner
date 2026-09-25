@@ -25,7 +25,7 @@
     - failed: "{{ github_runner_cluster_headscale_host_dir | length == 0 }}"
       msg: >-
         No directory for Headscale's files on {{ github_runner_cluster_headscale_host_name }}: set github_runner_cluster_headscale_dir
-        (that host has no github_runner_cluster_repo_root to default it from).
+        (that host has neither github_runner_cluster_dir nor gathered facts to default it from).
     - failed: "{{ github_runner_cluster_headscale_litestream | bool and github_runner_cluster_headscale_litestream_replica | length == 0 }}"
       msg: github_runner_cluster_headscale_litestream is on but github_runner_cluster_headscale_litestream_replica is empty, so Litestream has nowhere to write.
   loop_control:

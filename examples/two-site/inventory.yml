@@ -16,13 +16,10 @@ all:
       hosts:
         a1:
           ansible_host: 203.0.113.21
-          github_runner_cluster_repo_root: /srv/github-runner
         a2:
           ansible_host: 100.64.0.22
-          github_runner_cluster_repo_root: /srv/github-runner
         a3:
           ansible_host: 100.64.0.23
-          github_runner_cluster_repo_root: /srv/github-runner
     site_b:
       vars:
         github_runner_cluster_mesh: tailscale
@@ -32,4 +29,3 @@ all:
       hosts:
         b1:
           ansible_host: 100.64.1.1
-          github_runner_cluster_repo_root: /srv/github-runner

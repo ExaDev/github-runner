@@ -22,7 +22,7 @@ dependencies:
   community.general: ">=9.0.0"
 repository: https://github.com/ExaDev/github-runner
 issues: https://github.com/ExaDev/github-runner/issues
-# Everything that is not collection content: the container images, the Compose stack and Helm values the roles read from a checkout on each target host, this fleet's own inventory and host_vars, CI, and the standalone bootstrap wrapper.
+# Everything that is not collection content: the runner and platform container images, Helm values, local inventory configuration, CI, and the standalone bootstrap wrapper. The k3s node's Compose file and image build context ship inside roles/github_runner_cluster/files, so they are collection content.
 build_ignore:
   - .github
   - .dockerignore
@@ -36,11 +36,9 @@ build_ignore:
   - playbooks/collections
   - autoscaler
   - heartbeat
-  - k3s
   - scripts
   - values
   - Dockerfile
-  - docker-compose.yml
   - bootstrap.sh
   - kubeconfig
   - secrets

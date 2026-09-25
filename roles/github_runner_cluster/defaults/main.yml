@@ -57,7 +57,7 @@ github_runner_cluster_headscale_join_key_renew_days: 14
 github_runner_cluster_headscale_version: "0.29.3"
 # The inventory host headscale_hosted runs it on (headscale_in_cluster always runs it on the bootstrap server). Empty means the cluster's bootstrap server; any inventory host works, including one outside the cluster group (it needs Docker with Compose, and github_runner_cluster_headscale_dir).
 github_runner_cluster_headscale_host: ""
-# Where on that host the role keeps Headscale's configuration, policy, Compose project or static pod manifest and the API and join keys it creates (under secrets/, mode 0600). Empty means a headscale directory under the host's github_runner_cluster_repo_root, which a host outside the cluster group does not have.
+# Where on that host the role keeps Headscale's configuration, policy, Compose project or static pod manifest and the API and join keys it creates (under secrets/, mode 0600). Empty means a headscale directory under the host's github_runner_cluster_dir, which a host outside the cluster group does not have (its facts are never gathered, so its default cannot be worked out).
 github_runner_cluster_headscale_dir: ""
 # How Headscale serves github_runner_cluster_headscale_url. letsencrypt has Headscale obtain its own certificate for the URL's host name (TLS-ALPN-01 on port 443, so that port must reach it from the internet). none serves plain HTTP on github_runner_cluster_headscale_port, for a reverse proxy that terminates TLS in front of it, or a private network every node shares.
 github_runner_cluster_headscale_tls: letsencrypt
@@ -102,9 +102,9 @@ github_runner_cluster_headscale_standby_host: ""
 # headscale_in_cluster keeps Headscale's state on the bootstrap server's k3s data volume, which a static pod cannot replace with a replicated persistent volume (kubelet runs it with no API server, so it cannot bind a claim), so the provider requires Litestream. Set this to true to run without it and accept that losing that volume loses every registration.
 github_runner_cluster_headscale_accept_node_local_state: false
 
-# Extra Compose files merged after docker-compose.yml for this host's k3s project, as paths relative to github_runner_cluster_repo_root or absolute. Nothing needs them in normal use; the mesh integration tests use one to put several nodes on one Docker host.
+# Extra Compose files merged after docker-compose.yml for this host's k3s project, as paths relative to github_runner_cluster_dir or absolute. Nothing needs them in normal use; the mesh integration tests use one to put several nodes on one Docker host.
 github_runner_cluster_compose_files: []
-# Derived, never set directly: every Compose file for this host's k3s project, in merge order: docker-compose.yml, then the override the headscale_in_cluster provider writes for the bootstrap server, then github_runner_cluster_compose_files. With no files beyond docker-compose.yml the role passes none at all and Compose reads it by itself, exactly as a plain `docker compose up` in the checkout would.
+# Derived, never set directly: every Compose file for this host's k3s project, in merge order: docker-compose.yml, then the override the headscale_in_cluster provider writes for the bootstrap server, then github_runner_cluster_compose_files. With no files beyond docker-compose.yml the role passes none at all and Compose reads it by itself, exactly as a plain `docker compose up` in github_runner_cluster_dir would.
 github_runner_cluster_compose_file_list: >-
   {{ ['docker-compose.yml']
      + (['docker-compose.mesh.yml'] if github_runner_cluster_mesh == 'headscale_in_cluster' and github_runner_cluster_effective_bootstrap | default(false) | bool else [])
@@ -112,8 +112,13 @@ github_runner_cluster_compose_file_list: >-
 # The node's k3s container, as docker-compose.yml names it. The headscale_in_cluster provider runs commands inside it; override it only alongside an extra Compose file that renames the container.
 github_runner_cluster_container_name: github-runner-k3s
 
-# Repo root ON THE TARGET HOST itself: docker-compose.yml and the .env this role templates live there. Deliberately left undefined here, not defaulted to `{{ playbook_dir }}/..`: playbook_dir is a control-node path, and using it as a template destination on the target host fails outright the moment the control node's own checkout doesn't sit at the identical path as the target's. Every host must set this explicitly.
-github_runner_cluster_kubeconfig_path: "{{ github_runner_cluster_repo_root }}/kubeconfig/kubeconfig.yaml"
+# The directory on the target host the role manages as this host's Compose project: it copies the collection's docker-compose.yml and k3s/ build context there, templates .env there, and k3s writes the kubeconfig to its kubeconfig/ subdirectory. Needs no checkout of anything on the host. The default reads HOME from the target's gathered facts, so it is the connecting user's home on that host, not the control node's.
+github_runner_cluster_dir: "{{ ansible_facts['env']['HOME'] }}/{{ github_runner_cluster_dir_name }}"
+# The default directory's name under HOME. A constant, kept separate so the Headscale providers can work out another host's default directory through hostvars, which never sees role defaults.
+github_runner_cluster_dir_name: ".github-runner"
+# The Compose project name. Compose prefixes every named volume with it, and the k3s datastore and each node's mesh identity live in those volumes (github-runner_k3s-data, github-runner_k3s-tailscale-data and the agent equivalents), so changing it on a running host starts a new, empty node. Pinned rather than left to Compose, which would take it from the directory's name, so github_runner_cluster_dir can move without losing the cluster.
+github_runner_cluster_compose_project: github-runner
+github_runner_cluster_kubeconfig_path: "{{ github_runner_cluster_dir }}/kubeconfig/kubeconfig.yaml"
 
 # Whether this host waits for every node to report Ready (self-healing stale node-password registrations on the way). Needs the kubernetes Python client, which this role installs through github_runner_k8s_client only when this is true, so it is off by default and turned on for the hosts that go on to talk to the Kubernetes API (see playbooks/site.yml).
 github_runner_cluster_wait_for_nodes: false

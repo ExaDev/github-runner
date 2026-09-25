@@ -16,7 +16,10 @@
   ansible.builtin.set_fact:
     github_runner_cluster_headscale_host_name: "{{ github_runner_cluster_topology.bootstrap }}"
     github_runner_cluster_headscale_host_dir: >-
-      {{ github_runner_cluster_headscale_dir or ((hostvars[github_runner_cluster_topology.bootstrap].github_runner_cluster_repo_root ~ '/headscale') if github_runner_cluster_topology.bootstrap else '') }}
+      {{ github_runner_cluster_headscale_dir or ((hostvars[github_runner_cluster_topology.bootstrap].github_runner_cluster_dir
+         if hostvars[github_runner_cluster_topology.bootstrap].github_runner_cluster_dir is defined
+         else hostvars[github_runner_cluster_topology.bootstrap].ansible_facts.env.HOME ~ '/' ~ github_runner_cluster_dir_name) ~ '/headscale'
+         if github_runner_cluster_topology.bootstrap else '') }}
 
 - name: Fail if the cluster group has no bootstrap server
   ansible.builtin.fail:
@@ -90,7 +93,7 @@
     - name: Write the bootstrap server's Compose override
       ansible.builtin.template:
         src: headscale/compose-in-cluster.yml.j2
-        dest: "{{ github_runner_cluster_repo_root }}/docker-compose.mesh.yml"
+        dest: "{{ github_runner_cluster_dir }}/docker-compose.mesh.yml"
         mode: "0644"
 
     - name: Determine the active Docker CLI context
@@ -114,13 +117,14 @@
         - name: Template .env for the bootstrap server
           ansible.builtin.template:
             src: env.j2
-            dest: "{{ github_runner_cluster_repo_root }}/.env"
+            dest: "{{ github_runner_cluster_dir }}/.env"
             mode: "0600"
           no_log: true
 
         - name: Start k3s on the bootstrap server
           community.docker.docker_compose_v2:
-            project_src: "{{ github_runner_cluster_repo_root }}"
+            project_src: "{{ github_runner_cluster_dir }}"
+            project_name: "{{ github_runner_cluster_compose_project }}"
             profiles: ["server"]
             cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
             files: "{{ github_runner_cluster_compose_file_list }}"

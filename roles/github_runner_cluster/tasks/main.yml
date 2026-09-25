@@ -4,15 +4,6 @@
 - name: Decide this host's part in the cluster
   ansible.builtin.include_tasks: topology.yml
 
-- name: Fail if this host's repo root is not set
-  ansible.builtin.fail:
-    msg: >-
-      github_runner_cluster_repo_root is not set on this host. It must be the
-      absolute path of the github-runner checkout on this target host
-      itself (not the control node). Add it to
-      host_vars/{{ inventory_hostname }}.yml.
-  when: github_runner_cluster_repo_root is not defined
-
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-
@@ -20,6 +11,24 @@
       Ansible reads (ansible-vault, a lookup), or run a secrets adapter
       such as github_runner_secrets_onepassword first.
   when: github_runner_cluster_k3s_token | default('') | length == 0
+
+- name: Create this host's Compose project directory
+  ansible.builtin.file:
+    path: "{{ github_runner_cluster_dir }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: ["", k3s, kubeconfig]
+
+- name: Place the collection's Compose file and k3s build context in it
+  # Before the mesh step, since the headscale_in_cluster provider starts the bootstrap server's Compose project itself. Copied on every run, so a collection upgrade reaches the host. The entrypoint is bind-mounted read-only and run through /bin/sh, so its mode only matters to someone running it by hand.
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ github_runner_cluster_dir }}/{{ item.src }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {src: docker-compose.yml, mode: "0644"}
+    - {src: k3s/Dockerfile, mode: "0644"}
+    - {src: k3s/node-entrypoint.sh, mode: "0755"}
 
 - name: Set up the mesh the nodes join, and publish its join key and control server
   # Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read the mesh facts it publishes. See tasks/mesh/main.yml for the provider interface.
@@ -51,13 +60,14 @@
     - name: Template .env for this k3s server
       ansible.builtin.template:
         src: env.j2
-        dest: "{{ github_runner_cluster_repo_root }}/.env"
+        dest: "{{ github_runner_cluster_dir }}/.env"
         mode: "0600"
       no_log: true
 
     - name: Start k3s via docker compose (bootstrapping or joining, per this host's own .env)
       community.docker.docker_compose_v2:
-        project_src: "{{ github_runner_cluster_repo_root }}"
+        project_src: "{{ github_runner_cluster_dir }}"
+        project_name: "{{ github_runner_cluster_compose_project }}"
         profiles: ["server"]
         cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
         files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
@@ -69,13 +79,14 @@
     - name: Template .env for the k3s agent
       ansible.builtin.template:
         src: env-agent.j2
-        dest: "{{ github_runner_cluster_repo_root }}/.env"
+        dest: "{{ github_runner_cluster_dir }}/.env"
         mode: "0600"
       no_log: true
 
     - name: Join the cluster as an agent
       community.docker.docker_compose_v2:
-        project_src: "{{ github_runner_cluster_repo_root }}"
+        project_src: "{{ github_runner_cluster_dir }}"
+        project_name: "{{ github_runner_cluster_compose_project }}"
         profiles: ["agent"]
         cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
         files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"

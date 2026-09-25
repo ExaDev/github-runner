@@ -10,7 +10,7 @@
   ansible.builtin.set_fact:
     github_runner_cluster_headscale_host_dir: >-
       {{ github_runner_cluster_headscale_dir or hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_headscale_dir | default('', true)
-         or ((hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_repo_root ~ '/headscale') if hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_repo_root is defined else '') }}
+         or (hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_dir ~ '/headscale' if hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_dir is defined else hostvars[github_runner_cluster_headscale_host_name].ansible_facts.env.HOME ~ '/' ~ github_runner_cluster_dir_name ~ '/headscale' if hostvars[github_runner_cluster_headscale_host_name].ansible_facts.env.HOME is defined else '') }}
     github_runner_cluster_headscale_host_project: "{{ hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_headscale_container_name | default(github_runner_cluster_headscale_container_name) }}"
     github_runner_cluster_headscale_host_compose_files: "{{ hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_headscale_compose_files | default(github_runner_cluster_headscale_compose_files) }}"
 
@@ -33,7 +33,7 @@
   ansible.builtin.set_fact:
     github_runner_cluster_headscale_standby_dir: >-
       {{ hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_headscale_dir | default('', true)
-         or ((hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_repo_root ~ '/headscale') if hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_repo_root is defined else '') }}
+         or (hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_dir ~ '/headscale' if hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_dir is defined else hostvars[github_runner_cluster_headscale_standby_name].ansible_facts.env.HOME ~ '/' ~ github_runner_cluster_dir_name ~ '/headscale' if hostvars[github_runner_cluster_headscale_standby_name].ansible_facts.env.HOME is defined else '') }}
     github_runner_cluster_headscale_standby_project: "{{ hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_headscale_container_name | default(github_runner_cluster_headscale_container_name) }}"
     github_runner_cluster_headscale_standby_compose_files: "{{ hostvars[github_runner_cluster_headscale_standby_name].github_runner_cluster_headscale_compose_files | default(github_runner_cluster_headscale_compose_files) }}"
   when: github_runner_cluster_headscale_standby_name | length > 0
@@ -42,7 +42,7 @@
   ansible.builtin.fail:
     msg: >-
       No directory for Headscale's files on the standby {{ github_runner_cluster_headscale_standby_name }}: set github_runner_cluster_headscale_dir
-      on that host (it has no github_runner_cluster_repo_root to default it from).
+      on that host (it has neither github_runner_cluster_dir nor gathered facts to default it from).
   when:
     - github_runner_cluster_headscale_standby_name | length > 0
     - github_runner_cluster_headscale_standby_dir | length == 0
