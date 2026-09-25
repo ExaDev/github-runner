@@ -89,6 +89,12 @@ control_server_answers() {
 
 # The bootstrap server of a cluster whose Headscale server runs inside the cluster, as a static pod on this node. k3s cannot start with --vpn-auth until Headscale answers, and Headscale cannot answer until k3s runs its static pod, so this node always starts off the mesh first: k3s runs directly on the container's network, kubelet starts the Headscale static pod, and once Headscale answers (and there is a join key), k3s is stopped and started again on the mesh. Only the k3s process restarts, never the container, so the Headscale pod keeps running throughout and the mesh has a control server to register with. The same sequence covers the first start, when the join key does not exist yet, and every later cold start (a reboot, a recreated container).
 supervise_self_hosted() {
+  # k3s moves the container's processes out of the root cgroup itself only when it runs as PID 1, which it does not here, and cgroup v2 refuses kubelet's pod cgroups while processes remain in the root. So do what k3s would: move every process into a child cgroup and delegate every controller to the root's children. Without this kubelet fails with "cannot enter cgroupv2 /sys/fs/cgroup/kubepods with domain controllers -- it is in an invalid state" and k3s exits.
+  if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+    mkdir -p /sys/fs/cgroup/init
+    xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
+    sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control
+  fi
   k3s_pid=""
   watcher_pid=""
   trap 'if [ -n "$k3s_pid" ]; then kill -TERM "$k3s_pid" 2>/dev/null; wait "$k3s_pid"; fi; exit 0' TERM INT

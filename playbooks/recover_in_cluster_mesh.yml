@@ -1,0 +1,100 @@
+---
+# Recovers the bootstrap server of a cluster using the headscale_in_cluster mesh provider when its k3s cannot get back onto the mesh. Run it from ansible/ like site.yml, e.g.: ansible-playbook ../playbooks/recover_in_cluster_mesh.yml
+#
+# Why this can be needed: Headscale runs as a static pod on the bootstrap server, so that server's k3s always starts off the mesh until Headscale answers, then restarts on it (k3s/node-entrypoint.sh). On a single-server cluster that always works. With several servers, starting off the mesh can leave the bootstrap server's etcd member unable to reach the others, and without etcd quorum on that server k3s may never run the static pod, so Headscale never answers and the server never rejoins, even though the other servers keep the cluster running.
+#
+# What it does, on the bootstrap server only: restarts the k3s container, so k3s starts off the mesh again, and waits for Headscale to answer. If it does not, it runs a temporary Headscale container in the k3s container's network namespace, on the same configuration and the same state as the static pod, which lets k3s restart on the mesh and rejoin the cluster; once the node is Ready it removes the temporary container, and the static pod takes over again.
+- name: Recover the in-cluster Headscale mesh on the bootstrap server
+  hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
+  gather_facts: false
+  vars:
+    github_runner_cluster_recover_answer_retries: 36
+    github_runner_cluster_recover_rejoin_retries: 120
+  tasks:
+    - name: Decide each host's part in the cluster
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: topology
+        public: true
+
+    - name: Recover the bootstrap server
+      when: github_runner_cluster_effective_bootstrap | bool
+      block:
+        - name: Fail unless the cluster uses the in-cluster Headscale provider
+          ansible.builtin.fail:
+            msg: github_runner_cluster_mesh is {{ github_runner_cluster_mesh }}; this playbook only applies to headscale_in_cluster.
+          when: github_runner_cluster_mesh != 'headscale_in_cluster'
+
+        - name: Record where Headscale's files live
+          ansible.builtin.set_fact:
+            github_runner_cluster_recover_headscale_dir: "{{ github_runner_cluster_headscale_dir or github_runner_cluster_repo_root ~ '/headscale' }}"
+            github_runner_cluster_recover_probe: [docker, exec, "{{ github_runner_cluster_container_name }}", wget, -q, -T, "5", -O, /dev/null, "http://127.0.0.1:9090/metrics"]
+            github_runner_cluster_recover_rescue: "{{ github_runner_cluster_container_name }}-headscale-rescue"
+
+        - name: Restart the k3s container, which starts k3s off the mesh until Headscale answers
+          ansible.builtin.command:
+            argv: [docker, restart, "{{ github_runner_cluster_container_name }}"]
+          changed_when: true
+
+        - name: Wait for the Headscale static pod to answer
+          ansible.builtin.command:
+            argv: "{{ github_runner_cluster_recover_probe }}"
+          changed_when: false
+          failed_when: false
+          register: github_runner_cluster_recover_answers
+          until: github_runner_cluster_recover_answers.rc == 0
+          retries: "{{ github_runner_cluster_recover_answer_retries }}"
+          delay: 5
+
+        - name: Bring the node back through a temporary Headscale server
+          when: github_runner_cluster_recover_answers.rc != 0
+          block:
+            - name: Find the k3s container's data volume, which holds Headscale's state
+              ansible.builtin.command:
+                argv: [docker, inspect, --format, "{{ '{{' }} range .Mounts {{ '}}' }}{{ '{{' }} if eq .Destination \"/var/lib/rancher/k3s\" {{ '}}' }}{{ '{{' }} .Name {{ '}}' }}{{ '{{' }} end {{ '}}' }}{{ '{{' }} end {{ '}}' }}", "{{ github_runner_cluster_container_name }}"]
+              changed_when: false
+              register: github_runner_cluster_recover_volume
+
+            - name: Run a temporary Headscale server on the static pod's configuration and state
+              ansible.builtin.command:
+                argv:
+                  - docker
+                  - run
+                  - --detach
+                  - --rm
+                  - --name
+                  - "{{ github_runner_cluster_recover_rescue }}"
+                  - --network
+                  - "container:{{ github_runner_cluster_container_name }}"
+                  - --volume
+                  - "{{ github_runner_cluster_recover_headscale_dir }}/config:/etc/headscale:ro"
+                  - --mount
+                  - "type=volume,src={{ github_runner_cluster_recover_volume.stdout | trim }},dst=/var/lib/headscale,volume-subpath=github-runner-headscale"
+                  - "docker.io/headscale/headscale:v{{ github_runner_cluster_headscale_version }}"
+                  - serve
+              changed_when: true
+
+            - name: Wait for this node to rejoin the cluster on the mesh
+              ansible.builtin.command:
+                argv: [docker, exec, "{{ github_runner_cluster_container_name }}", kubectl, wait, --for=condition=Ready, "node/{{ github_runner_cluster_topology.hosts[inventory_hostname].node_name }}", --timeout=10s]
+              changed_when: false
+              register: github_runner_cluster_recover_ready
+              until: github_runner_cluster_recover_ready.rc == 0
+              retries: "{{ github_runner_cluster_recover_rejoin_retries }}"
+              delay: 5
+
+          always:
+            - name: Remove the temporary Headscale server, so the static pod can take its port back
+              ansible.builtin.command:
+                argv: [docker, rm, --force, "{{ github_runner_cluster_recover_rescue }}"]
+              changed_when: true
+              failed_when: false
+
+        - name: Wait for the Headscale static pod to answer again
+          ansible.builtin.command:
+            argv: "{{ github_runner_cluster_recover_probe }}"
+          changed_when: false
+          register: github_runner_cluster_recover_final
+          until: github_runner_cluster_recover_final.rc == 0
+          retries: "{{ github_runner_cluster_recover_rejoin_retries }}"
+          delay: 5

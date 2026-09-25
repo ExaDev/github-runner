@@ -13,3 +13,5 @@ logs/
 !**/AGENTS.md
 .ansible-venv/
 __pycache__/
+docker-compose.mesh.yml
+/headscale/

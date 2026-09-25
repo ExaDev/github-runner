@@ -1,0 +1,133 @@
+---
+# The headscale_in_cluster mesh provider: the role runs Headscale inside the cluster itself, as a static pod on the bootstrap server, published on that host's port so every node reaches it at github_runner_cluster_headscale_url. The bootstrap server's k3s starts off the mesh until Headscale answers and then restarts on it (k3s/node-entrypoint.sh, K3S_MESH_SELF_HOSTED_HEALTH_URL), and every other node joins through it. The control server lives on one node of the cluster it serves: see the role README for what that means for recovery, and playbooks/recover_in_cluster_mesh.yml.
+
+- name: Decide where Headscale's files live on the bootstrap server
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_host_name: "{{ github_runner_cluster_topology.bootstrap }}"
+    github_runner_cluster_headscale_host_dir: >-
+      {{ github_runner_cluster_headscale_dir or ((hostvars[github_runner_cluster_topology.bootstrap].github_runner_cluster_repo_root ~ '/headscale') if github_runner_cluster_topology.bootstrap else '') }}
+
+- name: Fail if the cluster group has no bootstrap server
+  ansible.builtin.fail:
+    msg: >-
+      headscale_in_cluster runs Headscale on the cluster's bootstrap server, but no host in the cluster group bootstraps the
+      cluster (every host joins a server outside the inventory). Use headscale_hosted or headscale_existing instead.
+  when: github_runner_cluster_topology.bootstrap | length == 0
+
+- name: Check the settings a self-run Headscale server needs
+  ansible.builtin.include_tasks: mesh/headscale_server_checks.yml
+
+- name: Take the join key already known, for the bootstrap server's first start
+  # Supplied, or stored on the bootstrap server by an earlier run. Empty on the very first run: the bootstrap server then starts without one, and the keys step below creates it once Headscale answers.
+  ansible.builtin.set_fact:
+    github_runner_cluster_mesh_join_key: "{{ github_runner_cluster_headscale_join_key }}"
+    github_runner_cluster_mesh_control_server_url: "{{ github_runner_cluster_headscale_url }}"
+  no_log: true
+
+- name: Run Headscale on the bootstrap server
+  when: github_runner_cluster_effective_bootstrap | bool
+  block:
+    - name: Create Headscale's directories
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_headscale_host_dir }}/{{ item }}"
+        state: directory
+        mode: "{{ '0700' if item == 'secrets' else '0755' }}"
+      loop: ["", config, manifests, secrets]
+
+    - name: Read the stored join key
+      ansible.builtin.slurp:
+        src: "{{ github_runner_cluster_headscale_host_dir }}/secrets/join-key"
+      register: github_runner_cluster_headscale_stored_join_key
+      failed_when: false
+      no_log: true
+
+    - name: Use the stored join key if none was supplied
+      ansible.builtin.set_fact:
+        github_runner_cluster_mesh_join_key: "{{ github_runner_cluster_mesh_join_key or (github_runner_cluster_headscale_stored_join_key.content | default('') | b64decode | trim) }}"
+      no_log: true
+
+    - name: Write Headscale's configuration and policy
+      ansible.builtin.template:
+        src: "headscale/{{ item }}.j2"
+        dest: "{{ github_runner_cluster_headscale_host_dir }}/config/{{ item }}"
+        mode: "0644"
+      loop: [config.yaml, policy.hujson]
+      register: github_runner_cluster_headscale_config_files
+
+    - name: Write the Headscale static pod
+      ansible.builtin.template:
+        src: headscale/static-pod.yaml.j2
+        dest: "{{ github_runner_cluster_headscale_host_dir }}/manifests/github-runner-headscale.yaml"
+        mode: "0644"
+      vars:
+        github_runner_cluster_headscale_config_checksum: "{{ github_runner_cluster_headscale_config_files.results | map(attribute='checksum') | join('') | hash('sha1') }}"
+
+    - name: Write the bootstrap server's Compose override
+      ansible.builtin.template:
+        src: headscale/compose-in-cluster.yml.j2
+        dest: "{{ github_runner_cluster_repo_root }}/docker-compose.mesh.yml"
+        mode: "0644"
+
+    - name: Determine the active Docker CLI context
+      ansible.builtin.command: docker context show
+      changed_when: false
+      check_mode: false
+      register: github_runner_cluster_docker_context
+
+    - name: Ask whether Headscale answers inside the bootstrap server's k3s container
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ github_runner_cluster_container_name }}", wget, -q, -T, "5", -O, /dev/null, "http://127.0.0.1:9090/metrics"]
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      register: github_runner_cluster_headscale_answers
+
+    - name: Start the bootstrap server so that it can run Headscale
+      # Only when Headscale is not already answering: on a running cluster, the server block in tasks/main.yml applies any change to .env the usual way.
+      when: github_runner_cluster_headscale_answers.rc != 0
+      block:
+        - name: Template .env for the bootstrap server
+          ansible.builtin.template:
+            src: env.j2
+            dest: "{{ github_runner_cluster_repo_root }}/.env"
+            mode: "0600"
+          no_log: true
+
+        - name: Start k3s on the bootstrap server
+          community.docker.docker_compose_v2:
+            project_src: "{{ github_runner_cluster_repo_root }}"
+            profiles: ["server"]
+            cli_context: "{{ github_runner_cluster_docker_context.stdout | trim }}"
+            files: "{{ github_runner_cluster_compose_file_list }}"
+            state: present
+
+    - name: Wait for Headscale to answer inside the bootstrap server's k3s container
+      # First start: k3s starts off the mesh, kubelet pulls the Headscale image and starts the static pod.
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ github_runner_cluster_container_name }}", wget, -q, -T, "5", -O, /dev/null, "http://127.0.0.1:9090/metrics"]
+      changed_when: false
+      check_mode: false
+      register: github_runner_cluster_headscale_wait
+      until: github_runner_cluster_headscale_wait.rc == 0
+      retries: 120
+      delay: 5
+
+- name: Keep the API key and join key for the Headscale server in the cluster
+  ansible.builtin.include_tasks: mesh/headscale_server_keys.yml
+  vars:
+    # Runs the Headscale CLI inside the static pod's container, through the k3s container's own crictl. The script's own arguments ("$@") are the headscale subcommand and its flags.
+    github_runner_cluster_headscale_cli:
+      - docker
+      - exec
+      - "{{ github_runner_cluster_container_name }}"
+      - sh
+      - -c
+      - exec crictl exec "$(crictl ps -q --name '^headscale$' --state running | head -n 1)" headscale "$@"
+      - headscale
+
+- name: Publish the headscale_in_cluster provider's join key and control server
+  ansible.builtin.set_fact:
+    github_runner_cluster_mesh_join_key: "{{ github_runner_cluster_headscale_join_key }}"
+    github_runner_cluster_mesh_control_server_url: "{{ github_runner_cluster_headscale_url }}"
+    github_runner_cluster_mesh_missing_key_hint: The Headscale server in the cluster did not produce a join key; see the output above.
+  no_log: true
