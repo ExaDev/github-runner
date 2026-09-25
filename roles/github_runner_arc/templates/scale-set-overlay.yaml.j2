@@ -1,4 +1,4 @@
-{# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With sizing off it holds only the profile's nodeSelector. `profile` is the expanded profile from plugins/filter/arc.py. #}
+{# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With probes and sizing both off it holds only the profile's nodeSelector. `profile` is the expanded profile from plugins/filter/arc.py. #}
 {% set node_selector = profile.node_selector %}
 {% if profile.sizing and not profile.autoscale %}
 # Derived from the profile's sizing: {{ profile.sizing.per_node }} per node ({{ profile.sizing.per_node_by_cpu }} by CPU, {{ profile.sizing.per_node_by_memory }} by memory) across the nodes, {{ profile.sizing.theoretical }} in theory, less the safety margin.
@@ -7,3 +7,27 @@ maxRunners: {{ profile.sizing.max_runners }}
 template:
   spec:
     nodeSelector: {{ node_selector | to_json }}
+{% if github_runner_arc_listener_probes_enabled | bool %}
+# The chart puts no probe on the listener. The AutoscalingRunnerSet needs containers whenever listenerTemplate.spec is set, and a container named listener is merged into the real listener rather than added as a sidecar.
+listenerTemplate:
+  spec:
+    containers:
+      - name: listener
+{% if github_runner_arc_listener_probes_enabled | bool %}
+        # An HTTP probe on the metrics endpoint: the listener image has no shell, so an exec probe can never succeed. A 200 means the process has got past its startup and authentication, not just that it has not exited.
+        readinessProbe:
+          httpGet:
+            path: {{ github_runner_arc_listener_metrics_endpoint | to_json }}
+            port: {{ github_runner_arc_listener_probe_port | int }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: {{ github_runner_arc_listener_metrics_endpoint | to_json }}
+            port: {{ github_runner_arc_listener_probe_port | int }}
+          initialDelaySeconds: 15
+          periodSeconds: 15
+          failureThreshold: 3
+{% endif %}
+{% endif %}

@@ -16,6 +16,16 @@ github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path | d
 github_runner_arc_controller_replicas: 1
 github_runner_arc_controller_extra_values: {}
 
+# Prometheus metrics for the controller and every listener. The 0.14 chart enables both together, so this is one switch. Listener probes (below) need it on.
+github_runner_arc_metrics_enabled: false
+github_runner_arc_controller_metrics_addr: ":8080"
+github_runner_arc_listener_metrics_addr: ":8080"
+github_runner_arc_listener_metrics_endpoint: "/metrics"
+
+# Readiness and liveness probes on each listener's metrics endpoint. The chart's listener container has no probe, so without these a listener that starts and then fails its GitHub authentication still counts as ready during a rollout. The listener image has no shell, so an HTTP probe is the only kind that works.
+github_runner_arc_listener_probes_enabled: false
+github_runner_arc_listener_probe_port: 8080
+
 # Secrets, normally set by the github_runner_secrets role: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images), github_runner_arc_heartbeat_gh_token (a PAT with gist scope), and github_runner_arc_org_private_keys ({<org name>: <PEM content>}). No defaults.
 
 # Registry the pull Secret authenticates to, and its name in each namespace.
