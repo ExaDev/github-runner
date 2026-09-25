@@ -148,13 +148,14 @@
         name: "{{ github_runner_cluster_topology.hosts[item].node_name }}.node-password.k3s"
       loop: "{{ github_runner_cluster_rejoin_hosts }}"
 
-    - name: Clear the stale Node object of each host that has not rejoined, to match
+    # Agents only. Deleting a server's Node object makes k3s remove that server's etcd member, and a removed member cannot rejoin on its own: its etcd refuses to start until its local datastore is cleared. The node-password Secret above is what a password mismatch needs; an agent's stale Node object is cleared as well so it re-registers cleanly.
+    - name: Clear the stale Node object of each agent that has not rejoined, to match
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_cluster_kubeconfig_path }}"
         state: absent
         kind: Node
         name: "{{ github_runner_cluster_topology.hosts[item].node_name }}"
-      loop: "{{ github_runner_cluster_rejoin_hosts }}"
+      loop: "{{ github_runner_cluster_rejoin_hosts | select('in', github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'agent') | map(attribute='key') | list) | list }}"
 
     - name: Retry waiting for every node to report Ready now that any stale registration is cleared
       ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
