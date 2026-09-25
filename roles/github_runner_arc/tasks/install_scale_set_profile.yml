@@ -64,7 +64,7 @@
   kubernetes.core.k8s_info:
     api_version: actions.github.com/v1alpha1
     kind: AutoscalingListener
-    namespace: actions-runner-controller
+    namespace: "{{ github_runner_arc_controller_namespace }}"
     label_selectors:
       - "actions.github.com/scale-set-name={{ profile.release }}"
   register: github_runner_arc_listener
@@ -83,7 +83,7 @@
     state: absent
     api_version: actions.github.com/v1alpha1
     kind: AutoscalingListener
-    namespace: actions-runner-controller
+    namespace: "{{ github_runner_arc_controller_namespace }}"
     name: "{{ github_runner_arc_listener.resources[0].metadata.name }}"
   when:
     - github_runner_arc_listener.resources | length > 0

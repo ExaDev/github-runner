@@ -3,9 +3,9 @@
 
 - name: Install/upgrade the ARC controller release
   kubernetes.core.helm:
-    name: arc
+    name: "{{ github_runner_arc_controller_release_name }}"
     chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
     chart_version: "{{ github_runner_arc_controller_chart_version | default(omit) }}"
-    release_namespace: actions-runner-controller
+    release_namespace: "{{ github_runner_arc_controller_namespace }}"
     create_namespace: true
     values: "{{ lookup('ansible.builtin.template', 'controller-values.yaml.j2') | from_yaml | default({}, true) | combine(github_runner_arc_controller_extra_values, recursive=true) }}"
