@@ -113,7 +113,7 @@
   when: github_runner_cluster_wait_for_nodes | bool
 
 - name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
-  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See README's Non-obvious behaviour section; the same failure mode applies to a joining server's own container recreation, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name, as tasks/topology.yml recorded it), since that, not the inventory name, is what k3s names the Node and its node-password Secret after. Only ever touches cluster members that are NOT the bootstrap host (as tasks/topology.yml decided it): that host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway.
+  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See README's Non-obvious behaviour section; the same failure mode applies to a joining server's own container recreation, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name, as tasks/topology.yml recorded it), since that, not the inventory name, is what k3s names the Node and its node-password Secret after. Only ever touches cluster members that are NOT the bootstrap host (as tasks/topology.yml decided it), and of those only the ones whose node is missing or not Ready: the bootstrap host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway, and a Ready node's registration is not stale.
   when: github_runner_cluster_wait_for_nodes | bool
   block:
     - name: Wait for every node to report Ready
@@ -123,22 +123,38 @@
         KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
       changed_when: false
   rescue:
-    - name: Clear every non-bootstrap host's stale node-password secret
+    - name: Read which nodes are Ready
+      ansible.builtin.command:
+        argv: [kubectl, get, nodes, -o, 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}']
+      environment:
+        KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
+      changed_when: false
+      register: github_runner_cluster_node_readiness
+
+    # Only the hosts whose node is missing or not Ready: clearing a Ready node's Node object makes the cluster evict every pod on it, so a single unreachable host must not take the registrations of healthy ones with it.
+    - name: Pick the non-bootstrap hosts whose node has not rejoined
+      ansible.builtin.set_fact:
+        github_runner_cluster_rejoin_hosts: >-
+          {{ github_runner_cluster_topology.hosts | dict2items | rejectattr('value.bootstrap')
+             | rejectattr('value.node_name', 'in', github_runner_cluster_node_readiness.stdout_lines | select('search', ' True$') | map('split', ' ') | map('first') | list)
+             | map(attribute='key') | list }}
+
+    - name: Clear the stale node-password secret of each host that has not rejoined
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_cluster_kubeconfig_path }}"
         state: absent
         kind: Secret
         namespace: kube-system
         name: "{{ github_runner_cluster_topology.hosts[item].node_name }}.node-password.k3s"
-      loop: "{{ github_runner_cluster_topology.hosts | dict2items | rejectattr('value.bootstrap') | map(attribute='key') | list }}"
+      loop: "{{ github_runner_cluster_rejoin_hosts }}"
 
-    - name: Clear every non-bootstrap host's stale Node object to match
+    - name: Clear the stale Node object of each host that has not rejoined, to match
       kubernetes.core.k8s:
         kubeconfig: "{{ github_runner_cluster_kubeconfig_path }}"
         state: absent
         kind: Node
         name: "{{ github_runner_cluster_topology.hosts[item].node_name }}"
-      loop: "{{ github_runner_cluster_topology.hosts | dict2items | rejectattr('value.bootstrap') | map(attribute='key') | list }}"
+      loop: "{{ github_runner_cluster_rejoin_hosts }}"
 
     - name: Retry waiting for every node to report Ready now that any stale registration is cleared
       ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
