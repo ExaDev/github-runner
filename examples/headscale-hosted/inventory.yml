@@ -1,0 +1,31 @@
+---
+# Three servers joining through a Headscale server the role runs under Docker Compose on a small dedicated machine outside the cluster, so the control server does not depend on the cluster it serves. Headscale gets its own Let's Encrypt certificate, so headscale.example.com must resolve to that machine and its port 443 must reach it from the internet. Leave github_runner_cluster_headscale_host unset to run Headscale on the bootstrap server instead (still outside k3s).
+all:
+  vars:
+    github_runner_secrets_vault: Example
+    github_runner_secrets_item: github-runner
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_mesh: headscale_hosted
+        github_runner_cluster_headscale_url: https://headscale.example.com
+        github_runner_cluster_headscale_host: control
+        github_runner_cluster_headscale_acme_email: ops@example.com
+        # Headscale's MagicDNS base domain; it must not be headscale.example.com itself or a parent of it.
+        github_runner_cluster_tailnet_domain: mesh.example.com
+      hosts:
+        node1:
+          ansible_host: 100.64.0.1
+          github_runner_cluster_repo_root: /srv/github-runner
+        node2:
+          ansible_host: 100.64.0.2
+          github_runner_cluster_repo_root: /srv/github-runner
+        node3:
+          ansible_host: 100.64.0.3
+          github_runner_cluster_repo_root: /srv/github-runner
+    # Outside the cluster group: it runs Headscale and nothing else. It needs Docker with Compose, and a directory for Headscale's files, since it has no checkout of this repository.
+    headscale:
+      hosts:
+        control:
+          ansible_host: 203.0.113.10
+          github_runner_cluster_headscale_dir: /srv/headscale

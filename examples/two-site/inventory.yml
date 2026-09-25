@@ -1,0 +1,33 @@
+---
+# Two sites, each its own cluster with its own inventory group, bootstrap server and mesh. One cluster cannot span two meshes: flannel's tailscale backend routes pod traffic over the one mesh every node is on. Here site_a runs its own Headscale in the cluster and site_b uses a Tailscale tailnet; see site.yml alongside this file for the playbook that runs the role once per site. A host belongs to at most one site group.
+all:
+  vars:
+    github_runner_secrets_vault: Example
+    github_runner_secrets_item: github-runner
+  children:
+    site_a:
+      vars:
+        github_runner_cluster_mesh: headscale_in_cluster
+        github_runner_cluster_headscale_url: https://headscale.site-a.example.com
+        github_runner_cluster_headscale_acme_email: ops@example.com
+        github_runner_cluster_tailnet_domain: mesh.site-a.example.com
+      hosts:
+        a1:
+          ansible_host: 203.0.113.21
+          github_runner_cluster_repo_root: /srv/github-runner
+        a2:
+          ansible_host: 100.64.0.22
+          github_runner_cluster_repo_root: /srv/github-runner
+        a3:
+          ansible_host: 100.64.0.23
+          github_runner_cluster_repo_root: /srv/github-runner
+    site_b:
+      vars:
+        github_runner_cluster_mesh: tailscale
+        github_runner_cluster_tailnet_domain: site-b-tailnet.ts.net
+        # A separate 1Password item, so each site has its own k3s token and join key.
+        github_runner_secrets_item: github-runner-site-b
+      hosts:
+        b1:
+          ansible_host: 100.64.1.1
+          github_runner_cluster_repo_root: /srv/github-runner

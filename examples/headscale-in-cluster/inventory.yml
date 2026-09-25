@@ -1,0 +1,24 @@
+---
+# Three servers joining through a Headscale server that runs inside the cluster itself, as a static pod on the bootstrap server (node1), published on that host's port 443 with its own Let's Encrypt certificate. No machine outside the cluster is needed, at the cost of the control server living on one node of the cluster it serves: see the role README's headscale_in_cluster section and playbooks/recover_in_cluster_mesh.yml.
+all:
+  vars:
+    github_runner_secrets_vault: Example
+    github_runner_secrets_item: github-runner
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_mesh: headscale_in_cluster
+        # Must resolve to node1's public address, where the role publishes Headscale's port.
+        github_runner_cluster_headscale_url: https://headscale.example.com
+        github_runner_cluster_headscale_acme_email: ops@example.com
+        github_runner_cluster_tailnet_domain: mesh.example.com
+      hosts:
+        node1:
+          ansible_host: 203.0.113.11
+          github_runner_cluster_repo_root: /srv/github-runner
+        node2:
+          ansible_host: 100.64.0.2
+          github_runner_cluster_repo_root: /srv/github-runner
+        node3:
+          ansible_host: 100.64.0.3
+          github_runner_cluster_repo_root: /srv/github-runner

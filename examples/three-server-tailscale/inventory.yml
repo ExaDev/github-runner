@@ -1,0 +1,21 @@
+---
+# Three machines, all k3s servers (embedded etcd tolerates one failure), joined through Tailscale's own control plane. The first host bootstraps the cluster; a fourth or fifth host would become a server too, and any beyond five an agent. With the secrets role's tailscale-api-token field set, the role keeps the tailnet ACL's node tag, route auto-approval and pod grant in place; without it, the join key must be supplied and the ACL managed by hand.
+all:
+  vars:
+    github_runner_secrets_vault: Example
+    github_runner_secrets_item: github-runner
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_mesh: tailscale
+        github_runner_cluster_tailnet_domain: example-tailnet.ts.net
+      hosts:
+        node1:
+          ansible_host: 100.64.0.1
+          github_runner_cluster_repo_root: /srv/github-runner
+        node2:
+          ansible_host: 100.64.0.2
+          github_runner_cluster_repo_root: /srv/github-runner
+        node3:
+          ansible_host: 100.64.0.3
+          github_runner_cluster_repo_root: /srv/github-runner

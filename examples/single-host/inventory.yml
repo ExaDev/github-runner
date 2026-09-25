@@ -1,0 +1,15 @@
+---
+# One machine running the whole cluster: a single k3s server on SQLite (no etcd), joined to a Tailscale tailnet so more machines can be added later. Run with: ansible-playbook -i examples/single-host/inventory.yml playbooks/site.yml
+all:
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_tailnet_domain: example-tailnet.ts.net
+        # One server, so SQLite is enough. Switching to etcd later (to add servers) is k3s's own supported migration: set this to etcd and rerun.
+        github_runner_cluster_datastore: sqlite
+      hosts:
+        node1:
+          ansible_host: 100.64.0.1
+          github_runner_cluster_repo_root: /srv/github-runner
+          github_runner_secrets_vault: Example
+          github_runner_secrets_item: github-runner

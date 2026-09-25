@@ -1,0 +1,26 @@
+---
+# Three servers joining through a Headscale server someone else runs. The role reads its policy and fails, printing the JSON to add, until the policy defines the node tag and auto-approves the pod routes:
+#   "tagOwners": {"tag:github-runner-node": []},
+#   "autoApprovers": {"routes": {"10.42.0.0/16": ["tag:github-runner-node"]}}
+# plus a grant between the tag and 10.42.0.0/16 in both directions for pod traffic. The Headscale API key comes from the secrets role's headscale-api-key field; in 1Password mode the role creates the join key itself and stores it in headscale-join-key.
+all:
+  vars:
+    github_runner_secrets_vault: Example
+    github_runner_secrets_item: github-runner
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_mesh: headscale_existing
+        github_runner_cluster_headscale_url: https://headscale.example.com
+        # Headscale's dns.base_domain on that server: every node's address is <node name>.<this domain>.
+        github_runner_cluster_tailnet_domain: mesh.example.com
+      hosts:
+        node1:
+          ansible_host: 100.64.0.1
+          github_runner_cluster_repo_root: /srv/github-runner
+        node2:
+          ansible_host: 100.64.0.2
+          github_runner_cluster_repo_root: /srv/github-runner
+        node3:
+          ansible_host: 100.64.0.3
+          github_runner_cluster_repo_root: /srv/github-runner

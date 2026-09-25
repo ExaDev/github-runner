@@ -1,0 +1,19 @@
+---
+# Runs the roles once per site. github_runner_cluster_group names the site's inventory group, which is both the play's hosts and the group the cluster role picks that site's servers and bootstrap host from, so the two clusters never see each other's hosts. Run from ansible/ with: ansible-playbook -i ../examples/two-site/inventory.yml ../examples/two-site/site.yml
+- name: Site A cluster
+  hosts: site_a
+  gather_facts: true
+  vars:
+    github_runner_cluster_group: site_a
+  roles:
+    - exadev.github_runner.github_runner_secrets
+    - exadev.github_runner.github_runner_cluster
+
+- name: Site B cluster
+  hosts: site_b
+  gather_facts: true
+  vars:
+    github_runner_cluster_group: site_b
+  roles:
+    - exadev.github_runner.github_runner_secrets
+    - exadev.github_runner.github_runner_cluster
