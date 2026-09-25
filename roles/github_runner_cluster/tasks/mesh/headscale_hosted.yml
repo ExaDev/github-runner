@@ -1,0 +1,67 @@
+---
+# The headscale_hosted mesh provider: the role runs a Headscale server under Docker Compose on one host (github_runner_cluster_headscale_host, by default the bootstrap server), outside k3s, so the control server never depends on the cluster it serves. It writes the server's configuration and policy (role-owned, see github_runner_cluster_headscale_policy), starts the pinned image, creates an API key with the server's own CLI, then goes through the same API steps as headscale_existing.
+
+- name: Decide which host runs Headscale and where its files live
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_host_name: "{{ github_runner_cluster_headscale_host or github_runner_cluster_topology.bootstrap }}"
+
+- name: Record the Headscale host's directory
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_host_dir: >-
+      {{ github_runner_cluster_headscale_dir or hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_headscale_dir | default('', true)
+         or ((hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_repo_root ~ '/headscale') if hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_repo_root is defined else '') }}
+
+- name: Check the settings a self-run Headscale server needs
+  ansible.builtin.include_tasks: mesh/headscale_server_checks.yml
+
+- name: Run Headscale on its host
+  run_once: true
+  delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
+  block:
+    - name: Create Headscale's directories
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_headscale_host_dir }}/{{ item }}"
+        state: directory
+        mode: "{{ '0700' if item == 'secrets' else '0755' }}"
+      loop: ["", config, secrets]
+
+    - name: Write Headscale's configuration and policy
+      ansible.builtin.template:
+        src: "headscale/{{ item.src }}"
+        dest: "{{ github_runner_cluster_headscale_host_dir }}/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {src: config.yaml.j2, dest: config/config.yaml}
+        - {src: policy.hujson.j2, dest: config/policy.hujson}
+        - {src: docker-compose.yml.j2, dest: docker-compose.yml}
+      register: github_runner_cluster_headscale_files
+
+    - name: Determine the Headscale host's Docker CLI context
+      # See the same step in tasks/main.yml for why the context is read rather than assumed.
+      ansible.builtin.command: docker context show
+      changed_when: false
+      check_mode: false
+      register: github_runner_cluster_headscale_docker_context
+
+    - name: Start Headscale, recreating it when its configuration or policy changed
+      # The configuration is a bind mount Headscale reads only at start, so a changed file needs a new container to take effect.
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_cluster_headscale_host_dir }}"
+        files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_compose_files }}"
+        cli_context: "{{ github_runner_cluster_headscale_docker_context.stdout | trim }}"
+        state: present
+        recreate: "{{ 'always' if github_runner_cluster_headscale_files is changed else 'auto' }}"
+        wait: true
+        wait_timeout: 120
+
+- name: Keep the API key and join key for the server this role runs
+  ansible.builtin.include_tasks: mesh/headscale_server_keys.yml
+  vars:
+    github_runner_cluster_headscale_cli: ["docker", "exec", "{{ github_runner_cluster_headscale_container_name }}", "headscale"]
+
+- name: Publish the headscale_hosted provider's join key and control server
+  ansible.builtin.set_fact:
+    github_runner_cluster_mesh_join_key: "{{ github_runner_cluster_headscale_join_key }}"
+    github_runner_cluster_mesh_control_server_url: "{{ github_runner_cluster_headscale_url }}"
+    github_runner_cluster_mesh_missing_key_hint: The Headscale server the role runs did not produce a join key; see the output above.
+  no_log: true

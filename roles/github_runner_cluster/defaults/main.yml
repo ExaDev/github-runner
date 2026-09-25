@@ -24,7 +24,7 @@ github_runner_cluster_tailscale_api_token: ""
 # Whether tasks/mesh/tailscale_api.yml may create a join key when none is supplied. Only safe where the new key can be persisted for the next run; the github_runner_secrets role turns it on in 1Password mode and persists the key itself.
 github_runner_cluster_create_tailscale_join_key: false
 
-# The mesh every node's k3s joins through --vpn-auth, and so the control server its Tailscale client registers with. One of: tailscale (Tailscale's own control plane; the tailscale_* variables above) or headscale_existing (a Headscale server someone already runs). Every provider publishes the same facts, so nothing outside tasks/mesh/ depends on which one is in use: github_runner_cluster_mesh_join_key (the reusable join key), github_runner_cluster_mesh_control_server_url (empty for Tailscale), github_runner_cluster_mesh_vpn_auth (the resulting k3s --vpn-auth value) and github_runner_cluster_mesh_policy (the tailnet policy the route and tag check in tasks/mesh/check_policy.yml reads). See tasks/mesh/main.yml.
+# The mesh every node's k3s joins through --vpn-auth, and so the control server its Tailscale client registers with. One of: tailscale (Tailscale's own control plane; the tailscale_* variables above), headscale_existing (a Headscale server someone already runs) or headscale_hosted (a Headscale server this role runs under Docker Compose on one host, outside k3s). Every provider publishes the same facts, so nothing outside tasks/mesh/ depends on which one is in use: github_runner_cluster_mesh_join_key (the reusable join key), github_runner_cluster_mesh_control_server_url (empty for Tailscale), github_runner_cluster_mesh_vpn_auth (the resulting k3s --vpn-auth value) and github_runner_cluster_mesh_policy (the tailnet policy the route and tag check in tasks/mesh/check_policy.yml reads). See tasks/mesh/main.yml.
 github_runner_cluster_mesh: tailscale
 # The tag every node registers with, and that the policy must let register and auto-approve the pod routes for.
 github_runner_cluster_mesh_tag: "tag:github-runner-node"
@@ -34,10 +34,10 @@ github_runner_cluster_pod_cidr: "10.42.0.0/16"
 # Headscale, for every headscale_* provider. github_runner_cluster_headscale_url is the control server URL each node's Tailscale client registers with (it becomes controlServerURL in --vpn-auth), so every node must reach it. github_runner_cluster_headscale_api_url is where the control node reaches Headscale's REST API; empty means the same URL, and it only needs setting when the control node has a different route to the server.
 github_runner_cluster_headscale_url: ""
 github_runner_cluster_headscale_api_url: ""
-# Secrets, normally set by the github_runner_secrets role (its headscale-api-key and headscale-join-key fields). headscale_existing needs the API key (headscale apikeys create --expiration 90d); the join key may start empty when the role is allowed to create one.
+# Secrets, normally set by the github_runner_secrets role (its headscale-api-key and headscale-join-key fields). headscale_existing needs the API key (headscale apikeys create --expiration 90d); the join key may start empty when the role is allowed to create one. A provider that runs its own Headscale server creates both and keeps them on that server's host, so there these only override the stored ones.
 github_runner_cluster_headscale_api_key: ""
 github_runner_cluster_headscale_join_key: ""
-# Whether headscale_existing may create a join key when the known one is missing, expired or due for renewal. Only safe where the new key can be persisted for the next run; the github_runner_secrets role turns it on in 1Password mode and persists the key itself.
+# Whether headscale_existing may create a join key when the known one is missing, expired or due for renewal. Only safe where the new key can be persisted for the next run; the github_runner_secrets role turns it on in 1Password mode and persists the key itself. A provider that runs its own Headscale server always may, since it keeps the key on that server's host.
 github_runner_cluster_create_headscale_join_key: false
 # The Headscale user new join keys belong to. Empty (the default) creates keys owned by the tag alone, which is what Headscale does for tagged keys; set it to a user name to own them by that user instead.
 github_runner_cluster_headscale_user: ""
@@ -48,6 +48,33 @@ github_runner_cluster_mesh_policy_tag_owner: "{{ 'autogroup:admin' if github_run
 # A new join key's lifetime, and how close to expiry an existing key is replaced. Replacing the key only changes what new nodes register with: nodes already on the mesh keep their registration.
 github_runner_cluster_headscale_join_key_days: 90
 github_runner_cluster_headscale_join_key_renew_days: 14
+
+# The Headscale server the headscale_hosted provider runs itself: this release, pinned deliberately, since Headscale's configuration and API change between minor releases.
+github_runner_cluster_headscale_version: "0.29.3"
+# The inventory host headscale_hosted runs it on. Empty means the cluster's bootstrap server; any inventory host works, including one outside the cluster group (it needs Docker with Compose, and github_runner_cluster_headscale_dir).
+github_runner_cluster_headscale_host: ""
+# Where on that host the role keeps Headscale's configuration, policy, Compose project and the API and join keys it creates (under secrets/, mode 0600). Empty means a headscale directory under the host's github_runner_cluster_repo_root, which a host outside the cluster group does not have.
+github_runner_cluster_headscale_dir: ""
+# How Headscale serves github_runner_cluster_headscale_url. letsencrypt has Headscale obtain its own certificate for the URL's host name (TLS-ALPN-01 on port 443, so that port must reach it from the internet). none serves plain HTTP on github_runner_cluster_headscale_port, for a reverse proxy that terminates TLS in front of it, or a private network every node shares.
+github_runner_cluster_headscale_tls: letsencrypt
+github_runner_cluster_headscale_acme_email: ""
+github_runner_cluster_headscale_port: 8080
+# Derived, never set directly: the port Headscale listens on and the host publishes.
+github_runner_cluster_headscale_listen_port: "{{ 443 if github_runner_cluster_headscale_tls == 'letsencrypt' else github_runner_cluster_headscale_port }}"
+# DERP relays, for nodes that cannot reach each other directly. public uses Tailscale's public DERP map; embedded also runs Headscale's own DERP server, which needs the letsencrypt TLS mode and STUN (UDP 3478) reachable from every node.
+github_runner_cluster_headscale_derp: public
+# Upstream resolvers for the tailnet's DNS. Empty leaves each node's own resolver in place for every name outside the tailnet domain; a list overrides it with these servers.
+github_runner_cluster_headscale_nameservers: []
+# The policy the role writes for a Headscale server it runs: the node tag, auto-approval of the pod routes, and a grant between nodes and their pods (Tailscale and Headscale evaluate a subnet-routed packet by its real source address, so a grant between node tags alone would drop pod-to-pod traffic; see k3s-io/k3s#8372). Replace it to add rules; the policy check fails a replacement that drops the tag or the route approval.
+github_runner_cluster_headscale_policy: >-
+  {{
+    {'tagOwners': {github_runner_cluster_mesh_tag: ([github_runner_cluster_headscale_tag_owner] if github_runner_cluster_headscale_tag_owner else [])},
+     'autoApprovers': {'routes': {github_runner_cluster_pod_cidr: [github_runner_cluster_mesh_tag]}},
+     'grants': [{'src': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'dst': [github_runner_cluster_mesh_tag, github_runner_cluster_pod_cidr], 'ip': ['*']}]}
+  }}
+# Extra Compose files for the headscale_hosted Headscale project, merged after the role's own (e.g. to attach it to a Docker network), as paths on the Headscale host.
+github_runner_cluster_headscale_compose_files: []
+github_runner_cluster_headscale_container_name: github-runner-headscale
 
 # Extra Compose files merged after docker-compose.yml for this host's k3s project, as paths relative to github_runner_cluster_repo_root or absolute. Nothing needs them in normal use; the mesh integration tests use one to put several nodes on one Docker host.
 github_runner_cluster_compose_files: []

@@ -1,0 +1,81 @@
+---
+# Keeps the API key and join key for a Headscale server this role runs, stored on that server's host under secrets/ (mode 0600), so a new key never needs 1Password or any other store: an API key is created with the server's own CLI (github_runner_cluster_headscale_cli, the argv prefix that runs `headscale` there) whenever the stored one is missing or the API rejects it, and the join key goes through the same API steps as headscale_existing, which may create a replacement here. A github_runner_cluster_headscale_api_key or github_runner_cluster_headscale_join_key set some other way (e.g. by the secrets role) takes precedence over the stored one.
+
+- name: Keep the keys, once for the whole play
+  run_once: true
+  block:
+    - name: Read the stored keys
+      ansible.builtin.slurp:
+        src: "{{ github_runner_cluster_headscale_host_dir }}/secrets/{{ item }}"
+      delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
+      loop: [api-key, join-key]
+      register: github_runner_cluster_headscale_stored_keys
+      failed_when: false
+      no_log: true
+
+    - name: Take the supplied keys, or the stored ones
+      ansible.builtin.set_fact:
+        github_runner_cluster_headscale_api_key: >-
+          {{ github_runner_cluster_headscale_api_key or (github_runner_cluster_headscale_stored_keys.results[0].content | default('') | b64decode | trim) }}
+        github_runner_cluster_headscale_join_key: >-
+          {{ github_runner_cluster_headscale_join_key or (github_runner_cluster_headscale_stored_keys.results[1].content | default('') | b64decode | trim) }}
+      no_log: true
+
+    - name: Check the API key against the server
+      ansible.builtin.uri:
+        url: "{{ github_runner_cluster_headscale_api_url or github_runner_cluster_headscale_url }}/api/v1/user"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ github_runner_cluster_headscale_api_key }}"
+        status_code: [200, 401]
+      delegate_to: localhost
+      check_mode: false
+      no_log: true
+      register: github_runner_cluster_headscale_api_probe
+      # A freshly started server can take a moment to answer at all.
+      until: github_runner_cluster_headscale_api_probe.status in [200, 401]
+      retries: 30
+      delay: 2
+      when: github_runner_cluster_headscale_api_key | length > 0
+
+    - name: Create an API key with the server's own CLI
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_headscale_cli + ['apikeys', 'create', '--expiration', github_runner_cluster_headscale_join_key_days ~ 'd'] }}"
+      delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
+      changed_when: true
+      no_log: true
+      register: github_runner_cluster_headscale_new_api_key
+      until: github_runner_cluster_headscale_new_api_key.rc == 0
+      retries: 30
+      delay: 2
+      when: github_runner_cluster_headscale_api_key | length == 0 or github_runner_cluster_headscale_api_probe.status | default(0) == 401
+
+    - name: Store the new API key
+      ansible.builtin.copy:
+        dest: "{{ github_runner_cluster_headscale_host_dir }}/secrets/api-key"
+        content: "{{ github_runner_cluster_headscale_new_api_key.stdout_lines | last }}"
+        mode: "0600"
+      delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
+      no_log: true
+      when: github_runner_cluster_headscale_new_api_key is not skipped
+
+    - name: Use the new API key
+      ansible.builtin.set_fact:
+        github_runner_cluster_headscale_api_key: "{{ github_runner_cluster_headscale_new_api_key.stdout_lines | last }}"
+      no_log: true
+      when: github_runner_cluster_headscale_new_api_key is not skipped
+
+    - name: Check the policy and keep a join key through the API
+      ansible.builtin.include_tasks: mesh/headscale_api.yml
+      vars:
+        github_runner_cluster_headscale_api_base: "{{ github_runner_cluster_headscale_api_url or github_runner_cluster_headscale_url }}"
+        github_runner_cluster_headscale_may_create_join_key: true
+
+    - name: Store a new join key
+      ansible.builtin.copy:
+        dest: "{{ github_runner_cluster_headscale_host_dir }}/secrets/join-key"
+        content: "{{ github_runner_cluster_headscale_new_join_key }}"
+        mode: "0600"
+      delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
+      no_log: true
+      when: github_runner_cluster_headscale_new_join_key is defined

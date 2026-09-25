@@ -1,0 +1,30 @@
+---
+# Checks shared by the providers that run their own Headscale server, before anything is written.
+
+- name: Fail if the Headscale server's settings don't add up
+  ansible.builtin.fail:
+    msg: "{{ item.msg }}"
+  when: item.failed
+  loop:
+    - failed: "{{ github_runner_cluster_headscale_url | length == 0 }}"
+      msg: >-
+        github_runner_cluster_headscale_url is not set: the URL every node registers with, e.g. https://headscale.example.com
+        (or http://<address>:<port> with github_runner_cluster_headscale_tls: none).
+    - failed: "{{ github_runner_cluster_tailnet_domain | length == 0 }}"
+      msg: >-
+        github_runner_cluster_tailnet_domain is not set. A Headscale server this role runs uses it as its MagicDNS base domain,
+        so it names every node as <node name>.<domain>; it must not be, or contain, the Headscale URL's own host name.
+    - failed: "{{ github_runner_cluster_headscale_tls not in ['letsencrypt', 'none'] }}"
+      msg: github_runner_cluster_headscale_tls must be letsencrypt or none.
+    - failed: "{{ github_runner_cluster_headscale_derp not in ['public', 'embedded'] }}"
+      msg: github_runner_cluster_headscale_derp must be public or embedded.
+    - failed: "{{ github_runner_cluster_headscale_tls == 'letsencrypt' and not github_runner_cluster_headscale_url.startswith('https://') }}"
+      msg: github_runner_cluster_headscale_tls is letsencrypt, so github_runner_cluster_headscale_url must be an https URL.
+    - failed: "{{ github_runner_cluster_headscale_derp == 'embedded' and github_runner_cluster_headscale_tls != 'letsencrypt' }}"
+      msg: The embedded DERP server needs TLS, so it needs github_runner_cluster_headscale_tls letsencrypt.
+    - failed: "{{ github_runner_cluster_headscale_host_dir | length == 0 }}"
+      msg: >-
+        No directory for Headscale's files on {{ github_runner_cluster_headscale_host_name }}: set github_runner_cluster_headscale_dir
+        (that host has no github_runner_cluster_repo_root to default it from).
+  loop_control:
+    label: "{{ item.msg | truncate(60) }}"
