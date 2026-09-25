@@ -15,7 +15,8 @@ client=grtest-ls-client
 primary=grtest-ls-primary
 standby=grtest-ls-standby
 headscale_name=headscale.grtest.internal
-api_port=18080
+# Not the mesh integration test's port, so the two can run on one machine at once.
+api_port="${GRTEST_LS_API_PORT:-18480}"
 s3_image=docker.io/versity/versitygw:v1.8.0
 caddy_image=docker.io/library/caddy:2.11.4
 tailscale_image=docker.io/tailscale/tailscale:v1.102.5
@@ -172,6 +173,8 @@ write_override() {
       echo "    profiles: [active]"
     fi
     echo "    depends_on: [headscale]"
+    echo "    environment:"
+    echo "      HEADSCALE_PORT: \"${api_port}\""
     echo "    volumes:"
     echo "      - ${here}/Caddyfile:/etc/caddy/Caddyfile:ro"
     echo "      - ${work}/certs:/certs:ro"

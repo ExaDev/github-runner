@@ -6,5 +6,5 @@
 
 headscale.grtest.internal:443 {
 	tls /certs/server.crt /certs/server.key
-	reverse_proxy headscale:18080
+	reverse_proxy headscale:{$HEADSCALE_PORT}
 }
