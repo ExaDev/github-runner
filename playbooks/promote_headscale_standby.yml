@@ -1,0 +1,19 @@
+---
+# Promotes the warm standby of a cluster using the headscale_hosted mesh provider (github_runner_cluster_headscale_standby_host) when its Headscale server is lost or has to go. Run it from ansible/ like site.yml, e.g.: ansible-playbook ../playbooks/promote_headscale_standby.yml
+#
+# What it does: stops Headscale and its Litestream sidecar on the current server if it can reach it (and refuses to go on if it cannot, unless -e github_runner_cluster_headscale_promote_without_stopping=true says that server is down), restores the replica's latest state on the standby, starts Headscale there, and prints the DNS and inventory changes to make. It changes neither: nodes keep using the old address until the Headscale URL's name points at the standby. See the role README's headscale_hosted section for the recovery time and data loss to expect.
+- name: Promote the Headscale warm standby
+  # One host of the cluster group is enough: the tasks that act on a machine are delegated to the old server or the standby, and the topology reads the whole group anyway.
+  hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}[0]"
+  gather_facts: false
+  tasks:
+    - name: Decide each host's part in the cluster
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: topology
+        public: true
+
+    - name: Promote the standby
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: headscale_promote

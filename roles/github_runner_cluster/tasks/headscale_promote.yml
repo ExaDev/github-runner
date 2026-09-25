@@ -1,0 +1,109 @@
+---
+# Promotes headscale_hosted's warm standby to be the Headscale server, for playbooks/promote_headscale_standby.yml. Run once, after tasks/topology.yml. Stops the old server if it can reach it, restores the replica's latest state on the standby, starts Headscale there and prints the DNS change that makes nodes use it. It never changes DNS or the inventory.
+
+- name: Fail unless the cluster runs headscale_hosted with a standby
+  ansible.builtin.fail:
+    msg: >-
+      Promotion applies to headscale_hosted with github_runner_cluster_headscale_standby_host set; this cluster has
+      github_runner_cluster_mesh {{ github_runner_cluster_mesh }} and standby '{{ github_runner_cluster_headscale_standby_host }}'.
+  when: github_runner_cluster_mesh != 'headscale_hosted' or github_runner_cluster_headscale_standby_host | length == 0
+
+- name: Decide which hosts run Headscale and its standby
+  ansible.builtin.include_tasks: mesh/headscale_hosted_hosts.yml
+
+- name: Stop the old server, so that it neither answers nodes nor writes to the replica again
+  # Headscale first, then its sidecar, which copies Headscale's last writes to the replica as it stops. The docker CLI rather than the Compose module, which would need the host's Docker context read first, on a host that may not answer. A stopped container stays stopped across reboots under the unless-stopped restart policy.
+  ansible.builtin.command:
+    argv: >-
+      {{ ['docker', 'compose', '--project-directory', github_runner_cluster_headscale_host_dir]
+         + (['docker-compose.yml'] + github_runner_cluster_headscale_host_compose_files) | map('regex_replace', '^', '--file=') | list
+         + ['stop', item] }}
+    chdir: "{{ github_runner_cluster_headscale_host_dir }}"
+  loop: [headscale, litestream]
+  delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
+  ignore_unreachable: true
+  failed_when: false
+  changed_when: true
+  register: github_runner_cluster_headscale_promote_stop
+
+- name: Record whether the old server is stopped
+  ansible.builtin.set_fact:
+    github_runner_cluster_headscale_promote_stopped: >-
+      {{ github_runner_cluster_headscale_promote_stop.results | map(attribute='rc', default=1) | select('equalto', 0) | list | length == 2 }}
+    github_runner_cluster_headscale_promote_stop_errors: >-
+      {{ github_runner_cluster_headscale_promote_stop.results | map(attribute='msg', default='') | select | list
+         + github_runner_cluster_headscale_promote_stop.results | map(attribute='stderr', default='') | select | list }}
+
+- name: Fail if the old server could not be stopped, unless promotion goes ahead anyway
+  # Two servers replicating to one replica would each overwrite the other's history.
+  ansible.builtin.fail:
+    msg: |-
+      Could not stop Headscale on {{ github_runner_cluster_headscale_host_name }}: {{ github_runner_cluster_headscale_promote_stop_errors | join('; ') }}
+      If that host is down, or you have stopped its Headscale and Litestream containers some other way, rerun with
+      -e github_runner_cluster_headscale_promote_without_stopping=true. It must then not start them again: when it comes back, run
+      `docker compose stop` in {{ github_runner_cluster_headscale_host_dir }} before anything else, since containers that were running when it went down restart with it.
+  when:
+    - not github_runner_cluster_headscale_promote_stopped | bool
+    - not github_runner_cluster_headscale_promote_without_stopping | default(false) | bool
+
+- name: Promote the standby
+  delegate_to: "{{ github_runner_cluster_headscale_standby_name }}"
+  block:
+    - name: Determine the standby's Docker CLI context
+      ansible.builtin.command: docker context show
+      changed_when: false
+      check_mode: false
+      register: github_runner_cluster_headscale_promote_context
+
+    - name: Stop following the replica
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_cluster_headscale_standby_dir }}"
+        files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files }}"
+        cli_context: "{{ github_runner_cluster_headscale_promote_context.stdout | trim }}"
+        services: [litestream-follow]
+        state: stopped
+
+    - name: Restore the replica's latest state, replacing anything the standby holds
+      # Fails, rather than starting an empty server, if the replica has nothing to restore.
+      ansible.builtin.command:
+        argv: >-
+          {{ ['docker', '--context', github_runner_cluster_headscale_promote_context.stdout | trim, 'compose', '--project-directory', github_runner_cluster_headscale_standby_dir]
+             + (['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files) | map('regex_replace', '^', '--file=') | list
+             + ['--profile', 'active', 'run', '--rm', '--no-deps', '-e', 'GITHUB_RUNNER_LITESTREAM_FORCE=1', 'litestream-restore'] }}
+        chdir: "{{ github_runner_cluster_headscale_standby_dir }}"
+      changed_when: true
+      register: github_runner_cluster_headscale_promote_restore
+
+    - name: Start Headscale and its Litestream sidecar on the standby
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_cluster_headscale_standby_dir }}"
+        files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files }}"
+        cli_context: "{{ github_runner_cluster_headscale_promote_context.stdout | trim }}"
+        profiles: [active]
+        state: present
+        wait: true
+        wait_timeout: 120
+
+    - name: Check the promoted server answers with the restored nodes
+      ansible.builtin.command:
+        argv: [docker, --context, "{{ github_runner_cluster_headscale_promote_context.stdout | trim }}", exec, "{{ github_runner_cluster_headscale_standby_project }}", headscale, nodes, list, --output, json]
+      changed_when: false
+      register: github_runner_cluster_headscale_promote_nodes
+      until: github_runner_cluster_headscale_promote_nodes.rc == 0
+      retries: 30
+      delay: 2
+
+- name: Say what to change next
+  ansible.builtin.debug:
+    msg:
+      - >-
+        Headscale now runs on {{ github_runner_cluster_headscale_standby_name }} with {{ github_runner_cluster_headscale_promote_nodes.stdout | from_json | default([], true) | length }}
+        restored nodes{{ '' if github_runner_cluster_headscale_promote_stopped | bool else ' (the old server was NOT stopped by this run: keep it stopped)' }}.
+      - >-
+        DNS: point {{ github_runner_cluster_headscale_url | urlsplit('hostname') }} at
+        {{ hostvars[github_runner_cluster_headscale_standby_name].ansible_host | default(github_runner_cluster_headscale_standby_name) }}
+        (it now points at {{ hostvars[github_runner_cluster_headscale_host_name].ansible_host | default(github_runner_cluster_headscale_host_name) }}).
+        Nodes reconnect on their own once the name resolves to the new server.
+      - >-
+        Inventory, before the next site.yml run: set github_runner_cluster_headscale_host to {{ github_runner_cluster_headscale_standby_name }}
+        and github_runner_cluster_headscale_standby_host to the old server once it is rebuilt (or empty until then).
