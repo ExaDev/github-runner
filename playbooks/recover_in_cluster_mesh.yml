@@ -63,7 +63,7 @@
                   - docker
                   - run
                   - --detach
-                  - --rm
+                  # No --rm: a server that exits must keep its log for the tasks below; the always block removes it either way.
                   - --name
                   - "{{ github_runner_cluster_recover_rescue }}"
                   - --network
@@ -78,6 +78,21 @@
                   - "docker.io/headscale/headscale:v{{ github_runner_cluster_headscale_version }}"
                   - serve
               changed_when: true
+
+            - name: Wait for the temporary Headscale server to answer
+              ansible.builtin.command:
+                argv: "{{ github_runner_cluster_recover_probe }}"
+              changed_when: false
+              failed_when: false
+              register: github_runner_cluster_recover_rescue_answers
+              until: github_runner_cluster_recover_rescue_answers.rc == 0
+              retries: "{{ github_runner_cluster_recover_answer_retries }}"
+              delay: 5
+
+            - name: Fail if the temporary Headscale server did not start
+              ansible.builtin.fail:
+                msg: The temporary Headscale server never answered; its log follows.
+              when: github_runner_cluster_recover_rescue_answers.rc != 0
 
             - name: Wait for this node to rejoin the cluster on the mesh
               ansible.builtin.command:
