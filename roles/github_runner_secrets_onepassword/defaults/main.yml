@@ -1,0 +1,10 @@
+---
+# The 1Password vault and item every field this role reads lives on, read on the control node with a single `op item get` (plus one `op read` per org's App private key) rather than one `op read` per field: 1Password's desktop-app integration prompts for approval on every distinct op invocation (not once per time window, not once per item), so separate reads would mean separate approval prompts for values that live on the same item.
+github_runner_secrets_onepassword_vault: ""
+github_runner_secrets_onepassword_item: ""
+
+# The roles in this play whose secrets to resolve: cluster (github_runner_cluster) and/or arc (github_runner_arc). The playbook sets it to the roles it runs, so an ARC-only play needs no k3s-token field and a cluster-only play reads no org keys.
+github_runner_secrets_onepassword_consumers: [cluster, arc]
+
+# Cached on the CONTROL NODE (never in this repo, never on a fleet host) after the first successful 1Password read, keyed by the item name, so a repeated debugging session does not mean one desktop-app approval prompt per run. `lookup('env', 'HOME')`, not `ansible_facts`: inside a delegated task, ansible_facts still refers to the CURRENT (target) host's own gathered facts, not localhost's. Delete the file to force a fresh read (e.g. after rotating a secret).
+github_runner_secrets_onepassword_cache_path: "{{ lookup('env', 'HOME') }}/.cache/github-runner-arc/secrets-{{ github_runner_secrets_onepassword_item }}.json"

@@ -73,7 +73,7 @@
       The Headscale join key cannot be used: {{ github_runner_cluster_headscale_join_key_problem }}. Supply a reusable,
       non-ephemeral pre-auth key tagged {{ github_runner_cluster_mesh_tag }} as github_runner_cluster_headscale_join_key
       (headscale preauthkeys create --reusable --tags {{ github_runner_cluster_mesh_tag }} --expiration 90d), or give a new key
-      somewhere to be kept (github_runner_cluster_join_key_path, or a secrets adapter such as github_runner_secrets) so the role
+      somewhere to be kept (github_runner_cluster_join_key_path, or a secrets adapter such as github_runner_secrets_onepassword) so the role
       can create one.
   when:
     - github_runner_cluster_headscale_join_key_problem | length > 0

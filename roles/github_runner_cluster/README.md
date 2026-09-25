@@ -86,9 +86,18 @@ all:
 ```yaml
 - hosts: github_runner_cluster
   roles:
-    - exadev.github_runner.github_runner_secrets
     - exadev.github_runner.github_runner_cluster
 ```
+
+with the secrets set from any source, for example:
+
+```yaml
+# group_vars/github_runner_cluster.yml
+github_runner_cluster_k3s_token: "{{ vault_k3s_token }}"
+github_runner_cluster_tailscale_join_key: "{{ lookup('ansible.builtin.env', 'TAILSCALE_JOIN_KEY') }}"
+```
+
+or read from 1Password by adding `exadev.github_runner.github_runner_secrets_onepassword` (with `github_runner_secrets_onepassword_consumers: [cluster]`) before it.
 
 ## Testing
 

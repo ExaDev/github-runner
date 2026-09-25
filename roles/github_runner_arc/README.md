@@ -12,7 +12,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 
 ## Variables
 
-- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id`, `image`, `private_key` (the App's PEM private key, from any source Ansible reads) or `private_key_op_reference` (an `op://` reference that the 1Password secrets role resolves into `private_key`), optionally `installation_id` (resolved from the App when empty), and `scale_set_profiles`, a list of profiles:
+- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id`, `image`, `private_key` (the App's PEM private key, from any source Ansible reads) or `private_key_op_reference` (an `op://` reference that the `github_runner_secrets_onepassword` adapter resolves into `private_key`), optionally `installation_id` (resolved from the App when empty), and `scale_set_profiles`, a list of profiles:
   - `suffix`: appended to the namespace (`arc-runners-<org><suffix>`) and release (`<org>-runners<suffix>`) names. Default empty.
   - `values_file`: Helm values for the release, a Jinja template read from `github_runner_arc_values_dir` on the control node (or an absolute path). Without it the role's `templates/runner-scale-set-values.yaml.j2` is used, driven by the profile's own `max_runners`, `min_runners`, `container_mode` (`dind` for the chart's Docker-in-Docker mode) and `resources` (the runner container's requests and limits).
   - `node_selector`: a nodeSelector for the runner pods, merged over the eligibility label below.
@@ -71,7 +71,8 @@ github_runner_arc_values_dir: "{{ playbook_dir }}/../values"
 github_runner_arc_orgs:
   - name: ExampleOrg
     app_id: 123456
-    private_key_op_reference: "op://Vault/example-app-private-key/private key"
+    # The App's PEM key, from ansible-vault here; any lookup works too. With the 1Password adapter, private_key_op_reference: "op://Vault/example-app-private-key/private key" instead.
+    private_key: "{{ vault_example_app_private_key }}"
     image: "ghcr.io/example/github-runner:latest"
     scale_set_profiles:
       - suffix: ""

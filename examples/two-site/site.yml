@@ -6,7 +6,10 @@
   vars:
     github_runner_cluster_group: site_a
   roles:
-    - exadev.github_runner.github_runner_secrets
+    - role: exadev.github_runner.github_runner_secrets_onepassword
+      when: github_runner_secrets_source | default('none') == 'onepassword'
+      vars:
+        github_runner_secrets_onepassword_consumers: [cluster]
     - exadev.github_runner.github_runner_cluster
 
 - name: Site B cluster
@@ -15,5 +18,8 @@
   vars:
     github_runner_cluster_group: site_b
   roles:
-    - exadev.github_runner.github_runner_secrets
+    - role: exadev.github_runner.github_runner_secrets_onepassword
+      when: github_runner_secrets_source | default('none') == 'onepassword'
+      vars:
+        github_runner_secrets_onepassword_consumers: [cluster]
     - exadev.github_runner.github_runner_cluster

@@ -1,0 +1,150 @@
+---
+# Reads the cluster and ARC roles' secrets from one 1Password item and sets them as those roles' own plain variables, for the roles named in github_runner_secrets_onepassword_consumers only: github_runner_cluster_k3s_token, github_runner_cluster_tailscale_join_key, github_runner_cluster_tailscale_api_token, github_runner_cluster_headscale_api_key, github_runner_cluster_headscale_join_key and github_runner_cluster_join_key_listener for cluster; github_runner_arc_ghcr_username, github_runner_arc_ghcr_token, github_runner_arc_heartbeat_gh_token and each org's private_key (from its private_key_op_reference) in github_runner_arc_orgs for arc.
+
+- name: Fail if the 1Password vault or item is not set
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_secrets_onepassword_vault and github_runner_secrets_onepassword_item must be set on this host to read its
+      secrets from 1Password. Add them to host_vars/{{ inventory_hostname }}.yml.
+  when: github_runner_secrets_onepassword_vault | length == 0 or github_runner_secrets_onepassword_item | length == 0
+
+- name: Fail if a consumer is unknown
+  ansible.builtin.fail:
+    msg: github_runner_secrets_onepassword_consumers is {{ github_runner_secrets_onepassword_consumers }}; each entry must be cluster or arc.
+  when: github_runner_secrets_onepassword_consumers | difference(['cluster', 'arc']) | length > 0
+
+# Delegated to the control node, not this host: 1Password access (desktop-app integration, or a signed-in CLI session) belongs to whichever machine an operator is actually running Ansible from, not to every fleet host. No delegate_facts: a plain `register:` result already attaches to inventory_hostname regardless of where the task's execution was delegated to; only `set_fact`'s own fact-namespace assignment is sensitive to delegate_facts (see the ARC role's resolve_installation_id.yml for the one place that mattered, and why delegate_facts: true there was backwards).
+- name: Check for a cached 1Password secrets read
+  ansible.builtin.stat:
+    path: "{{ github_runner_secrets_onepassword_cache_path }}"
+  delegate_to: localhost
+  register: github_runner_secrets_onepassword_cache_file
+
+# The cache above is shared by every host that uses this exact secrets item, but github_runner_arc_orgs is host-specific (an agent host defines none at all). Building org_private_keys from only the TRIGGERING host's own org list means whichever host happens to populate the cache first determines what's in it forever after: an agent-only run once seeded the cache with an empty org_private_keys, silently breaking a later GitHub App secret creation once another host read that same cache back. Aggregating across every host sharing this item makes the cached content correct regardless of which host writes it first.
+- name: Compute every org configured anywhere in the fleet that shares this item and names its key by 1Password reference
+  ansible.builtin.set_fact:
+    github_runner_secrets_onepassword_all_orgs: >-
+      {{
+        (groups['all']
+        | map('extract', hostvars)
+        | selectattr('github_runner_secrets_onepassword_item', 'defined')
+        | selectattr('github_runner_secrets_onepassword_item', 'equalto', github_runner_secrets_onepassword_item)
+        | map(attribute='github_runner_arc_orgs', default=[])
+        | list | flatten | selectattr('private_key_op_reference', 'defined') | unique(attribute='name'))
+        if 'arc' in github_runner_secrets_onepassword_consumers else []
+      }}
+
+- name: Load the cached read
+  ansible.builtin.set_fact:
+    github_runner_secrets_onepassword_cached: >-
+      {{ (lookup('ansible.builtin.file', github_runner_secrets_onepassword_cache_file.stat.path) | from_json)
+         if github_runner_secrets_onepassword_cache_file.stat.exists else {} }}
+  no_log: true
+
+# Every org when there is no cache; otherwise only orgs added since it was written (a cache written by a play that did not run the ARC role holds none), so a cached item is never read again.
+- name: Work out which org keys still need reading
+  ansible.builtin.set_fact:
+    github_runner_secrets_onepassword_orgs_to_read: >-
+      {{ github_runner_secrets_onepassword_all_orgs
+         | rejectattr('name', 'in', (github_runner_secrets_onepassword_cached.org_private_keys | default({})).keys() | list) | list }}
+
+# A field missing from the item reads as empty rather than failing the read, so the item only needs the fields the play's roles use; the checks below and the roles' own checks name any that is missing.
+- name: Read the 1Password item and org keys this play needs in one shell invocation
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {% if github_runner_secrets_onepassword_cache_file.stat.exists %}
+    secrets='{}'
+    {% else %}
+    secrets=$(op item get '{{ github_runner_secrets_onepassword_item }}' --vault '{{ github_runner_secrets_onepassword_vault }}' --format json --reveal | jq -c '{
+      k3s_token: ([.fields[] | select(.label=="k3s-token") | .value] | first // ""),
+      ghcr_username: ([.fields[] | select(.label=="ghcr-username") | .value] | first // ""),
+      ghcr_token: ([.fields[] | select(.label=="ghcr-token") | .value] | first // ""),
+      heartbeat_gh_token: ([.fields[] | select(.label=="heartbeat-gh-token") | .value] | first // ""),
+      tailscale_join_key: ([.fields[] | select(.label=="tailscale-join-key") | .value] | first // ""),
+      tailscale_api_token: ([.fields[] | select(.label=="tailscale-api-token") | .value] | first // ""),
+      headscale_api_key: ([.fields[] | select(.label=="headscale-api-key") | .value] | first // ""),
+      headscale_join_key: ([.fields[] | select(.label=="headscale-join-key") | .value] | first // "")
+    }')
+    {% endif %}
+    org_keys='{}'
+    {% for org in github_runner_secrets_onepassword_orgs_to_read %}
+    key_{{ loop.index }}=$(op read '{{ org.private_key_op_reference }}')
+    org_keys=$(jq -n --argjson prev "$org_keys" --arg name '{{ org.name }}' --arg key "$key_{{ loop.index }}" '$prev + {($name): $key}')
+    {% endfor %}
+    jq -n --argjson secrets "$secrets" --argjson org_keys "$org_keys" '$secrets + {org_private_keys: $org_keys}'
+  delegate_to: localhost
+  changed_when: false
+  no_log: true
+  # Read-only; everything after it needs the secrets, including under --check.
+  check_mode: false
+  register: github_runner_secrets_onepassword_raw
+  when: not github_runner_secrets_onepassword_cache_file.stat.exists or github_runner_secrets_onepassword_orgs_to_read | length > 0
+
+- name: Combine the cached read with what was just read
+  ansible.builtin.set_fact:
+    github_runner_secrets_onepassword_values: >-
+      {{ github_runner_secrets_onepassword_cached
+         | combine(github_runner_secrets_onepassword_raw.stdout | from_json if github_runner_secrets_onepassword_raw is not skipped else {}, recursive=true) }}
+  no_log: true
+
+- name: Create the cache's directory on the control node
+  ansible.builtin.file:
+    path: "{{ github_runner_secrets_onepassword_cache_path | dirname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  when:
+    - github_runner_secrets_onepassword_raw is not skipped
+    - github_runner_secrets_onepassword_cache_path | dirname is not directory
+
+# A first read is cached exactly as op and jq printed it; a cache that only gained org keys is rewritten from the combined values.
+- name: Cache this read for future runs
+  ansible.builtin.copy:
+    dest: "{{ github_runner_secrets_onepassword_cache_path }}"
+    content: >-
+      {{ github_runner_secrets_onepassword_values | to_json if github_runner_secrets_onepassword_cache_file.stat.exists
+         else github_runner_secrets_onepassword_raw.stdout }}
+    mode: "0600"
+  delegate_to: localhost
+  no_log: true
+  when: github_runner_secrets_onepassword_raw is not skipped
+
+- name: Fail if the item has no k3s token for the cluster role
+  ansible.builtin.fail:
+    msg: >-
+      The 1Password item {{ github_runner_secrets_onepassword_vault }}/{{ github_runner_secrets_onepassword_item }} has no
+      k3s-token field (or it is empty), which the cluster role needs. If you have just added it, delete the cached read at
+      {{ github_runner_secrets_onepassword_cache_path }} and rerun.
+  when:
+    - "'cluster' in github_runner_secrets_onepassword_consumers"
+    - github_runner_secrets_onepassword_values.k3s_token | length == 0
+
+# This role keeps a Tailscale or Headscale join key the cluster role creates: it turns on github_runner_cluster_join_key_listener, and its handler (tasks/persist_join_key.yml) writes the new key back to the item.
+#
+# The Headscale fields are optional on the item, and an empty one leaves any value already set for the cluster role (e.g. in inventory) in place.
+- name: Hand the cluster role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
+  ansible.builtin.set_fact:
+    github_runner_cluster_k3s_token: "{{ github_runner_secrets_onepassword_values.k3s_token }}"
+    github_runner_cluster_tailscale_join_key: "{{ github_runner_secrets_onepassword_values.tailscale_join_key | default('') }}"
+    github_runner_cluster_tailscale_api_token: "{{ github_runner_secrets_onepassword_values.tailscale_api_token | default('') }}"
+    github_runner_cluster_headscale_api_key: "{{ github_runner_secrets_onepassword_values.headscale_api_key | default('', true) or github_runner_cluster_headscale_api_key | default('') }}"
+    github_runner_cluster_headscale_join_key: "{{ github_runner_secrets_onepassword_values.headscale_join_key | default('', true) or github_runner_cluster_headscale_join_key | default('') }}"
+    github_runner_cluster_join_key_listener: true
+  no_log: true
+  when: "'cluster' in github_runner_secrets_onepassword_consumers"
+
+- name: Hand the ARC role its own secrets  # noqa: var-naming[no-role-prefix] - these facts are the other role's own inputs, so they carry its prefix
+  ansible.builtin.set_fact:
+    github_runner_arc_ghcr_username: "{{ github_runner_secrets_onepassword_values.ghcr_username }}"
+    github_runner_arc_ghcr_token: "{{ github_runner_secrets_onepassword_values.ghcr_token }}"
+    github_runner_arc_heartbeat_gh_token: "{{ github_runner_secrets_onepassword_values.heartbeat_gh_token }}"
+  no_log: true
+  when: "'arc' in github_runner_secrets_onepassword_consumers"
+
+- name: Give each of this host's orgs that names its App key by 1Password reference the key itself  # noqa: var-naming[no-role-prefix] - the ARC role's own input
+  ansible.builtin.set_fact:
+    github_runner_arc_orgs: "{{ github_runner_arc_orgs | exadev.github_runner.onepassword_fill_org_keys(github_runner_secrets_onepassword_values.org_private_keys) }}"
+  no_log: true
+  when:
+    - "'arc' in github_runner_secrets_onepassword_consumers"
+    - github_runner_arc_orgs | default([]) | selectattr('private_key_op_reference', 'defined') | list | length > 0

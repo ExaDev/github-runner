@@ -7,9 +7,9 @@
       - op
       - item
       - edit
-      - "{{ github_runner_secrets_item }}"
+      - "{{ github_runner_secrets_onepassword_item }}"
       - --vault
-      - "{{ github_runner_secrets_vault }}"
+      - "{{ github_runner_secrets_onepassword_vault }}"
       - "{{ github_runner_cluster_new_join_key.mesh }}-join-key[password]={{ github_runner_cluster_new_join_key.key }}"
   delegate_to: localhost
   changed_when: true
@@ -17,13 +17,13 @@
 
 - name: Fold the new join key into this run's own in-memory secrets
   ansible.builtin.set_fact:
-    github_runner_secrets_values: "{{ github_runner_secrets_values | combine({github_runner_cluster_new_join_key.mesh ~ '_join_key': github_runner_cluster_new_join_key.key}) }}"
+    github_runner_secrets_onepassword_values: "{{ github_runner_secrets_onepassword_values | combine({github_runner_cluster_new_join_key.mesh ~ '_join_key': github_runner_cluster_new_join_key.key}) }}"
   no_log: true
 
 - name: Refresh the cached secrets read to match, so future runs see the new key without re-reading 1Password
   ansible.builtin.copy:
-    dest: "{{ github_runner_secrets_cache_path }}"
-    content: "{{ github_runner_secrets_values | to_json }}"
+    dest: "{{ github_runner_secrets_onepassword_cache_path }}"
+    content: "{{ github_runner_secrets_onepassword_values | to_json }}"
     mode: "0600"
   delegate_to: localhost
   no_log: true

@@ -1,7 +1,7 @@
 ---
 galaxy_info:
   author: ExaDev
-  description: Resolves the cluster and ARC roles' secrets from 1Password or from supplied values.
+  description: Optional adapter that reads the cluster and ARC roles' secrets from one 1Password item and sets them as those roles' plain variables.
   license: MIT
   min_ansible_version: "2.15"
   platforms:

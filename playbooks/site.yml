@@ -1,10 +1,16 @@
 ---
 # Single entrypoint. Run it from ansible/ so that ansible.cfg and the inventory apply, and scope a run to one machine with --limit, e.g.: ansible-playbook ../playbooks/site.yml --limit node-b
-# Checks the ARC configuration before k3s is started or changed, so bad input fails before anything changes. Needs no facts and no secrets.
+# The roles read their secrets as plain variables, from any source Ansible reads (ansible-vault, SOPS, an env, HashiCorp Vault or SSM lookup). github_runner_secrets_source: onepassword adds the 1Password adapter role, which reads them from one 1Password item instead; none (the default) adds nothing.
+# Checks the secrets source and the ARC configuration before k3s is started or changed, so bad input fails before anything changes. Needs no facts and no secrets.
 - name: Validate the ARC configuration
   hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
   gather_facts: false
   tasks:
+    - name: Fail if the secrets source is unknown
+      ansible.builtin.fail:
+        msg: github_runner_secrets_source is '{{ github_runner_secrets_source }}'; it must be onepassword or none.
+      when: github_runner_secrets_source | default('none') not in ['onepassword', 'none']
+
     - name: Validate before anything changes
       ansible.builtin.include_role:
         name: exadev.github_runner.github_runner_arc
@@ -32,7 +38,10 @@
         state: present
 
   roles:
-    - exadev.github_runner.github_runner_secrets
+    - role: exadev.github_runner.github_runner_secrets_onepassword
+      when: github_runner_secrets_source | default('none') == 'onepassword'
+      vars:
+        github_runner_secrets_onepassword_consumers: [cluster, arc]
     # Only the hosts that go on to install ARC or the fleet-health platform wait for the cluster's nodes to be Ready: they are the ones that talk to the Kubernetes API, and waiting needs the kubernetes Python client the others never install.
     - role: exadev.github_runner.github_runner_cluster
       vars:

@@ -2,8 +2,10 @@
 # Three servers joining through a Headscale server that runs inside the cluster itself, as a static pod on the bootstrap server (node1), published on that host's port 443 with its own Let's Encrypt certificate. No machine outside the cluster is needed, at the cost of the control server living on one node of the cluster it serves: see the role README's headscale_in_cluster section and playbooks/recover_in_cluster_mesh.yml.
 all:
   vars:
-    github_runner_secrets_vault: Example
-    github_runner_secrets_item: github-runner
+    # Secrets from one 1Password item, through the adapter role playbooks/site.yml adds for this source. See examples/ansible-vault and examples/env for the same variables from other sources.
+    github_runner_secrets_source: onepassword
+    github_runner_secrets_onepassword_vault: Example
+    github_runner_secrets_onepassword_item: github-runner
   children:
     github_runner_cluster:
       vars:

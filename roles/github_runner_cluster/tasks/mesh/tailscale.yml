@@ -24,7 +24,7 @@
       Supply github_runner_cluster_tailscale_join_key, or a
       github_runner_cluster_tailscale_api_token together with somewhere to keep
       a new key (github_runner_cluster_join_key_path, or a secrets adapter such
-      as github_runner_secrets) so tasks/mesh/tailscale_api.yml can create one.
+      as github_runner_secrets_onepassword) so tasks/mesh/tailscale_api.yml can create one.
   no_log: true
 
 - name: Publish the ACL policy tailscale_api.yml just ensured, for the shared check

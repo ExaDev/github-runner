@@ -1,11 +1,16 @@
 ---
 # ARC only, against a cluster that already exists: the controller, the orgs' runner scale sets and, if configured, the fleet-health platform. Runs on the control node by default, talking to the cluster through github_runner_arc_kubeconfig_path (empty means KUBECONFIG or ~/.kube/config), with helm, kubectl and python3 on the control node. Put the role's variables in a vars file, e.g.:
 #   ansible-playbook playbooks/arc.yml -e @arc-vars.yml
-# Secrets come from github_runner_secrets when github_runner_secrets_vault/_item or github_runner_secrets_provided is set, otherwise set github_runner_arc_ghcr_username, github_runner_arc_ghcr_token, github_runner_arc_org_private_keys and (for the platform) github_runner_arc_heartbeat_gh_token directly. Set github_runner_arc_hosts to run from inventory hosts instead.
+# Secrets are plain variables: github_runner_arc_ghcr_username, github_runner_arc_ghcr_token, each org's private_key and (for the platform) github_runner_arc_heartbeat_gh_token, from any source Ansible reads. With github_runner_secrets_source: onepassword, the 1Password adapter reads them from github_runner_secrets_onepassword_vault/_item instead, resolving only the ARC role's fields. Set github_runner_arc_hosts to run from inventory hosts instead.
 - name: Validate the ARC configuration
   hosts: "{{ github_runner_arc_hosts | default('localhost') }}"
   gather_facts: false
   tasks:
+    - name: Fail if the secrets source is unknown
+      ansible.builtin.fail:
+        msg: github_runner_secrets_source is '{{ github_runner_secrets_source }}'; it must be onepassword or none.
+      when: github_runner_secrets_source | default('none') not in ['onepassword', 'none']
+
     - name: Validate before anything changes
       ansible.builtin.include_role:
         name: exadev.github_runner.github_runner_arc
@@ -15,10 +20,12 @@
   hosts: "{{ github_runner_arc_hosts | default('localhost') }}"
   gather_facts: true
   tasks:
-    - name: Resolve secrets
+    - name: Read the ARC role's secrets from 1Password
       ansible.builtin.include_role:
-        name: exadev.github_runner.github_runner_secrets
-      when: (github_runner_secrets_vault | default('')) | length > 0 or (github_runner_secrets_provided | default({})) | length > 0
+        name: exadev.github_runner.github_runner_secrets_onepassword
+      vars:
+        github_runner_secrets_onepassword_consumers: [arc]
+      when: github_runner_secrets_source | default('none') == 'onepassword'
 
     - name: Install ARC
       ansible.builtin.include_role:

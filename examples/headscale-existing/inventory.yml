@@ -2,11 +2,13 @@
 # Three servers joining through a Headscale server someone else runs. The role reads its policy and fails, printing the JSON to add, until the policy defines the node tag and auto-approves the pod routes:
 #   "tagOwners": {"tag:github-runner-node": []},
 #   "autoApprovers": {"routes": {"10.42.0.0/16": ["tag:github-runner-node"]}}
-# plus a grant between the tag and 10.42.0.0/16 in both directions for pod traffic. The Headscale API key comes from the secrets role's headscale-api-key field; in 1Password mode the role creates the join key itself and stores it in headscale-join-key.
+# plus a grant between the tag and 10.42.0.0/16 in both directions for pod traffic. The Headscale API key comes from the 1Password item's headscale-api-key field; the role creates the join key itself and the adapter stores it in headscale-join-key. Without 1Password, set github_runner_cluster_headscale_api_key and either supply the join key or set github_runner_cluster_join_key_path for the role to keep one there.
 all:
   vars:
-    github_runner_secrets_vault: Example
-    github_runner_secrets_item: github-runner
+    # Secrets from one 1Password item, through the adapter role playbooks/site.yml adds for this source. See examples/ansible-vault and examples/env for the same variables from other sources.
+    github_runner_secrets_source: onepassword
+    github_runner_secrets_onepassword_vault: Example
+    github_runner_secrets_onepassword_item: github-runner
   children:
     github_runner_cluster:
       vars:

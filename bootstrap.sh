@@ -74,14 +74,12 @@ jq -n \
     github_runner_arc_autoscaler_usable_budget_gi: (env.AUTOSCALER_USABLE_BUDGET_GI // "" | if . == "" then "24" else . end),
     github_runner_arc_autoscaler_max_ceiling: (env.AUTOSCALER_MAX_CEILING // "" | if . == "" then "7" else . end),
     github_runner_arc_autoscaler_floor: (env.AUTOSCALER_FLOOR // "" | if . == "" then "3" else . end),
-    github_runner_secrets_provided: {
-      k3s_token: (env.K3S_TOKEN // ""),
-      tailscale_join_key: (env.K3S_VPN_AUTH_JOIN_KEY // ""),
-      tailscale_api_token: (env.TAILSCALE_API_TOKEN // ""),
-      ghcr_username: (env.GHCR_PULL_USERNAME // ""),
-      ghcr_token: (env.GHCR_PULL_TOKEN // ""),
-      heartbeat_gh_token: (env.HEARTBEAT_GH_TOKEN // "")
-    }
+    github_runner_cluster_k3s_token: (env.K3S_TOKEN // ""),
+    github_runner_cluster_tailscale_join_key: (env.K3S_VPN_AUTH_JOIN_KEY // ""),
+    github_runner_cluster_tailscale_api_token: (env.TAILSCALE_API_TOKEN // ""),
+    github_runner_arc_ghcr_username: (env.GHCR_PULL_USERNAME // ""),
+    github_runner_arc_ghcr_token: (env.GHCR_PULL_TOKEN // ""),
+    github_runner_arc_heartbeat_gh_token: (env.HEARTBEAT_GH_TOKEN // "")
   }
   + opt("github_runner_arc_autoscaler_dry_run"; "AUTOSCALER_DRY_RUN")
   + opt("github_runner_arc_autoscaler_poll_seconds"; "AUTOSCALER_POLL_SECONDS")

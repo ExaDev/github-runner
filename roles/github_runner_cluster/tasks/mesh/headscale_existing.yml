@@ -38,5 +38,5 @@
     github_runner_cluster_mesh_control_server_url: "{{ github_runner_cluster_headscale_url }}"
     github_runner_cluster_mesh_missing_key_hint: >-
       Supply github_runner_cluster_headscale_join_key, or give a new key somewhere to be kept (github_runner_cluster_join_key_path,
-      or a secrets adapter such as github_runner_secrets) so the role can create one.
+      or a secrets adapter such as github_runner_secrets_onepassword) so the role can create one.
   no_log: true

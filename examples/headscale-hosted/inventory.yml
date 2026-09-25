@@ -2,8 +2,10 @@
 # Three servers joining through a Headscale server the role runs under Docker Compose on a small dedicated machine outside the cluster, so the control server does not depend on the cluster it serves. Headscale gets its own Let's Encrypt certificate, so headscale.example.com must resolve to that machine and its port 443 must reach it from the internet. Leave github_runner_cluster_headscale_host unset to run Headscale on the bootstrap server instead (still outside k3s).
 all:
   vars:
-    github_runner_secrets_vault: Example
-    github_runner_secrets_item: github-runner
+    # Secrets from one 1Password item, through the adapter role playbooks/site.yml adds for this source. See examples/ansible-vault and examples/env for the same variables from other sources.
+    github_runner_secrets_source: onepassword
+    github_runner_secrets_onepassword_vault: Example
+    github_runner_secrets_onepassword_item: github-runner
   children:
     github_runner_cluster:
       vars:
