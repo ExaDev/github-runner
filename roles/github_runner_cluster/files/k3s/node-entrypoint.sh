@@ -15,6 +15,10 @@ mkdir -p /var/run/tailscale /var/lib/tailscale
 tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
 until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 0.5; done
 
+# Keeps traffic addressed to the mesh on the mesh. Tailscale routes each peer's address through tailscale0 from its own policy table (52), which the kernel consults before the main table, so these routes only catch mesh addresses Tailscale has no route for: every one of them while this node is off the mesh (a self-hosted bootstrap server starting direct, or a node whose control server is down), when etcd, kubelet and flannel keep dialling peers' mesh addresses. Without them those connections take the default route out of the container onto the host's network, where the same range is often the host's own tailnet. Confirmed on a Docker VM whose host ran Tailscale: the hanging connections exhausted the VM's user-mode network proxy and cut the internet off for every container on it until they stopped. The ranges are Headscale's prefixes (templates/headscale/config.yaml.j2) and Tailscale's own, which are the same.
+ip route replace unreachable 100.64.0.0/10
+ip -6 route replace unreachable fd7a:115c:a1e0::/48
+
 # Only a self-hosted bootstrap server may start without a join key: its first start is what brings up the Headscale server that issues it.
 if [ -z "$join_key" ] && [ -z "$self_hosted_health_url" ]; then
   echo "K3S_VPN_AUTH_JOIN_KEY must be set in .env: a reusable, pre-authorised join key for the mesh (see the README's Tailscale section for how it's provisioned)." >&2
