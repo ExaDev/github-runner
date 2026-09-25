@@ -1,0 +1,107 @@
+name: Mesh integration
+
+# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check. Only on changes that can affect how nodes join the mesh.
+#
+# Routes through ExaDev/runner-fallback-action like ci.yml, but prefers the exadev-image-builder profile rather than exadev-runners: this job needs a Docker daemon that can run privileged containers (k3s, and Tailscale inside it), which only that profile's Docker-in-Docker sidecar provides. It falls back to ubuntu-latest, which has one natively. The work directory sits under runner.temp because the DinD daemon resolves Compose bind mounts on its own filesystem, and only the runner's _work volume is shared with it.
+
+on:
+  pull_request:
+    paths:
+      - roles/github_runner_cluster/**
+      - plugins/filter/**
+      - docker-compose.yml
+      - k3s/**
+      - playbooks/recover_in_cluster_mesh.yml
+      - tests/mesh/**
+      - .github/workflows/mesh-integration.yml
+  workflow_dispatch:
+
+concurrency:
+  group: mesh-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  determine-runner:
+    name: Determine runner
+    runs-on: exadev-runners
+    timeout-minutes: 5
+    outputs:
+      selected-runner: ${{ steps.fallback.outputs.selected-runner || '["ubuntu-latest"]' }}
+    steps:
+      - id: fallback
+        uses: ExaDev/runner-fallback-action@b774d51ff5360bf53705b2eb34ff019afd4d7f07
+        with:
+          preferred-labels: exadev-image-builder
+
+  mesh:
+    name: Mesh (${{ matrix.scenario }})
+    needs: determine-runner
+    runs-on: ${{ fromJson(needs.determine-runner.outputs.selected-runner) }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      # The builder profile runs one job at a time anyway; this keeps the scenarios from queueing behind each other's timeouts on ubuntu-latest too.
+      max-parallel: 1
+      matrix:
+        scenario: [existing, hosted, in_cluster]
+    env:
+      COMPOSE_VERSION: v5.5.1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Docker Compose if the runner lacks it
+        # The fleet's runner image ships the Docker CLI and buildx but not the Compose plugin.
+        run: |
+          set -euo pipefail
+          if docker compose version >/dev/null 2>&1; then
+            docker compose version
+            exit 0
+          fi
+          case "$(uname -m)" in
+            x86_64) arch=x86_64 ;;
+            aarch64 | arm64) arch=aarch64 ;;
+            *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          mkdir -p "${HOME}/.docker/cli-plugins"
+          base="https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${arch}"
+          curl -fsSL -o "${RUNNER_TEMP}/docker-compose" "$base"
+          echo "$(curl -fsSL "${base}.sha256" | cut -d' ' -f1)  ${RUNNER_TEMP}/docker-compose" | sha256sum -c -
+          install -m 0755 "${RUNNER_TEMP}/docker-compose" "${HOME}/.docker/cli-plugins/docker-compose"
+          docker compose version
+
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core
+          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install -r ansible/requirements.yml -p "${RUNNER_TEMP}/collections"
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run the ${{ matrix.scenario }} scenario
+        env:
+          ANSIBLE_COLLECTIONS_PATH: ${{ runner.temp }}/collections
+          GRTEST_WORK: ${{ runner.temp }}/grtest-mesh
+        run: tests/mesh/run.sh "${{ matrix.scenario }}"
+
+  required-checks:
+    name: Mesh integration result
+    needs: [determine-runner, mesh]
+    if: always()
+    # The ordinary pool, like determine-runner: this job only reads results, so it has no reason to wait for the single builder runner.
+    runs-on: exadev-runners
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any scenario failed or was cancelled
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more scenarios did not succeed:"
+            echo '${{ toJSON(needs) }}'
+            exit 1
+          fi

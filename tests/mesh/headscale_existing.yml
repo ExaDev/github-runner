@@ -1,0 +1,21 @@
+---
+# Runs only the cluster role's mesh setup with the headscale_existing provider, against a Headscale server the integration test started, from the control node. Pass headscale_url, headscale_api_key and optionally headscale_join_key as extra vars; the test asserts on whether it fails and on what it prints.
+- name: Check a Headscale server with the headscale_existing mesh provider
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    github_runner_cluster_mesh: headscale_existing
+    github_runner_cluster_headscale_url: "{{ headscale_url }}"
+    github_runner_cluster_headscale_api_key: "{{ headscale_api_key }}"
+    github_runner_cluster_headscale_join_key: "{{ headscale_join_key | default('') }}"
+  tasks:
+    - name: Set up the mesh
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: mesh/main
+        public: true
+
+    - name: Show the join key the provider settled on, masked to its prefix
+      ansible.builtin.debug:
+        msg: "join key prefix: {{ github_runner_cluster_mesh_join_key[:18] }}"

@@ -1,0 +1,9 @@
+// Defines the node tag but, deliberately, no autoApprovers: the policy check must fail and print the entry to add.
+{
+  "tagOwners": {
+    "tag:github-runner-node": [],
+  },
+  "grants": [
+    {"src": ["tag:github-runner-node"], "dst": ["tag:github-runner-node"], "ip": ["*"]},
+  ],
+}

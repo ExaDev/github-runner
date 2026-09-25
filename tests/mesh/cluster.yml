@@ -1,0 +1,7 @@
+---
+# Runs the cluster role alone (no secrets or ARC roles) against the mesh integration test's inventory, which tests/mesh/run.sh writes.
+- name: Bring up the test cluster
+  hosts: github_runner_cluster
+  gather_facts: false
+  roles:
+    - exadev.github_runner.github_runner_cluster
