@@ -58,6 +58,8 @@ services:
   litestream-follow:
     image: docker.io/litestream/litestream:{{ github_runner_cluster_headscale_litestream_version }}
     entrypoint: ["/bin/sh", "/etc/github-runner-litestream/litestream.sh", "follow"]
+    # Its own profile, so that promotion's `up --profile active` cannot start it again alongside the server it is replacing.
+    profiles: [standby]
     restart: unless-stopped
     volumes: {{ (litestream_volumes + ['headscale-standby:/var/lib/headscale-standby']) | to_json }}
 {% endif %}

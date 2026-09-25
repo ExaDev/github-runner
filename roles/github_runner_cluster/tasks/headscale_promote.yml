@@ -56,13 +56,15 @@
       check_mode: false
       register: github_runner_cluster_headscale_promote_context
 
-    - name: Stop following the replica
-      community.docker.docker_compose_v2:
-        project_src: "{{ github_runner_cluster_headscale_standby_dir }}"
-        files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files }}"
-        cli_context: "{{ (github_runner_cluster_headscale_promote_context.stdout | trim) or omit }}"
-        services: [litestream-follow]
-        state: stopped
+    - name: Stop following the replica and remove the follower
+      # Removed, not just stopped: its restart policy would otherwise bring it back once the restore below has replaced the database it was following, and it cannot resume from there.
+      ansible.builtin.command:
+        argv: >-
+          {{ ['docker', 'compose', '--project-directory', github_runner_cluster_headscale_standby_dir]
+             + (['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files) | map('regex_replace', '^', '--file=') | list
+             + ['--profile', 'standby', 'rm', '--stop', '--force', 'litestream-follow'] }}
+        chdir: "{{ github_runner_cluster_headscale_standby_dir }}"
+      changed_when: true
 
     - name: Restore the replica's latest state, replacing anything the standby holds
       # Fails, rather than starting an empty server, if the replica has nothing to restore.

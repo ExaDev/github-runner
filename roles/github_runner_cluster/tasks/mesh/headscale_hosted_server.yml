@@ -39,12 +39,13 @@
       register: github_runner_cluster_headscale_docker_context
 
     - name: Start the project, recreating it when its configuration, policy or Litestream settings changed
-      # The configuration is a bind mount each container reads only at start, so a changed file needs a new container to take effect. On a standby only the services outside the active profile start.
+      # The configuration is a bind mount each container reads only at start, so a changed file needs a new container to take effect. On a standby only the follower's standby profile starts; the server's active profile stays down until promotion.
       community.docker.docker_compose_v2:
         project_src: "{{ github_runner_cluster_headscale_server_dir }}"
         files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_server_compose_files }}"
         cli_context: "{{ (github_runner_cluster_headscale_docker_context.stdout | trim) or omit }}"
         state: present
+        profiles: "{{ ['standby'] if github_runner_cluster_headscale_as_standby | bool else omit }}"
         remove_orphans: true
         recreate: >-
           {{ 'always' if github_runner_cluster_headscale_files is changed
