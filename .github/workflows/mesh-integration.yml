@@ -2,7 +2,7 @@ name: Mesh integration
 
 # Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check. Only on changes that can affect how nodes join the mesh.
 #
-# Routes through ExaDev/runner-fallback-action like ci.yml, but prefers the exadev-image-builder profile rather than exadev-runners: this job needs a Docker daemon that can run privileged containers (k3s, and Tailscale inside it), which only that profile's Docker-in-Docker sidecar provides. It falls back to ubuntu-latest, which has one natively. The work directory sits under runner.temp because the DinD daemon resolves Compose bind mounts on its own filesystem, and only the runner's _work volume is shared with it.
+# Routes through ExaDev/runner-fallback-action like ci.yml, but prefers the exadev-image-builder profile rather than exadev-runners: this job needs a Docker daemon that can run privileged containers (k3s, and Tailscale inside it), which only that profile's Docker-in-Docker sidecar provides. It falls back to ubuntu-latest, which has one natively, and a manual run can choose ubuntu-latest directly with the github-hosted input. The work directory sits under runner.temp because the DinD daemon resolves Compose bind mounts on its own filesystem, and only the runner's _work volume is shared with it.
 
 on:
   pull_request:
@@ -15,6 +15,11 @@ on:
       - tests/mesh/**
       - .github/workflows/mesh-integration.yml
   workflow_dispatch:
+    inputs:
+      github-hosted:
+        description: Run on ubuntu-latest instead of the fleet, to tell a fault in the fleet's environment from one in the code.
+        type: boolean
+        default: false
 
 concurrency:
   group: mesh-integration-${{ github.ref }}
@@ -32,6 +37,7 @@ jobs:
       selected-runner: ${{ steps.fallback.outputs.selected-runner || '["ubuntu-latest"]' }}
     steps:
       - id: fallback
+        if: ${{ !inputs.github-hosted }}
         uses: ExaDev/runner-fallback-action@b774d51ff5360bf53705b2eb34ff019afd4d7f07
         with:
           preferred-labels: exadev-image-builder
