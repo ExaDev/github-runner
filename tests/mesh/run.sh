@@ -12,7 +12,6 @@ headscale_ip="${subnet_prefix}.10"
 node_count=3
 etcd_image=gcr.io/etcd-development/etcd:v3.5.21
 busybox_image=busybox:1.37
-curl_image=curlimages/curl:8.16.0
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
 derp_map_url=https://controlplane.tailscale.com/derpmap/default
@@ -20,6 +19,10 @@ work="${GRTEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/grtest-mesh.XXXXXX")}"
 k3s_token="grtest-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 
 log() { echo "==> $*"; }
+# Whether this machine reaches the URL Headscale fetches its DERP map from on start, which it cannot start without.
+egress() {
+  echo "----- egress at $(date -u +%H:%M:%S): $(curl -sS -m 15 -o /dev/null -w '%{http_code}' "$derp_map_url" 2>&1 || true)"
+}
 fail() {
   echo "FAIL: $*" >&2
   diagnose >&2 || true
@@ -38,12 +41,7 @@ diagnose() {
     echo "----- $(container "$index"): last log lines"
     docker logs --tail 60 "$(container "$index")" 2>&1 | cut -c1-400 || true
   done
-  # Whether the internet is reachable from the bootstrap server's own network namespace and from a fresh container on the test network: Headscale fetches its DERP map from there on start.
-  if docker inspect "$(container 1)" >/dev/null 2>&1; then
-    echo "----- egress from $(container 1)'s namespace, then from a fresh container on ${network}"
-    docker run --rm --network "container:$(container 1)" "$curl_image" -sS -m 15 -o /dev/null -w '%{http_code}\n' "$derp_map_url" 2>&1 || true
-    docker run --rm --network "$network" "$curl_image" -sS -m 15 -o /dev/null -w '%{http_code}\n' "$derp_map_url" 2>&1 || true
-  fi
+  egress
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
     docker exec grtest-headscale headscale nodes list </dev/null 2>&1 || true
@@ -264,6 +262,7 @@ started_at() {
 scenario_cluster() {
   local scenario="$1"
   reset_environment
+  egress
   prepare_nodes "$scenario"
   write_inventory "$scenario"
   run_role
@@ -276,10 +275,15 @@ scenario_cluster() {
   [ "$before" = "$after" ] || fail "rerunning the role restarted a node container: ${before} -> ${after}"
   assert_cluster
   if [ "$scenario" = in_cluster ]; then
+    egress
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
+    # Probes the egress Headscale needs throughout the recovery, so a failure shows when it was lost.
+    (while :; do egress; sleep 30; done) &
+    local prober=$!
     (cd "${repo_root}/ansible" && ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections:${ANSIBLE_COLLECTIONS_PATH:-}" \
       "$ansible_playbook" -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml") \
-      || fail "the recovery playbook did not bring the bootstrap server back"
+      || { kill "$prober"; fail "the recovery playbook did not bring the bootstrap server back"; }
+    kill "$prober"
     assert_cluster
   fi
 }
