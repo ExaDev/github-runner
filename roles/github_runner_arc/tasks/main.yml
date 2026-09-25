@@ -1,7 +1,7 @@
 ---
 # Installs the ARC controller, the fleet-health platform, and each org's runner scale sets into the cluster github_runner_arc_kubeconfig_path reaches. Safe to rerun: every mutating task uses kubernetes.core.k8s (server-side apply) or helm upgrade --install semantics, never a plain create.
 
-# playbooks/site.yml runs validate.yml in an earlier play so that bad input fails before anything changes; this covers a play that includes the role on its own.
+# playbooks/site.yml and playbooks/arc.yml run validate.yml in an earlier play so that bad input fails before anything changes; this covers a play that includes the role on its own.
 - name: Validate the ARC configuration
   ansible.builtin.include_tasks: validate.yml
   when: not (github_runner_arc_validated | default(false))
