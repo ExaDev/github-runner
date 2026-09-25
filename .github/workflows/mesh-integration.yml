@@ -37,14 +37,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Docker Compose if the runner lacks it
-        # The fleet's runner image ships the Docker CLI and buildx but not the Compose plugin.
+      - name: Install the pinned Docker Compose
+        # Always the pinned version, not whatever the runner has: ubuntu-latest's own Compose recreated every node container when the role ran a second time, which the pinned version does not. The user plugin directory takes precedence over the system one.
         run: |
           set -euo pipefail
-          if docker compose version >/dev/null 2>&1; then
-            docker compose version
-            exit 0
-          fi
+          docker version --format 'Docker Engine {{.Server.Version}}'
           case "$(uname -m)" in
             x86_64) arch=x86_64 ;;
             aarch64 | arm64) arch=aarch64 ;;
