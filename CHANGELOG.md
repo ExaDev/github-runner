@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/ExaDev/github-runner/compare/v1.3.1...v1.4.0) (2026-09-26)
+
+
+### Features
+
+* **cluster:** pin the Docker context the role drives per host ([63bb283](https://github.com/ExaDev/github-runner/commit/63bb283677690b213d1b17c1a0c046265ee2272c))
+
 ## [1.3.1](https://github.com/ExaDev/github-runner/compare/v1.3.0...v1.3.1) (2026-09-26)
 
 
