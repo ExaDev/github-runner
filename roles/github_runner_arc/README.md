@@ -12,7 +12,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 
 ## Variables
 
-- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id`, `image`, `private_key` (the App's PEM private key, from any source Ansible reads) or `private_key_op_reference` (an `op://` reference that the `github_runner_secrets_onepassword` adapter resolves into `private_key`), optionally `installation_id` (resolved from the App when empty), optionally `app_secret_name` (the App Secret's name in each of the org's namespaces, default `<org>-github-app`), and `scale_set_profiles`, a list of profiles:
+- `github_runner_arc_orgs`: the orgs this host installs. Each entry has `name`, `app_id` (needed only when the role writes the App Secret, see `github_runner_arc_manage_secrets`), `image`, `private_key` (the App's PEM private key, from any source Ansible reads) or `private_key_op_reference` (an `op://` reference that the `github_runner_secrets_onepassword` adapter resolves into `private_key`), optionally `installation_id` (resolved from the App when empty), optionally `app_secret_name` (the App Secret's name in each of the org's namespaces, default `<org>-github-app`), and `scale_set_profiles`, a list of profiles:
   - `suffix`: appended to the namespace (`arc-runners-<org><suffix>`) and release (`<org>-runners<suffix>`) names. Default empty.
   - `namespace`, `release_name`: the profile's namespace and Helm release name, in place of the names derived from the suffix. The release name is also the scale set's name on GitHub, so two profiles of one org cannot share it.
   - `values_file`: Helm values for the release, a Jinja template read from `github_runner_arc_values_dir` on the control node (or an absolute path). Without it the role's `templates/runner-scale-set-values.yaml.j2` is used, driven by the profile's own `max_runners`, `min_runners`, `container_mode` (`dind` for the chart's Docker-in-Docker mode) and `resources` (the runner container's requests and limits).
@@ -31,7 +31,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 - `github_runner_arc_listener_probes_enabled`: readiness and liveness probes on each listener's metrics endpoint, so a listener that starts and then fails its GitHub authentication is not counted ready during a rollout. Needs metrics on.
 - `github_runner_arc_node_label_key`, `github_runner_arc_node_label_value`: when the key is set, the controller, listeners and runner pods are restricted to nodes carrying the label. The role labels the nodes named in `github_runner_arc_labelled_nodes`.
 - `github_runner_arc_ghcr_username`, `github_runner_arc_ghcr_token`, `github_runner_arc_heartbeat_gh_token`: secrets, as plain variables. The pull credential is needed only for a static pull Secret.
-- `github_runner_arc_manage_secrets`: `false` stops the role writing the App Secrets and `heartbeat-gh-token`, and instead checks before any change that they already exist. The role then needs no `private_key` or `installation_id`.
+- `github_runner_arc_manage_secrets`: `false` stops the role writing the App Secrets and `heartbeat-gh-token`, and instead checks before any change that they already exist, and that each App Secret holds `github_app_id`, `github_app_installation_id` and `github_app_private_key`. The role then needs no `private_key` or `installation_id`, and no `app_id` either: it reads the App's id from the Secret where it needs it. An `app_id` that is set must match the Secret's `github_app_id`.
 - `github_runner_arc_manage_image_pull_secret`: `false` stops the role writing the pull Secret, so an existing one named `github_runner_arc_image_pull_secret_name` is used as it is, kept current by something else. No pull credential is needed and the pull check is skipped; the role checks the Secret exists. Follows `github_runner_arc_manage_secrets` unless set.
 - `github_runner_arc_image_pull_secret_source`: where a pull Secret the role writes gets its credential: `static` (the default) from `github_runner_arc_ghcr_username` and `github_runner_arc_ghcr_token`, or `app` from each org's GitHub App, renewed in the cluster (see [Image pull Secret from the GitHub App](#image-pull-secret-from-the-github-app)). `github_runner_arc_image_pull_secret_renewal_schedule` (default every 15 minutes) and `github_runner_arc_image_pull_secret_renewer_image` configure the renewal.
 - `github_runner_arc_image_pull_registry`, `github_runner_arc_image_pull_secret_name`, `github_runner_arc_verify_image_pull`: the pull Secret's registry and name, and whether to prove the credential before writing it.
@@ -162,8 +162,8 @@ github_runner_arc_manage_secrets: false
 github_runner_arc_manage_image_pull_secret: false
 github_runner_arc_image_pull_secret_name: "existing-pull-secret"
 github_runner_arc_orgs:
+  # No app_id: the role reads it from the existing App Secret.
   - name: ExampleOrg
-    app_id: 123456
     app_secret_name: "existing-app-secret"
     image: "ghcr.io/example/github-runner:2026.01.01"
     scale_set_profiles:

@@ -417,13 +417,14 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
     return expanded
 
 
-def arc_profiles(orgs: Sequence[Any]) -> dict[str, Any]:
+def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, Any]:
     """Expand github_runner_arc_orgs entries into one record per scale-set profile, and check them.
 
     Pass every org configured anywhere in the inventory, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile) see the whole fleet.
 
     Args:
-        orgs: github_runner_arc_orgs entries, each with name, app_id, image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label.
+        require_app_id: whether each org must set app_id. The role needs it only when it writes the App Secret; otherwise the App's id is in the existing App Secret, and an app_id that is set is only checked against it.
+        orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label.
 
     Returns:
         A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, max_runners (the static maxRunners the role sets, or None), label and settings, the profile's own keys) and ``autoscaled`` (the one profile flagged autoscale, or None).
@@ -442,9 +443,10 @@ def arc_profiles(orgs: Sequence[Any]) -> dict[str, Any]:
         if not org_name:
             errors.append(f"{where} has no name")
             continue
-        for key in ("app_id", "image"):
-            if not _text(org, key):
-                errors.append(f"{org_name}: {key} is required")
+        if require_app_id and not _text(org, "app_id"):
+            errors.append(f"{org_name}: app_id is required when the role writes the App Secret (github_runner_arc_manage_secrets); with an existing App Secret it is read from that Secret's github_app_id")
+        if not _text(org, "image"):
+            errors.append(f"{org_name}: image is required")
         # Presence only: reading the value would decrypt an ansible-vault string for no reason.
         if org.get("private_key") is not None and org.get("private_key_op_reference") is not None:
             errors.append(f"{org_name}: set private_key or private_key_op_reference, not both (the 1Password adapter fills private_key from the reference)")

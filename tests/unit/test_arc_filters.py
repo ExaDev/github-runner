@@ -106,10 +106,16 @@ class ProfilesTest(unittest.TestCase):
 
     def test_missing_required_org_fields_are_errors(self) -> None:
         result = arc.arc_profiles([{"name": "X", "scale_set_profiles": [{}]}, {"app_id": 1}, {"name": "Y", "app_id": 1, "image": "i", "scale_set_profiles": []}])
-        self.assertIn("X: app_id is required", result["errors"])
+        self.assertIn("X: app_id is required when the role writes the App Secret (github_runner_arc_manage_secrets); with an existing App Secret it is read from that Secret's github_app_id", result["errors"])
         self.assertIn("X: image is required", result["errors"])
         self.assertIn("github_runner_arc_orgs[1] has no name", result["errors"])
         self.assertIn("Y: scale_set_profiles must be a non-empty list", result["errors"])
+
+    def test_app_id_is_optional_when_the_role_does_not_write_the_app_secret(self) -> None:
+        without = {"name": "Example", "image": "ghcr.io/example/runner:1", "scale_set_profiles": [{"max_runners": 1}]}
+        self.assertEqual(arc.arc_profiles([without], require_app_id=False)["errors"], [])
+        self.assertEqual(arc.arc_profiles([without])["errors"], ["Example: app_id is required when the role writes the App Secret (github_runner_arc_manage_secrets); with an existing App Secret it is read from that Secret's github_app_id"])
+        self.assertIn("Example: image is required", arc.arc_profiles([{**without, "image": ""}], require_app_id=False)["errors"])
 
     def test_a_private_key_and_a_1password_reference_together_are_an_error(self) -> None:
         both = dict(org(), private_key="pem", private_key_op_reference="op://v/i/f")

@@ -4,13 +4,14 @@
 # This host's orgs come from github_runner_arc_orgs as this play resolves it, which includes play and role variables and -e; another host's can only be read from hostvars, which holds its inventory variables and facts. Taking this host's from hostvars too would miss orgs passed as a play variable, and every check and lookup built on the fleet (the scale sets' namespaces that measured sizing leaves out, the autoscaled profile) would then not see them. An implicit localhost is not in groups['all'] at all.
 - name: Expand every org configured anywhere in the inventory into its scale-set profiles
   ansible.builtin.set_fact:
+    # Whether an org needs app_id depends on whether its host writes the App Secret, which only that host's own check knows, so the fleet-wide expansion (for the cross-host checks) does not ask for it.
     github_runner_arc_fleet: >-
       {{
         ((groups['all'] | reject('equalto', inventory_hostname) | map('extract', hostvars) | map(attribute='github_runner_arc_orgs', default=[]) | flatten)
          + github_runner_arc_orgs)
-        | exadev.github_runner.arc_profiles
+        | exadev.github_runner.arc_profiles(require_app_id=false)
       }}
-    github_runner_arc_local: "{{ github_runner_arc_orgs | exadev.github_runner.arc_profiles }}"
+    github_runner_arc_local: "{{ github_runner_arc_orgs | exadev.github_runner.arc_profiles(require_app_id=github_runner_arc_manage_secrets | bool) }}"
 
 - name: Fail on invalid orgs or scale-set profiles
   ansible.builtin.fail:
