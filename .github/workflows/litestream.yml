@@ -1,6 +1,6 @@
 name: Headscale Litestream
 
-# Runs tests/litestream/run.sh: the headscale_hosted provider with Litestream and a warm standby against an S3-compatible store, a real Tailscale client, promotion of the standby, and the headscale_in_cluster guard. Only on changes that can affect them.
+# Runs tests/litestream/run.sh: the headscale_hosted provider with Litestream and a warm standby against an S3-compatible store, a real Tailscale client, promotion of the standby, and the headscale_in_cluster guard, once as is and once with the Headscale hosts pinning github_runner_cluster_docker_context while the current Docker context points at nothing. Only on changes that can affect them.
 #
 # Runs on GitHub-hosted ubuntu-latest, which has the Docker daemon the test needs. The work directory sits under runner.temp, which the job always has write access to.
 
@@ -9,6 +9,9 @@ on:
     paths:
       - roles/github_runner_cluster/tasks/mesh/headscale_*.yml
       - roles/github_runner_cluster/tasks/headscale_promote.yml
+      - roles/github_runner_cluster/tasks/docker_context.yml
+      - plugins/filter/docker.py
+      - tests/lib/**
       - roles/github_runner_cluster/templates/headscale/**
       - roles/github_runner_cluster/files/headscale/**
       - roles/github_runner_cluster/defaults/main.yml
@@ -26,9 +29,14 @@ permissions:
 
 jobs:
   litestream:
-    name: Litestream and standby promotion
+    name: Litestream and standby promotion${{ matrix.pin && ' (context pinned)' || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned: the Headscale hosts pin github_runner_cluster_docker_context while the current Docker context points at nothing (see tests/litestream/run.sh).
+        pin: [false, true]
     env:
       COMPOSE_VERSION: v5.5.1
     steps:
@@ -67,6 +75,7 @@ jobs:
         env:
           GRTEST_WORK: ${{ runner.temp }}/grtest-ls
           GRTEST_EXTRA_COLLECTIONS: ${{ runner.temp }}/collections
+          GRTEST_PIN_CONTEXT: ${{ matrix.pin && '1' || '0' }}
         run: tests/litestream/run.sh
 
   required-checks:

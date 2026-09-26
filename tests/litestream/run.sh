@@ -3,11 +3,16 @@
 #
 # Everything the Tailscale client, the S3 store and Litestream talk to is on an internal Docker network with no route out, and Headscale serves a DERP map of its own, so nothing contacts Tailscale or any other outside service. A network alias on each project's TLS proxy stands in for the DNS name the promotion playbook tells the operator to move: only the running server's proxy answers it.
 #
+# With GRTEST_PIN_CONTEXT=1, the Headscale hosts pin github_runner_cluster_docker_context while the current Docker context the playbooks see points at nothing (tests/lib/docker_context.sh), so every docker call the mesh step and the promotion make on those hosts, which they reach by delegation, must take the pin from that host's own inventory; afterwards the current context must be unchanged.
+#
 # Usage: tests/litestream/run.sh. Needs Docker with Compose, openssl, and Python 3 with ansible-core and the community.docker collection (ANSIBLE_PLAYBOOK overrides which ansible-playbook runs, and GRTEST_EXTRA_COLLECTIONS adds a collections directory, e.g. where community.docker was installed). Creates only Docker objects named grtest-ls-*, and removes them on exit unless GRTEST_KEEP=1.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 here="${repo_root}/tests/litestream"
+# shellcheck source=tests/lib/docker_context.sh
+. "${repo_root}/tests/lib/docker_context.sh"
+pin_context="${GRTEST_PIN_CONTEXT:-0}"
 ansible_playbook="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 network=grtest-ls-net
 s3=grtest-ls-s3
@@ -133,14 +138,23 @@ litestream_version() {
 }
 
 run_playbook() {
-  local playbook="$1"
+  local playbook="$1" config=()
   shift
-  ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections${GRTEST_EXTRA_COLLECTIONS:+:${GRTEST_EXTRA_COLLECTIONS}}" ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_RETRY_FILES_ENABLED=False \
+  if [ "$pin_context" = 1 ]; then config=("DOCKER_CONFIG=${work}/docker-config"); fi
+  env "${config[@]}" ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections${GRTEST_EXTRA_COLLECTIONS:+:${GRTEST_EXTRA_COLLECTIONS}}" ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_RETRY_FILES_ENABLED=False \
     "$ansible_playbook" -i "${work}/inventory.yml" "$playbook" "$@" </dev/null
 }
 
 log "Work directory: ${work}"
 mkdir -p "${work}/certs" "${work}/${primary}" "${work}/${standby}"
+
+pin_inventory=""
+if [ "$pin_context" = 1 ]; then
+  log "Pinning the Docker context ${grtest_pinned_context} on the Headscale hosts, with the current context pointing at nothing"
+  grtest_setup_pinned_contexts "${work}/docker-config"
+  # Only on the Headscale hosts, not the play's own host, so the pin has to come from the inventory of the host each task is delegated to.
+  pin_inventory="github_runner_cluster_docker_context: ${grtest_pinned_context}"
+fi
 
 log "Creating a certificate authority and a certificate for ${headscale_name}"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=grtest-ls CA" \
@@ -233,10 +247,12 @@ all:
     headscale:
       hosts:
         primary:
+          ${pin_inventory}
           github_runner_cluster_headscale_dir: ${work}/${primary}
           github_runner_cluster_headscale_container_name: ${primary}
           github_runner_cluster_headscale_compose_files: [${work}/${primary}-override.yml]
         standby:
+          ${pin_inventory}
           github_runner_cluster_headscale_dir: ${work}/${standby}
           github_runner_cluster_headscale_container_name: ${standby}
           github_runner_cluster_headscale_compose_files: [${work}/${standby}-override.yml]
@@ -304,5 +320,9 @@ if docker inspect "${standby}-litestream-follow-1" >/dev/null 2>&1; then
 fi
 [ "$(snapshot "$standby" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["users"]))')" -ge 2 ] || fail "the promoted server lost users when the role reran"
 wait_for 60 client_online_on "$standby" || fail "the client is not online after the role reran on the promoted server"
+
+if [ "$pin_context" = 1 ]; then
+  grtest_assert_current_context_unchanged "${work}/docker-config" || fail "the playbooks changed the current Docker context"
+fi
 
 log "PASS: promotion took $((promoted - promote_started))s; the client was back online $((reconnected - promote_started))s after promotion started"
