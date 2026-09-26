@@ -1,0 +1,45 @@
+---
+# Included with `github_runner_arc_measure` set to an expanded profile whose sizing is measured (see plugins/filter/arc.py's arc_measured_max_runners): from install_scale_set_profile.yml for an ordinary profile, where the result becomes the release's maxRunners, and from install_platform.yml for the autoscaled one, where it becomes the autoscaler's ceiling. Reads every Node and every running Pod, so the kubeconfig needs cluster-wide read access to both; read-only, so it also runs under --check. The result is recorded under the profile's label in github_runner_arc_measured_sizing.
+
+- name: Read the nodes for {{ github_runner_arc_measure.label }}
+  kubernetes.core.k8s_info:
+    kind: Node
+  register: github_runner_arc_measure_nodes
+
+- name: Read the pods that still hold requests for {{ github_runner_arc_measure.label }}
+  kubernetes.core.k8s_info:
+    kind: Pod
+    field_selectors:
+      - status.phase!=Succeeded
+      - status.phase!=Failed
+  register: github_runner_arc_measure_pods
+
+# The same nodeSelector the runner pods get (scale-set-overlay.yaml.j2), and the pods of every scale set in the fleet left out, so that runners already running never lower the ceiling they are sized by.
+- name: Work out how many runners fit on the eligible nodes for {{ github_runner_arc_measure.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_measured_sizing: >-
+      {{
+        github_runner_arc_measured_sizing | default({})
+        | combine({github_runner_arc_measure.label: github_runner_arc_measure.settings.sizing
+            | exadev.github_runner.arc_measured_max_runners(
+                github_runner_arc_measure_nodes.resources,
+                github_runner_arc_measure_pods.resources,
+                ({github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {})
+                | combine(github_runner_arc_measure.node_selector),
+                github_runner_arc_fleet.profiles | map(attribute='namespace') | list)})
+      }}
+
+- name: Fail when the runner ceiling cannot be measured for {{ github_runner_arc_measure.label }}
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_measure.label }}: {{ github_runner_arc_measured_sizing[github_runner_arc_measure.label].errors | join('; ') }}"
+  when: github_runner_arc_measured_sizing[github_runner_arc_measure.label].errors | length > 0
+
+- name: Report the measured runner ceiling for {{ github_runner_arc_measure.label }}
+  ansible.builtin.debug:
+    msg:
+      max_runners: "{{ github_runner_arc_measured.max_runners }}"
+      fit_before_the_safety_margin: "{{ github_runner_arc_measured.theoretical }}"
+      eligible_nodes: "{{ github_runner_arc_measured.nodes }}"
+      skipped_nodes: "{{ github_runner_arc_measured.skipped_nodes }}"
+  vars:
+    github_runner_arc_measured: "{{ github_runner_arc_measured_sizing[github_runner_arc_measure.label] }}"

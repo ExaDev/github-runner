@@ -72,14 +72,17 @@
       github_runner_arc_autoscaler_max_ceiling, all whole numbers, with the floor no higher than the ceiling.
   vars:
     github_runner_arc_ceiling: "{{ github_runner_arc_fleet.autoscaled.sizing.max_runners if github_runner_arc_fleet.autoscaled.sizing else (github_runner_arc_autoscaler_max_ceiling | default('')) }}"
+    # A measured ceiling is only known once the cluster is read, so install_platform.yml checks the floor against it then.
+    github_runner_arc_ceiling_measured: "{{ github_runner_arc_fleet.autoscaled.sizing.measured | default(false) if github_runner_arc_fleet.autoscaled.sizing else false }}"
   when:
     - github_runner_arc_fleet.autoscaled is not none
     - github_runner_arc_heartbeat_gist_id | length > 0
     - >-
       github_runner_arc_autoscaler_usable_budget_gi | default('') | string is not match('^[0-9]+$')
       or github_runner_arc_autoscaler_floor | default('') | string is not match('^[0-9]+$')
-      or github_runner_arc_ceiling | string is not match('^[0-9]+$')
-      or (github_runner_arc_autoscaler_floor | int) > (github_runner_arc_ceiling | int)
+      or (not github_runner_arc_ceiling_measured
+          and (github_runner_arc_ceiling | string is not match('^[0-9]+$')
+               or (github_runner_arc_autoscaler_floor | int) > (github_runner_arc_ceiling | int)))
 
 # The platform installs from whichever host sets github_runner_arc_heartbeat_gist_id, so the question is whether ANY host in the inventory sets one. scripts/heartbeat.sh checks HEARTBEAT_GIST_ID at container start, but that only shows up as a crash-looping pod, and with no gist id anywhere the platform is not installed at all. This creates the gist the same way the README's manual instructions do, then fails on purpose: its id has to be recorded by hand in a host's host_vars (and in any consumer named in github_runner_arc_heartbeat_gist_consumer), and carrying on silently would leave that undone.
 - name: Bootstrap the heartbeat gist if no host in the fleet has one yet
