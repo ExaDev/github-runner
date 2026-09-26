@@ -1,9 +1,14 @@
 ---
 # Brings this host up as a k3s node under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, as tasks/topology.yml decides from the cluster group. Safe to rerun: the .env is templated and docker compose converges to it.
 
+- name: Check which Docker daemon the role drives on this host
+  # First, so that a pinned context that does not exist, or one set alongside DOCKER_HOST, stops the run before anything touches the host.
+  ansible.builtin.include_tasks: docker_context.yml
+
 - name: Read this host's Docker Compose version
-  # First, before anything that runs Compose (the mesh providers start Compose projects too), for the check below. The CLI plugin's own version, which no Docker context or daemon changes. Read-only, so it runs under --check as well.
+  # Before anything that runs Compose (the mesh providers start Compose projects too), for the check below. The CLI plugin's own version, which no Docker context or daemon changes; it still runs with the pinned context, like every docker command in the role. Read-only, so it runs under --check as well.
   ansible.builtin.command: docker compose version --short
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
   changed_when: false
   check_mode: false
   register: github_runner_cluster_compose_version
@@ -59,14 +64,9 @@
   # Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read the mesh facts it publishes. See tasks/mesh/main.yml for the provider interface.
   ansible.builtin.include_tasks: mesh/main.yml
 
-- name: Determine the active Docker CLI context
-  # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use, so a host running Colima (whose docker.sock lives under ~/.colima/default/, not /var/run) fails outright without this. Read the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead.
-  # Empty when DOCKER_HOST is set: the module then takes the daemon from DOCKER_HOST itself, and rejects cli_context alongside it ("parameters are mutually exclusive: docker_host|cli_context", as on a Docker-in-Docker CI runner).
-  ansible.builtin.shell: if [ -z "${DOCKER_HOST:-}" ]; then docker context show; fi
-  changed_when: false
-  # Read-only, and every docker_compose_v2 task below depends on its output, so it has to run under --check too: a skipped result leaves cli_context empty and the dry run targets the wrong daemon.
-  check_mode: false
-  register: github_runner_cluster_docker_context
+- name: Resolve this host's Docker context again for the Compose tasks below
+  # community.docker.docker_compose_v2 defaults to unix:///var/run/docker.sock when neither docker_host nor cli_context is given, ignoring whatever context `docker` itself is actually configured to use, so a host running Colima (whose docker.sock lives under ~/.colima/default/, not /var/run) fails outright without a context. docker_context.yml takes the pinned github_runner_cluster_docker_context, or else reads the host's own current context rather than hardcoding "colima", since a Docker Desktop host would need "desktop-linux" instead. Again here, because the mesh step above resolves it for the Headscale host it delegates to, which may be another host.
+  ansible.builtin.include_tasks: docker_context.yml
 
 - name: Set up and start this host as a k3s server, bootstrapping or joining
   when: github_runner_cluster_effective_node_role == "server"
@@ -95,7 +95,7 @@
         project_src: "{{ github_runner_cluster_dir }}"
         project_name: "{{ github_runner_cluster_compose_project }}"
         profiles: ["server"]
-        cli_context: "{{ (github_runner_cluster_docker_context.stdout | trim) or omit }}"
+        cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
         files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
         state: present
 
@@ -114,7 +114,7 @@
         project_src: "{{ github_runner_cluster_dir }}"
         project_name: "{{ github_runner_cluster_compose_project }}"
         profiles: ["agent"]
-        cli_context: "{{ (github_runner_cluster_docker_context.stdout | trim) or omit }}"
+        cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
         files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
         state: present
 

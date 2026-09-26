@@ -38,9 +38,20 @@
       delay: 2
       when: github_runner_cluster_headscale_api_key | length > 0
 
+    - name: Resolve the Headscale host's Docker context, for its CLI
+      # The CLI is a docker command on that host (github_runner_cluster_headscale_cli), so it takes that host's pinned github_runner_cluster_docker_context; see docker_context.yml.
+      ansible.builtin.include_tasks:
+        file: docker_context.yml
+        apply:
+          run_once: true
+      vars:
+        github_runner_cluster_docker_target: "{{ github_runner_cluster_headscale_host_name }}"
+      when: github_runner_cluster_headscale_api_key | length == 0 or github_runner_cluster_headscale_api_probe.status | default(0) == 401
+
     - name: Create an API key with the server's own CLI
       ansible.builtin.command:
         argv: "{{ github_runner_cluster_headscale_cli + ['apikeys', 'create', '--expiration', github_runner_cluster_headscale_join_key_days ~ 'd'] }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
       delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
       changed_when: true
       no_log: true

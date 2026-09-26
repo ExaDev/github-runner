@@ -27,6 +27,12 @@
             msg: github_runner_cluster_mesh is {{ github_runner_cluster_mesh }}; this playbook only applies to headscale_in_cluster.
           when: github_runner_cluster_mesh != 'headscale_in_cluster'
 
+        - name: Resolve the Docker context the recovery drives, the same one the cluster role uses on this host
+          # See the cluster role's docker_context.yml: the host's pinned github_runner_cluster_docker_context, or its current context. Every docker command below runs with it.
+          ansible.builtin.include_role:
+            name: exadev.github_runner.github_runner_cluster
+            tasks_from: docker_context
+
         - name: Record where Headscale's files live
           ansible.builtin.set_fact:
             github_runner_cluster_recover_headscale_dir: "{{ github_runner_cluster_headscale_dir or github_runner_cluster_dir ~ '/headscale' }}"
@@ -36,11 +42,13 @@
         - name: Restart the k3s container, which starts k3s off the mesh until Headscale answers
           ansible.builtin.command:
             argv: [docker, restart, "{{ github_runner_cluster_container_name }}"]
+          environment: "{{ github_runner_cluster_docker_cli_environment }}"
           changed_when: true
 
         - name: Wait for the Headscale static pod to answer
           ansible.builtin.command:
             argv: "{{ github_runner_cluster_recover_probe }}"
+          environment: "{{ github_runner_cluster_docker_cli_environment }}"
           changed_when: false
           failed_when: false
           register: github_runner_cluster_recover_answers
@@ -54,6 +62,7 @@
             - name: Find the k3s container's data volume, which holds Headscale's state
               ansible.builtin.command:
                 argv: [docker, inspect, --format, "{{ '{{' }} range .Mounts {{ '}}' }}{{ '{{' }} if eq .Destination \"/var/lib/rancher/k3s\" {{ '}}' }}{{ '{{' }} .Name {{ '}}' }}{{ '{{' }} end {{ '}}' }}{{ '{{' }} end {{ '}}' }}", "{{ github_runner_cluster_container_name }}"]
+              environment: "{{ github_runner_cluster_docker_cli_environment }}"
               changed_when: false
               register: github_runner_cluster_recover_volume
 
@@ -77,11 +86,13 @@
                   - "type=volume,src={{ github_runner_cluster_recover_volume.stdout | trim }},dst=/var/lib/headscale,volume-subpath=github-runner-headscale"
                   - "docker.io/headscale/headscale:v{{ github_runner_cluster_headscale_version }}"
                   - serve
+              environment: "{{ github_runner_cluster_docker_cli_environment }}"
               changed_when: true
 
             - name: Wait for the temporary Headscale server to answer
               ansible.builtin.command:
                 argv: "{{ github_runner_cluster_recover_probe }}"
+              environment: "{{ github_runner_cluster_docker_cli_environment }}"
               changed_when: false
               failed_when: false
               register: github_runner_cluster_recover_rescue_answers
@@ -97,6 +108,7 @@
             - name: Wait for this node to rejoin the cluster on the mesh
               ansible.builtin.command:
                 argv: [docker, exec, "{{ github_runner_cluster_container_name }}", kubectl, wait, --for=condition=Ready, "node/{{ github_runner_cluster_topology.hosts[inventory_hostname].node_name }}", --timeout=10s]
+              environment: "{{ github_runner_cluster_docker_cli_environment }}"
               changed_when: false
               register: github_runner_cluster_recover_ready
               until: github_runner_cluster_recover_ready.rc == 0
@@ -107,6 +119,7 @@
             - name: Read the temporary Headscale server's log, for a recovery that did not bring the node back
               ansible.builtin.command:
                 argv: [docker, logs, --tail, "40", "{{ github_runner_cluster_recover_rescue }}"]
+              environment: "{{ github_runner_cluster_docker_cli_environment }}"
               changed_when: false
               failed_when: false
               register: github_runner_cluster_recover_rescue_log
@@ -120,12 +133,14 @@
             - name: Remove the temporary Headscale server, so the static pod can take its port back
               ansible.builtin.command:
                 argv: [docker, rm, --force, "{{ github_runner_cluster_recover_rescue }}"]
+              environment: "{{ github_runner_cluster_docker_cli_environment }}"
               changed_when: true
               failed_when: false
 
         - name: Wait for the Headscale static pod to answer again
           ansible.builtin.command:
             argv: "{{ github_runner_cluster_recover_probe }}"
+          environment: "{{ github_runner_cluster_docker_cli_environment }}"
           changed_when: false
           register: github_runner_cluster_recover_final
           until: github_runner_cluster_recover_final.rc == 0
