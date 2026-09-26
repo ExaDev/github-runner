@@ -180,7 +180,8 @@ EOF
 
 run_role() {
   log "Running the cluster role"
-  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml"
+  # Returns the playbook's own status, which a caller testing it (compose_faulty) relies on, errexit being off there.
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" || return
   if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the role changed the current Docker context"; fi
 }
 
