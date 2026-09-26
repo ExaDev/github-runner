@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/ExaDev/github-runner/compare/v1.2.2...v1.3.0) (2026-09-26)
+
+
+### Features
+
+* **arc:** taint a stopped node out of service so its pods are replaced ([8d6d44b](https://github.com/ExaDev/github-runner/commit/8d6d44b8bb4b78f388f02aed05a8c52772f52abb)), closes [#2](https://github.com/ExaDev/github-runner/issues/2)
+
 ## [1.2.2](https://github.com/ExaDev/github-runner/compare/v1.2.1...v1.2.2) (2026-09-26)
 
 
