@@ -1,10 +1,32 @@
 ---
-# Creates the GitHub App the runner scale sets authenticate as, through GitHub's App manifest flow, in two runs of playbooks/github_app_setup.yml on the control node. Without github_runner_arc_app_manifest_code it renders a local HTML form that posts the manifest to GitHub; a person submits it and copies the one-time code GitHub returns. With the code it exchanges it for the App's credentials, writes the private key to github_runner_arc_app_private_key_path, waits while the person installs the App on the organisation, and prints the values to record. Touches no cluster.
+# Creates the GitHub App the runner scale sets authenticate as, through GitHub's App manifest flow, in two runs of playbooks/github_app_setup.yml on the control node. Without github_runner_arc_app_manifest_code it renders a local HTML form that posts the manifest to GitHub; a person submits it and copies the one-time code GitHub returns. With the code it exchanges it for the App's credentials, writes the private key to github_runner_arc_app_private_key_path, waits while the person installs the App on the organisation, and prints the values to record. With github_runner_arc_app_setup_write_secret it also writes the App Secret into the cluster and then removes the key file, unless github_runner_arc_app_setup_keep_private_key keeps it. The private key is never printed, including under -v.
 
 - name: Fail when the organisation or App name is missing
   ansible.builtin.fail:
     msg: github_runner_arc_app_setup_org (the organisation login) and github_runner_arc_app_setup_name (the App's display name) are both required.
   when: github_runner_arc_app_setup_org | length == 0 or github_runner_arc_app_setup_name | length == 0
+
+# Where the App Secret goes: explicit namespaces and name, or the organisation's own scale-set profiles in github_runner_arc_orgs, whose namespaces and app_secret_name the role's install uses. Worked out in both phases, so that a phase 1 run already shows a configuration phase 2 could not use.
+- name: Work out where the App Secret goes
+  ansible.builtin.set_fact:
+    github_runner_arc_app_setup_secret_targets: >-
+      {{
+        (github_runner_arc_app_setup_secret_namespaces or github_runner_arc_app_setup_org_profiles | map(attribute='namespace') | list)
+        | product([github_runner_arc_app_setup_secret_name or (github_runner_arc_app_setup_org_profiles | map(attribute='app_secret') | first | default(github_runner_arc_app_setup_org | lower ~ '-github-app'))])
+        | list
+      }}
+  vars:
+    # The organisation's entry is expanded on its own, so its missing app_id (the App does not exist yet) makes arc_profiles report an error without hiding the profiles.
+    github_runner_arc_app_setup_org_profiles: >-
+      {{ (github_runner_arc_orgs | selectattr('name', 'defined') | selectattr('name', 'equalto', github_runner_arc_app_setup_org) | list | exadev.github_runner.arc_profiles).profiles }}
+  when: github_runner_arc_app_setup_write_secret | bool
+
+- name: Fail when there is nowhere to write the App Secret
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_arc_app_setup_write_secret needs the namespaces to write the App Secret into: set github_runner_arc_app_setup_secret_namespaces,
+      or configure {{ github_runner_arc_app_setup_org }} with its scale-set profiles in github_runner_arc_orgs.
+  when: github_runner_arc_app_setup_write_secret | bool and github_runner_arc_app_setup_secret_targets | length == 0
 
 - name: Build the App manifest
   ansible.builtin.set_fact:
@@ -44,7 +66,7 @@
         msg:
           - "Open {{ github_runner_arc_app_form.path }} in a browser and follow its steps."
           - "It posts the manifest to GitHub for {{ github_runner_arc_app_setup_org }}; you must be an owner of that organisation."
-          - "Then rerun with -e github_runner_arc_app_manifest_code=<code> -e github_runner_arc_app_private_key_path=<new file for the key>."
+          - "Then run: {{ github_runner_arc_app_setup_command }} -e github_runner_arc_app_manifest_code=<code> -e github_runner_arc_app_private_key_path=<new file for the key>"
 
 - name: Exchange the code and wait for the installation (phase 2)
   when: github_runner_arc_app_manifest_code | length > 0
@@ -70,7 +92,34 @@
         or github_runner_arc_app_key_stat.stat.exists
         or not (github_runner_arc_app_key_dir_stat.stat.isdir | default(false))
 
-    # Not no_log, so that GitHub's own error is visible when the exchange fails. The registered result holds the key, so -v output would show it; nothing unattended runs this.
+    # Also before the exchange, for the same reason: the cluster the App Secret goes to must be reachable, and its namespaces must exist, while a failure still costs only a rerun. Creating a namespace that exists changes nothing.
+    - name: Reach the cluster and create the App Secret's namespaces
+      when: github_runner_arc_app_setup_write_secret | bool
+      module_defaults:
+        group/kubernetes.core.k8s:
+          kubeconfig: "{{ github_runner_arc_kubeconfig_path or omit }}"
+      block:
+        - name: Gather the environment the kubernetes client's virtualenv path comes from
+          ansible.builtin.setup:
+            gather_subset:
+              - "!all"
+              - "!min"
+              - env
+
+        - name: Give this host the kubernetes Python client
+          ansible.builtin.include_role:
+            name: github_runner_k8s_client
+
+        - name: Create the App Secret's namespaces
+          kubernetes.core.k8s:
+            definition:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: "{{ item }}"
+          loop: "{{ github_runner_arc_app_setup_secret_targets | map('first') | unique }}"
+
+    # no_log because a successful response holds the private key, which -v would otherwise print. The next task reports GitHub's own error when the exchange fails.
     - name: Exchange the manifest code for the App's credentials
       ansible.builtin.uri:
         url: "https://api.github.com/app-manifests/{{ github_runner_arc_app_manifest_code | urlencode }}/conversions"
@@ -78,8 +127,16 @@
         headers:
           Accept: application/vnd.github+json
           X-GitHub-Api-Version: "2022-11-28"
-        status_code: [201]
+        status_code: [201, 400, 401, 403, 404, 410, 422]
       register: github_runner_arc_app_conversion
+      no_log: true
+
+    - name: Fail when GitHub refused the code
+      ansible.builtin.fail:
+        msg: >-
+          GitHub refused the manifest code (HTTP {{ github_runner_arc_app_conversion.status }}: {{ github_runner_arc_app_conversion.json.message | default('no message') }}).
+          A code works once and expires within an hour; run phase 1 again for a new one.
+      when: github_runner_arc_app_conversion.status != 201
 
     - name: Write the App's private key
       ansible.builtin.copy:
@@ -118,8 +175,49 @@
       delay: "{{ github_runner_arc_app_setup_install_delay }}"
       no_log: true
 
+    - name: Record the App's installation on the organisation
+      ansible.builtin.set_fact:
+        github_runner_arc_app_installation_id: "{{ (github_runner_arc_app_installations.json | selectattr('account.login', 'equalto', github_runner_arc_app_setup_org) | first).id | string }}"
+
+    - name: Write the App Secret
+      when: github_runner_arc_app_setup_write_secret | bool
+      module_defaults:
+        group/kubernetes.core.k8s:
+          kubeconfig: "{{ github_runner_arc_kubeconfig_path or omit }}"
+      block:
+        # The three keys the ARC controller reads from githubConfigSecret, as the role's own install writes them.
+        - name: Create or update the App Secret
+          kubernetes.core.k8s:
+            definition:
+              apiVersion: v1
+              kind: Secret
+              type: Opaque
+              metadata:
+                name: "{{ item.1 }}"
+                namespace: "{{ item.0 }}"
+              stringData:
+                github_app_id: "{{ github_runner_arc_app_conversion.json.id | string }}"
+                github_app_installation_id: "{{ github_runner_arc_app_installation_id }}"
+                github_app_private_key: "{{ github_runner_arc_app_conversion.json.pem }}"
+          loop: "{{ github_runner_arc_app_setup_secret_targets }}"
+          loop_control:
+            label: "{{ item.0 }}/{{ item.1 }}"
+          no_log: true
+
+        - name: Remove the private key file now that the App Secret holds the key
+          ansible.builtin.file:
+            path: "{{ github_runner_arc_app_private_key_path | expanduser }}"
+            state: absent
+          when: not (github_runner_arc_app_setup_keep_private_key | bool)
+
     - name: Print the values to record
       ansible.builtin.debug:
-        msg:
-          - "Private key written to {{ github_runner_arc_app_private_key_path }}; store it in your secret store and set the org's private_key from it (or its private_key_op_reference, with the 1Password adapter)."
-          - "github_runner_arc_orgs entry: name {{ github_runner_arc_app_setup_org }}, app_id {{ github_runner_arc_app_conversion.json.id }}, installation_id {{ (github_runner_arc_app_installations.json | selectattr('account.login', 'equalto', github_runner_arc_app_setup_org) | first).id }}"
+        msg: >-
+          {{
+            (['App Secret ' ~ (github_runner_arc_app_setup_secret_targets | map('join', '/') | join(', ')) ~ ' written.']
+             if github_runner_arc_app_setup_write_secret | bool else [])
+            + (['Private key file removed; the App Secret holds the only copy.']
+               if github_runner_arc_app_setup_write_secret | bool and not (github_runner_arc_app_setup_keep_private_key | bool) else
+               ['Private key written to ' ~ github_runner_arc_app_private_key_path ~ "; store it in your secret store and set the org's private_key from it (or its private_key_op_reference, with the 1Password adapter)."])
+            + ['github_runner_arc_orgs entry: name ' ~ github_runner_arc_app_setup_org ~ ', app_id ' ~ github_runner_arc_app_conversion.json.id ~ ', installation_id ' ~ github_runner_arc_app_installation_id]
+          }}

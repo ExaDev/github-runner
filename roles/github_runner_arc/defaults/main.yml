@@ -84,3 +84,15 @@ github_runner_arc_app_private_key_path: ""
 # How long phase 2 waits for the App to be installed: retries times delay seconds.
 github_runner_arc_app_setup_install_retries: 40
 github_runner_arc_app_setup_install_delay: 15
+# The phase 2 command the manifest form and phase 1's instructions tell the person to run, without the code and key path, which the role appends. Its default runs this collection's playbook from a checkout; a playbook that wraps the flow names itself here, with whatever arguments it needs.
+github_runner_arc_app_setup_command: >-
+  ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org={{ github_runner_arc_app_setup_org }}
+  -e '{"github_runner_arc_app_setup_name": "{{ github_runner_arc_app_setup_name }}"}'
+# Whether phase 2 writes the App Secret (github_app_id, github_app_installation_id and github_app_private_key) into the cluster once the App is installed, through github_runner_arc_kubeconfig_path, creating the namespaces it needs. The cluster is reached, and the namespaces created, before the one-time code is used, so a broken cluster path costs only a rerun. false leaves the key in its file for the operator to store.
+github_runner_arc_app_setup_write_secret: false
+# The namespaces the App Secret is written into. Empty means those of the organisation's scale-set profiles in github_runner_arc_orgs.
+github_runner_arc_app_setup_secret_namespaces: []
+# The App Secret's name. Empty means the organisation's app_secret_name in github_runner_arc_orgs, or <org>-github-app, as the role's install uses.
+github_runner_arc_app_setup_secret_name: ""
+# Whether to keep the private key file once the App Secret holds the key. false removes it, so the key is on disk only until the Secret is written; a run that stops earlier, for example because nobody installed the App within the wait, leaves the file so the App can still be finished without a new code.
+github_runner_arc_app_setup_keep_private_key: false

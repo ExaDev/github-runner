@@ -196,6 +196,28 @@ argument_specs:
         type: str
         default: ""
         description: New file the App setup writes the private key to.
+      github_runner_arc_app_setup_command:
+        type: str
+        description:
+          - The phase 2 command the manifest form and phase 1 tell the person to run, without the code and key path, which are appended.
+          - Defaults to this collection's playbook run from a checkout; a playbook that wraps the flow names itself.
+      github_runner_arc_app_setup_write_secret:
+        type: bool
+        default: false
+        description: Whether phase 2 writes the App Secret into the cluster, creating its namespaces before the code is used, once the App is installed.
+      github_runner_arc_app_setup_secret_namespaces:
+        type: list
+        elements: str
+        default: []
+        description: Namespaces the App Secret is written into. Empty means those of the organisation's scale-set profiles in github_runner_arc_orgs.
+      github_runner_arc_app_setup_secret_name:
+        type: str
+        default: ""
+        description: The App Secret's name. Empty means the organisation's app_secret_name in github_runner_arc_orgs, or <org>-github-app.
+      github_runner_arc_app_setup_keep_private_key:
+        type: bool
+        default: false
+        description: Keep the private key file after the App Secret is written. false removes it.
       github_runner_arc_app_setup_install_retries:
         type: int
         default: 40
