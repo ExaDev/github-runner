@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
+# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
 # Usage: tests/mesh/run.sh <scenario>... (default: all three). Needs Docker with Compose, and Python 3 with ansible-core (ANSIBLE_PLAYBOOK overrides which ansible-playbook runs). Creates only Docker objects named grtest-*, and removes them again on exit unless GRTEST_KEEP=1.
 set -euo pipefail
@@ -274,6 +274,37 @@ scenario_cluster() {
   fi
 }
 
+# The role must refuse a Docker Compose release that recreates the containers it has just built (see the check in the cluster role's tasks/main.yml) before it writes anything to the host. The workflow installs such a release for this scenario; every other scenario runs under a good one and so also shows the check lets that through.
+scenario_compose_faulty() {
+  local output node
+  reset_environment
+  node="$(node_name 1)"
+  mkdir -p "${work}/${node}"
+  cat > "${work}/inventory.yml" <<EOF
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: $(command -v python3)
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_k3s_token: ${k3s_token}
+      hosts:
+        ${node}:
+          github_runner_cluster_dir: ${work}/${node}
+          github_runner_cluster_compose_project: ${node}
+EOF
+  log "The role must refuse Docker Compose $(docker compose version --short) before touching the host"
+  if output=$(run_role 2>&1); then
+    echo "$output"; fail "the role ran with a Compose release it should refuse"
+  fi
+  echo "$output" | grep -F "Fail if this host's Docker Compose recreates the containers it has just built" >/dev/null || { echo "$output"; fail "the role failed, but not at the Compose version check"; }
+  echo "$output" | grep -F 'Upgrade the Docker Compose plugin on this host' >/dev/null || { echo "$output"; fail "the failure did not say to upgrade Compose"; }
+  [ -z "$(ls -A "${work}/${node}")" ] || fail "the role wrote to the cluster directory before refusing: $(ls -A "${work}/${node}")"
+  echo "$output" | grep -F 'Upgrade the Docker Compose plugin' | head -n 1
+  log "It did"
+}
+
 scenario_existing() {
   reset_environment
   local fixtures="${repo_root}/tests/mesh/fixtures/headscale-existing" api_url api_key output
@@ -322,6 +353,7 @@ for scenario in "${scenarios[@]}"; do
   case "$scenario" in
     hosted | in_cluster) scenario_cluster "$scenario" ;;
     existing) scenario_existing ;;
+    compose_faulty) scenario_compose_faulty ;;
     # Re-checks a cluster a previous run kept with GRTEST_KEEP=1 and the same GRTEST_WORK, without rebuilding it.
     assert) assert_cluster ;;
     *) fail "unknown scenario ${scenario}" ;;

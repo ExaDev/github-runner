@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install the pinned Docker Compose
-        # Always the pinned version, not whatever the runner has: ubuntu-latest's own Compose recreated every node container when the role ran a second time, which the pinned version does not. The user plugin directory takes precedence over the system one.
+        # Always the pinned version, not whatever the runner has: ubuntu-latest has shipped Compose releases the cluster role refuses (see its tasks/main.yml). The user plugin directory takes precedence over the system one.
         run: |
           set -euo pipefail
           docker version --format 'Docker Engine {{.Server.Version}}'
