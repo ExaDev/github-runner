@@ -1,6 +1,6 @@
 name: Mesh integration
 
-# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check, plus the role's refusal of a Docker Compose release that recreates the containers it has just built. Only on changes that can affect how nodes join the mesh.
+# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check, plus the role's refusal of a Docker Compose release that recreates the containers it has just built. headscale_in_cluster also runs with github_runner_cluster_docker_context pinned while the current Docker context points at nothing, which covers the cluster role's own docker calls and the recovery playbook's, and context_checks checks the role refuses a pin it cannot honour. Only on changes that can affect how nodes join the mesh.
 #
 # Runs on GitHub-hosted ubuntu-latest, whose Docker daemon runs the privileged containers the test needs (k3s, and Tailscale inside it). The work directory sits under runner.temp, which the job always has write access to.
 
@@ -13,6 +13,7 @@ on:
       - k3s/**
       - playbooks/recover_in_cluster_mesh.yml
       - tests/mesh/**
+      - tests/lib/**
       - .github/workflows/mesh-integration.yml
   workflow_dispatch:
 
@@ -25,7 +26,7 @@ permissions:
 
 jobs:
   mesh:
-    name: Mesh (${{ matrix.scenario }}, Compose ${{ matrix.compose }})
+    name: Mesh (${{ matrix.scenario }}, Compose ${{ matrix.compose }}${{ matrix.pin && ', context pinned' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -38,6 +39,8 @@ jobs:
           - {scenario: in_cluster, compose: v5.5.1}
           - {scenario: hosted, compose: v2.39.0}
           - {scenario: compose_faulty, compose: v2.38.2}
+          - {scenario: in_cluster, compose: v5.5.1, pin: true}
+          - {scenario: context_checks, compose: v5.5.1}
     steps:
       - uses: actions/checkout@v7
 
@@ -76,6 +79,7 @@ jobs:
         env:
           ANSIBLE_COLLECTIONS_PATH: ${{ runner.temp }}/collections
           GRTEST_WORK: ${{ runner.temp }}/grtest-mesh
+          GRTEST_PIN_CONTEXT: ${{ matrix.pin && '1' || '0' }}
         run: tests/mesh/run.sh "${{ matrix.scenario }}"
 
   required-checks:

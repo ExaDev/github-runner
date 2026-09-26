@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
+# With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
+#
 # Usage: tests/mesh/run.sh <scenario>... (default: all three). Needs Docker with Compose, and Python 3 with ansible-core (ANSIBLE_PLAYBOOK overrides which ansible-playbook runs). Creates only Docker objects named grtest-*, and removes them again on exit unless GRTEST_KEEP=1.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=tests/lib/docker_context.sh
+. "${repo_root}/tests/lib/docker_context.sh"
+pin_context="${GRTEST_PIN_CONTEXT:-0}"
 ansible_playbook="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 network=grtest-mesh
 subnet_prefix=172.31.250
@@ -16,6 +21,8 @@ busybox_image=busybox:1.37
 reach_attempts=8
 work="${GRTEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/grtest-mesh.XXXXXX")}"
 k3s_token="grtest-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+# The Docker CLI configuration the ansible-playbook runs see when the context is pinned; see tests/lib/docker_context.sh.
+docker_config="${work}/docker-config"
 
 log() { echo "==> $*"; }
 fail() {
@@ -66,6 +73,13 @@ teardown() {
   rm -rf "$work"
 }
 
+# Runs ansible-playbook from ansible/, with the throwaway Docker configuration when the context is pinned.
+ansible_run() {
+  local config=()
+  if [ "$pin_context" = 1 ]; then config=("DOCKER_CONFIG=${docker_config}"); fi
+  (cd "${repo_root}/ansible" && env "${config[@]}" ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections:${ANSIBLE_COLLECTIONS_PATH:-}" "$ansible_playbook" "$@")
+}
+
 cleanup() {
   if [ "${GRTEST_KEEP:-}" = 1 ]; then
     log "Keeping the test environment in ${work} (GRTEST_KEEP=1)"
@@ -80,6 +94,10 @@ reset_environment() {
   teardown
   mkdir -p "$work"
   docker network create --subnet "${subnet_prefix}.0/24" "$network" >/dev/null
+  if [ "$pin_context" = 1 ]; then
+    log "Pinning the Docker context ${grtest_pinned_context}, with the current context pointing at nothing"
+    grtest_setup_pinned_contexts "$docker_config"
+  fi
 }
 
 # Each node gets its own cluster directory, which the role fills with the Compose file and k3s build context, plus an override that renames its container, drops the host port every node would otherwise publish, and puts it on the shared test network at a fixed address.
@@ -143,6 +161,9 @@ EOF
     echo "        github_runner_cluster_headscale_compose_files: [${work}/headscale-grtest.yml]"
     echo "        github_runner_cluster_compose_files: [compose.grtest.yml]"
     echo "        github_runner_cluster_k3s_token: ${k3s_token}"
+    if [ "$pin_context" = 1 ]; then
+      echo "        github_runner_cluster_docker_context: ${grtest_pinned_context}"
+    fi
     # Litestream has its own test (tests/litestream); this one exercises the in-cluster bootstrap on node-local state, which the role only allows once acknowledged.
     if [ "$scenario" = in_cluster ]; then
       echo "        github_runner_cluster_headscale_accept_node_local_state: true"
@@ -159,8 +180,8 @@ EOF
 
 run_role() {
   log "Running the cluster role"
-  (cd "${repo_root}/ansible" && ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections:${ANSIBLE_COLLECTIONS_PATH:-}" \
-    "$ansible_playbook" -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml")
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml"
+  if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the role changed the current Docker context"; fi
 }
 
 kubectl_on() { docker exec -i "$(container "$1")" kubectl "${@:2}"; }
@@ -267,19 +288,16 @@ scenario_cluster() {
   assert_cluster
   if [ "$scenario" = in_cluster ]; then
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
-    (cd "${repo_root}/ansible" && ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections:${ANSIBLE_COLLECTIONS_PATH:-}" \
-      "$ansible_playbook" -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml") \
+    ansible_run -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml" \
       || fail "the recovery playbook did not bring the bootstrap server back"
+    if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the recovery playbook changed the current Docker context"; fi
     assert_cluster
   fi
 }
 
-# The role must refuse a Docker Compose release that recreates the containers it has just built (see the check in the cluster role's tasks/main.yml) before it writes anything to the host. The workflow installs such a release for this scenario; every other scenario runs under a good one and so also shows the check lets that through.
-scenario_compose_faulty() {
-  local output node
-  reset_environment
-  node="$(node_name 1)"
-  mkdir -p "${work}/${node}"
+# One node and only the settings the role reads before its first check fails, for the scenarios that expect it to stop before touching the host.
+write_minimal_inventory() {
+  local node="$1"
   cat > "${work}/inventory.yml" <<EOF
 all:
   vars:
@@ -294,6 +312,15 @@ all:
           github_runner_cluster_dir: ${work}/${node}
           github_runner_cluster_compose_project: ${node}
 EOF
+}
+
+# The role must refuse a Docker Compose release that recreates the containers it has just built (see the check in the cluster role's tasks/main.yml) before it writes anything to the host. The workflow installs such a release for this scenario; every other scenario runs under a good one and so also shows the check lets that through.
+scenario_compose_faulty() {
+  local output node
+  reset_environment
+  node="$(node_name 1)"
+  mkdir -p "${work}/${node}"
+  write_minimal_inventory "$node"
   log "The role must refuse Docker Compose $(docker compose version --short) before touching the host"
   if output=$(run_role 2>&1); then
     echo "$output"; fail "the role ran with a Compose release it should refuse"
@@ -302,6 +329,35 @@ EOF
   echo "$output" | grep -F 'Upgrade the Docker Compose plugin on this host' >/dev/null || { echo "$output"; fail "the failure did not say to upgrade Compose"; }
   [ -z "$(ls -A "${work}/${node}")" ] || fail "the role wrote to the cluster directory before refusing: $(ls -A "${work}/${node}")"
   echo "$output" | grep -F 'Upgrade the Docker Compose plugin' | head -n 1
+  log "It did"
+}
+
+# The role must refuse a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before it writes anything to the host.
+scenario_context_checks() {
+  local output node
+  reset_environment
+  # reset_environment has already made it when every scenario runs pinned.
+  [ "$pin_context" = 1 ] || grtest_setup_pinned_contexts "$docker_config"
+  node="$(node_name 1)"
+  mkdir -p "${work}/${node}"
+  write_minimal_inventory "$node"
+
+  log "A pinned context that does not exist must stop the role before it touches the host"
+  if output=$(pin_context=1 ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" -e github_runner_cluster_docker_context=grtest-missing 2>&1); then
+    echo "$output"; fail "the role ran with a pinned context that does not exist"
+  fi
+  echo "$output" | grep -F "names the Docker context 'grtest-missing', which does not exist" >/dev/null || { echo "$output"; fail "the failure did not say the pinned context is missing"; }
+  echo "$output" | grep -F "$grtest_pinned_context" >/dev/null || { echo "$output"; fail "the failure did not list the contexts that do exist"; }
+  [ -z "$(ls -A "${work}/${node}")" ] || fail "the role wrote to the cluster directory before refusing: $(ls -A "${work}/${node}")"
+  log "It did"
+
+  log "A pinned context alongside DOCKER_HOST must stop the role before it touches the host"
+  if output=$(pin_context=1 DOCKER_HOST="unix://${docker_config}/decoy.sock" ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" -e "github_runner_cluster_docker_context=${grtest_pinned_context}" 2>&1); then
+    echo "$output"; fail "the role ran with both a pinned context and DOCKER_HOST"
+  fi
+  echo "$output" | grep -F 'but DOCKER_HOST is also set' >/dev/null || { echo "$output"; fail "the failure did not name the conflict with DOCKER_HOST"; }
+  [ -z "$(ls -A "${work}/${node}")" ] || fail "the role wrote to the cluster directory before refusing: $(ls -A "${work}/${node}")"
+  grtest_assert_current_context_unchanged "$docker_config" || fail "the role changed the current Docker context"
   log "It did"
 }
 
@@ -354,6 +410,7 @@ for scenario in "${scenarios[@]}"; do
     hosted | in_cluster) scenario_cluster "$scenario" ;;
     existing) scenario_existing ;;
     compose_faulty) scenario_compose_faulty ;;
+    context_checks) scenario_context_checks ;;
     # Re-checks a cluster a previous run kept with GRTEST_KEEP=1 and the same GRTEST_WORK, without rebuilding it.
     assert) assert_cluster ;;
     *) fail "unknown scenario ${scenario}" ;;
