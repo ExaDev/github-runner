@@ -1,3 +1,17 @@
+# [1.2.0](https://github.com/ExaDev/github-runner/compare/v1.1.0...v1.2.0) (2026-09-26)
+
+
+### Bug Fixes
+
+* **arc:** keep each org's resolved installation id to that org ([6c1b65a](https://github.com/ExaDev/github-runner/commit/6c1b65a1b0026241d57b1a186c0bee5b80f1973b))
+
+
+### Features
+
+* **arc:** let the App setup write the App Secret and remove the key ([7f64f21](https://github.com/ExaDev/github-runner/commit/7f64f21bea9d9f2a3689b1be26d7a27122fa6054))
+* **arc:** measure the runner ceiling from each node's free capacity ([a9a498b](https://github.com/ExaDev/github-runner/commit/a9a498b7c03b5cd1741b0b71cf53cd93cf96f1dc))
+* **arc:** mint the image pull secret from the runners' GitHub App ([6d1c8a3](https://github.com/ExaDev/github-runner/commit/6d1c8a3c17555cf5b9d57608d896c59af74335f6))
+
 # [1.1.0](https://github.com/ExaDev/github-runner/compare/v1.0.3...v1.1.0) (2026-09-25)
 
 
