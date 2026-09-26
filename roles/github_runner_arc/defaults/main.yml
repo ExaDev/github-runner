@@ -80,6 +80,15 @@ github_runner_arc_autoscaler_poll_seconds: 45
 github_runner_arc_autoscaler_raise_confirm_polls: 2
 github_runner_arc_autoscaler_mem_available_pressure_pct: 15
 
+# Node recovery (see tasks/install_node_recovery.yml and scripts/node-recovery.sh). When a node's kubelet stops reporting, the control plane marks the node's pods for deletion but only the kubelet can confirm it, so they stay Terminating, and an ARC listener on that node is never replaced. The watcher gives such a node the node.kubernetes.io/out-of-service=nodeshutdown:NoExecute taint once its Ready condition has been Unknown for github_runner_arc_node_recovery_after_seconds, which makes the control plane evict its pods and force-delete the terminating ones, and removes the taint when the node reports Ready again. false removes the watcher and any taint it left.
+github_runner_arc_node_recovery_enabled: true
+# Counted from when the node controller marks the node Unknown, which it does only after the kubelet has missed heartbeats for the controller manager's node-monitor-grace-period (50 seconds on current Kubernetes). 120 seconds more leaves room for a k3s container restart or image upgrade to report Ready again before anything is given up, while bounding how long a stopped node stalls its listeners to roughly four minutes at worst (the grace period, this threshold, one poll, the pod garbage collector's 20-second sweep and the listener's own restart) instead of indefinitely. It is also where the node's own runner pods are given up, earlier than the five-minute default eviction would; their containers stopped with the node, so a job on it is lost either way unless the node returns within that time. Lower it for faster recovery at the cost of losing the jobs of a node that comes back sooner; raise it to keep them for longer outages.
+github_runner_arc_node_recovery_after_seconds: 120
+# How often the watcher checks the nodes. A taint lands at most this long after the threshold passes.
+github_runner_arc_node_recovery_poll_seconds: 15
+# Image the watcher runs. Pulled without a pull Secret, so it must be public.
+github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:1.2.2"
+
 # GitHub App creation through the manifest flow (tasks/app_setup.yml, run by playbooks/github_app_setup.yml). The App needs only organisation self-hosted runner write access; add packages: read to the permissions if its installation token should also pull private packages.
 github_runner_arc_app_setup_org: ""
 github_runner_arc_app_setup_name: ""

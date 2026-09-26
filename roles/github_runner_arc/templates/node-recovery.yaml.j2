@@ -1,0 +1,105 @@
+{# The node recovery watcher (see tasks/install_node_recovery.yml and scripts/node-recovery.sh): a ServiceAccount, a ClusterRole allowing only get, list and patch on nodes, its binding, and the Deployment. The namespace is ensured separately, since the platform's other Deployments share it. #}
+{% set name = 'node-recovery' %}
+{% set cluster_name = 'github-runner-node-recovery' %}
+{% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ github_runner_arc_platform_namespace | to_json }}
+  labels: {{ labels | to_json }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ cluster_name | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  # Nodes are cluster-scoped, and a taint is part of the Node object, so patch cannot be narrower than this. No delete: the watcher never removes a Node, which on a k3s server would remove its etcd member.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ cluster_name | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ github_runner_arc_platform_namespace | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ cluster_name | to_json }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ github_runner_arc_platform_namespace | to_json }}
+  labels: {{ labels | to_json }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{ {'app.kubernetes.io/name': name} | to_json }}
+  template:
+    metadata:
+      labels: {{ labels | to_json }}
+    spec:
+      serviceAccountName: {{ name | to_json }}
+      # Unpinned, like the rest of the platform. When the watcher's own node stops, a short toleration gets it evicted within seconds of the node being marked unreachable, so its ReplicaSet starts a replacement elsewhere long before the threshold passes; the default five minutes would leave no watcher running for longer than the threshold it enforces. The old pod stays Terminating until the new watcher taints its node.
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 10
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: node-recovery
+          image: {{ github_runner_arc_node_recovery_image | to_json }}
+          env:
+            - name: NODE_RECOVERY_AFTER_SECONDS
+              value: {{ github_runner_arc_node_recovery_after_seconds | string | to_json }}
+            - name: NODE_RECOVERY_POLL_SECONDS
+              value: {{ github_runner_arc_node_recovery_poll_seconds | string | to_json }}
+            - name: NODE_RECOVERY_ANNOTATION
+              value: {{ github_runner_arc_node_recovery_annotation | to_json }}
+            # The watcher never taints the node it runs on.
+            - name: NODE_RECOVERY_SELF_NODE
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # kubectl's cache goes to the in-memory volume, since the root filesystem is read-only.
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi

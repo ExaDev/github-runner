@@ -9,3 +9,6 @@ github_runner_arc_pull_token_expiry_annotation: github-runner.exadev/pull-token-
 
 # Server-side apply field manager the renewal job writes the pull Secret with.
 github_runner_arc_pull_secret_field_manager: github-runner-pull-secret-renewer
+
+# Annotation the node recovery watcher writes alongside the out-of-service taint it applies, recording when it applied it. The watcher removes only a taint carrying this annotation, so an operator's own out-of-service taint is left alone.
+github_runner_arc_node_recovery_annotation: github-runner.exadev/out-of-service-applied-at

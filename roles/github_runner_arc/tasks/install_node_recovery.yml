@@ -1,0 +1,59 @@
+---
+# Installs the node recovery watcher (templates/node-recovery.yaml.j2, running scripts/node-recovery.sh) when github_runner_arc_node_recovery_enabled is on, and otherwise removes it along with any out-of-service taint it left behind, so that turning it off never leaves a node that returns unable to run anything. Included from main.yml on any host that installs something.
+
+- name: "Node recovery: describe its resources"
+  ansible.builtin.set_fact:
+    github_runner_arc_node_recovery_resources: "{{ lookup('ansible.builtin.template', 'node-recovery.yaml.j2') | from_yaml_all | list }}"
+
+- name: "Node recovery: create the namespace it runs in"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ github_runner_arc_platform_namespace }}"
+  when: github_runner_arc_node_recovery_enabled | bool
+
+- name: "Node recovery: install the watcher"
+  kubernetes.core.k8s:
+    definition: "{{ item }}"
+  loop: "{{ github_runner_arc_node_recovery_resources }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+  when: github_runner_arc_node_recovery_enabled | bool
+
+- name: "Node recovery: remove the watcher and its taints"
+  when: not (github_runner_arc_node_recovery_enabled | bool)
+  block:
+    # The Deployment goes before the permissions it runs with, so nothing is left running that can no longer patch nodes.
+    - name: "Node recovery: remove the watcher"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: "{{ item.apiVersion }}"
+        kind: "{{ item.kind }}"
+        namespace: "{{ item.metadata.namespace | default(omit) }}"
+        name: "{{ item.metadata.name }}"
+      loop: "{{ github_runner_arc_node_recovery_resources | reverse | list }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+    - name: "Node recovery: find the nodes it tainted"
+      kubernetes.core.k8s_info:
+        kind: Node
+      register: github_runner_arc_node_recovery_nodes
+
+    # Only nodes carrying the watcher's own annotation, and only the out-of-service taint; every other taint and annotation is kept.
+    - name: "Node recovery: remove the taint it applied"
+      kubernetes.core.k8s_json_patch:
+        kind: Node
+        name: "{{ item.metadata.name }}"
+        patch:
+          - op: add
+            path: /spec/taints
+            value: "{{ item.spec.taints | default([]) | rejectattr('key', 'equalto', 'node.kubernetes.io/out-of-service') | list }}"
+          - op: add
+            path: /metadata/annotations
+            value: "{{ item.metadata.annotations | dict2items | rejectattr('key', 'equalto', github_runner_arc_node_recovery_annotation) | items2dict }}"
+      loop: "{{ github_runner_arc_node_recovery_nodes.resources | selectattr('metadata.annotations', 'defined') | selectattr('metadata.annotations', 'contains', github_runner_arc_node_recovery_annotation) | list }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"

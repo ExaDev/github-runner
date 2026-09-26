@@ -1,6 +1,6 @@
 name: Release
 
-# Runs semantic-release against every push to main. Almost every conventional-commit type triggers at least a patch release (see .releaserc.json's commit-analyzer releaseRules), so in practice this fires on nearly every push, stamping the collection version into galaxy.yml and the arc role's heartbeat, autoscaler and pull-secret-renewer image defaults, building the collection tarball, and, if a release was actually published, building and pushing all four container images (runner, heartbeat, autoscaler, pull-secret-renewer) tagged with the exact new version alongside floating major and latest tags on the same manifest.
+# Runs semantic-release against every push to main. Almost every conventional-commit type triggers at least a patch release (see .releaserc.json's commit-analyzer releaseRules), so in practice this fires on nearly every push, stamping the collection version into galaxy.yml and the arc role's heartbeat, autoscaler, pull-secret-renewer and node-recovery image defaults, building the collection tarball, and, if a release was actually published, building and pushing all five container images (runner, heartbeat, autoscaler, pull-secret-renewer, node-recovery) tagged with the exact new version alongside floating major and latest tags on the same manifest.
 #
 # The release commit and tag are pushed over SSH with a write-enabled deploy key (secret RELEASE_DEPLOY_KEY): actions/checkout loads it for every later git command, and .releaserc.json's repositoryUrl is the SSH remote, so @semantic-release/git pushes with it. A deploy key is scoped to this one repository and can be listed as a ruleset bypass actor. It can't call the GitHub API, so the semantic-release process uses the ordinary secrets.GITHUB_TOKEN for creating the Release and uploading the collection tarball, which need no bypass.
 #
@@ -76,6 +76,9 @@ jobs:
           - name: pull-secret-renewer
             dockerfile: pull-secret-renewer/Dockerfile
             image: ghcr.io/exadev/github-runner-pull-secret-renewer
+          - name: node-recovery
+            dockerfile: node-recovery/Dockerfile
+            image: ghcr.io/exadev/github-runner-node-recovery
     steps:
       - uses: actions/checkout@v7
         with:

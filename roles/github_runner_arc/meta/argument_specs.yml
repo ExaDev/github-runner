@@ -176,6 +176,23 @@ argument_specs:
         type: int
         default: 15
         description: Available memory percentage below which the autoscaler treats a node as under pressure.
+      github_runner_arc_node_recovery_enabled:
+        type: bool
+        default: true
+        description:
+          - Install the node recovery watcher, which gives a node the out-of-service taint once it has stopped reporting for github_runner_arc_node_recovery_after_seconds, so the control plane clears its stuck pods, and removes the taint when the node is Ready again.
+          - false removes the watcher and any taint it applied.
+      github_runner_arc_node_recovery_after_seconds:
+        type: int
+        default: 120
+        description: Seconds a node's Ready condition must have been Unknown before the watcher taints it out of service.
+      github_runner_arc_node_recovery_poll_seconds:
+        type: int
+        default: 15
+        description: How often the node recovery watcher checks the nodes.
+      github_runner_arc_node_recovery_image:
+        type: str
+        description: Image the node recovery watcher runs, pulled without a pull Secret.
       github_runner_arc_autoscaler_usable_budget_gi:
         type: int
         description: Memory runner pods may use across every node. Required for an autoscaled profile.

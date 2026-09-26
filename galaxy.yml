@@ -38,6 +38,7 @@ build_ignore:
   - autoscaler
   - heartbeat
   - pull-secret-renewer
+  - node-recovery
   - scripts
   - Dockerfile
   - bootstrap.sh

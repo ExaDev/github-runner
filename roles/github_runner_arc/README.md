@@ -37,6 +37,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 - `github_runner_arc_image_pull_registry`, `github_runner_arc_image_pull_secret_name`, `github_runner_arc_verify_image_pull`: the pull Secret's registry and name, and whether to prove the credential before writing it.
 - `github_runner_arc_heartbeat_gist_id`: install the fleet-health platform from this host, refreshing this gist. `github_runner_arc_heartbeat_bootstrap_gist`, `github_runner_arc_heartbeat_gist_description` and `github_runner_arc_heartbeat_gist_consumer` control the bootstrap described above.
 - `github_runner_arc_autoscaler_usable_budget_gi`, `github_runner_arc_autoscaler_max_ceiling`, `github_runner_arc_autoscaler_floor`: required when a profile sets `autoscale: true` and the platform is installed. The floor must equal the autoscaled profile's `maxRunners`, which every Helm upgrade reverts to. The other `github_runner_arc_autoscaler_*` and `github_runner_arc_heartbeat_*` settings have defaults; see `defaults/main.yml`.
+- `github_runner_arc_node_recovery_enabled` (default `true`), `github_runner_arc_node_recovery_after_seconds` (default 120), `github_runner_arc_node_recovery_poll_seconds` (default 15), `github_runner_arc_node_recovery_image`: the node recovery watcher (see [Node recovery](#node-recovery)).
 - `github_runner_arc_app_setup_*`, `github_runner_arc_app_manifest_code`, `github_runner_arc_app_private_key_path`: inputs to `playbooks/github_app_setup.yml` (see below), including `github_runner_arc_app_setup_write_secret`, `github_runner_arc_app_setup_secret_namespaces`, `github_runner_arc_app_setup_secret_name`, `github_runner_arc_app_setup_keep_private_key` and `github_runner_arc_app_setup_command`.
 
 ## Sizing
@@ -95,6 +96,10 @@ github_runner_arc_orgs:
     scale_set_profiles:
       - max_runners: 4
 ```
+
+## Node recovery
+
+Every host that installs anything also installs a small watcher, the `node-recovery` Deployment in `github_runner_arc_platform_namespace`, so that a node that stops does not leave its pods `Terminating` for ever. ARC waits for a listener's old pod to go before starting a new one, so a listener on a stopped node otherwise stalls its scale set until the pod is force-deleted by hand. Once a node's `Ready` condition has been `Unknown` for `github_runner_arc_node_recovery_after_seconds`, the watcher gives it the `node.kubernetes.io/out-of-service=nodeshutdown:NoExecute` taint of Kubernetes' non-graceful node shutdown, which makes the control plane evict the node's pods and force-delete the terminating ones; it removes the taint when the node reports `Ready` again. It never acts on a node reporting `NotReady`, never on its own node, and never removes a taint it did not apply. Its ClusterRole allows `get`, `list` and `patch` on nodes and nothing else. `github_runner_arc_node_recovery_enabled: false` removes the watcher, its RBAC and any taint it left behind. Its image is pulled without a pull Secret, so it must be public. The repository README's Node recovery section explains the default threshold.
 
 ## GitHub App setup
 
