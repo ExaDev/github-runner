@@ -1,3 +1,10 @@
+## [1.2.2](https://github.com/ExaDev/github-runner/compare/v1.2.1...v1.2.2) (2026-09-26)
+
+
+### Bug Fixes
+
+* **arc:** read the App's id from an existing App Secret ([e0854d2](https://github.com/ExaDev/github-runner/commit/e0854d24506d26650e3197d6d7f425ca1814f36e))
+
 ## [1.2.1](https://github.com/ExaDev/github-runner/compare/v1.2.0...v1.2.1) (2026-09-26)
 
 
