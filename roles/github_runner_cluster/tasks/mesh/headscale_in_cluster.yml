@@ -96,19 +96,15 @@
         dest: "{{ github_runner_cluster_dir }}/docker-compose.mesh.yml"
         mode: "0644"
 
-    - name: Determine the active Docker CLI context
-      # Empty when DOCKER_HOST is set: the module then takes the daemon from DOCKER_HOST itself, and rejects cli_context alongside it ("parameters are mutually exclusive: docker_host|cli_context", as on a Docker-in-Docker CI runner).
-      ansible.builtin.shell: if [ -z "${DOCKER_HOST:-}" ]; then docker context show; fi
-      changed_when: false
-      check_mode: false
-      register: github_runner_cluster_docker_context
+    - name: Resolve the bootstrap server's Docker context
+      # See docker_context.yml: the pinned github_runner_cluster_docker_context, or the host's current context.
+      ansible.builtin.include_tasks: docker_context.yml
 
     - name: Keep the Headscale image in the bootstrap host's own Docker, for recovery
       # playbooks/recover_in_cluster_mesh.yml runs a temporary Headscale container from this image when the node cannot rejoin, which is exactly when pulling it may not work; kubelet's copy inside k3s is in a different image store. Confirmed in CI: the recovery's own pull timed out against Docker Hub.
       ansible.builtin.shell: |
         if docker image inspect "$image" >/dev/null 2>&1; then echo present; else docker pull --quiet "$image"; fi
-      environment:
-        image: "docker.io/headscale/headscale:v{{ github_runner_cluster_headscale_version }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment | combine({'image': 'docker.io/headscale/headscale:v' ~ github_runner_cluster_headscale_version}) }}"
       register: github_runner_cluster_headscale_image
       changed_when: github_runner_cluster_headscale_image.stdout != 'present'
       until: github_runner_cluster_headscale_image.rc == 0
@@ -118,6 +114,7 @@
     - name: Ask whether Headscale answers inside the bootstrap server's k3s container
       ansible.builtin.command:
         argv: [docker, exec, "{{ github_runner_cluster_container_name }}", wget, -q, -T, "5", -O, /dev/null, "http://127.0.0.1:9090/metrics"]
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
       changed_when: false
       failed_when: false
       check_mode: false
@@ -139,7 +136,7 @@
             project_src: "{{ github_runner_cluster_dir }}"
             project_name: "{{ github_runner_cluster_compose_project }}"
             profiles: ["server"]
-            cli_context: "{{ (github_runner_cluster_docker_context.stdout | trim) or omit }}"
+            cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
             files: "{{ github_runner_cluster_compose_file_list }}"
             state: present
 
@@ -147,6 +144,7 @@
       # First start: k3s starts off the mesh, kubelet pulls the Headscale image and starts the static pod.
       ansible.builtin.command:
         argv: [docker, exec, "{{ github_runner_cluster_container_name }}", wget, -q, -T, "5", -O, /dev/null, "http://127.0.0.1:9090/metrics"]
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
       changed_when: false
       check_mode: false
       register: github_runner_cluster_headscale_wait
@@ -166,6 +164,7 @@
           - exec crictl exec "$(crictl ps -q --name '^litestream$' --state running | head -n 1)" cat "/var/lib/headscale/$1"
           - read-key
           - "{{ item }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
       loop: "{{ ['noise_private.key'] + (['derp_server_private.key'] if github_runner_cluster_headscale_derp == 'embedded' else []) }}"
       changed_when: false
       check_mode: false

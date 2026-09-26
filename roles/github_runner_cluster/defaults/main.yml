@@ -109,6 +109,8 @@ github_runner_cluster_compose_file_list: >-
   {{ ['docker-compose.yml']
      + (['docker-compose.mesh.yml'] if github_runner_cluster_mesh == 'headscale_in_cluster' and github_runner_cluster_effective_bootstrap | default(false) | bool else [])
      + github_runner_cluster_compose_files }}
+# The Docker context this host's node runs in, pinned by name (for example "colima"). Empty, the default, follows the host's current Docker context, or DOCKER_HOST when that is set. When set, every community.docker module call in the role passes it as cli_context and every docker CLI command runs with DOCKER_CONTEXT set to it, so both always reach the same daemon, whatever the host's current context is at the time. The role fails before touching the host if the context does not exist there, or if DOCKER_HOST is set as well, and it never changes the host's current context. Set it on any host with more than one Docker engine installed: on a Mac running its node in Colima with Docker Desktop also installed, merely launching Docker Desktop makes desktop-linux the current context, and an unpinned run would then build a second, empty node in Docker Desktop instead of managing the real one. Per host, like every value here that names something on the host; the Headscale tasks read it from the inventory of the host they act on.
+github_runner_cluster_docker_context: ""
 # The node's k3s container, as docker-compose.yml names it. The headscale_in_cluster provider runs commands inside it; override it only alongside an extra Compose file that renames the container.
 github_runner_cluster_container_name: github-runner-k3s
 

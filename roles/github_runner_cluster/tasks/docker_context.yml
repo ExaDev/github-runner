@@ -1,0 +1,63 @@
+---
+# Checks and resolves the Docker daemon the role drives on one host, github_runner_cluster_docker_target (the host this play runs on unless the caller names another, as the Headscale tasks do for a host they delegate to). Include it immediately before the docker tasks for that host, since a later include for a different host replaces what it publishes.
+#
+# Publishes two facts. github_runner_cluster_docker_cli_context is what every community.docker module call for that host passes as cli_context: the host's github_runner_cluster_docker_context when set, otherwise the host's current CLI context, or empty when DOCKER_HOST is set, since the module then takes the daemon from DOCKER_HOST and rejects cli_context alongside it ("parameters are mutually exclusive: docker_host|cli_context", as on a Docker-in-Docker CI runner). github_runner_cluster_docker_cli_environment is the environment every docker CLI call for that host runs with: DOCKER_CONTEXT set to the pinned context, or nothing when no context is pinned, so the CLI follows the host's current context or DOCKER_HOST exactly as the modules do. It never changes the host's own current context.
+
+- name: Take the Docker context pinned for the host whose Docker the next tasks drive, {{ github_runner_cluster_docker_target | default(inventory_hostname) }}
+  # The host's own value when it is this host, so that a value set in play vars or by set_fact counts too; another host's through hostvars, which never sees role defaults, hence its empty default.
+  ansible.builtin.set_fact:
+    github_runner_cluster_docker_pinned_context: >-
+      {{ (github_runner_cluster_docker_context
+          if (github_runner_cluster_docker_target | default(inventory_hostname)) == inventory_hostname
+          else hostvars[github_runner_cluster_docker_target].github_runner_cluster_docker_context | default('')) | trim }}
+
+- name: Read how the host chooses its Docker daemon, {{ github_runner_cluster_docker_target | default(inventory_hostname) }}
+  # Read-only, and every docker task after it depends on its result, so it runs under --check too. Lists the host's context names when the pinned one is missing, for the failure below; the names are not secret, unlike the endpoints `docker context ls` would also print.
+  ansible.builtin.shell: |
+    if [ -n "${DOCKER_HOST:-}" ]; then echo docker_host=set; fi
+    if [ -n "$pinned" ]; then
+      if docker context inspect "$pinned" >/dev/null 2>&1; then
+        echo pinned=present
+      else
+        echo pinned=missing
+        for name in $(docker context ls --quiet); do echo "available=$name"; done
+      fi
+    elif [ -z "${DOCKER_HOST:-}" ]; then
+      current=$(docker context show) || exit 1
+      echo "current=$current"
+    fi
+  environment:
+    pinned: "{{ github_runner_cluster_docker_pinned_context }}"
+  delegate_to: "{{ github_runner_cluster_docker_target | default(inventory_hostname) }}"
+  changed_when: false
+  check_mode: false
+  register: github_runner_cluster_docker_probe
+
+- name: Fail if the pinned Docker context and DOCKER_HOST are both set
+  # Either names the daemon, and they can name different ones, so neither is allowed to win silently.
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_docker_context is set to '{{ github_runner_cluster_docker_pinned_context }}' for
+      {{ github_runner_cluster_docker_target | default(inventory_hostname) }}, but DOCKER_HOST is also set in the environment Ansible
+      runs docker in there. They conflict: unset DOCKER_HOST for that user, or leave github_runner_cluster_docker_context empty to
+      use DOCKER_HOST.
+  when:
+    - github_runner_cluster_docker_pinned_context | length > 0
+    - "'docker_host=set' in github_runner_cluster_docker_probe.stdout_lines"
+
+- name: Fail if the pinned Docker context does not exist
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_docker_context names the Docker context '{{ github_runner_cluster_docker_pinned_context }}', which does
+      not exist on {{ github_runner_cluster_docker_target | default(inventory_hostname) }} (its contexts:
+      {{ github_runner_cluster_docker_probe.stdout_lines | select('match', '^available=') | map('regex_replace', '^available=', '') | join(', ') }}).
+      Correct the variable, or create the context with `docker context create`. The role never creates a context or changes the
+      current one.
+  when: "'pinned=missing' in github_runner_cluster_docker_probe.stdout_lines"
+
+- name: Publish the context and environment the docker tasks use on {{ github_runner_cluster_docker_target | default(inventory_hostname) }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_docker_cli_context: >-
+      {{ github_runner_cluster_docker_pinned_context
+         or (github_runner_cluster_docker_probe.stdout_lines | select('match', '^current=') | map('regex_replace', '^current=', '') | first | default('')) }}
+    github_runner_cluster_docker_cli_environment: "{{ github_runner_cluster_docker_pinned_context | exadev.github_runner.docker_cli_environment }}"

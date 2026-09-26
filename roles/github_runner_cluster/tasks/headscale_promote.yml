@@ -12,13 +12,17 @@
   ansible.builtin.include_tasks: mesh/headscale_hosted_hosts.yml
 
 - name: Stop the old server, so that it neither answers nodes nor writes to the replica again
-  # Headscale first, then its sidecar, which copies Headscale's last writes to the replica as it stops. The docker CLI rather than the Compose module, which would need the host's Docker context read first, on a host that may not answer. A stopped container stays stopped across reboots under the unless-stopped restart policy.
+  # Headscale first, then its sidecar, which copies Headscale's last writes to the replica as it stops. The docker CLI rather than the Compose module, which would need the host's Docker context read first, on a host that may not answer; for the same reason that host's pinned github_runner_cluster_docker_context is taken from its inventory rather than checked there first (a missing one shows up as this task's error). A stopped container stays stopped across reboots under the unless-stopped restart policy.
   ansible.builtin.command:
     argv: >-
       {{ ['docker', 'compose', '--project-directory', github_runner_cluster_headscale_host_dir]
          + (['docker-compose.yml'] + github_runner_cluster_headscale_host_compose_files) | map('regex_replace', '^', '--file=') | list
          + ['stop', item] }}
     chdir: "{{ github_runner_cluster_headscale_host_dir }}"
+  environment: >-
+    {{ ((github_runner_cluster_docker_context if github_runner_cluster_headscale_host_name == inventory_hostname
+         else hostvars[github_runner_cluster_headscale_host_name].github_runner_cluster_docker_context | default('')) | trim)
+       | exadev.github_runner.docker_cli_environment }}
   loop: [headscale, litestream]
   delegate_to: "{{ github_runner_cluster_headscale_host_name }}"
   ignore_unreachable: true
@@ -49,12 +53,11 @@
 - name: Promote the standby
   delegate_to: "{{ github_runner_cluster_headscale_standby_name }}"
   block:
-    - name: Determine the standby's Docker CLI context
-      # Empty when DOCKER_HOST is set: the Compose module then takes the daemon from DOCKER_HOST itself, and rejects cli_context alongside it ("parameters are mutually exclusive: docker_host|cli_context", as on a Docker-in-Docker CI runner). The docker CLI calls below need neither, since the CLI follows its own context and DOCKER_HOST.
-      ansible.builtin.shell: if [ -z "${DOCKER_HOST:-}" ]; then docker context show; fi
-      changed_when: false
-      check_mode: false
-      register: github_runner_cluster_headscale_promote_context
+    - name: Resolve the standby's Docker context
+      # See docker_context.yml: the standby's pinned github_runner_cluster_docker_context, or its current context. The docker CLI calls below take the same context through DOCKER_CONTEXT.
+      ansible.builtin.include_tasks: docker_context.yml
+      vars:
+        github_runner_cluster_docker_target: "{{ github_runner_cluster_headscale_standby_name }}"
 
     - name: Stop following the replica and remove the follower
       # Removed, not just stopped: its restart policy would otherwise bring it back once the restore below has replaced the database it was following, and it cannot resume from there.
@@ -64,6 +67,7 @@
              + (['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files) | map('regex_replace', '^', '--file=') | list
              + ['--profile', 'standby', 'rm', '--stop', '--force', 'litestream-follow'] }}
         chdir: "{{ github_runner_cluster_headscale_standby_dir }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
       changed_when: true
 
     - name: Restore the replica's latest state, replacing anything the standby holds
@@ -74,6 +78,7 @@
              + (['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files) | map('regex_replace', '^', '--file=') | list
              + ['--profile', 'active', 'run', '--rm', '--no-deps', '-e', 'GITHUB_RUNNER_LITESTREAM_FORCE=1', 'litestream-restore'] }}
         chdir: "{{ github_runner_cluster_headscale_standby_dir }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
       changed_when: true
       register: github_runner_cluster_headscale_promote_restore
 
@@ -81,7 +86,7 @@
       community.docker.docker_compose_v2:
         project_src: "{{ github_runner_cluster_headscale_standby_dir }}"
         files: "{{ ['docker-compose.yml'] + github_runner_cluster_headscale_standby_compose_files }}"
-        cli_context: "{{ (github_runner_cluster_headscale_promote_context.stdout | trim) or omit }}"
+        cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
         profiles: [active]
         state: present
         wait: true
@@ -90,6 +95,7 @@
     - name: Check the promoted server answers with the restored nodes
       ansible.builtin.command:
         argv: [docker, exec, "{{ github_runner_cluster_headscale_standby_project }}", headscale, nodes, list, --output, json]
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
       changed_when: false
       register: github_runner_cluster_headscale_promote_nodes
       until: github_runner_cluster_headscale_promote_nodes.rc == 0
