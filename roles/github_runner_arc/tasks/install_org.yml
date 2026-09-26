@@ -4,12 +4,12 @@
 # The installation ID only goes into the App Secret, so it is not resolved when the role does not write that Secret.
 - name: Resolve the installation ID of {{ org.name }}
   ansible.builtin.include_tasks: resolve_installation_id.yml
-  when: github_runner_arc_manage_secrets | bool and (org.installation_id | default('')) | length == 0
+  when: github_runner_arc_manage_secrets | bool and (org.installation_id | default('') | string) | length == 0 and org.name not in (github_runner_arc_installation_ids | default({}))
 
 - name: Set the effective installation ID of {{ org.name }}
-  # Read directly by name: resolve_installation_id.yml sets this with a plain set_fact and no delegate_facts, so it attaches to this host, not to the localhost it delegated to.
+  # The org's own installation_id when set, otherwise the one resolved for this org. The resolved ids are read directly by name: resolve_installation_id.yml sets them with a plain set_fact and no delegate_facts, so they attach to this host, not to the localhost it delegated to.
   ansible.builtin.set_fact:
-    github_runner_arc_installation_id: "{{ github_runner_arc_resolved_installation_id | default(org.installation_id) }}"
+    github_runner_arc_installation_id: "{{ (org.installation_id | default('') | string) or github_runner_arc_installation_ids[org.name] }}"
   when: github_runner_arc_manage_secrets | bool
 
 - name: Install/upgrade each scale-set profile of {{ org.name }}

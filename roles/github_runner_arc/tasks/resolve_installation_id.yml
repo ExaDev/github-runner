@@ -1,5 +1,5 @@
 ---
-# Included once per org whose installation_id is not set (see install_org.yml). Signs a short-lived App JWT with files/generate_app_jwt.py and finds this org's installation in GET /app/installations, using the org's own private_key.
+# Included once per org whose installation_id is not set, and records it in github_runner_arc_installation_ids under the org's name (see install_org.yml). Signs a short-lived App JWT with files/generate_app_jwt.py and finds this org's installation in GET /app/installations, using the org's own private_key.
 #
 # Runs entirely on the control node: nothing here needs the target host, and delegating keeps the temporary key file off it.
 #
@@ -40,14 +40,17 @@
       no_log: true
       register: github_runner_arc_resolve_installations
 
-    - name: Record the installation ID of {{ org.name }}
-      ansible.builtin.set_fact:
-        github_runner_arc_resolved_installation_id: "{{ github_runner_arc_resolve_installations.json | selectattr('account.login', 'equalto', org.name) | map(attribute='id') | map('string') | first | default('') }}"
-
     - name: Fail if the App has no installation on {{ org.name }}
       ansible.builtin.fail:
         msg: "Could not resolve an installation id for {{ org.name }}. Is the GitHub App installed on that org?"
       when: github_runner_arc_resolved_installation_id | length == 0
+      vars:
+        github_runner_arc_resolved_installation_id: "{{ github_runner_arc_resolve_installations.json | selectattr('account.login', 'equalto', org.name) | map(attribute='id') | map('string') | first | default('') }}"
+
+    # Keyed by org, so that one org's resolved id can never stand in for another org's.
+    - name: Record the installation ID of {{ org.name }}
+      ansible.builtin.set_fact:
+        github_runner_arc_installation_ids: "{{ github_runner_arc_installation_ids | default({}) | combine({org.name: github_runner_arc_resolve_installations.json | selectattr('account.login', 'equalto', org.name) | map(attribute='id') | map('string') | first}) }}"
   always:
     - name: Remove the private key temporary file for {{ org.name }}
       ansible.builtin.file:
