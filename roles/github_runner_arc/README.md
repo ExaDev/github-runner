@@ -8,7 +8,7 @@ It runs in two ways. Inside `playbooks/site.yml`, against a k3s server host that
 
 `tasks/validate.yml` checks every input that needs neither secrets nor a cluster: each org's fields, profile names (derived or overridden) that would collide or make invalid Kubernetes names, two of an org's profiles sharing a release name, a `max_runners` that is not a whole number, the controller's release name and namespace, the same org configured on two hosts, more than one autoscaled profile, values files that do not exist, the autoscaler's pool settings, sizing inputs, and the controller, probe and node label settings. Both playbooks run it in a play of its own before anything changes; the role runs it itself when included some other way. It also bootstraps the heartbeat gist when `github_runner_arc_heartbeat_bootstrap_gist` is on and no host in the inventory has one: it creates the gist with the control node's `gh` session and stops, printing the id to record.
 
-Before touching the cluster the role then checks the secrets it is about to write (each org's App key looks like a PEM key, the pull credential and heartbeat token are set) and proves the pull credential can read every image it installs from `github_runner_arc_image_pull_registry`, by getting a pull-scoped registry token and fetching each image's manifest.
+Before touching the cluster the role then checks the secrets it is about to write (each org's App key looks like a PEM key, the pull credential and heartbeat token are set) and proves the pull credential can read every image it installs from `github_runner_arc_image_pull_registry`, by getting a pull-scoped registry token and fetching each image's manifest. With an App-sourced pull Secret (see below) it mints each org's token and proves it the same way, before installing anything.
 
 ## Variables
 
@@ -30,9 +30,10 @@ Before touching the cluster the role then checks the secrets it is about to writ
 - `github_runner_arc_metrics_enabled` (and the `_addr`/`_endpoint` settings): Prometheus metrics for the controller and every listener; the 0.14 chart only enables them together.
 - `github_runner_arc_listener_probes_enabled`: readiness and liveness probes on each listener's metrics endpoint, so a listener that starts and then fails its GitHub authentication is not counted ready during a rollout. Needs metrics on.
 - `github_runner_arc_node_label_key`, `github_runner_arc_node_label_value`: when the key is set, the controller, listeners and runner pods are restricted to nodes carrying the label. The role labels the nodes named in `github_runner_arc_labelled_nodes`.
-- `github_runner_arc_ghcr_username`, `github_runner_arc_ghcr_token`, `github_runner_arc_heartbeat_gh_token`: secrets, as plain variables.
+- `github_runner_arc_ghcr_username`, `github_runner_arc_ghcr_token`, `github_runner_arc_heartbeat_gh_token`: secrets, as plain variables. The pull credential is needed only for a static pull Secret.
 - `github_runner_arc_manage_secrets`: `false` stops the role writing the App Secrets and `heartbeat-gh-token`, and instead checks before any change that they already exist. The role then needs no `private_key` or `installation_id`.
-- `github_runner_arc_manage_image_pull_secret`: `false` stops the role writing the pull Secret, so an existing one named `github_runner_arc_image_pull_secret_name` is used as it is, for example one that something else mints from a GitHub App installation token. No pull credential is needed and the pull check is skipped; the role checks the Secret exists. Follows `github_runner_arc_manage_secrets` unless set.
+- `github_runner_arc_manage_image_pull_secret`: `false` stops the role writing the pull Secret, so an existing one named `github_runner_arc_image_pull_secret_name` is used as it is, kept current by something else. No pull credential is needed and the pull check is skipped; the role checks the Secret exists. Follows `github_runner_arc_manage_secrets` unless set.
+- `github_runner_arc_image_pull_secret_source`: where a pull Secret the role writes gets its credential: `static` (the default) from `github_runner_arc_ghcr_username` and `github_runner_arc_ghcr_token`, or `app` from each org's GitHub App, renewed in the cluster (see [Image pull Secret from the GitHub App](#image-pull-secret-from-the-github-app)). `github_runner_arc_image_pull_secret_renewal_schedule` (default every 15 minutes) and `github_runner_arc_image_pull_secret_renewer_image` configure the renewal.
 - `github_runner_arc_image_pull_registry`, `github_runner_arc_image_pull_secret_name`, `github_runner_arc_verify_image_pull`: the pull Secret's registry and name, and whether to prove the credential before writing it.
 - `github_runner_arc_heartbeat_gist_id`: install the fleet-health platform from this host, refreshing this gist. `github_runner_arc_heartbeat_bootstrap_gist`, `github_runner_arc_heartbeat_gist_description` and `github_runner_arc_heartbeat_gist_consumer` control the bootstrap described above.
 - `github_runner_arc_autoscaler_usable_budget_gi`, `github_runner_arc_autoscaler_max_ceiling`, `github_runner_arc_autoscaler_floor`: required when a profile sets `autoscale: true` and the platform is installed. The floor must equal the autoscaled profile's `maxRunners`, which every Helm upgrade reverts to. The other `github_runner_arc_autoscaler_*` and `github_runner_arc_heartbeat_*` settings have defaults; see `defaults/main.yml`.
@@ -57,6 +58,27 @@ sizing:
 ```
 
 The filter behind it is `exadev.github_runner.arc_max_runners`.
+
+## Image pull Secret from the GitHub App
+
+When the runner image is a private package owned by the org, `github_runner_arc_image_pull_secret_source: app` pulls it with the runners' own GitHub App rather than a registry token tied to a person. The App needs the `packages: read` permission (add it to `github_runner_arc_app_setup_permissions` when creating the App, or to an existing App's settings), approved by the organisation on the App's installation.
+
+For each org the role signs an App JWT with the App's private key (the org's `private_key`, or the existing App Secret when `github_runner_arc_manage_secrets` is `false`), mints an installation token restricted to `packages: read`, and proves it can read the org's image with the registry's own token exchange and a manifest read, all before changing anything. It then writes the token into each of the org's namespaces as the pull Secret, with `x-access-token` as the username and the token's expiry in the `github-runner.exadev/pull-token-expires-at` annotation.
+
+An installation token lasts an hour, so the role also installs a CronJob in each of those namespaces, named after the pull Secret with `-renewer` appended, that repeats the mint and the check on `github_runner_arc_image_pull_secret_renewal_schedule` and patches the Secret only when both succeed; a refused run leaves the current Secret in place and fails the Job. It reads the App Secret from a mounted volume, and its Role allows only `get` and `patch` on the pull Secret by name. Its image, `github_runner_arc_image_pull_secret_renewer_image`, is pulled without a pull Secret, so an expired token never stops the job that replaces it, and the image must be public. With `static` the role removes any such CronJob and its RBAC.
+
+The fleet-health platform belongs to no one org, so with `app` its Deployments pull without a pull Secret; the role's default platform images are public.
+
+```yaml
+github_runner_arc_image_pull_secret_source: app
+github_runner_arc_orgs:
+  - name: ExampleOrg
+    app_id: 123456
+    private_key: "{{ vault_example_app_private_key }}"
+    image: "ghcr.io/exampleorg/github-runner:1.0.0"
+    scale_set_profiles:
+      - max_runners: 4
+```
 
 ## GitHub App setup
 

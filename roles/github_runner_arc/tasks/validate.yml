@@ -23,7 +23,7 @@
     github_runner_arc_values_path: "{{ item.values_file if item.values_file is abs else github_runner_arc_values_dir ~ '/' ~ item.values_file }}"
   when: github_runner_arc_values_path is not file or (item.values_file is not abs and github_runner_arc_values_dir | length == 0)
 
-- name: Fail on invalid controller, metrics, probe or node label settings
+- name: Fail on invalid controller, metrics, probe, pull Secret or node label settings
   ansible.builtin.fail:
     msg: "{{ item.msg }}"
   loop:
@@ -41,6 +41,20 @@
       failed: "{{ github_runner_arc_listener_probes_enabled | bool and not (github_runner_arc_metrics_enabled | bool) }}"
     - msg: github_runner_arc_listener_probe_port must match the port in github_runner_arc_listener_metrics_addr.
       failed: "{{ github_runner_arc_listener_probes_enabled | bool and github_runner_arc_listener_metrics_addr is not match('.*:' ~ github_runner_arc_listener_probe_port ~ '$') }}"
+    - msg: github_runner_arc_image_pull_secret_source must be static or app.
+      failed: "{{ github_runner_arc_image_pull_secret_source not in ['static', 'app'] }}"
+    - msg: github_runner_arc_image_pull_secret_source app needs github_runner_arc_manage_image_pull_secret, since the role writes the Secret it renews.
+      failed: "{{ github_runner_arc_image_pull_secret_source == 'app' and not (github_runner_arc_manage_image_pull_secret | bool) }}"
+    # Kubernetes caps a CronJob's name at 52 characters, leaving room for the suffix it adds to each Job's name.
+    - msg: With github_runner_arc_image_pull_secret_source app, the renewal CronJob's name ({{ github_runner_arc_image_pull_secret_name }}-renewer) must be at most 52 characters; shorten github_runner_arc_image_pull_secret_name.
+      failed: "{{ github_runner_arc_image_pull_secret_source == 'app' and (github_runner_arc_image_pull_secret_name ~ '-renewer') | length > 52 }}"
+    - msg: github_runner_arc_image_pull_secret_renewal_schedule must be a cron schedule, five fields or a macro such as @hourly.
+      failed: >-
+        {{
+          github_runner_arc_image_pull_secret_source == 'app'
+          and not (github_runner_arc_image_pull_secret_renewal_schedule | string is match('^@[a-z]+$')
+                   or github_runner_arc_image_pull_secret_renewal_schedule | string | split | length == 5)
+        }}
     - msg: github_runner_arc_labelled_nodes needs github_runner_arc_node_label_key.
       failed: "{{ github_runner_arc_labelled_nodes | length > 0 and github_runner_arc_node_label_key | length == 0 }}"
     - msg: github_runner_arc_node_label_value must be set when github_runner_arc_node_label_key is.

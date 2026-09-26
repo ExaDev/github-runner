@@ -1,11 +1,11 @@
 ---
-# Included once per image from verify_image_pull.yml, with `image` set to its registry, repository and reference.
+# Included once per image, with `image` set to its registry, repository and reference, and the credential to prove in github_runner_arc_pull_username and github_runner_arc_pull_password, described for the failure message by github_runner_arc_pull_credential and github_runner_arc_pull_credential_hint. verify_image_pull.yml passes the static credential and mint_app_pull_token.yml an App's token.
 
 - name: Exchange the pull credential for a registry token scoped to the image
   ansible.builtin.uri:
     url: "https://{{ image.registry }}/token?scope=repository:{{ image.repository }}:pull&service={{ image.registry }}"
-    url_username: "{{ github_runner_arc_ghcr_username }}"
-    url_password: "{{ github_runner_arc_ghcr_token }}"
+    url_username: "{{ github_runner_arc_pull_username }}"
+    url_password: "{{ github_runner_arc_pull_password }}"
     force_basic_auth: true
     return_content: true
     status_code: [200, 401, 403]
@@ -31,10 +31,10 @@
 - name: Fail when the credential cannot pull the image
   ansible.builtin.fail:
     msg: >-
-      The pull credential for {{ github_runner_arc_ghcr_username }} cannot read
+      {{ github_runner_arc_pull_credential }} cannot read
       {{ image.registry }}/{{ image.repository }}:{{ image.reference }}
       ({{ 'the registry refused the credential, HTTP ' ~ github_runner_arc_registry_token.status if github_runner_arc_registry_token.status != 200
           else 'reading the manifest returned HTTP ' ~ github_runner_arc_manifest.status }}).
-      Check the token has package read access (read:packages for a classic token) and that the account can see the package.
+      {{ github_runner_arc_pull_credential_hint }}
       Refusing to write it into the cluster's pull Secret.
   when: github_runner_arc_registry_token.status != 200 or github_runner_arc_manifest.status != 200

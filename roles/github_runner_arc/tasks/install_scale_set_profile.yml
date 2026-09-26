@@ -25,11 +25,39 @@
   no_log: true
   when: github_runner_arc_manage_secrets | bool
 
+# From the static credential, or from the org's App token that mint_app_pull_token.yml minted and proved, with its expiry recorded on the Secret.
 - name: Create/update the image pull secret for {{ profile.label }}
   kubernetes.core.k8s:
-    definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars={'namespace': profile.namespace}) | from_yaml }}"
+    definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars=github_runner_arc_pull_secret_vars) | from_yaml }}"
   no_log: true
   when: github_runner_arc_manage_image_pull_secret | bool
+  vars:
+    github_runner_arc_pull_secret_vars: >-
+      {{
+        {'namespace': profile.namespace, 'username': github_runner_arc_app_pull_token_username,
+         'password': github_runner_arc_app_pull_tokens[org.name].token,
+         'annotations': {github_runner_arc_pull_token_expiry_annotation: github_runner_arc_app_pull_tokens[org.name].expires_at}}
+        if github_runner_arc_image_pull_secret_source == 'app' else
+        {'namespace': profile.namespace, 'username': github_runner_arc_ghcr_username, 'password': github_runner_arc_ghcr_token, 'annotations': {}}
+      }}
+
+# A Secret last written by `kubectl apply` keeps a copy of its earlier credential, such as a personal token, in this annotation, which neither the role's write nor the renewal's server-side apply replaces.
+- name: Remove any earlier credential kept in the pull secret's annotations for {{ profile.label }}
+  kubernetes.core.k8s:
+    kind: Secret
+    namespace: "{{ profile.namespace }}"
+    name: "{{ github_runner_arc_image_pull_secret_name }}"
+    state: patched
+    merge_type: merge
+    definition:
+      metadata:
+        annotations:
+          kubectl.kubernetes.io/last-applied-configuration: null
+  no_log: true
+  when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_image_pull_secret_source == 'app'
+
+- name: Install or remove the pull Secret renewal for {{ profile.label }}
+  ansible.builtin.include_tasks: install_pull_secret_renewal.yml
 
 - name: Install/upgrade the scale-set release for {{ profile.label }}
   # runnerScaleSetName is left to default to the release name: it is the scale set's registration identity on GitHub, so two releases sharing it make the second one's listener crash-loop registering a duplicate. scaleSetLabels is the pooling mechanism instead: an extra label every profile's runners carry alongside their own unique one, so runs-on: <label> matches every profile sharing it. A profile sets its own runs_on_label to stay out of the shared pool, or scale_set_labels to choose the whole list (empty sets none, leaving jobs to target the release name).

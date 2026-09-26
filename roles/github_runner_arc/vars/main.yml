@@ -1,0 +1,11 @@
+---
+# Fixed names the role uses, not settings: changing one would orphan what an earlier run wrote under the old one.
+
+# The username GitHub documents for authenticating to its registries with a token that belongs to no user, such as an App installation token.
+github_runner_arc_app_pull_token_username: x-access-token
+
+# Annotation on an App-sourced pull Secret recording when its token expires, written by the role and by the renewal job, so `kubectl get secret -o yaml` shows how fresh the credential is.
+github_runner_arc_pull_token_expiry_annotation: github-runner.exadev/pull-token-expires-at
+
+# Server-side apply field manager the renewal job writes the pull Secret with.
+github_runner_arc_pull_secret_field_manager: github-runner-pull-secret-renewer
