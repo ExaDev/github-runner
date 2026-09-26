@@ -25,9 +25,9 @@
 <li>Click &ldquo;Create GitHub App&rdquo;, signed in to GitHub as an owner of {{ github_runner_arc_app_setup_org | e }}, and confirm on GitHub's page.</li>
 <li>GitHub then redirects to <code>{{ github_runner_arc_app_manifest.redirect_url | e }}</code> with a <code>code</code> query parameter. Copy its value from the address bar.</li>
 <li>Run the second phase straight away, because the code works once and expires quickly:
-<pre>ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org={{ github_runner_arc_app_setup_org | e }} -e '{"github_runner_arc_app_setup_name": "{{ github_runner_arc_app_setup_name | e }}"}' -e github_runner_arc_app_manifest_code=&lt;code&gt; -e github_runner_arc_app_private_key_path=&lt;path for the key&gt;</pre>
+<pre>{{ github_runner_arc_app_setup_command | e }} -e github_runner_arc_app_manifest_code=&lt;code&gt; -e github_runner_arc_app_private_key_path=&lt;path for the key&gt;</pre>
 </li>
-<li>That run creates the App and waits while you install it on the organisation, at organisation level rather than on selected repositories.</li>
+<li>That run creates the App and waits while you install it on the organisation, at organisation level rather than on selected repositories.{% if github_runner_arc_app_setup_write_secret | bool %} It then writes the App Secret into the cluster{{ ' and removes the key file' if not (github_runner_arc_app_setup_keep_private_key | bool) else '' }}.{% endif %}</li>
 </ol>
 
 <form id="manifest-form" action="https://github.com/organizations/{{ github_runner_arc_app_setup_org | urlencode }}/settings/apps/new?state={{ github_runner_arc_app_manifest_state | urlencode }}" method="post">

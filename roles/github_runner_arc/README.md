@@ -37,7 +37,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
 - `github_runner_arc_image_pull_registry`, `github_runner_arc_image_pull_secret_name`, `github_runner_arc_verify_image_pull`: the pull Secret's registry and name, and whether to prove the credential before writing it.
 - `github_runner_arc_heartbeat_gist_id`: install the fleet-health platform from this host, refreshing this gist. `github_runner_arc_heartbeat_bootstrap_gist`, `github_runner_arc_heartbeat_gist_description` and `github_runner_arc_heartbeat_gist_consumer` control the bootstrap described above.
 - `github_runner_arc_autoscaler_usable_budget_gi`, `github_runner_arc_autoscaler_max_ceiling`, `github_runner_arc_autoscaler_floor`: required when a profile sets `autoscale: true` and the platform is installed. The floor must equal the autoscaled profile's `maxRunners`, which every Helm upgrade reverts to. The other `github_runner_arc_autoscaler_*` and `github_runner_arc_heartbeat_*` settings have defaults; see `defaults/main.yml`.
-- `github_runner_arc_app_setup_*`, `github_runner_arc_app_manifest_code`, `github_runner_arc_app_private_key_path`: inputs to `playbooks/github_app_setup.yml` (see below).
+- `github_runner_arc_app_setup_*`, `github_runner_arc_app_manifest_code`, `github_runner_arc_app_private_key_path`: inputs to `playbooks/github_app_setup.yml` (see below), including `github_runner_arc_app_setup_write_secret`, `github_runner_arc_app_setup_secret_namespaces`, `github_runner_arc_app_setup_secret_name`, `github_runner_arc_app_setup_keep_private_key` and `github_runner_arc_app_setup_command`.
 
 ## Sizing
 
@@ -88,6 +88,28 @@ github_runner_arc_orgs:
 ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org=example-org -e '{"github_runner_arc_app_setup_name": "Example runners"}'
 ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org=example-org -e '{"github_runner_arc_app_setup_name": "Example runners"}' \
   -e github_runner_arc_app_manifest_code=<code> -e github_runner_arc_app_private_key_path=~/example-app.pem
+```
+
+With `github_runner_arc_app_setup_write_secret: true`, the second run also writes the App Secret, with the `github_app_id`, `github_app_installation_id` and `github_app_private_key` keys the role's install reads, into the cluster `github_runner_arc_kubeconfig_path` reaches. It goes into `github_runner_arc_app_setup_secret_namespaces`, or by default each namespace of the organisation's scale-set profiles in `github_runner_arc_orgs`, under `github_runner_arc_app_setup_secret_name`, or by default the organisation's `app_secret_name` (`<org>-github-app` unless set). The run reaches the cluster and creates those namespaces before it uses the one-time code, so a broken cluster path costs only a rerun. Once the Secret is written it removes the key file, unless `github_runner_arc_app_setup_keep_private_key` keeps it; a run that stops earlier, for example because nobody installed the App within the wait, leaves the file so the App can still be finished without a new code. The private key is never printed, even with `-v`. The role's install then needs no `private_key` for that organisation: set `github_runner_arc_manage_secrets: false` so it uses the Secret as it is.
+
+A playbook that wraps this one, for example to set the organisation and App name from its own variables, sets `github_runner_arc_app_setup_command` to the command that runs the wrapper, so the form and the first run's instructions name it:
+
+```yaml
+- name: Set the App's identity
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Hand the identity to the collection's flow
+      ansible.builtin.set_fact:
+        github_runner_arc_app_setup_org: example-org
+        github_runner_arc_app_setup_name: Example runners
+        github_runner_arc_app_setup_command: ansible-playbook app-setup.yml
+        github_runner_arc_app_setup_write_secret: true
+        github_runner_arc_app_setup_secret_namespaces: [example-runners]
+        github_runner_arc_app_setup_secret_name: example-github-app
+
+- name: Run the collection's App manifest flow
+  ansible.builtin.import_playbook: exadev.github_runner.github_app_setup
 ```
 
 ## Example
