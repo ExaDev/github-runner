@@ -1,0 +1,21 @@
+# Renders the github_runner_arc role's pull Secret renewal manifests (templates/pull-secret-renewal.yaml.j2) with the role's defaults and constants, for tests/pull_secret_renewal/run.sh to apply to a test cluster. Takes renewal_namespace, renewal_org_image and renewal_output as extra variables; a role variable such as the renewer image is overridden with an extra variable of its own name, since the defaults file loaded here outranks play variables.
+- name: Render the pull Secret renewal manifests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+    - ../../roles/github_runner_arc/vars/main.yml
+  vars:
+    org:
+      name: example-org
+      image: "{{ renewal_org_image }}"
+    profile:
+      namespace: "{{ renewal_namespace }}"
+      app_secret: example-org-github-app
+  tasks:
+    - name: Write the manifests
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_arc/templates/pull-secret-renewal.yaml.j2') }}"
+        dest: "{{ renewal_output }}"
+        mode: "0644"
