@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/ExaDev/github-runner/compare/v1.2.0...v1.2.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **arc:** count this host's orgs however they were supplied ([c731751](https://github.com/ExaDev/github-runner/commit/c7317512d4c47098b1342fd507df9d072470d156))
+
 # [1.2.0](https://github.com/ExaDev/github-runner/compare/v1.1.0...v1.2.0) (2026-09-26)
 
 
