@@ -18,3 +18,8 @@
   loop_control:
     loop_var: image
     label: "{{ image.registry }}/{{ image.repository }}:{{ image.reference }}"
+  vars:
+    github_runner_arc_pull_username: "{{ github_runner_arc_ghcr_username }}"
+    github_runner_arc_pull_password: "{{ github_runner_arc_ghcr_token }}"
+    github_runner_arc_pull_credential: "The pull credential for {{ github_runner_arc_ghcr_username }}"
+    github_runner_arc_pull_credential_hint: "Check the token has package read access (read:packages for a classic token) and that the account can see the package."

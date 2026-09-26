@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Stamp the collection version into galaxy.yml and the two published-image tag defaults in roles/github_runner_arc/defaults/main.yml, ahead of `ansible-galaxy collection build`.
+"""Stamp the collection version into galaxy.yml and the published-image tag defaults in roles/github_runner_arc/defaults/main.yml, ahead of `ansible-galaxy collection build`.
 
-Called from .releaserc.json's @semantic-release/exec prepareCmd, with the new version as the only argument (semantic-release supplies it via ${nextRelease.version}). galaxy.yml's `version:` stays 0.0.0 in source between releases (see its own header comment) and is stamped fresh here each release; the two arc-role image defaults are matched by variable name via regex, not by line number, since roles/github_runner_arc/defaults/main.yml can be edited concurrently by other work on this repo, and a line-number-based patch would silently corrupt an unrelated line.
+Called from .releaserc.json's @semantic-release/exec prepareCmd, with the new version as the only argument (semantic-release supplies it via ${nextRelease.version}). galaxy.yml's `version:` stays 0.0.0 in source between releases (see its own header comment) and is stamped fresh here each release; the arc-role image defaults are matched by variable name via regex, not by line number, since roles/github_runner_arc/defaults/main.yml can be edited concurrently by other work on this repo, and a line-number-based patch would silently corrupt an unrelated line.
 
-Stamps exactly two variables in that file: github_runner_arc_heartbeat_image and github_runner_arc_autoscaler_image. The runner image itself (ghcr.io/exadev/github-runner) has no equivalent role default to stamp: it is configured per-org, per-profile in each host's own host_vars (see roles/github_runner_arc/tasks/install_scale_set_profile.yml's `org.image`), which is fleet inventory configuration, not collection content, and is excluded from the built collection entirely (see galaxy.yml's build_ignore entry for ansible).
+Stamps exactly the variables named in IMAGE_VARS in that file, one per image the release workflow builds for the role. The runner image itself (ghcr.io/exadev/github-runner) has no equivalent role default to stamp: it is configured per-org, per-profile in each host's own host_vars (see roles/github_runner_arc/tasks/install_scale_set_profile.yml's `org.image`), which is fleet inventory configuration, not collection content, and is excluded from the built collection entirely (see galaxy.yml's build_ignore entry for ansible).
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ ARC_DEFAULTS = REPO_ROOT / "roles" / "github_runner_arc" / "defaults" / "main.ym
 IMAGE_VARS = (
     "github_runner_arc_heartbeat_image",
     "github_runner_arc_autoscaler_image",
+    "github_runner_arc_image_pull_secret_renewer_image",
 )
 
 

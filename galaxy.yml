@@ -37,6 +37,7 @@ build_ignore:
   - playbooks/collections
   - autoscaler
   - heartbeat
+  - pull-secret-renewer
   - scripts
   - Dockerfile
   - bootstrap.sh

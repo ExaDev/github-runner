@@ -35,19 +35,28 @@ github_runner_arc_node_label_key: ""
 github_runner_arc_node_label_value: "true"
 github_runner_arc_labelled_nodes: []
 
-# Secrets, as plain variables from any source Ansible reads: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images) and github_runner_arc_heartbeat_gh_token (a PAT with gist scope), plus each org's private_key above. No defaults.
+# Secrets, as plain variables from any source Ansible reads: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token (a registry pull credential for the runner and platform images, needed only when github_runner_arc_image_pull_secret_source is static) and github_runner_arc_heartbeat_gh_token (a PAT with gist scope), plus each org's private_key above. No defaults.
 
 # false means the role does not write the App Secrets or heartbeat-gh-token itself (and needs no private_key or installation_id), and instead checks before changing anything that each profile's namespace already holds its App Secret (and that the platform namespace holds heartbeat-gh-token).
 github_runner_arc_manage_secrets: true
 
-# Whether the role writes the image pull Secret named below into each namespace from github_runner_arc_ghcr_username and github_runner_arc_ghcr_token. false uses a pull Secret something else creates and keeps current, such as one minted from a GitHub App installation token: the role then needs no pull credential, skips the image pull check, and only checks the Secret exists before changing anything. Follows github_runner_arc_manage_secrets unless set.
+# Whether the role writes the image pull Secret named below into each namespace, from the credential github_runner_arc_image_pull_secret_source chooses. false uses a pull Secret something else creates and keeps current: the role then needs no pull credential, skips the image pull check, and only checks the Secret exists before changing anything. Follows github_runner_arc_manage_secrets unless set.
 github_runner_arc_manage_image_pull_secret: "{{ github_runner_arc_manage_secrets }}"
 
 # Registry the pull Secret authenticates to, and its name in each namespace, whether the role writes it or uses an existing one.
 github_runner_arc_image_pull_registry: "ghcr.io"
 github_runner_arc_image_pull_secret_name: "ghcr-pull"
 
-# Before writing the pull Secret, prove the credential can read each image this host installs from that registry: exchange it for a registry bearer token and fetch the image's manifest. A token that authenticates but lacks package access is otherwise only found later, as pods stuck in ImagePullBackOff. Uses the registry's /token endpoint, as GHCR provides.
+# Where a pull Secret the role writes gets its credential. static: github_runner_arc_ghcr_username and github_runner_arc_ghcr_token. app: an installation token the role mints from each org's GitHub App (the App Secret it writes, or the existing one when github_runner_arc_manage_secrets is false), restricted to packages: read, with x-access-token as the username. The App must have the packages: read permission, approved on its installation. An installation token lasts an hour, so with app the role also installs a CronJob in each runner namespace that mints a fresh token, proves it can read the org's image and patches the Secret (see tasks/install_pull_secret_renewal.yml); with static it removes any such CronJob. With app the platform's Deployments pull without a Secret, since no one org's App can read another's packages.
+github_runner_arc_image_pull_secret_source: static
+
+# How often the renewal CronJob replaces an App-sourced pull token. Well inside the token's one-hour lifetime, so that two missed runs still leave a valid token.
+github_runner_arc_image_pull_secret_renewal_schedule: "*/15 * * * *"
+
+# Image the renewal CronJob runs. Pulled without a pull Secret, so it must be public.
+github_runner_arc_image_pull_secret_renewer_image: "ghcr.io/exadev/github-runner-pull-secret-renewer:1.1.0"
+
+# Before writing the pull Secret, prove the credential can read each image this host installs from that registry (with an App token, each org's own image, in the role and in every renewal): exchange it for a registry bearer token and fetch the image's manifest. A token that authenticates but lacks package access is otherwise only found later, as pods stuck in ImagePullBackOff. Uses the registry's /token endpoint, as GHCR provides.
 github_runner_arc_verify_image_pull: true
 
 # Fleet-health platform. Set github_runner_arc_heartbeat_gist_id on one host to install it from there.

@@ -256,9 +256,24 @@
 
 - name: "Platform: create/update the image pull secret"
   kubernetes.core.k8s:
-    definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars={'namespace': github_runner_arc_platform_namespace}) | from_yaml }}"
+    definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars=github_runner_arc_platform_pull_secret_vars) | from_yaml }}"
   no_log: true
-  when: github_runner_arc_manage_image_pull_secret | bool
+  when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_image_pull_secret_source == 'static'
+  vars:
+    github_runner_arc_platform_pull_secret_vars:
+      namespace: "{{ github_runner_arc_platform_namespace }}"
+      username: "{{ github_runner_arc_ghcr_username }}"
+      password: "{{ github_runner_arc_ghcr_token }}"
+      annotations: {}
+
+# An App's installation token reads only its own organisation's packages, and the platform belongs to no one org, so with an App-sourced pull Secret the platform's Deployments pull without one. The role's default platform images are public.
+- name: "Platform: choose the pull Secret its Deployments use"
+  ansible.builtin.set_fact:
+    github_runner_arc_platform_image_pull_secrets: >-
+      {{
+        [] if github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_image_pull_secret_source == 'app'
+        else [{'name': github_runner_arc_image_pull_secret_name}]
+      }}
 
 - name: "Platform: install/upgrade the heartbeat Deployment"
   kubernetes.core.k8s:
@@ -279,8 +294,7 @@
               app: heartbeat
           spec:
             serviceAccountName: heartbeat
-            imagePullSecrets:
-              - name: "{{ github_runner_arc_image_pull_secret_name }}"
+            imagePullSecrets: "{{ github_runner_arc_platform_image_pull_secrets }}"
             containers:
               - name: heartbeat
                 image: "{{ github_runner_arc_heartbeat_image }}"
@@ -334,8 +348,7 @@
               app: autoscaler
           spec:
             serviceAccountName: autoscaler
-            imagePullSecrets:
-              - name: "{{ github_runner_arc_image_pull_secret_name }}"
+            imagePullSecrets: "{{ github_runner_arc_platform_image_pull_secrets }}"
             containers:
               - name: autoscaler
                 image: "{{ github_runner_arc_autoscaler_image }}"

@@ -81,11 +81,11 @@ argument_specs:
         description: Nodes the role gives the eligibility label.
       github_runner_arc_ghcr_username:
         type: str
-        description: Registry user for the pull Secret. Required when the role writes the pull Secret.
+        description: Registry user for the pull Secret. Required when the role writes the pull Secret from a static credential.
       github_runner_arc_ghcr_token:
         type: str
         no_log: true
-        description: Registry token for the pull Secret. Required when the role writes the pull Secret.
+        description: Registry token for the pull Secret. Required when the role writes the pull Secret from a static credential.
       github_runner_arc_heartbeat_gh_token:
         type: str
         no_log: true
@@ -97,8 +97,22 @@ argument_specs:
       github_runner_arc_manage_image_pull_secret:
         type: bool
         description:
-          - Whether the role writes the pull Secret. false uses an existing Secret named github_runner_arc_image_pull_secret_name, which something else keeps current, and checks it exists.
+          - Whether the role writes the pull Secret, from the credential github_runner_arc_image_pull_secret_source chooses. false uses an existing Secret named github_runner_arc_image_pull_secret_name, which something else keeps current, and checks it exists.
           - Follows github_runner_arc_manage_secrets unless set.
+      github_runner_arc_image_pull_secret_source:
+        type: str
+        default: static
+        choices: [static, app]
+        description:
+          - Where a pull Secret the role writes gets its credential. static uses github_runner_arc_ghcr_username and github_runner_arc_ghcr_token.
+          - app mints a packages read installation token from each org's GitHub App, proves it can read the org's image, writes it, and installs a CronJob in each runner namespace that renews it. The platform's Deployments then pull without a Secret.
+      github_runner_arc_image_pull_secret_renewal_schedule:
+        type: str
+        default: "*/15 * * * *"
+        description: Cron schedule of the App-sourced pull Secret renewal. Keep it well inside the token's one-hour lifetime.
+      github_runner_arc_image_pull_secret_renewer_image:
+        type: str
+        description: Image the renewal CronJob runs, pulled without a pull Secret.
       github_runner_arc_image_pull_registry:
         type: str
         default: ghcr.io

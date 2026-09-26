@@ -21,7 +21,7 @@
 
 - name: Prove the pull credential can read every image this host installs
   ansible.builtin.include_tasks: verify_image_pull.yml
-  when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_verify_image_pull | bool
+  when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_image_pull_secret_source == 'static' and github_runner_arc_verify_image_pull | bool
 
 - name: Give this host the kubernetes Python client
   ansible.builtin.include_role:
@@ -37,6 +37,17 @@
     - name: Check the Secrets this host relies on already exist in the cluster
       ansible.builtin.include_tasks: check_existing_secrets.yml
       when: not (github_runner_arc_manage_secrets | bool and github_runner_arc_manage_image_pull_secret | bool)
+
+    # Before anything is installed, like the static credential's check above, but inside the block: an App Secret the role does not write is read from the cluster.
+    - name: Mint each org's pull token from its GitHub App and prove it can read the org's image
+      ansible.builtin.include_tasks: mint_app_pull_token.yml
+      loop: "{{ github_runner_arc_orgs }}"
+      loop_control:
+        loop_var: org
+        label: "{{ org.name }}"
+      vars:
+        github_runner_arc_org_first_profile: "{{ github_runner_arc_local.profiles | selectattr('org_name', 'equalto', org.name) | first }}"
+      when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_image_pull_secret_source == 'app'
 
     - name: Label the eligible nodes
       ansible.builtin.include_tasks: label_nodes.yml
