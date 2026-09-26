@@ -1,6 +1,31 @@
 ---
 # Brings this host up as a k3s node under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, as tasks/topology.yml decides from the cluster group. Safe to rerun: the .env is templated and docker compose converges to it.
 
+- name: Read this host's Docker Compose version
+  # First, before anything that runs Compose (the mesh providers start Compose projects too), for the check below. The CLI plugin's own version, which no Docker context or daemon changes. Read-only, so it runs under --check as well.
+  ansible.builtin.command: docker compose version --short
+  changed_when: false
+  check_mode: false
+  register: github_runner_cluster_compose_version
+
+- name: Fail if this host's Docker Compose recreates the containers it has just built
+  # Compose 2.37.1 to 2.38.x build a service's image through Bake, key the build result by service name instead of image name, and so create the service's container without the com.docker.compose.image label (docker/compose#13047, fixed in 2.39.0). The next `up` sees that label differ from the image and recreates the container: every node restarts, and k3s with it, on the run after the one that built the k3s image. Releases before and after that range keep the container. An output with no version number in it fails too, rather than letting the check pass by default.
+  vars:
+    github_runner_cluster_compose_faulty_from: "2.37.1"
+    github_runner_cluster_compose_fixed_in: "2.39.0"
+    github_runner_cluster_compose_version_number: "{{ github_runner_cluster_compose_version.stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') }}"
+  ansible.builtin.fail:
+    msg: >-
+      Docker Compose on this host reports version "{{ github_runner_cluster_compose_version.stdout | trim }}".
+      Compose releases from {{ github_runner_cluster_compose_faulty_from }} up to but not including
+      {{ github_runner_cluster_compose_fixed_in }} recreate every node container, restarting k3s, on the run after the one
+      that built the k3s image (docker/compose#13047). Upgrade the Docker Compose
+      plugin on this host to {{ github_runner_cluster_compose_fixed_in }} or later and run again.
+  when: >-
+    github_runner_cluster_compose_version.stdout is not search('[0-9]+\\.[0-9]+\\.[0-9]+')
+    or (github_runner_cluster_compose_version_number is version(github_runner_cluster_compose_faulty_from, '>=')
+        and github_runner_cluster_compose_version_number is version(github_runner_cluster_compose_fixed_in, '<'))
+
 - name: Decide this host's part in the cluster
   ansible.builtin.include_tasks: topology.yml
 
