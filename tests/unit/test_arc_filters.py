@@ -1,4 +1,4 @@
-"""Tests for the github_runner_arc role's profile expansion, sizing and image-reference filters."""
+"""Tests for the github_runner_arc role's profile expansion, sizing (uniform and measured) and image-reference filters."""
 
 from __future__ import annotations
 
@@ -200,6 +200,134 @@ class MaxRunnersTest(unittest.TestCase):
 
     def test_a_non_mapping_is_an_error(self) -> None:
         self.assertEqual(arc.arc_max_runners([1])["errors"], ["sizing must be a mapping"])
+
+
+MEASURED = {"measured": True, "pod_cpu_request": 1, "pod_memory_request_gib": 2}
+
+
+def node(name: str, cpu: str = "4", memory: str = "8Gi", labels: dict[str, str] | None = None, **spec: Any) -> dict[str, Any]:
+    """Return a Node object as kubernetes.core.k8s_info returns it."""
+    return {"metadata": {"name": name, "labels": labels or {}}, "spec": spec, "status": {"allocatable": {"cpu": cpu, "memory": memory}}}
+
+
+def pod(node_name: str, cpu: str = "0", memory: str = "0", namespace: str = "default", phase: str = "Running", **spec: Any) -> dict[str, Any]:
+    """Return a Pod object with one container requesting cpu and memory."""
+    return {
+        "metadata": {"name": f"p-{node_name}", "namespace": namespace},
+        "spec": {"nodeName": node_name, "containers": [{"name": "c", "resources": {"requests": {"cpu": cpu, "memory": memory}}}], **spec},
+        "status": {"phase": phase},
+    }
+
+
+class QuantityTest(unittest.TestCase):
+    def test_parses_kubernetes_quantities(self) -> None:
+        cases = {"3500m": "3.5", "4": "4", "0.5": "0.5", "1500u": "0.0015", "128Mi": str(128 * 1024**2), "2Gi": str(2 * 1024**3), "1G": "1000000000", "2e3": "2000", "1E": str(10**18), "12Ki": "12288"}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(arc.arc_quantity(text), arc.Decimal(expected))
+
+    def test_rejects_what_is_not_a_quantity(self) -> None:
+        for text in ("", "Mi", "1 Gi", "1Xi", "-"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                arc.arc_quantity(text)
+
+
+class MeasuredMaxRunnersTest(unittest.TestCase):
+    def test_measured_sizing_checks_only_the_pod_reserve_and_margin(self) -> None:
+        result = arc.arc_max_runners({**MEASURED, "reserve_cpu": 0.5, "reserve_memory_gib": 1, "safety_margin": 0.5})
+        self.assertEqual(result["errors"], [])
+        self.assertTrue(result["measured"])
+        self.assertIsNone(result["max_runners"])
+        self.assertEqual((result["pod_cpu"], result["reserve_cpu"], result["reserve_memory_gib"]), (1.0, 0.5, 1.0))
+        uniform = arc.arc_max_runners({**MEASURED, "node_count": 3})
+        self.assertIn("sizing has an unknown key 'node_count' (measured sizing reads the nodes from the cluster)", uniform["errors"])
+        self.assertIn("sizing.measured must be a boolean (got 'sometimes')", arc.arc_max_runners({**SIZING, "measured": "sometimes"})["errors"])
+        self.assertEqual(arc.arc_max_runners({**SIZING, "measured": False})["max_runners"], 24)
+
+    def test_a_measured_profile_has_no_static_max_runners(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"sizing": MEASURED}, {"suffix": "-m", "max_runners": 3, "sizing": MEASURED}])])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([profile["max_runners"] for profile in result["profiles"]], [None, 3])
+        self.assertTrue(result["profiles"][0]["sizing"]["measured"])
+
+    def test_sums_what_fits_on_each_node_after_its_requests(self) -> None:
+        nodes = [node("small", "4", "8Gi"), node("big", "16", "32Gi")]
+        pods = [pod("small", "1500m", "3Gi"), pod("big", "2", "4Gi"), pod("big", "500m", "1Gi")]
+        result = arc.arc_measured_max_runners(MEASURED, nodes, pods)
+        self.assertEqual(result["errors"], [])
+        # big: CPU (16 - 2.5) / 1 = 13, memory (32 - 5) / 2 = 13.5 -> 13. small: CPU 2.5 -> 2, memory 5 / 2 -> 2.
+        self.assertEqual([(entry["name"], entry["by_cpu"], entry["by_memory"], entry["runners"]) for entry in result["nodes"]], [("big", 13, 13, 13), ("small", 2, 2, 2)])
+        self.assertEqual((result["theoretical"], result["max_runners"]), (15, 15))
+        self.assertEqual(result["nodes"][1]["requested_memory_gib"], 3.0)
+
+    def test_reserve_sidecar_and_margin_all_reduce_the_result(self) -> None:
+        sizing = {**MEASURED, "sidecar_cpu_request": 0.5, "sidecar_memory_request_gib": 1, "reserve_cpu": 1, "reserve_memory_gib": 2, "safety_margin": 0.75}
+        # CPU (8 - 1) / 1.5 = 4.67 -> 4; memory (16 - 2) / 3 = 4.67 -> 4; two nodes = 8; * 0.75 = 6.
+        result = arc.arc_measured_max_runners(sizing, [node("a", "8", "16Gi"), node("b", "8", "16Gi")], [])
+        self.assertEqual((result["theoretical"], result["max_runners"]), (8, 6))
+
+    def test_the_tighter_resource_bounds_each_node(self) -> None:
+        result = arc.arc_measured_max_runners(MEASURED, [node("a", "10", "4Gi")], [])
+        self.assertEqual((result["nodes"][0]["by_cpu"], result["nodes"][0]["by_memory"], result["max_runners"]), (10, 2, 2))
+
+    def test_a_node_already_over_committed_contributes_nothing(self) -> None:
+        result = arc.arc_measured_max_runners(MEASURED, [node("full", "2", "4Gi"), node("free", "2", "4Gi")], [pod("full", "3", "1Gi")])
+        self.assertEqual([entry["runners"] for entry in result["nodes"]], [2, 0])
+        self.assertEqual(result["max_runners"], 2)
+
+    def test_only_nodes_runner_pods_can_use_count(self) -> None:
+        nodes = [
+            node("labelled", labels={"ci": "true"}),
+            node("unlabelled"),
+            node("tainted", labels={"ci": "true"}, taints=[{"key": "node-role.kubernetes.io/control-plane", "effect": "NoSchedule"}]),
+            node("preferring", labels={"ci": "true"}, taints=[{"key": "spot", "effect": "PreferNoSchedule"}]),
+        ]
+        result = arc.arc_measured_max_runners(MEASURED, nodes, [], {"ci": "true"})
+        self.assertEqual([entry["name"] for entry in result["nodes"]], ["labelled", "preferring"])
+        self.assertEqual(result["skipped_nodes"], [
+            {"name": "tainted", "reason": "has the taint node-role.kubernetes.io/control-plane:NoSchedule"},
+            {"name": "unlabelled", "reason": "does not have the label ci=true"},
+        ])
+
+    def test_a_node_in_a_passing_condition_still_counts(self) -> None:
+        # The ceiling lasts until the next run, so a node that is briefly unreachable or cordoned for maintenance is sized as it will be when it is back.
+        nodes = [
+            node("unreachable", taints=[{"key": "node.kubernetes.io/unreachable", "effect": "NoSchedule"}, {"key": "node.kubernetes.io/unreachable", "effect": "NoExecute"}]),
+            node("cordoned", unschedulable=True, taints=[{"key": "node.kubernetes.io/unschedulable", "effect": "NoSchedule"}]),
+        ]
+        result = arc.arc_measured_max_runners(MEASURED, nodes, [])
+        self.assertEqual(result["skipped_nodes"], [])
+        self.assertEqual({entry["name"]: entry["condition"] for entry in result["nodes"]}, {
+            "cordoned": "is cordoned, has the taint node.kubernetes.io/unschedulable:NoSchedule",
+            "unreachable": "has the taint node.kubernetes.io/unreachable:NoSchedule, has the taint node.kubernetes.io/unreachable:NoExecute",
+        })
+        self.assertEqual(result["max_runners"], 8)
+
+    def test_runner_pods_and_finished_pods_are_not_counted(self) -> None:
+        pods = [pod("a", "2", "4Gi", namespace="arc-runners-example"), pod("a", "2", "4Gi", phase="Succeeded"), pod("a", "2", "4Gi", phase="Failed"), pod("a", "1", "2Gi")]
+        result = arc.arc_measured_max_runners(MEASURED, [node("a", "4", "8Gi")], pods, excluded_namespaces=["arc-runners-example"])
+        self.assertEqual((result["nodes"][0]["requested_cpu"], result["max_runners"]), (1.0, 3))
+
+    def test_pod_requests_follow_the_schedulers_rules(self) -> None:
+        # Apps and the restartable sidecar run together (1 + 0.5); the ordinary init container before the sidecar peaks at 2 alone; overhead adds 0.25.
+        init = [{"name": "setup", "resources": {"requests": {"cpu": "2"}}}, {"name": "proxy", "restartPolicy": "Always", "resources": {"requests": {"cpu": "500m"}}}]
+        heavy_init = pod("a", "1", initContainers=init, overhead={"cpu": "250m"})
+        self.assertEqual(arc._pod_requests(heavy_init)[0], arc.Decimal("2.25"))
+        # An ordinary init container after the sidecar runs beside it: 1.5 + 0.5 = 2 beats the apps' 1 + 0.5.
+        late_init = pod("a", "1", initContainers=[init[1], {"name": "late", "resources": {"requests": {"cpu": "1500m"}}}])
+        self.assertEqual(arc._pod_requests(late_init)[0], arc.Decimal("2"))
+        self.assertEqual(arc._pod_requests({"spec": {"containers": [{"name": "c"}]}}), (arc.Decimal(0), arc.Decimal(0)))
+
+    def test_no_eligible_node_is_an_error_not_zero_runners(self) -> None:
+        result = arc.arc_measured_max_runners(MEASURED, [node("a")], [], {"ci": "true"})
+        self.assertEqual(result["errors"], ["no node is eligible for runner pods with the labels ci=true"])
+        self.assertIsNone(result["max_runners"])
+
+    def test_invalid_input_is_reported(self) -> None:
+        self.assertEqual(arc.arc_measured_max_runners(SIZING, [node("a")], [])["errors"], ["sizing is not measured (set measured: true)"])
+        self.assertIn("sizing.pod_cpu_request is required", arc.arc_measured_max_runners({"measured": True, "pod_memory_request_gib": 1}, [node("a")], [])["errors"])
+        bad = arc.arc_measured_max_runners(MEASURED, [node("a", cpu="lots")], [])
+        self.assertEqual(bad["errors"], ["node a: not a Kubernetes quantity: 'lots'"])
 
 
 class ImageRefTest(unittest.TestCase):

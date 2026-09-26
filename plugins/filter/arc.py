@@ -1,4 +1,4 @@
-"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, deriving a runner ceiling from node capacity, and splitting an image reference."""
+"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, deriving a runner ceiling from node capacity (uniform figures, or each node's measured free capacity), and splitting an image reference."""
 
 from __future__ import annotations
 
@@ -28,6 +28,47 @@ _SIZING_INPUTS: tuple[tuple[str, bool, str, str | None, bool, str | None, bool],
 )
 
 
+# Measured sizing inputs, in the same form: the node figures come from the cluster instead, and reserve_* is held back on every node for what the requests do not show.
+_MEASURED_SIZING_INPUTS: tuple[tuple[str, bool, str, str | None, bool, str | None, bool], ...] = (
+    ("pod_cpu_request", True, "0", "0", False, None, False),
+    ("pod_memory_request_gib", True, "0", "0", False, None, False),
+    ("sidecar_cpu_request", False, "0", "0", True, None, False),
+    ("sidecar_memory_request_gib", False, "0", "0", True, None, False),
+    ("reserve_cpu", False, "0", "0", True, None, False),
+    ("reserve_memory_gib", False, "0", "0", True, None, False),
+    ("safety_margin", False, "1", "0", False, "1", True),
+)
+
+# Kubernetes resource quantity suffixes (k8s.io/apimachinery resource.Quantity): binary powers of 1024, and decimal SI prefixes.
+_QUANTITY = re.compile(r"^([+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)(Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$")
+_QUANTITY_SUFFIXES = {
+    "": Decimal(1),
+    "n": Decimal("1e-9"),
+    "u": Decimal("1e-6"),
+    "m": Decimal("1e-3"),
+    "k": Decimal("1e3"),
+    "M": Decimal("1e6"),
+    "G": Decimal("1e9"),
+    "T": Decimal("1e12"),
+    "P": Decimal("1e15"),
+    "E": Decimal("1e18"),
+    "Ki": Decimal(1024),
+    "Mi": Decimal(1024) ** 2,
+    "Gi": Decimal(1024) ** 3,
+    "Ti": Decimal(1024) ** 4,
+    "Pi": Decimal(1024) ** 5,
+    "Ei": Decimal(1024) ** 6,
+}
+_GIB = Decimal(1024) ** 3
+
+# Pod phases whose containers have all stopped, so the scheduler no longer counts the pod's requests against its node.
+_TERMINAL_POD_PHASES = frozenset({"Succeeded", "Failed"})
+# Taint effects that keep a pod without a matching toleration off a node. Runner pods are taken to tolerate none.
+_REPELLING_TAINT_EFFECTS = frozenset({"NoSchedule", "NoExecute"})
+# The prefix of the taints Kubernetes itself puts on a node for a passing condition (not ready, unreachable, under pressure, cordoned). The ceiling outlasts the moment it is measured, so a node in such a state still counts, as it will when it recovers; only a node's labels and deliberately added taints decide whether it is eligible.
+_CONDITION_TAINT_PREFIX = "node.kubernetes.io/"
+
+
 def _decimal(value: Any) -> Decimal | None:
     """Return value as an exact Decimal, or None when it is not a finite number."""
     if isinstance(value, bool):
@@ -44,24 +85,10 @@ def _floor(value: Decimal) -> int:
     return int(value.to_integral_value(rounding=ROUND_FLOOR))
 
 
-def arc_max_runners(sizing: Mapping[str, Any]) -> dict[str, Any]:
-    """Derive how many runner pods a pool of identical nodes can hold.
-
-    Each node's allocatable CPU and memory, less a baseline fraction reserved for what already runs there, is divided by one runner pod's requests (the runner container plus any sidecar such as dind). The tighter of the two bounds gives pods per node; that times the node count, scaled down by the safety margin, is the result. Decimal arithmetic keeps the floors exact for inputs such as 0.1.
-
-    Args:
-        sizing: the inputs named in _SIZING_INPUTS. Optional ones default to no sidecar, no baseline reservation and no safety margin.
-
-    Returns:
-        A dict with ``errors`` (a list of messages, empty when the inputs are valid) and, when valid, ``max_runners`` plus every intermediate figure (``usable_cpu``, ``usable_memory_gib``, ``pod_cpu``, ``pod_memory_gib``, ``per_node_by_cpu``, ``per_node_by_memory``, ``per_node``, ``theoretical``). ``max_runners`` is None when there are errors.
-    """
-    errors: list[str] = []
-    if not isinstance(sizing, Mapping):
-        return {"errors": ["sizing must be a mapping"], "max_runners": None}
-    known = {spec[0] for spec in _SIZING_INPUTS}
-    errors.extend(f"sizing has an unknown key '{key}'" for key in sorted(set(sizing) - known))
+def _sizing_values(sizing: Mapping[str, Any], inputs: tuple[tuple[str, bool, str, str | None, bool, str | None, bool], ...], errors: list[str]) -> dict[str, Decimal]:
+    """Check sizing against one of the input tables, recording each problem in errors, and return the values that are valid, with defaults filled in."""
     values: dict[str, Decimal] = {}
-    for key, required, default, low, low_inclusive, high, high_inclusive in _SIZING_INPUTS:
+    for key, required, default, low, low_inclusive, high, high_inclusive in inputs:
         if key not in sizing or sizing[key] is None:
             if required:
                 errors.append(f"sizing.{key} is required")
@@ -79,21 +106,66 @@ def arc_max_runners(sizing: Mapping[str, Any]) -> dict[str, Any]:
             errors.append(f"sizing.{key} must be {'at most' if high_inclusive else 'less than'} {high} (got {number})")
             continue
         values[key] = number
-    if "node_count" in values and values["node_count"] != values["node_count"].to_integral_value():
+    return values
+
+
+def _is_measured(sizing: Mapping[str, Any], errors: list[str]) -> bool:
+    """Return whether sizing asks for measured node figures, recording an error when its measured key is not a boolean."""
+    try:
+        return boolean(sizing.get("measured", False), strict=True)
+    except TypeError:
+        errors.append(f"sizing.measured must be a boolean (got {sizing.get('measured')!r})")
+        return False
+
+
+def arc_max_runners(sizing: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive how many runner pods a pool of identical nodes can hold, or check the inputs of a measured sizing.
+
+    Each node's allocatable CPU and memory, less a baseline fraction reserved for what already runs there, is divided by one runner pod's requests (the runner container plus any sidecar such as dind). The tighter of the two bounds gives pods per node; that times the node count, scaled down by the safety margin, is the result. Decimal arithmetic keeps the floors exact for inputs such as 0.1.
+
+    With ``measured: true`` the node figures are not inputs: they are read from the cluster at install time and passed to arc_measured_max_runners. Only the pod's requests, the per-node reserve and the safety margin are checked here, and max_runners is None until then.
+
+    Args:
+        sizing: the inputs named in _SIZING_INPUTS, or with measured true those in _MEASURED_SIZING_INPUTS. Optional ones default to no sidecar, no baseline reservation or reserve, and no safety margin.
+
+    Returns:
+        A dict with ``errors`` (a list of messages, empty when the inputs are valid), ``measured`` and ``max_runners``. For uniform sizing with valid inputs it also has every intermediate figure (``usable_cpu``, ``usable_memory_gib``, ``pod_cpu``, ``pod_memory_gib``, ``per_node_by_cpu``, ``per_node_by_memory``, ``per_node``, ``theoretical``). For measured sizing it has ``pod_cpu``, ``pod_memory_gib``, ``reserve_cpu``, ``reserve_memory_gib`` and ``safety_margin``, and ``max_runners`` is None. ``max_runners`` is None whenever there are errors.
+    """
+    errors: list[str] = []
+    if not isinstance(sizing, Mapping):
+        return {"errors": ["sizing must be a mapping"], "measured": False, "max_runners": None}
+    measured = _is_measured(sizing, errors)
+    inputs = _MEASURED_SIZING_INPUTS if measured else _SIZING_INPUTS
+    known = {spec[0] for spec in inputs} | {"measured"}
+    errors.extend(f"sizing has an unknown key '{key}'{' (measured sizing reads the nodes from the cluster)' if measured and key in {spec[0] for spec in _SIZING_INPUTS} else ''}" for key in sorted(set(sizing) - known))
+    values = _sizing_values(sizing, inputs, errors)
+    if not measured and "node_count" in values and values["node_count"] != values["node_count"].to_integral_value():
         errors.append(f"sizing.node_count must be a whole number (got {values['node_count']})")
     if errors:
-        return {"errors": errors, "max_runners": None}
+        return {"errors": errors, "measured": measured, "max_runners": None}
+    pod_cpu = values["pod_cpu_request"] + values["sidecar_cpu_request"]
+    pod_memory = values["pod_memory_request_gib"] + values["sidecar_memory_request_gib"]
+    if measured:
+        return {
+            "errors": [],
+            "measured": True,
+            "pod_cpu": float(pod_cpu),
+            "pod_memory_gib": float(pod_memory),
+            "reserve_cpu": float(values["reserve_cpu"]),
+            "reserve_memory_gib": float(values["reserve_memory_gib"]),
+            "safety_margin": float(values["safety_margin"]),
+            "max_runners": None,
+        }
 
     usable_cpu = values["node_allocatable_cpu"] * (1 - values["baseline_cpu_fraction"])
     usable_memory = values["node_allocatable_memory_gib"] * (1 - values["baseline_memory_fraction"])
-    pod_cpu = values["pod_cpu_request"] + values["sidecar_cpu_request"]
-    pod_memory = values["pod_memory_request_gib"] + values["sidecar_memory_request_gib"]
     per_node_by_cpu = _floor(usable_cpu / pod_cpu)
     per_node_by_memory = _floor(usable_memory / pod_memory)
     per_node = min(per_node_by_cpu, per_node_by_memory)
     theoretical = per_node * int(values["node_count"])
     return {
         "errors": [],
+        "measured": False,
         "usable_cpu": float(usable_cpu),
         "usable_memory_gib": float(usable_memory),
         "pod_cpu": float(pod_cpu),
@@ -103,6 +175,145 @@ def arc_max_runners(sizing: Mapping[str, Any]) -> dict[str, Any]:
         "per_node": per_node,
         "theoretical": theoretical,
         "max_runners": _floor(theoretical * values["safety_margin"]),
+    }
+
+
+def arc_quantity(value: Any) -> Decimal:
+    """Parse a Kubernetes resource quantity such as 3500m, 4251Mi, 1.5 or 2e3 into its value in base units (cores, or bytes).
+
+    Raises:
+        ValueError: when value is not a quantity.
+    """
+    match = _QUANTITY.match(str(value).strip())
+    if match is None:
+        raise ValueError(f"not a Kubernetes quantity: {value!r}")
+    return Decimal(match.group(1)) * _QUANTITY_SUFFIXES[match.group(2) or ""]
+
+
+def _container_requests(container: Mapping[str, Any]) -> tuple[Decimal, Decimal]:
+    """Return a container's CPU (cores) and memory (bytes) requests, zero where it sets none."""
+    requests = (container.get("resources") or {}).get("requests") or {}
+    return arc_quantity(requests.get("cpu", 0)), arc_quantity(requests.get("memory", 0))
+
+
+def _pod_requests(pod: Mapping[str, Any]) -> tuple[Decimal, Decimal]:
+    """Return what the scheduler counts a pod as requesting, per resource: the larger of its app and sidecar containers' sum and its largest ordinary init container (each running beside the sidecars started before it), plus the pod's overhead."""
+    spec = pod.get("spec") or {}
+    totals = []
+    for index in (0, 1):
+        sidecars = Decimal(0)
+        init_peak = Decimal(0)
+        for container in spec.get("initContainers") or []:
+            request = _container_requests(container)[index]
+            if container.get("restartPolicy") == "Always":
+                sidecars += request
+            else:
+                init_peak = max(init_peak, request + sidecars)
+        apps = sum((_container_requests(container)[index] for container in spec.get("containers") or []), Decimal(0))
+        overhead = arc_quantity((spec.get("overhead") or {}).get(("cpu", "memory")[index], 0))
+        totals.append(max(apps + sidecars, init_peak) + overhead)
+    return totals[0], totals[1]
+
+
+def _node_eligibility(node: Mapping[str, Any], node_selector: Mapping[str, Any]) -> tuple[str, str]:
+    """Return why runner pods can never be placed on node (empty when they can), and any passing condition that keeps them off it for now."""
+    labels = (node.get("metadata") or {}).get("labels") or {}
+    for key, value in node_selector.items():
+        if labels.get(key) != str(value):
+            return f"does not have the label {key}={value}", ""
+    spec = node.get("spec") or {}
+    conditions = ["is cordoned"] if spec.get("unschedulable") else []
+    for taint in spec.get("taints") or []:
+        if taint.get("effect") not in _REPELLING_TAINT_EFFECTS:
+            continue
+        description = f"has the taint {taint.get('key')}:{taint.get('effect')}"
+        if not str(taint.get("key", "")).startswith(_CONDITION_TAINT_PREFIX):
+            return description, ""
+        conditions.append(description)
+    return "", ", ".join(conditions)
+
+
+def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]], pods: Sequence[Mapping[str, Any]], node_selector: Mapping[str, Any] | None = None, excluded_namespaces: Sequence[str] = ()) -> dict[str, Any]:
+    """Derive how many runner pods fit on the eligible nodes as they are now.
+
+    A node is eligible when it carries every label in node_selector and has no NoSchedule or NoExecute taint other than the ones Kubernetes adds for a passing condition (not ready, unreachable, cordoned and the like): the ceiling lasts until the next run, so a node that is only briefly unavailable still counts. For each one, its allocatable CPU and memory, less what the pods already on it request and less the sizing's reserve, is divided by one runner pod's requests; the tighter bound is how many fit there. The sum over the nodes, scaled down by the safety margin, is the result. Pods in excluded_namespaces are not counted, so the runner pods themselves never lower the ceiling they are sized by, and pods that have finished are not counted, as the scheduler does not count them.
+
+    Args:
+        sizing: a measured sizing mapping (see arc_max_runners).
+        nodes: Node objects, as kubernetes.core.k8s_info returns them.
+        pods: Pod objects from every namespace.
+        node_selector: labels an eligible node must carry.
+        excluded_namespaces: namespaces whose pods are left out of each node's requests.
+
+    Returns:
+        A dict with ``errors`` (messages, empty when it could be worked out), ``nodes`` (per eligible node: name, allocatable_cpu, allocatable_memory_gib, requested_cpu, requested_memory_gib, by_cpu, by_memory, runners, and condition, naming any passing condition it was counted despite), ``skipped_nodes`` (name and reason for each node that is not eligible), ``theoretical`` and ``max_runners``, which is None when there are errors.
+    """
+    checked = arc_max_runners(sizing)
+    errors = list(checked["errors"])
+    if not errors and not checked["measured"]:
+        errors.append("sizing is not measured (set measured: true)")
+    if errors:
+        return {"errors": errors, "nodes": [], "skipped_nodes": [], "theoretical": None, "max_runners": None}
+    selector = dict(node_selector or {})
+    excluded = set(excluded_namespaces)
+    pod_cpu = Decimal(str(checked["pod_cpu"]))
+    pod_memory = Decimal(str(checked["pod_memory_gib"])) * _GIB
+    reserve_cpu = Decimal(str(checked["reserve_cpu"]))
+    reserve_memory = Decimal(str(checked["reserve_memory_gib"])) * _GIB
+    requested: dict[str, list[Decimal]] = {}
+    for pod in pods:
+        metadata = pod.get("metadata") or {}
+        node_name = (pod.get("spec") or {}).get("nodeName")
+        if not node_name or metadata.get("namespace") in excluded or (pod.get("status") or {}).get("phase") in _TERMINAL_POD_PHASES:
+            continue
+        try:
+            cpu, memory = _pod_requests(pod)
+        except ValueError as error:
+            errors.append(f"pod {metadata.get('namespace')}/{metadata.get('name')}: {error}")
+            continue
+        totals = requested.setdefault(node_name, [Decimal(0), Decimal(0)])
+        totals[0] += cpu
+        totals[1] += memory
+    eligible: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for node in sorted(nodes, key=lambda item: (item.get("metadata") or {}).get("name", "")):
+        name = (node.get("metadata") or {}).get("name", "")
+        reason, condition = _node_eligibility(node, selector)
+        if reason:
+            skipped.append({"name": name, "reason": reason})
+            continue
+        allocatable = (node.get("status") or {}).get("allocatable") or {}
+        try:
+            allocatable_cpu = arc_quantity(allocatable.get("cpu", 0))
+            allocatable_memory = arc_quantity(allocatable.get("memory", 0))
+        except ValueError as error:
+            errors.append(f"node {name}: {error}")
+            continue
+        used_cpu, used_memory = requested.get(name, [Decimal(0), Decimal(0)])
+        by_cpu = max(0, _floor((allocatable_cpu - used_cpu - reserve_cpu) / pod_cpu))
+        by_memory = max(0, _floor((allocatable_memory - used_memory - reserve_memory) / pod_memory))
+        eligible.append({
+            "name": name,
+            "allocatable_cpu": float(allocatable_cpu),
+            "allocatable_memory_gib": float(allocatable_memory / _GIB),
+            "requested_cpu": float(used_cpu),
+            "requested_memory_gib": float(used_memory / _GIB),
+            "by_cpu": by_cpu,
+            "by_memory": by_memory,
+            "runners": min(by_cpu, by_memory),
+            "condition": condition,
+        })
+    if not eligible and not errors:
+        errors.append(f"no node is eligible for runner pods{' with the labels ' + ', '.join(f'{key}={value}' for key, value in selector.items()) if selector else ''}")
+    if errors:
+        return {"errors": errors, "nodes": eligible, "skipped_nodes": skipped, "theoretical": None, "max_runners": None}
+    theoretical = sum(node["runners"] for node in eligible)
+    return {
+        "errors": [],
+        "nodes": eligible,
+        "skipped_nodes": skipped,
+        "theoretical": theoretical,
+        "max_runners": _floor(Decimal(theoretical) * Decimal(str(checked["safety_margin"]))),
     }
 
 
@@ -305,4 +516,4 @@ class FilterModule:
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"arc_profiles": arc_profiles, "arc_max_runners": arc_max_runners, "arc_image_ref": arc_image_ref}
+        return {"arc_profiles": arc_profiles, "arc_max_runners": arc_max_runners, "arc_measured_max_runners": arc_measured_max_runners, "arc_image_ref": arc_image_ref}

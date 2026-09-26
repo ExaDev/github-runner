@@ -1,8 +1,11 @@
-{# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With node eligibility, probes, max_runners and sizing all off it holds only the profile's nodeSelector. `profile` is the expanded profile from plugins/filter/arc.py. #}
+{# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With node eligibility, probes, max_runners and sizing all off it holds only the profile's nodeSelector. A measured sizing's result is read from github_runner_arc_measured_sizing, which tasks/measure_sizing.yml fills in. `profile` is the expanded profile from plugins/filter/arc.py. #}
 {% set node_selector = ({github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {}) | combine(profile.node_selector) %}
 {% if profile.settings.max_runners is defined and profile.settings.max_runners is not none %}
 # The profile's own max_runners, which takes precedence over its values file and its sizing.
 maxRunners: {{ profile.max_runners }}
+{% elif profile.label in (github_runner_arc_measured_sizing | default({})) and not profile.autoscale %}
+# Measured from the eligible nodes' free capacity: {{ github_runner_arc_measured_sizing[profile.label].nodes | map(attribute='runners') | list }} per node, {{ github_runner_arc_measured_sizing[profile.label].theoretical }} in all, less the safety margin.
+maxRunners: {{ github_runner_arc_measured_sizing[profile.label].max_runners }}
 {% elif profile.max_runners is not none %}
 # Derived from the profile's sizing: {{ profile.sizing.per_node }} per node ({{ profile.sizing.per_node_by_cpu }} by CPU, {{ profile.sizing.per_node_by_memory }} by memory) across the nodes, {{ profile.sizing.theoretical }} in theory, less the safety margin.
 maxRunners: {{ profile.max_runners }}

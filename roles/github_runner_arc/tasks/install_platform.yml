@@ -314,6 +314,22 @@
         if github_runner_arc_controller_namespace != 'actions-runner-controller' else []
       }}
 
+- name: "Platform: measure the autoscaled profile's ceiling from the eligible nodes"
+  ansible.builtin.include_tasks: measure_sizing.yml
+  vars:
+    github_runner_arc_measure: "{{ github_runner_arc_fleet.autoscaled }}"
+  when: github_runner_arc_fleet.autoscaled is not none and github_runner_arc_fleet.autoscaled.sizing is not none and github_runner_arc_fleet.autoscaled.sizing.measured
+
+- name: "Platform: fail when the autoscaler's floor is above its measured ceiling"
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_arc_autoscaler_floor ({{ github_runner_arc_autoscaler_floor }}) is above the ceiling measured for
+      {{ github_runner_arc_fleet.autoscaled.label }} ({{ github_runner_arc_measured_sizing[github_runner_arc_fleet.autoscaled.label].max_runners }}).
+  when:
+    - github_runner_arc_fleet.autoscaled is not none
+    - github_runner_arc_fleet.autoscaled.label in (github_runner_arc_measured_sizing | default({}))
+    - (github_runner_arc_autoscaler_floor | int) > (github_runner_arc_measured_sizing[github_runner_arc_fleet.autoscaled.label].max_runners | int)
+
 - name: "Platform: install/upgrade the autoscaler Deployment"
   when: github_runner_arc_fleet.autoscaled is not none
   kubernetes.core.k8s:
@@ -347,7 +363,13 @@
                   - name: AUTOSCALER_USABLE_BUDGET_GI
                     value: "{{ github_runner_arc_autoscaler_usable_budget_gi | string }}"
                   - name: AUTOSCALER_MAX_CEILING
-                    value: "{{ (github_runner_arc_fleet.autoscaled.sizing.max_runners if github_runner_arc_fleet.autoscaled.sizing else github_runner_arc_autoscaler_max_ceiling) | string }}"
+                    value: >-
+                      {{
+                        (github_runner_arc_measured_sizing[github_runner_arc_fleet.autoscaled.label].max_runners
+                         if github_runner_arc_fleet.autoscaled.label in (github_runner_arc_measured_sizing | default({}))
+                         else github_runner_arc_fleet.autoscaled.sizing.max_runners if github_runner_arc_fleet.autoscaled.sizing
+                         else github_runner_arc_autoscaler_max_ceiling) | string
+                      }}
                   - name: AUTOSCALER_FLOOR
                     value: "{{ github_runner_arc_autoscaler_floor | string }}"
                   - name: AUTOSCALER_RAISE_CONFIRM_POLLS

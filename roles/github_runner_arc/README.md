@@ -6,7 +6,7 @@ It runs in two ways. Inside `playbooks/site.yml`, against a k3s server host that
 
 ## Validation
 
-`tasks/validate.yml` checks every input that needs neither secrets nor a cluster: each org's fields, profile names (derived or overridden) that would collide or make invalid Kubernetes names, two of an org's profiles sharing a release name, a `max_runners` that is not a whole number, the controller's release name and namespace, the same org configured on two hosts, more than one autoscaled profile, values files that do not exist, the autoscaler's pool settings, sizing inputs, and the controller, probe and node label settings. Both playbooks run it in a play of its own before anything changes; the role runs it itself when included some other way. It also bootstraps the heartbeat gist when `github_runner_arc_heartbeat_bootstrap_gist` is on and no host in the inventory has one: it creates the gist with the control node's `gh` session and stops, printing the id to record.
+`tasks/validate.yml` checks every input that needs neither secrets nor a cluster (a measured sizing's node figures are read later, when the role installs the profile): each org's fields, profile names (derived or overridden) that would collide or make invalid Kubernetes names, two of an org's profiles sharing a release name, a `max_runners` that is not a whole number, the controller's release name and namespace, the same org configured on two hosts, more than one autoscaled profile, values files that do not exist, the autoscaler's pool settings, sizing inputs, and the controller, probe and node label settings. Both playbooks run it in a play of its own before anything changes; the role runs it itself when included some other way. It also bootstraps the heartbeat gist when `github_runner_arc_heartbeat_bootstrap_gist` is on and no host in the inventory has one: it creates the gist with the control node's `gh` session and stops, printing the id to record.
 
 Before touching the cluster the role then checks the secrets it is about to write (each org's App key looks like a PEM key, the pull credential and heartbeat token are set) and proves the pull credential can read every image it installs from `github_runner_arc_image_pull_registry`, by getting a pull-scoped registry token and fetching each image's manifest.
 
@@ -21,7 +21,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
   - `runs_on_label`: the extra `scaleSetLabels` entry the runners carry. Default `<org>-runners`, which pools every profile of the org under one `runs-on` label; set a different one to keep a profile out of that pool.
   - `scale_set_labels`: the whole `scaleSetLabels` list, in place of `runs_on_label`. An empty list sets no `scaleSetLabels`, so jobs target the scale set by its release name.
   - `autoscale`: `true` on at most one profile in the whole inventory makes it the scale set the autoscaler manages.
-  - `sizing`: derive a runner ceiling from node capacity (see Sizing). On an ordinary profile without `max_runners` it sets `maxRunners`; on the autoscaled profile it sets the autoscaler's ceiling, leaving `maxRunners` as the floor.
+  - `sizing`: derive a runner ceiling from node capacity, given as uniform figures or measured from each eligible node (see Sizing). On an ordinary profile without `max_runners` it sets `maxRunners`; on the autoscaled profile it sets the autoscaler's ceiling, leaving `maxRunners` as the floor.
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
 - `github_runner_arc_kubeconfig_path`: the kubeconfig on the host the role runs against. Defaults to `github_runner_cluster`'s kubeconfig; empty means `KUBECONFIG` or `~/.kube/config`.
 - `github_runner_arc_controller_chart_version`, `github_runner_arc_scaleset_chart_version`: chart pins; unset installs the latest chart.
@@ -55,6 +55,22 @@ sizing:
   baseline_memory_fraction: 0.25    # optional, default 0
   safety_margin: 0.8                # optional, default 1
 ```
+
+That assumes the nodes are alike. Where their free capacity differs a lot, `measured: true` works it out from the cluster instead, each time the role runs. It reads every node the runner pods may be placed on: every node carrying the eligibility label and the profile's `node_selector`, with no `NoSchedule` or `NoExecute` taint other than those Kubernetes adds for a passing condition. The ceiling lasts until the next run, so a node that is not ready, unreachable or cordoned when it is measured still counts, as it will once it is back. For each one it takes the node's allocatable CPU and memory, subtracts what the pods already on it request and the per-node reserve, and divides what is left by one runner pod's requests; the tighter of the two gives the runners that fit there. The sum over the nodes, scaled by the safety margin and rounded down, is the ceiling. Pods in any scale set's namespace are left out, so running runners never lower the ceiling they are sized by, as are pods that have finished. The reserve covers what requests do not show, such as a workload that uses more than it requests. The kubeconfig needs cluster-wide read access to nodes and pods. The role prints each node's figures when it runs.
+
+```yaml
+sizing:
+  measured: true
+  pod_cpu_request: 1
+  pod_memory_request_gib: 2
+  sidecar_cpu_request: 0.25         # optional, default 0
+  sidecar_memory_request_gib: 0.5   # optional, default 0
+  reserve_cpu: 0.5                  # optional, per node, default 0
+  reserve_memory_gib: 1             # optional, per node, default 0
+  safety_margin: 0.8                # optional, default 1
+```
+
+A profile's own `max_runners` still takes precedence, and on the autoscaled profile the measured figure is the autoscaler's ceiling. Measured sizing uses the `exadev.github_runner.arc_measured_max_runners` filter.
 
 The filter behind it is `exadev.github_runner.arc_max_runners`.
 
