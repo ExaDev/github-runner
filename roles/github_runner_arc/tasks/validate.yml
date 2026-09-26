@@ -1,9 +1,15 @@
 ---
-# Checks every ARC input that can be checked without secrets or a cluster, so that playbooks/site.yml can run it in a pre-flight play before k3s is started or changed. Reads nothing from the target host and changes nothing, apart from bootstrapping the heartbeat gist on GitHub (see below). Cross-host checks read github_runner_arc_orgs from every host in the inventory, which --limit does not narrow.
+# Checks every ARC input that can be checked without secrets or a cluster, so that playbooks/site.yml can run it in a pre-flight play before k3s is started or changed. Reads nothing from the target host and changes nothing, apart from bootstrapping the heartbeat gist on GitHub (see below). Cross-host checks read github_runner_arc_orgs from every host in the inventory, which --limit does not narrow, and from this host however it was set.
 
+# This host's orgs come from github_runner_arc_orgs as this play resolves it, which includes play and role variables and -e; another host's can only be read from hostvars, which holds its inventory variables and facts. Taking this host's from hostvars too would miss orgs passed as a play variable, and every check and lookup built on the fleet (the scale sets' namespaces that measured sizing leaves out, the autoscaled profile) would then not see them. An implicit localhost is not in groups['all'] at all.
 - name: Expand every org configured anywhere in the inventory into its scale-set profiles
   ansible.builtin.set_fact:
-    github_runner_arc_fleet: "{{ groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_orgs', default=[]) | flatten | exadev.github_runner.arc_profiles }}"
+    github_runner_arc_fleet: >-
+      {{
+        ((groups['all'] | reject('equalto', inventory_hostname) | map('extract', hostvars) | map(attribute='github_runner_arc_orgs', default=[]) | flatten)
+         + github_runner_arc_orgs)
+        | exadev.github_runner.arc_profiles
+      }}
     github_runner_arc_local: "{{ github_runner_arc_orgs | exadev.github_runner.arc_profiles }}"
 
 - name: Fail on invalid orgs or scale-set profiles
@@ -89,7 +95,8 @@
   run_once: true
   when:
     - github_runner_arc_heartbeat_bootstrap_gist | bool
-    - groups['all'] | map('extract', hostvars) | map(attribute='github_runner_arc_heartbeat_gist_id', default='') | select | list | length == 0
+    # This host's own gist id as the play resolves it, as for the orgs above.
+    - ((groups['all'] | reject('equalto', inventory_hostname) | map('extract', hostvars) | map(attribute='github_runner_arc_heartbeat_gist_id', default='') | list) + [github_runner_arc_heartbeat_gist_id]) | select | list | length == 0
   block:
     - name: Create the heartbeat status gist
       ansible.builtin.command:
