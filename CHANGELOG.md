@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/ExaDev/github-runner/compare/v1.3.0...v1.3.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **cluster:** refuse Docker Compose 2.37.1 to 2.38.x ([b99ae54](https://github.com/ExaDev/github-runner/commit/b99ae54e1576eab76b6d67cd202f126c83d81149))
+
 # [1.3.0](https://github.com/ExaDev/github-runner/compare/v1.2.2...v1.3.0) (2026-09-26)
 
 

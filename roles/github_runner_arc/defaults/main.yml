@@ -54,7 +54,7 @@ github_runner_arc_image_pull_secret_source: static
 github_runner_arc_image_pull_secret_renewal_schedule: "*/15 * * * *"
 
 # Image the renewal CronJob runs. Pulled without a pull Secret, so it must be public.
-github_runner_arc_image_pull_secret_renewer_image: "ghcr.io/exadev/github-runner-pull-secret-renewer:1.3.0"
+github_runner_arc_image_pull_secret_renewer_image: "ghcr.io/exadev/github-runner-pull-secret-renewer:1.3.1"
 
 # Before writing the pull Secret, prove the credential can read each image this host installs from that registry (with an App token, each org's own image, in the role and in every renewal): exchange it for a registry bearer token and fetch the image's manifest. A token that authenticates but lacks package access is otherwise only found later, as pods stuck in ImagePullBackOff. Uses the registry's /token endpoint, as GHCR provides.
 github_runner_arc_verify_image_pull: true
@@ -71,8 +71,8 @@ github_runner_arc_heartbeat_gist_consumer: ""
 
 # Namespace and images for the platform's own Deployments (see install_platform.yml).
 github_runner_arc_platform_namespace: "github-runner-platform"
-github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:1.3.0"
-github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:1.3.0"
+github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:1.3.1"
+github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:1.3.1"
 
 # Usage-driven autoscaler for the one scale-set profile that sets autoscale: true (see scripts/autoscaler.sh and the README's Autoscaler section). It is installed only when such a profile exists and this host installs the platform. The memory budget, ceiling and floor have no defaults because they depend on the pool: the budget is the memory runner pods may use across every node, the ceiling caps maxRunners (the autoscaled profile's sizing, when set, supplies it instead), and the floor must equal the maxRunners in that profile's values, which every Helm upgrade reverts to.
 github_runner_arc_autoscaler_dry_run: true
@@ -87,7 +87,7 @@ github_runner_arc_node_recovery_after_seconds: 120
 # How often the watcher checks the nodes. A taint lands at most this long after the threshold passes.
 github_runner_arc_node_recovery_poll_seconds: 15
 # Image the watcher runs. Pulled without a pull Secret, so it must be public.
-github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:1.3.0"
+github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:1.3.1"
 
 # GitHub App creation through the manifest flow (tasks/app_setup.yml, run by playbooks/github_app_setup.yml). The App needs only organisation self-hosted runner write access; add packages: read to the permissions if its installation token should also pull private packages.
 github_runner_arc_app_setup_org: ""
