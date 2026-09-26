@@ -1,0 +1,14 @@
+# Renders the github_runner_arc role's node recovery manifests (templates/node-recovery.yaml.j2) with the role's defaults and constants, for tests/node_recovery/run.sh to apply to a test cluster. Takes recovery_output as an extra variable; a role variable such as the image or the threshold is overridden with an extra variable of its own name, since the defaults file loaded here outranks play variables.
+- name: Render the node recovery manifests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+    - ../../roles/github_runner_arc/vars/main.yml
+  tasks:
+    - name: Write the manifests
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_arc/templates/node-recovery.yaml.j2') }}"
+        dest: "{{ recovery_output }}"
+        mode: "0644"
