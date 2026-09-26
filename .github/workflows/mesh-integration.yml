@@ -1,6 +1,6 @@
 name: Mesh integration
 
-# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check. Only on changes that can affect how nodes join the mesh.
+# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check, plus the role's refusal of a Docker Compose release that recreates the containers it has just built. Only on changes that can affect how nodes join the mesh.
 #
 # Runs on GitHub-hosted ubuntu-latest, whose Docker daemon runs the privileged containers the test needs (k3s, and Tailscale inside it). The work directory sits under runner.temp, which the job always has write access to.
 
@@ -25,20 +25,26 @@ permissions:
 
 jobs:
   mesh:
-    name: Mesh (${{ matrix.scenario }})
+    name: Mesh (${{ matrix.scenario }}, Compose ${{ matrix.compose }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        scenario: [existing, hosted, in_cluster]
-    env:
-      COMPOSE_VERSION: v5.5.1
+        # The hosted scenario also runs on Compose 2.39.0, the first release after the range the cluster role refuses (docker/compose#13047), so its rerun check proves that release keeps every node running. compose_faulty runs on 2.38.2, the last release in that range, and checks the role refuses it.
+        include:
+          - {scenario: existing, compose: v5.5.1}
+          - {scenario: hosted, compose: v5.5.1}
+          - {scenario: in_cluster, compose: v5.5.1}
+          - {scenario: hosted, compose: v2.39.0}
+          - {scenario: compose_faulty, compose: v2.38.2}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned Docker Compose
-        # Always the pinned version, not whatever the runner has: ubuntu-latest's own Compose recreated every node container when the role ran a second time, which the pinned version does not. The user plugin directory takes precedence over the system one.
+      - name: Install Docker Compose ${{ matrix.compose }}
+        # Always the matrix's version, not whatever the runner has, so a runner image update never changes what a scenario tests. The user plugin directory takes precedence over the system one.
+        env:
+          COMPOSE_VERSION: ${{ matrix.compose }}
         run: |
           set -euo pipefail
           docker version --format 'Docker Engine {{.Server.Version}}'
