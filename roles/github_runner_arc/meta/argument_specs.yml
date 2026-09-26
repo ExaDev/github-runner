@@ -9,7 +9,7 @@ argument_specs:
         elements: dict
         default: []
         description:
-          - Orgs whose runner scale sets this host installs. Each entry has name, app_id, image, private_key or private_key_op_reference, and optionally installation_id and app_secret_name (the App Secret's name, default <org>-github-app).
+          - Orgs whose runner scale sets this host installs. Each entry has name, app_id (needed only when the role writes the App Secret; otherwise the existing Secret supplies it), image, private_key or private_key_op_reference, and optionally installation_id and app_secret_name (the App Secret's name, default <org>-github-app).
           - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, autoscale and sizing.
           - max_runners, when set, is the release's maxRunners and takes precedence over its values file and its sizing.
           - scale_set_labels replaces runs_on_label with the whole list of scaleSetLabels; an empty list sets none, so jobs target the release name.
