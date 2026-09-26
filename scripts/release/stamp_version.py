@@ -21,6 +21,7 @@ IMAGE_VARS = (
     "github_runner_arc_heartbeat_image",
     "github_runner_arc_autoscaler_image",
     "github_runner_arc_image_pull_secret_renewer_image",
+    "github_runner_arc_node_recovery_image",
 )
 
 

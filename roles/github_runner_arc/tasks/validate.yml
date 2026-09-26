@@ -30,7 +30,7 @@
     github_runner_arc_values_path: "{{ item.values_file if item.values_file is abs else github_runner_arc_values_dir ~ '/' ~ item.values_file }}"
   when: github_runner_arc_values_path is not file or (item.values_file is not abs and github_runner_arc_values_dir | length == 0)
 
-- name: Fail on invalid controller, metrics, probe, pull Secret or node label settings
+- name: Fail on invalid controller, metrics, probe, pull Secret, node recovery or node label settings
   ansible.builtin.fail:
     msg: "{{ item.msg }}"
   loop:
@@ -61,6 +61,13 @@
           github_runner_arc_image_pull_secret_source == 'app'
           and not (github_runner_arc_image_pull_secret_renewal_schedule | string is match('^@[a-z]+$')
                    or github_runner_arc_image_pull_secret_renewal_schedule | string | split | length == 5)
+        }}
+    - msg: github_runner_arc_node_recovery_after_seconds and github_runner_arc_node_recovery_poll_seconds must be whole numbers of seconds, at least 1.
+      failed: >-
+        {{
+          github_runner_arc_node_recovery_enabled | bool
+          and ([github_runner_arc_node_recovery_after_seconds, github_runner_arc_node_recovery_poll_seconds]
+               | map('string') | reject('match', '^[1-9][0-9]*$') | list | length > 0)
         }}
     - msg: github_runner_arc_labelled_nodes needs github_runner_arc_node_label_key.
       failed: "{{ github_runner_arc_labelled_nodes | length > 0 and github_runner_arc_node_label_key | length == 0 }}"
