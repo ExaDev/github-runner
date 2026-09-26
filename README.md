@@ -6,7 +6,7 @@
 
 There are two ways to deploy. A fleet's hosts are managed from a control machine with Ansible, from the fleet's own inventory (see [Ansible](#ansible) below). `bootstrap.sh`, described here, brings up a single machine from a checkout of this repository without a control node or inventory. It runs the same Ansible role against the machine itself, so both paths deploy identically.
 
-Prerequisites on the host: Docker (or Colima) with the Compose plugin, `python3`, `jq`, `openssl`, and `gh`. On macOS, the playbook installs `helm`, `kubectl` and Docker through Homebrew itself. Elsewhere, install `helm` and `kubectl` from the host's package manager first.
+Prerequisites on the host: Docker (or Colima) with the Compose plugin, any release but 2.37.1 to 2.38.x (the cluster role refuses those; see Docker Compose versions in `roles/github_runner_cluster/README.md`), `python3`, `jq`, `openssl`, and `gh`. On macOS, the playbook installs `helm`, `kubectl` and Docker through Homebrew itself. Elsewhere, install `helm` and `kubectl` from the host's package manager first.
 
 1. **Create a GitHub App** on the organisation with **Self-hosted runners: read & write** permission, and install it on the organisation. `playbooks/github_app_setup.yml` does this through GitHub's manifest flow (see `roles/github_runner_arc/README.md`).
 2. **Configure the environment.** Copy `.env.bootstrap.example` to `.env.bootstrap` and fill in the following (the file's own comments cover the rest, such as joining an existing cluster or running as an agent):
