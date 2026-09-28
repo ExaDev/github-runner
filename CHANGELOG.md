@@ -1,3 +1,10 @@
+## [1.5.1](https://github.com/ExaDev/github-runner/compare/v1.5.0...v1.5.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* install make in the runner image for native addon builds ([e53aad6](https://github.com/ExaDev/github-runner/commit/e53aad62e588446332b050b55b1e8783033ded7f))
+
 # [1.5.0](https://github.com/ExaDev/github-runner/compare/v1.4.0...v1.5.0) (2026-09-28)
 
 
