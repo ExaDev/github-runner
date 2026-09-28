@@ -94,7 +94,7 @@ apply_new_max() {
         --type merge -p "{\"spec\":{\"maxRunners\": ${NEW_MAX[$i]}}}"
       echo "Patched ${TARGETS[$i]}'s maxRunners to ${NEW_MAX[$i]} (${reason})"
     fi
-    MAX[$i]=${NEW_MAX[$i]}
+    MAX[i]=${NEW_MAX[$i]}
   done
   write_status "$total" "$reason" "$headroom_mib"
 }
@@ -103,7 +103,7 @@ apply_new_max() {
 lower_to() {
   local combined_target=$1 i combined=0
   for ((i = 0; i < ${#TARGETS[@]}; i++)); do
-    NEW_MAX[$i]=${MAX[$i]}
+    NEW_MAX[i]=${MAX[$i]}
     combined=$(( combined + NEW_MAX[i] ))
   done
   while [ "$combined" -gt "$combined_target" ]; do
@@ -116,7 +116,7 @@ lower_to() {
       fi
     done
     [ "$best" -ge 0 ] || break # every target is already down at its own R; can't lower further without orphaning a running job
-    NEW_MAX[$best]=$(( NEW_MAX[best] - 1 ))
+    NEW_MAX[best]=$(( NEW_MAX[best] - 1 ))
     combined=$(( combined - 1 ))
   done
 }
@@ -131,8 +131,8 @@ raise_by_one() {
       best=$i
     fi
   done
-  for ((i = 0; i < ${#TARGETS[@]}; i++)); do NEW_MAX[$i]=${MAX[$i]}; done
-  NEW_MAX[$best]=$(( NEW_MAX[best] + 1 ))
+  for ((i = 0; i < ${#TARGETS[@]}; i++)); do NEW_MAX[i]=${MAX[$i]}; done
+  NEW_MAX[best]=$(( NEW_MAX[best] + 1 ))
 }
 
 fail_safe() {
@@ -157,12 +157,12 @@ for i in "${!TARGETS[@]}"; do
   r="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" -o jsonpath='{.status.currentRunners}' 2>/dev/null)" \
     || fail_safe "could not read ${target}'s status.currentRunners"
   case "$r" in ''|*[!0-9]*) fail_safe "${target}'s status.currentRunners was not a plain integer ('$r')" ;; esac
-  R[$i]=$r
+  R[i]=$r
 
   max="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" -o jsonpath='{.spec.maxRunners}' 2>/dev/null)" \
     || fail_safe "could not read ${target}'s current spec.maxRunners"
   case "$max" in ''|*[!0-9]*) fail_safe "${target}'s spec.maxRunners was not a plain integer ('$max')" ;; esac
-  MAX[$i]=$max
+  MAX[i]=$max
 
   # Wh: the pod's own hard memory limit, read from the live deployed spec, not re-parsed from values/*.yaml, so this always matches what is actually running even after a manual --set override.
   wh_raw="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" \
