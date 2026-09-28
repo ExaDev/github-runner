@@ -9,7 +9,7 @@
       kind: Namespace
       metadata:
         name: "{{ item }}"
-  loop: "{{ [github_runner_arc_platform_namespace, github_runner_arc_controller_namespace] + ([github_runner_arc_fleet.autoscaled.namespace] if github_runner_arc_fleet.autoscaled else []) }}"
+  loop: "{{ ([github_runner_arc_platform_namespace, github_runner_arc_controller_namespace] + (github_runner_arc_fleet.autoscaled | map(attribute='namespace') | list)) | unique }}"
 
 - name: "Platform: create heartbeat/autoscaler service accounts"
   kubernetes.core.k8s:
@@ -114,7 +114,7 @@
         apiGroup: rbac.authorization.k8s.io
 
 - name: "Platform: autoscaler RBAC"
-  when: github_runner_arc_fleet.autoscaled is not none
+  when: github_runner_arc_fleet.autoscaled | length > 0
   block:
     # autoscaler: read per-node memory usage via metrics-server (cluster-wide, so a ClusterRole). Needs both rules, not metrics.k8s.io alone - confirmed live, kubectl top nodes fails outright with "nodes is forbidden ... at the cluster scope" without the plain core grant too, the same gap as kubectl top pod needing core pods alongside pods.metrics.k8s.io below.
     - name: "Platform: autoscaler RBAC - read node metrics"
@@ -148,19 +148,19 @@
             name: github-runner-autoscaler-node-metrics-reader
             apiGroup: rbac.authorization.k8s.io
 
-    # autoscaler: read and patch the autoscaled profile's AutoscalingRunnerSet (scoped to that one object by resourceNames), and read pod metrics in its namespace.
-    - name: "Platform: autoscaler RBAC - manage the autoscaled AutoscalingRunnerSet and read pod metrics"
+    # autoscaler: read and patch each pooled profile's own AutoscalingRunnerSet (scoped to that one object by resourceNames), and read pod metrics in its namespace. One Role/RoleBinding pair per pooled profile, since each lives in its own namespace.
+    - name: "Platform: autoscaler RBAC - manage each pooled AutoscalingRunnerSet and read pod metrics"
       kubernetes.core.k8s:
         definition:
           apiVersion: rbac.authorization.k8s.io/v1
           kind: Role
           metadata:
             name: github-runner-autoscaler-runnerset-manager
-            namespace: "{{ github_runner_arc_fleet.autoscaled.namespace }}"
+            namespace: "{{ item.namespace }}"
           rules:
             - apiGroups: ["actions.github.com"]
               resources: ["autoscalingrunnersets"]
-              resourceNames: ["{{ github_runner_arc_fleet.autoscaled.release }}"]
+              resourceNames: ["{{ item.release }}"]
               verbs: ["get", "patch"]
             - apiGroups: ["metrics.k8s.io"]
               resources: ["pods"]
@@ -169,6 +169,9 @@
             - apiGroups: [""]
               resources: ["pods"]
               verbs: ["get", "list"]
+      loop: "{{ github_runner_arc_fleet.autoscaled }}"
+      loop_control:
+        label: "{{ item.label }}"
 
     - name: "Platform: autoscaler RBAC - bind runnerset-manager"
       kubernetes.core.k8s:
@@ -177,7 +180,7 @@
           kind: RoleBinding
           metadata:
             name: github-runner-autoscaler-runnerset-manager
-            namespace: "{{ github_runner_arc_fleet.autoscaled.namespace }}"
+            namespace: "{{ item.namespace }}"
           subjects:
             - kind: ServiceAccount
               name: autoscaler
@@ -186,6 +189,9 @@
             kind: Role
             name: github-runner-autoscaler-runnerset-manager
             apiGroup: rbac.authorization.k8s.io
+      loop: "{{ github_runner_arc_fleet.autoscaled }}"
+      loop_control:
+        label: "{{ item.label }}"
 
     # autoscaler: read/patch the shared status ConfigMap, scoped by resourceNames.
     - name: "Platform: autoscaler RBAC - manage the status ConfigMap"
@@ -328,24 +334,32 @@
         if github_runner_arc_controller_namespace != 'actions-runner-controller' else []
       }}
 
-- name: "Platform: measure the autoscaled profile's ceiling from the eligible nodes"
+- name: "Platform: measure the autoscaled pool's ceiling from the eligible nodes"
+  # arc_profiles already rejects more than one autoscaled profile setting sizing, so at most one iteration of this loop ever runs its task.
   ansible.builtin.include_tasks: measure_sizing.yml
-  vars:
-    github_runner_arc_measure: "{{ github_runner_arc_fleet.autoscaled }}"
-  when: github_runner_arc_fleet.autoscaled is not none and github_runner_arc_fleet.autoscaled.sizing is not none and github_runner_arc_fleet.autoscaled.sizing.measured
+  loop: "{{ github_runner_arc_fleet.autoscaled }}"
+  loop_control:
+    loop_var: github_runner_arc_measure
+    label: "{{ github_runner_arc_measure.label }}"
+  when: github_runner_arc_measure.sizing is not none and github_runner_arc_measure.sizing.measured
 
 - name: "Platform: fail when the autoscaler's floor is above its measured ceiling"
   ansible.builtin.fail:
     msg: >-
       github_runner_arc_autoscaler_floor ({{ github_runner_arc_autoscaler_floor }}) is above the ceiling measured for
-      {{ github_runner_arc_fleet.autoscaled.label }} ({{ github_runner_arc_measured_sizing[github_runner_arc_fleet.autoscaled.label].max_runners }}).
+      {{ item.label }} ({{ github_runner_arc_measured_sizing[item.label].max_runners }}).
+  loop: "{{ github_runner_arc_fleet.autoscaled }}"
+  loop_control:
+    label: "{{ item.label }}"
   when:
-    - github_runner_arc_fleet.autoscaled is not none
-    - github_runner_arc_fleet.autoscaled.label in (github_runner_arc_measured_sizing | default({}))
-    - (github_runner_arc_autoscaler_floor | int) > (github_runner_arc_measured_sizing[github_runner_arc_fleet.autoscaled.label].max_runners | int)
+    - item.label in (github_runner_arc_measured_sizing | default({}))
+    - (github_runner_arc_autoscaler_floor | int) > (github_runner_arc_measured_sizing[item.label].max_runners | int)
 
 - name: "Platform: install/upgrade the autoscaler Deployment"
-  when: github_runner_arc_fleet.autoscaled is not none
+  when: github_runner_arc_fleet.autoscaled | length > 0
+  vars:
+    # arc_profiles already rejects more than one autoscaled profile setting sizing, so this is at most one profile.
+    github_runner_arc_sized: "{{ github_runner_arc_fleet.autoscaled | selectattr('sizing', 'defined') | selectattr('sizing', 'ne', none) | list }}"
   kubernetes.core.k8s:
     definition:
       apiVersion: apps/v1
@@ -378,9 +392,9 @@
                   - name: AUTOSCALER_MAX_CEILING
                     value: >-
                       {{
-                        (github_runner_arc_measured_sizing[github_runner_arc_fleet.autoscaled.label].max_runners
-                         if github_runner_arc_fleet.autoscaled.label in (github_runner_arc_measured_sizing | default({}))
-                         else github_runner_arc_fleet.autoscaled.sizing.max_runners if github_runner_arc_fleet.autoscaled.sizing
+                        (github_runner_arc_measured_sizing[(github_runner_arc_sized | first).label].max_runners
+                         if github_runner_arc_sized | length > 0 and (github_runner_arc_sized | first).label in (github_runner_arc_measured_sizing | default({}))
+                         else (github_runner_arc_sized | first).sizing.max_runners if github_runner_arc_sized | length > 0
                          else github_runner_arc_autoscaler_max_ceiling) | string
                       }}
                   - name: AUTOSCALER_FLOOR
@@ -391,11 +405,9 @@
                     value: "{{ github_runner_arc_autoscaler_mem_available_pressure_pct | string }}"
                   - name: AUTOSCALER_STATE_NAMESPACE
                     value: "{{ github_runner_arc_platform_namespace }}"
-                  # The scale set it manages, and where its status lives, named explicitly so the script's own defaults never apply.
-                  - name: AUTOSCALER_NAMESPACE
-                    value: "{{ github_runner_arc_fleet.autoscaled.namespace }}"
-                  - name: AUTOSCALER_RELEASE_NAME
-                    value: "{{ github_runner_arc_fleet.autoscaled.release }}"
+                  # The pooled scale sets it manages, one namespace/release token per profile (see plugins/filter/arc.py's own target field), space-separated: the script splits on whitespace.
+                  - name: AUTOSCALER_TARGETS
+                    value: "{{ github_runner_arc_fleet.autoscaled | map(attribute='target') | join(' ') }}"
                   - name: AUTOSCALER_STATUS_CONFIGMAP
                     value: autoscaler-status
                 resources:

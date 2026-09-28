@@ -33,11 +33,11 @@ class ProfilesTest(unittest.TestCase):
         result = arc.arc_profiles([org(profiles=[{"suffix": "", "max_runners": 1}, {"suffix": "-builder", "values_file": "b.yaml", "runs_on_label": "image-builder", "node_selector": {"kubernetes.io/hostname": "n1"}}])])
         self.assertEqual(result["errors"], [])
         default, builder = result["profiles"]
-        self.assertEqual((default["namespace"], default["release"], default["app_secret"], default["scale_set_labels"]), ("arc-runners-example", "example-runners", "example-github-app", ["example-runners"]))
-        self.assertEqual((builder["namespace"], builder["release"], builder["scale_set_labels"]), ("arc-runners-example-builder", "example-runners-builder", ["image-builder"]))
+        self.assertEqual((default["namespace"], default["release"], default["target"], default["app_secret"], default["scale_set_labels"]), ("arc-runners-example", "example-runners", "arc-runners-example/example-runners", "example-github-app", ["example-runners"]))
+        self.assertEqual((builder["namespace"], builder["release"], builder["target"], builder["scale_set_labels"]), ("arc-runners-example-builder", "example-runners-builder", "arc-runners-example-builder/example-runners-builder", ["image-builder"]))
         self.assertEqual(builder["node_selector"], {"kubernetes.io/hostname": "n1"})
         self.assertEqual(default["node_selector"], {})
-        self.assertIsNone(result["autoscaled"])
+        self.assertEqual(result["autoscaled"], [])
 
     def test_a_missing_suffix_means_the_unsuffixed_profile(self) -> None:
         result = arc.arc_profiles([org(profiles=[{"values_file": "v.yaml"}])])
@@ -93,12 +93,20 @@ class ProfilesTest(unittest.TestCase):
     def test_one_autoscaled_profile_is_returned(self) -> None:
         result = arc.arc_profiles([org(profiles=[{"suffix": "", "autoscale": True, "max_runners": 1}, {"suffix": "-b", "max_runners": 1}])])
         self.assertEqual(result["errors"], [])
-        self.assertEqual(result["autoscaled"]["release"], "example-runners")
+        self.assertEqual([profile["release"] for profile in result["autoscaled"]], ["example-runners"])
 
-    def test_more_than_one_autoscaled_profile_is_an_error_across_orgs(self) -> None:
-        result = arc.arc_profiles([org("A", [{"autoscale": True}]), org("B", [{"autoscale": "yes"}])])
-        self.assertTrue(any("At most one" in message for message in result["errors"]))
-        self.assertIsNone(result["autoscaled"])
+    def test_more_than_one_autoscaled_profile_across_orgs_is_pooled_not_an_error(self) -> None:
+        result = arc.arc_profiles([org("A", [{"autoscale": True, "max_runners": 1}]), org("B", [{"autoscale": "yes", "max_runners": 1}])])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual({profile["label"] for profile in result["autoscaled"]}, {"A", "B"})
+
+    def test_more_than_one_autoscaled_profile_setting_sizing_is_an_error(self) -> None:
+        result = arc.arc_profiles([org("A", [{"autoscale": True, "sizing": SIZING, "values_file": "v.yaml"}]), org("B", [{"autoscale": True, "sizing": SIZING, "values_file": "v.yaml"}])])
+        self.assertTrue(any("At most one autoscaled scale-set profile may set sizing" in message for message in result["errors"]), result["errors"])
+
+    def test_one_autoscaled_profile_may_set_sizing_alongside_a_pooled_static_one(self) -> None:
+        result = arc.arc_profiles([org("A", [{"autoscale": True, "sizing": SIZING, "values_file": "v.yaml"}]), org("B", [{"autoscale": True, "max_runners": 1}])])
+        self.assertEqual(result["errors"], [])
 
     def test_invalid_autoscale_value_is_an_error(self) -> None:
         result = arc.arc_profiles([org(profiles=[{"autoscale": "sometimes"}])])

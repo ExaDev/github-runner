@@ -81,15 +81,17 @@
 - name: Fail when the autoscaler's pool settings are missing or inconsistent
   ansible.builtin.fail:
     msg: >-
-      The autoscaled profile {{ github_runner_arc_fleet.autoscaled.label }} needs
-      github_runner_arc_autoscaler_usable_budget_gi, github_runner_arc_autoscaler_floor and, unless the profile sets sizing,
-      github_runner_arc_autoscaler_max_ceiling, all whole numbers, with the floor no higher than the ceiling.
+      The autoscaled pool ({{ github_runner_arc_fleet.autoscaled | map(attribute='label') | join(', ') }}) needs
+      github_runner_arc_autoscaler_usable_budget_gi, github_runner_arc_autoscaler_floor and, unless one of its profiles sets
+      sizing, github_runner_arc_autoscaler_max_ceiling, all whole numbers, with the floor no higher than the ceiling.
   vars:
-    github_runner_arc_ceiling: "{{ github_runner_arc_fleet.autoscaled.sizing.max_runners if github_runner_arc_fleet.autoscaled.sizing else (github_runner_arc_autoscaler_max_ceiling | default('')) }}"
+    # arc_profiles already rejects more than one autoscaled profile setting sizing, so this is at most one profile.
+    github_runner_arc_sized: "{{ github_runner_arc_fleet.autoscaled | selectattr('sizing', 'defined') | selectattr('sizing', 'ne', none) | list }}"
+    github_runner_arc_ceiling: "{{ (github_runner_arc_sized | first).sizing.max_runners if github_runner_arc_sized | length > 0 else (github_runner_arc_autoscaler_max_ceiling | default('')) }}"
     # A measured ceiling is only known once the cluster is read, so install_platform.yml checks the floor against it then.
-    github_runner_arc_ceiling_measured: "{{ github_runner_arc_fleet.autoscaled.sizing.measured | default(false) if github_runner_arc_fleet.autoscaled.sizing else false }}"
+    github_runner_arc_ceiling_measured: "{{ (github_runner_arc_sized | first).sizing.measured | default(false) if github_runner_arc_sized | length > 0 else false }}"
   when:
-    - github_runner_arc_fleet.autoscaled is not none
+    - github_runner_arc_fleet.autoscaled | length > 0
     - github_runner_arc_heartbeat_gist_id | length > 0
     - >-
       github_runner_arc_autoscaler_usable_budget_gi | default('') | string is not match('^[0-9]+$')
