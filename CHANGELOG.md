@@ -1,3 +1,15 @@
+# [1.5.0](https://github.com/ExaDev/github-runner/compare/v1.4.0...v1.5.0) (2026-09-28)
+
+
+### Bug Fixes
+
+* **arc:** drop unnecessary $/${} on arithmetic array subscripts ([78be6df](https://github.com/ExaDev/github-runner/commit/78be6dfdcecf211cda61c0b64d99d3207b646423))
+
+
+### Features
+
+* **arc:** pool multiple autoscaled profiles into one shared budget ([82eddac](https://github.com/ExaDev/github-runner/commit/82eddacd5891c01bf15cb88ae1e6fa10ae11e624))
+
 # [1.4.0](https://github.com/ExaDev/github-runner/compare/v1.3.1...v1.4.0) (2026-09-26)
 
 
