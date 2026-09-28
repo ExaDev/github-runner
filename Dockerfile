@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        gcc-11 g++-11 unzip \
+        gcc-11 g++-11 make unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Bun (JS runtime), installed system-wide. Explicit bash -c (the default RUN
