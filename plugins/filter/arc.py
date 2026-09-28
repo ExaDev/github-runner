@@ -394,11 +394,15 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
         max_runners = sizing_result["max_runners"]
     else:
         max_runners = None
+    namespace = _optional_name(profile, "namespace", where, errors) or f"arc-runners-{org_lower}{suffix}"
+    release = _optional_name(profile, "release_name", where, errors) or f"{org_lower}-runners{suffix}"
     expanded = {
         "org_name": org_name,
         "suffix": suffix,
-        "namespace": _optional_name(profile, "namespace", where, errors) or f"arc-runners-{org_lower}{suffix}",
-        "release": _optional_name(profile, "release_name", where, errors) or f"{org_lower}-runners{suffix}",
+        "namespace": namespace,
+        "release": release,
+        # namespace/release joined for the autoscaler's own AUTOSCALER_TARGETS list (see scripts/autoscaler.sh): both are validated DNS labels below, so neither can itself contain '/', keeping each token unambiguous.
+        "target": f"{namespace}/{release}",
         "app_secret": app_secret,
         "scale_set_labels": _scale_set_labels(profile, f"{org_lower}-runners", where, errors),
         "values_file": _text(profile, "values_file"),
@@ -420,19 +424,19 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
 def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, Any]:
     """Expand github_runner_arc_orgs entries into one record per scale-set profile, and check them.
 
-    Pass every org configured anywhere in the inventory, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile) see the whole fleet.
+    Pass every org configured anywhere in the inventory, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile setting its own sizing) see the whole fleet.
 
     Args:
         require_app_id: whether each org must set app_id. The role needs it only when it writes the App Secret; otherwise the App's id is in the existing App Secret, and an app_id that is set is only checked against it.
         orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label.
 
     Returns:
-        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, max_runners (the static maxRunners the role sets, or None), label and settings, the profile's own keys) and ``autoscaled`` (the one profile flagged autoscale, or None).
+        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, target (namespace/release, joined), app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, max_runners (the static maxRunners the role sets, or None), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
     """
     errors: list[str] = []
     profiles: list[dict[str, Any]] = []
     if not isinstance(orgs, Sequence) or isinstance(orgs, (str, bytes)):
-        return {"errors": ["github_runner_arc_orgs must be a list"], "profiles": [], "autoscaled": None}
+        return {"errors": ["github_runner_arc_orgs must be a list"], "profiles": [], "autoscaled": []}
     seen_orgs: dict[str, str] = {}
     for index, org in enumerate(orgs):
         where = f"github_runner_arc_orgs[{index}]"
@@ -474,10 +478,12 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
         if release_key in releases:
             errors.append(f"{profile['label']} and {releases[release_key]} both use release name '{profile['release']}', which is the scale set's name on GitHub; give one of them a different suffix or release_name")
         releases.setdefault(release_key, profile["label"])
+    # Several autoscaled profiles are allowed - the autoscaler pools their combined scale sets against one shared memory budget - but each one's own sizing derives that budget's ceiling, so more than one sizing among them would leave the ceiling ambiguous.
     autoscaled = [profile for profile in profiles if profile["autoscale"]]
-    if len(autoscaled) > 1:
-        errors.append(f"At most one scale-set profile may set autoscale: true, because the autoscaler budgets one pool's memory for one scale set; found {', '.join(profile['label'] for profile in autoscaled)}")
-    return {"errors": errors, "profiles": profiles, "autoscaled": autoscaled[0] if len(autoscaled) == 1 else None}
+    sized_autoscaled = [profile for profile in autoscaled if profile["sizing"] is not None]
+    if len(sized_autoscaled) > 1:
+        errors.append(f"At most one autoscaled scale-set profile may set sizing, because it derives the shared pool's ceiling; found {', '.join(profile['label'] for profile in sized_autoscaled)}")
+    return {"errors": errors, "profiles": profiles, "autoscaled": autoscaled}
 
 
 def arc_image_ref(image: str) -> dict[str, str]:
