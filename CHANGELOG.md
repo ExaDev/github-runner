@@ -1,3 +1,10 @@
+## [1.5.2](https://github.com/ExaDev/github-runner/compare/v1.5.1...v1.5.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* register gcc-11/g++-11 as the generic gcc/g++/cc/c++ alternatives ([ebfd896](https://github.com/ExaDev/github-runner/commit/ebfd8964633356943fdbb18604f2b2875b8a570a))
+
 ## [1.5.1](https://github.com/ExaDev/github-runner/compare/v1.5.0...v1.5.1) (2026-09-28)
 
 
