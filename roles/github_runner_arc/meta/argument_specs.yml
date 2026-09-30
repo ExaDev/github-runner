@@ -14,7 +14,7 @@ argument_specs:
           - max_runners, when set, is the release's maxRunners and takes precedence over its values file and its sizing.
           - scale_set_labels replaces runs_on_label with the whole list of scaleSetLabels; an empty list sets none, so jobs target the release name.
           - sizing derives a runner ceiling from uniform node figures, or with measured true from each eligible node's allocatable CPU and memory less its current requests and reserve_cpu and reserve_memory_gib.
-          - burst, on a profile with sizing and without max_runners or autoscale, lets its runner pods overflow onto nodes carrying burst.node_label_key (any value, or one of burst.node_label_values), with burst.tolerations for their taint, and adds burst.max_runners to the sized maxRunners.
+          - burst, on a profile with sizing and without max_runners or autoscale, lets its runner pods overflow onto nodes carrying burst.node_label_key (any value, or one of burst.node_label_values), with burst.tolerations for their taint, and adds burst.max_runners to the sized maxRunners. With burst.exclusive true (and no sizing, max_runners or autoscale) the pods run on burst nodes only and burst.max_runners is the whole maxRunners.
       github_runner_arc_values_dir:
         type: str
         default: ""
