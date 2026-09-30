@@ -355,7 +355,7 @@ class BurstTest(unittest.TestCase):
         self.assertEqual((uniform["max_runners"], uniform["burst_runners"]), (24 + 6, 6))
         # A measured ceiling is known only at install time; the overlay adds burst_runners to it then.
         self.assertEqual((measured["max_runners"], measured["burst_runners"]), (None, 6))
-        self.assertEqual(uniform["burst"], {"node_label_key": "example.com/ci-burst", "node_label_values": [], "tolerations": BURST["tolerations"], "max_runners": 6})
+        self.assertEqual(uniform["burst"], {"node_label_key": "example.com/ci-burst", "node_label_values": [], "tolerations": BURST["tolerations"], "max_runners": 6, "exclusive": False})
 
     def test_a_profile_without_burst_has_no_burst_runners(self) -> None:
         profile = arc.arc_profiles([org(profiles=[{"sizing": SIZING}])])["profiles"][0]
@@ -383,6 +383,35 @@ class BurstTest(unittest.TestCase):
                 self.assertTrue(any(message in error for error in errors), errors)
         missing = {key: value for key, value in BURST.items() if key != "max_runners"}
         self.assertTrue(any("burst.max_runners must be a whole number" in error for error in arc.arc_profiles([org(profiles=[{"sizing": SIZING, "burst": missing}])])["errors"]))
+
+
+class ExclusiveBurstTest(unittest.TestCase):
+    EXCLUSIVE = {**BURST, "exclusive": True}
+
+    def test_an_exclusive_burst_profile_takes_its_ceiling_from_burst_alone(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"values_file": "v.yaml", "burst": self.EXCLUSIVE}])])
+        self.assertEqual(result["errors"], [])
+        profile = result["profiles"][0]
+        self.assertEqual((profile["max_runners"], profile["burst"]["exclusive"], profile["sizing"]), (6, True, None))
+
+    def test_an_exclusive_burst_rejects_sizing_max_runners_and_autoscale(self) -> None:
+        for extra in ({"sizing": SIZING}, {"max_runners": 3}, {"autoscale": True}):
+            with self.subTest(extra=extra):
+                errors = arc.arc_profiles([org(profiles=[{"values_file": "v.yaml", "burst": self.EXCLUSIVE, **extra}])])["errors"]
+                self.assertIn("Example scale_set_profiles[0]: an exclusive burst takes no sizing, max_runners or autoscale, since its runners use no eligible node and burst.max_runners is the whole ceiling", errors)
+
+    def test_exclusive_must_be_a_boolean(self) -> None:
+        errors = arc.arc_profiles([org(profiles=[{"values_file": "v.yaml", "burst": {**BURST, "exclusive": "sometimes"}}])])["errors"]
+        self.assertTrue(any("burst.exclusive must be a boolean" in error for error in errors), errors)
+
+    def test_an_exclusive_burst_requires_a_burst_node_and_ignores_the_eligibility_label(self) -> None:
+        profile = arc.arc_profiles([org(profiles=[{"values_file": "v.yaml", "node_selector": {"kubernetes.io/arch": "amd64"}, "burst": self.EXCLUSIVE}])])["profiles"][0]
+        placement = arc.arc_runner_placement(profile, {"example.com/ci-eligible": "true"})
+        self.assertEqual(placement, {
+            "nodeSelector": {"kubernetes.io/arch": "amd64"},
+            "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "example.com/ci-burst", "operator": "Exists"}]}]}}},
+            "tolerations": BURST["tolerations"],
+        })
 
 
 class RunnerPlacementTest(unittest.TestCase):

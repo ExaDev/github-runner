@@ -69,7 +69,7 @@ _REPELLING_TAINT_EFFECTS = frozenset({"NoSchedule", "NoExecute"})
 _CONDITION_TAINT_PREFIX = "node.kubernetes.io/"
 
 # A profile's burst keys (see _burst), and the fields of a Kubernetes toleration (core/v1 Toleration).
-_BURST_KEYS = frozenset({"node_label_key", "node_label_values", "tolerations", "max_runners"})
+_BURST_KEYS = frozenset({"node_label_key", "node_label_values", "tolerations", "max_runners", "exclusive"})
 _TOLERATION_KEYS = frozenset({"key", "operator", "value", "effect", "tolerationSeconds"})
 # The highest weight a preferred node affinity term may carry (1-100 in the Kubernetes API), so keeping runner pods on the fixed nodes outweighs any other preference the scheduler scores.
 _PREFER_FIXED_NODES_WEIGHT = 100
@@ -397,11 +397,18 @@ def _burst(profile: Mapping[str, Any], where: str, errors: list[str]) -> dict[st
     if max_runners is None or max_runners < 0 or max_runners != max_runners.to_integral_value():
         errors.append(f"{where}.burst.max_runners must be a whole number of at least 0 (got {burst.get('max_runners')!r})")
         max_runners = Decimal(0)
-    return {"node_label_key": label_key, "node_label_values": list(label_values), "tolerations": [dict(toleration) for toleration in tolerations], "max_runners": int(max_runners)}
+    try:
+        exclusive = boolean(burst.get("exclusive", False), strict=True)
+    except TypeError:
+        errors.append(f"{where}.burst.exclusive must be a boolean")
+        exclusive = False
+    return {"node_label_key": label_key, "node_label_values": list(label_values), "tolerations": [dict(toleration) for toleration in tolerations], "max_runners": int(max_runners), "exclusive": exclusive}
 
 
 def arc_runner_placement(profile: Mapping[str, Any], eligibility: Mapping[str, Any]) -> dict[str, Any]:
     """Return where a profile's runner pods may be scheduled, as pod spec fields: nodeSelector, and with burst also affinity and tolerations.
+
+    With burst.exclusive the pods may go only on a burst node: the required node affinity has the burst term alone and nothing is preferred. That suits work too large for the fixed nodes, such as image builds whose Docker daemon needs more memory than they can spare.
 
     Without burst the pods are held by nodeSelector to nodes carrying the eligibility label and the profile's node_selector. With burst the eligibility label moves into a required node affinity that also accepts a node carrying the burst label, so a pod that finds no room on an eligible node stays Pending until a burst node can take it, which is what makes Cluster Autoscaler add one. A preferred term keeps the pods off burst nodes while an eligible node has room. The profile's node_selector still applies to every node, and the tolerations let the pods past the burst nodes' taint.
 
@@ -416,6 +423,9 @@ def arc_runner_placement(profile: Mapping[str, Any], eligibility: Mapping[str, A
     if burst is None:
         return {"nodeSelector": {**selector, **profile["node_selector"]}}
     burst_node = {"key": burst["node_label_key"], "operator": "In", "values": burst["node_label_values"]} if burst["node_label_values"] else {"key": burst["node_label_key"], "operator": "Exists"}
+    # An exclusive profile runs on burst nodes only, whatever the eligibility label, so there is no fixed node to prefer.
+    if burst["exclusive"]:
+        return {"nodeSelector": dict(profile["node_selector"]), "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [burst_node]}]}}}, "tolerations": burst["tolerations"]}
     node_affinity: dict[str, Any] = {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": _PREFER_FIXED_NODES_WEIGHT, "preference": {"matchExpressions": [{"key": burst["node_label_key"], "operator": "DoesNotExist"}]}}]}
     # With no eligibility label every untainted node is already allowed, and the tolerations alone add the burst nodes.
     if selector:
@@ -448,11 +458,15 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
     explicit_max_runners = _explicit_max_runners(profile, where, errors)
     burst = _burst(profile, where, errors)
     # Burst runners are added to a ceiling the role derives from the fixed nodes, so they need sizing on a profile that sets its own maxRunners: an explicit max_runners is final, and the autoscaler's usage-driven ceiling has no notion of nodes that do not exist yet.
-    if burst is not None and (sizing_result is None or explicit_max_runners is not None or autoscale):
+    if burst is not None and burst["exclusive"] and (sizing_result is not None or explicit_max_runners is not None or autoscale):
+        errors.append(f"{where}: an exclusive burst takes no sizing, max_runners or autoscale, since its runners use no eligible node and burst.max_runners is the whole ceiling")
+    if burst is not None and not burst["exclusive"] and (sizing_result is None or explicit_max_runners is not None or autoscale):
         errors.append(f"{where}: burst needs sizing, and no max_runners or autoscale, since its max_runners is added to the ceiling sizing derives")
     burst_runners = burst["max_runners"] if burst is not None else 0
     # The static maxRunners the role sets on the release: the profile's own max_runners wins; otherwise sizing supplies it, plus any burst runners, except on the autoscaled profile, whose sizing sets the autoscaler's ceiling rather than its floor. A measured sizing's result is known only at install time, so its max_runners stays None here and the burst runners are added then.
-    if explicit_max_runners is not None:
+    if burst is not None and burst["exclusive"]:
+        max_runners = burst_runners
+    elif explicit_max_runners is not None:
         max_runners = explicit_max_runners
     elif sizing_result is not None and not sizing_result["errors"] and not autoscale:
         max_runners = None if sizing_result["max_runners"] is None else sizing_result["max_runners"] + burst_runners
@@ -494,7 +508,7 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
 
     Args:
         require_app_id: whether each org must set app_id. The role needs it only when it writes the App Secret; otherwise the App's id is in the existing App Secret, and an app_id that is set is only checked against it.
-        orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes; see arc_runner_placement.
+        orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes, and a profile without sizing may set burst with exclusive true to run on burst nodes only, with burst.max_runners as its maxRunners; see arc_runner_placement.
 
     Returns:
         A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, target (namespace/release, joined), app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).

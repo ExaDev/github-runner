@@ -1,6 +1,9 @@
 {# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With node eligibility, probes, max_runners, sizing and burst all off it holds only the profile's nodeSelector. A measured sizing's result is read from github_runner_arc_measured_sizing, which tasks/measure_sizing.yml fills in. `profile` is the expanded profile from plugins/filter/arc.py. #}
 {% set eligibility = {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {} %}
-{% if profile.settings.max_runners is defined and profile.settings.max_runners is not none %}
+{% if profile.burst is not none and profile.burst.exclusive %}
+# Burst nodes only: the runners the burst nodes hold, the profile's burst.max_runners.
+maxRunners: {{ profile.max_runners }}
+{% elif profile.settings.max_runners is defined and profile.settings.max_runners is not none %}
 # The profile's own max_runners, which takes precedence over its values file and its sizing.
 maxRunners: {{ profile.max_runners }}
 {% elif profile.label in (github_runner_arc_measured_sizing | default({})) and not profile.autoscale %}

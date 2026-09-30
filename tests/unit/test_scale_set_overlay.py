@@ -65,6 +65,15 @@ class OverlayTest(unittest.TestCase):
         # The listener must stay on a fixed node, since a burst node can be removed under it.
         self.assertEqual(overlay["listenerTemplate"]["spec"]["nodeSelector"], {ELIGIBLE: "true"})
 
+    def test_an_exclusive_burst_profile_runs_on_burst_nodes_only_with_its_own_ceiling(self) -> None:
+        overlay = render(expanded({"values_file": "v.yaml", "burst": {**BURST, "exclusive": True}}), github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true")
+        self.assertEqual(overlay["maxRunners"], BURST["max_runners"])
+        spec = overlay["template"]["spec"]
+        self.assertEqual(spec["nodeSelector"], {})
+        self.assertEqual(spec["affinity"]["nodeAffinity"], {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [{"key": BURST_KEY, "operator": "Exists"}]}]}})
+        # The listener still runs on a fixed node.
+        self.assertEqual(overlay["listenerTemplate"]["spec"]["nodeSelector"], {ELIGIBLE: "true"})
+
     def test_burst_runners_are_added_to_a_measured_ceiling(self) -> None:
         profile = expanded({"sizing": MEASURED, "burst": BURST})
         overlay = render(profile, github_runner_arc_measured_sizing={profile["label"]: {"nodes": [{"runners": 3}, {"runners": 2}], "theoretical": 5, "max_runners": 4}})
