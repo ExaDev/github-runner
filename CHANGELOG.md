@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/ExaDev/github-runner/compare/v1.6.0...v1.7.0) (2026-09-30)
+
+
+### Features
+
+* **arc:** let a profile run on burst nodes only ([44de91b](https://github.com/ExaDev/github-runner/commit/44de91b6d5cec772cc4efe21be45d25417370cd2))
+
 # [1.6.0](https://github.com/ExaDev/github-runner/compare/v1.5.2...v1.6.0) (2026-09-30)
 
 
