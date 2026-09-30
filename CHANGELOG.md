@@ -1,3 +1,10 @@
+# [1.6.0](https://github.com/ExaDev/github-runner/compare/v1.5.2...v1.6.0) (2026-09-30)
+
+
+### Features
+
+* **arc:** let a sized profile's runner pods overflow onto burst nodes ([94a0b2b](https://github.com/ExaDev/github-runner/commit/94a0b2bfc08c1604f6b9c324f3ef6480b794f7a9))
+
 ## [1.5.2](https://github.com/ExaDev/github-runner/compare/v1.5.1...v1.5.2) (2026-09-28)
 
 
