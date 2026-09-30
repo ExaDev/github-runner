@@ -6,7 +6,7 @@ It runs in two ways. Inside `playbooks/site.yml`, against a k3s server host that
 
 ## Validation
 
-`tasks/validate.yml` checks every input that needs neither secrets nor a cluster (a measured sizing's node figures are read later, when the role installs the profile): each org's fields, profile names (derived or overridden) that would collide or make invalid Kubernetes names, two of an org's profiles sharing a release name, a `max_runners` that is not a whole number, the controller's release name and namespace, the same org configured on two hosts, more than one autoscaled profile, values files that do not exist, the autoscaler's pool settings, sizing inputs, and the controller, probe and node label settings. Both playbooks run it in a play of its own before anything changes; the role runs it itself when included some other way. It also bootstraps the heartbeat gist when `github_runner_arc_heartbeat_bootstrap_gist` is on and no host in the inventory has one: it creates the gist with the control node's `gh` session and stops, printing the id to record.
+`tasks/validate.yml` checks every input that needs neither secrets nor a cluster (a measured sizing's node figures are read later, when the role installs the profile): each org's fields, profile names (derived or overridden) that would collide or make invalid Kubernetes names, two of an org's profiles sharing a release name, a `max_runners` that is not a whole number, the controller's release name and namespace, the same org configured on two hosts, more than one autoscaled profile, values files that do not exist, the autoscaler's pool settings, sizing inputs, burst settings, and the controller, probe and node label settings. Both playbooks run it in a play of its own before anything changes; the role runs it itself when included some other way. It also bootstraps the heartbeat gist when `github_runner_arc_heartbeat_bootstrap_gist` is on and no host in the inventory has one: it creates the gist with the control node's `gh` session and stops, printing the id to record.
 
 Before touching the cluster the role then checks the secrets it is about to write (each org's App key looks like a PEM key, the pull credential and heartbeat token are set) and proves the pull credential can read every image it installs from `github_runner_arc_image_pull_registry`, by getting a pull-scoped registry token and fetching each image's manifest. With an App-sourced pull Secret (see below) it mints each org's token and proves it the same way, before installing anything.
 
@@ -22,6 +22,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
   - `scale_set_labels`: the whole `scaleSetLabels` list, in place of `runs_on_label`. An empty list sets no `scaleSetLabels`, so jobs target the scale set by its release name.
   - `autoscale`: `true` on at most one profile in the whole inventory makes it the scale set the autoscaler manages.
   - `sizing`: derive a runner ceiling from node capacity, given as uniform figures or measured from each eligible node (see Sizing). On an ordinary profile without `max_runners` it sets `maxRunners`; on the autoscaled profile it sets the autoscaler's ceiling, leaving `maxRunners` as the floor.
+  - `burst`: let the runner pods overflow onto nodes a cluster autoscaler adds on demand, and count those nodes' runners into `maxRunners` (see [Burst nodes](#burst-nodes)). Needs `sizing`, and no `max_runners` or `autoscale`.
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
 - `github_runner_arc_kubeconfig_path`: the kubeconfig on the host the role runs against. Defaults to `github_runner_cluster`'s kubeconfig; empty means `KUBECONFIG` or `~/.kube/config`.
 - `github_runner_arc_controller_chart_version`, `github_runner_arc_scaleset_chart_version`: chart pins; unset installs the latest chart.
@@ -75,6 +76,25 @@ sizing:
 A profile's own `max_runners` still takes precedence, and on the autoscaled profile the measured figure is the autoscaler's ceiling. Measured sizing uses the `exadev.github_runner.arc_measured_max_runners` filter.
 
 The filter behind it is `exadev.github_runner.arc_max_runners`.
+
+## Burst nodes
+
+A fixed pool can overflow onto nodes that exist only while there is work for them, such as cloud instances a cluster autoscaler (Kubernetes' Cluster Autoscaler, for one) launches when pods are Pending and removes once they are idle. Such nodes usually carry a label and a matching `NoSchedule` taint so nothing else lands on them, and no eligibility label, so measured sizing never counts them. A profile's `burst` lets its runner pods onto them:
+
+```yaml
+burst:
+  node_label_key: example.com/ci-burst        # the label every burst node carries
+  node_label_values: [standard]               # optional; unset accepts any value of the label
+  tolerations:                                # optional; for the burst nodes' taint
+    - key: example.com/ci-burst
+      operator: Exists
+      effect: NoSchedule
+  max_runners: 12                             # how many runners the burst nodes hold at most
+```
+
+The runner pods then lose the eligibility `nodeSelector`, and get instead a required node affinity accepting a node that carries either the eligibility label or the burst label, a preferred one (at the highest weight) for nodes without the burst label, so the scheduler keeps using the fixed pool while it has room, and the tolerations. The profile's own `node_selector` still applies everywhere. The listener keeps the eligibility `nodeSelector`, so it never runs on a node that can disappear. Without an eligibility label the runner pods may already go on any untainted node, so only the tolerations and the preference are added.
+
+`burst.max_runners` is added to the ceiling `sizing` derives from the fixed nodes (uniform or measured, safety margin included), so ARC creates more runner pods than the fixed nodes hold; the extra pods stay Pending, which is what makes the autoscaler add a burst node. The safety margin is not applied to it, since burst nodes carry nothing else. Derive it from what the autoscaler may launch: each node group's maximum size times the runners one of its nodes holds (`exadev.github_runner.arc_max_runners` with the node's allocatable figures works that out). The placement comes from the `exadev.github_runner.arc_runner_placement` filter.
 
 ## Image pull Secret from the GitHub App
 

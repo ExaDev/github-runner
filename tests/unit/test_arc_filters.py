@@ -344,6 +344,75 @@ class MeasuredMaxRunnersTest(unittest.TestCase):
         self.assertEqual(bad["errors"], ["node a: not a Kubernetes quantity: 'lots'"])
 
 
+BURST = {"node_label_key": "example.com/ci-burst", "tolerations": [{"key": "example.com/ci-burst", "operator": "Exists", "effect": "NoSchedule"}], "max_runners": 6}
+
+
+class BurstTest(unittest.TestCase):
+    def test_burst_runners_are_added_to_the_sized_ceiling(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"sizing": SIZING, "burst": BURST}, {"suffix": "-m", "sizing": MEASURED, "burst": BURST}])])
+        self.assertEqual(result["errors"], [])
+        uniform, measured = result["profiles"]
+        self.assertEqual((uniform["max_runners"], uniform["burst_runners"]), (24 + 6, 6))
+        # A measured ceiling is known only at install time; the overlay adds burst_runners to it then.
+        self.assertEqual((measured["max_runners"], measured["burst_runners"]), (None, 6))
+        self.assertEqual(uniform["burst"], {"node_label_key": "example.com/ci-burst", "node_label_values": [], "tolerations": BURST["tolerations"], "max_runners": 6})
+
+    def test_a_profile_without_burst_has_no_burst_runners(self) -> None:
+        profile = arc.arc_profiles([org(profiles=[{"sizing": SIZING}])])["profiles"][0]
+        self.assertEqual((profile["burst"], profile["burst_runners"], profile["max_runners"]), (None, 0, 24))
+
+    def test_burst_needs_sizing_and_no_explicit_or_autoscaled_ceiling(self) -> None:
+        for profile in ({"values_file": "v.yaml", "burst": BURST}, {"max_runners": 3, "sizing": SIZING, "burst": BURST}, {"autoscale": True, "values_file": "v.yaml", "sizing": SIZING, "burst": BURST}):
+            with self.subTest(profile=profile):
+                errors = arc.arc_profiles([org(profiles=[profile])])["errors"]
+                self.assertIn("Example scale_set_profiles[0]: burst needs sizing, and no max_runners or autoscale, since its max_runners is added to the ceiling sizing derives", errors)
+
+    def test_invalid_burst_settings_are_errors(self) -> None:
+        cases = {
+            "must be a mapping": "yes",
+            "node_label_key must be a non-empty string": {**BURST, "node_label_key": ""},
+            "node_label_values must be a list of non-empty strings": {**BURST, "node_label_values": "standard"},
+            "tolerations must be a list of Kubernetes tolerations": {**BURST, "tolerations": ["NoSchedule"]},
+            "tolerations[0] has an unknown key 'efect'": {**BURST, "tolerations": [{"key": "k", "efect": "NoSchedule"}]},
+            "max_runners must be a whole number of at least 0": {**BURST, "max_runners": 1.5},
+            "burst has an unknown key 'nodes'": {**BURST, "nodes": 4},
+        }
+        for message, burst in cases.items():
+            with self.subTest(message=message):
+                errors = arc.arc_profiles([org(profiles=[{"sizing": SIZING, "burst": burst}])])["errors"]
+                self.assertTrue(any(message in error for error in errors), errors)
+        missing = {key: value for key, value in BURST.items() if key != "max_runners"}
+        self.assertTrue(any("burst.max_runners must be a whole number" in error for error in arc.arc_profiles([org(profiles=[{"sizing": SIZING, "burst": missing}])])["errors"]))
+
+
+class RunnerPlacementTest(unittest.TestCase):
+    ELIGIBLE = {"example.com/ci-eligible": True}
+
+    def placement(self, profile: dict[str, Any], eligibility: dict[str, Any]) -> dict[str, Any]:
+        expanded = arc.arc_profiles([org(profiles=[{"sizing": SIZING, **profile}])])
+        self.assertEqual(expanded["errors"], [])
+        result: dict[str, Any] = arc.arc_runner_placement(expanded["profiles"][0], eligibility)
+        return result
+
+    def test_without_burst_the_eligibility_label_is_a_node_selector(self) -> None:
+        self.assertEqual(self.placement({"node_selector": {"kubernetes.io/arch": "amd64"}}, self.ELIGIBLE), {"nodeSelector": {"example.com/ci-eligible": "True", "kubernetes.io/arch": "amd64"}})
+        self.assertEqual(self.placement({}, {}), {"nodeSelector": {}})
+
+    def test_burst_accepts_an_eligible_or_a_burst_node_and_prefers_the_eligible_one(self) -> None:
+        placement = self.placement({"node_selector": {"kubernetes.io/arch": "amd64"}, "burst": {**BURST, "node_label_values": ["standard"]}}, {"example.com/ci-eligible": "true"})
+        self.assertEqual(placement["nodeSelector"], {"kubernetes.io/arch": "amd64"})
+        self.assertEqual(placement["tolerations"], BURST["tolerations"])
+        affinity = placement["affinity"]["nodeAffinity"]
+        self.assertEqual(affinity["requiredDuringSchedulingIgnoredDuringExecution"], {"nodeSelectorTerms": [{"matchExpressions": [{"key": "example.com/ci-eligible", "operator": "In", "values": ["true"]}]}, {"matchExpressions": [{"key": "example.com/ci-burst", "operator": "In", "values": ["standard"]}]}]})
+        self.assertEqual(affinity["preferredDuringSchedulingIgnoredDuringExecution"], [{"weight": 100, "preference": {"matchExpressions": [{"key": "example.com/ci-burst", "operator": "DoesNotExist"}]}}])
+
+    def test_burst_without_an_eligibility_label_only_adds_the_tolerations_and_preference(self) -> None:
+        placement = self.placement({"burst": BURST}, {})
+        self.assertEqual(placement["nodeSelector"], {})
+        self.assertNotIn("requiredDuringSchedulingIgnoredDuringExecution", placement["affinity"]["nodeAffinity"])
+        self.assertEqual(placement["tolerations"], BURST["tolerations"])
+
+
 class ImageRefTest(unittest.TestCase):
     def test_splits_registry_repository_and_tag(self) -> None:
         cases = {
