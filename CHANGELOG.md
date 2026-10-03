@@ -1,3 +1,10 @@
+## [1.10.1](https://github.com/ExaDev/github-runner/compare/v1.10.0...v1.10.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **heartbeat:** stop vouching for the fleet when a scale set or its listener is missing ([6bbe74f](https://github.com/ExaDev/github-runner/commit/6bbe74f79d74a03da607f9557147e59e8b2f0130))
+
 # [1.10.0](https://github.com/ExaDev/github-runner/compare/v1.9.0...v1.10.0) (2026-10-03)
 
 
