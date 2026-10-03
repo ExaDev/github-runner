@@ -1,3 +1,10 @@
+# [1.15.0](https://github.com/ExaDev/github-runner/compare/v1.14.0...v1.15.0) (2026-10-03)
+
+
+### Features
+
+* **heartbeat:** publish the distribution of measured job peak memory ([9434c80](https://github.com/ExaDev/github-runner/commit/9434c8088a79842c0ae409fad21ae63501ac30be))
+
 # [1.14.0](https://github.com/ExaDev/github-runner/compare/v1.13.0...v1.14.0) (2026-10-03)
 
 

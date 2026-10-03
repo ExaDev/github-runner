@@ -63,7 +63,7 @@ github_runner_arc_image_pull_secret_source: static
 github_runner_arc_image_pull_secret_renewal_schedule: "*/15 * * * *"
 
 # Image the renewal CronJob runs. Pulled without a pull Secret, so it must be public.
-github_runner_arc_image_pull_secret_renewer_image: "ghcr.io/exadev/github-runner-pull-secret-renewer:1.14.0"
+github_runner_arc_image_pull_secret_renewer_image: "ghcr.io/exadev/github-runner-pull-secret-renewer:1.15.0"
 
 # Before writing the pull Secret, prove the credential can read each image this host installs from that registry (with an App token, each org's own image, in the role and in every renewal): exchange it for a registry bearer token and fetch the image's manifest. A token that authenticates but lacks package access is otherwise only found later, as pods stuck in ImagePullBackOff. Uses the registry's /token endpoint, as GHCR provides.
 github_runner_arc_verify_image_pull: true
@@ -80,8 +80,8 @@ github_runner_arc_heartbeat_gist_consumer: ""
 
 # Namespace and images for the platform's own Deployments (see install_platform.yml).
 github_runner_arc_platform_namespace: "github-runner-platform"
-github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:1.14.0"
-github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:1.14.0"
+github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:1.15.0"
+github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:1.15.0"
 # Scheduling class and local-storage sizing for the platform's own long-running pods (heartbeat, autoscaler, node recovery). Without them the pods run at the default priority with no ephemeral-storage request, so under disk pressure the kubelet ranks them with, or ahead of, the runner pods it should evict first, and the watcher that recovers a node was itself evicted while a node had disk pressure. The priority value only has to sit above 0, the priority every runner pod runs at, and below 1000000000, the ceiling Kubernetes reserves for its own system classes. The storage request is above what these pods write (container logs and kubectl's small cache) so the kubelet never counts them as exceeding it; the limit stops a runaway log from becoming the pressure.
 github_runner_arc_platform_priority_class_name: "github-runner-platform"
 github_runner_arc_platform_priority_value: 1000000
@@ -101,7 +101,7 @@ github_runner_arc_node_recovery_after_seconds: 120
 # How often the watcher checks the nodes. A taint lands at most this long after the threshold passes.
 github_runner_arc_node_recovery_poll_seconds: 15
 # Image the watcher runs. Pulled without a pull Secret, so it must be public.
-github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:1.14.0"
+github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:1.15.0"
 
 # GitHub App creation through the manifest flow (tasks/app_setup.yml, run by playbooks/github_app_setup.yml). The App needs only organisation self-hosted runner write access; add packages: read to the permissions if its installation token should also pull private packages.
 github_runner_arc_app_setup_org: ""
