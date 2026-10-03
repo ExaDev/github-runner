@@ -1,0 +1,44 @@
+name: ARC upgrade
+
+# Runs the ARC role's CRD handling against a kind cluster (tests/arc_upgrade/run.sh): installs the controller chart at an old version, shows the newer scale-set chart is rejected against those CRDs, applies the CRDs the way the role does, and shows it is then accepted.
+#
+# GitHub-hosted ubuntu-latest has Docker, kind, kubectl and helm already.
+
+on:
+  pull_request:
+    paths:
+      - roles/github_runner_arc/tasks/install_crds.yml
+      - roles/github_runner_arc/defaults/main.yml
+      - tests/arc_upgrade/**
+      - .github/workflows/arc-upgrade.yml
+  workflow_dispatch:
+
+concurrency:
+  group: arc-upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: CRD upgrade in kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ansible and the Kubernetes collection
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core kubernetes
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install kubernetes.core
+
+      - name: Run the ARC upgrade test
+        run: tests/arc_upgrade/run.sh

@@ -1,0 +1,23 @@
+---
+# Applies the ARC controller chart's CustomResourceDefinitions at the chart version the controller is about to be installed at (the scale-set chart ships none). Helm installs a chart's CRDs only on the first install of a release and never touches them on upgrade, so without this a newer chart renders fields the cluster's CRDs do not declare and the scale-set upgrade is rejected, which once removed every scale set. Server-side apply, so a CRD this task did not create is taken over rather than refused. Included before the controller release.
+
+- name: "ARC CRDs: read the controller chart's CRDs"
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['helm', 'show', 'crds', github_runner_arc_controller_chart_ref]
+        + (['--version', github_runner_arc_controller_chart_version] if github_runner_arc_controller_chart_version is defined else [])
+      }}
+  register: github_runner_arc_chart_crds
+  changed_when: false
+  check_mode: false
+
+- name: "ARC CRDs: apply them"
+  kubernetes.core.k8s:
+    definition: "{{ item }}"
+    server_side_apply:
+      field_manager: exadev-github-runner
+      force_conflicts: true
+  loop: "{{ github_runner_arc_chart_crds.stdout | from_yaml_all | select('mapping') | list }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"

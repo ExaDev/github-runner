@@ -1,0 +1,16 @@
+---
+# Runs the github_runner_arc role's CRD task against a test cluster, for tests/arc_upgrade/run.sh. Takes chart_version and kubeconfig as extra vars.
+- name: Apply the ARC controller chart's CRDs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+  vars:
+    github_runner_arc_controller_chart_version: "{{ chart_version }}"
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kubeconfig }}"
+  tasks:
+    - name: Include the role's CRD task
+      ansible.builtin.include_tasks: ../../roles/github_runner_arc/tasks/install_crds.yml
