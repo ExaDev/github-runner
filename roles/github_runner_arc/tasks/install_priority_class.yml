@@ -1,0 +1,13 @@
+---
+# Creates the PriorityClass the platform's own pods run under (see github_runner_arc_platform_priority_value in defaults/main.yml for why it exists and how its value is chosen). Included before the node recovery watcher and the fleet-health platform, which both reference it.
+
+- name: "Platform: create the priority class for the platform's own pods"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: scheduling.k8s.io/v1
+      kind: PriorityClass
+      metadata:
+        name: "{{ github_runner_arc_platform_priority_class_name }}"
+      value: "{{ github_runner_arc_platform_priority_value | int }}"
+      globalDefault: false
+      description: "The fleet-health platform's own pods: kept above runner pods so recovery tooling outlives the work it recovers."

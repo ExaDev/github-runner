@@ -49,6 +49,7 @@ spec:
       labels: {{ labels | to_json }}
     spec:
       serviceAccountName: {{ name | to_json }}
+      priorityClassName: {{ github_runner_arc_platform_priority_class_name | to_json }}
       # Unpinned, like the rest of the platform. When the watcher's own node stops, a short toleration gets it evicted within seconds of the node being marked unreachable, so its ReplicaSet starts a replacement elsewhere long before the threshold passes; the default five minutes would leave no watcher running for longer than the threshold it enforces. The old pod stays Terminating until the new watcher taints its node.
       tolerations:
         - key: node.kubernetes.io/unreachable
@@ -92,9 +93,11 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
+              ephemeral-storage: {{ github_runner_arc_platform_ephemeral_storage_request | to_json }}
             limits:
               cpu: 200m
               memory: 64Mi
+              ephemeral-storage: {{ github_runner_arc_platform_ephemeral_storage_limit | to_json }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

@@ -53,6 +53,9 @@
       ansible.builtin.include_tasks: label_nodes.yml
       when: github_runner_arc_node_label_key | length > 0 and github_runner_arc_labelled_nodes | length > 0
 
+    - name: Create the priority class the platform's own pods run under
+      ansible.builtin.include_tasks: install_priority_class.yml
+
     - name: Install the node recovery watcher, or remove it when turned off
       ansible.builtin.include_tasks: install_node_recovery.yml
 
