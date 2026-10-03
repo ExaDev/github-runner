@@ -1,3 +1,10 @@
+# [1.12.0](https://github.com/ExaDev/github-runner/compare/v1.11.1...v1.12.0) (2026-10-03)
+
+
+### Features
+
+* **arc:** refuse a controller version change while runners are running ([eeb7259](https://github.com/ExaDev/github-runner/commit/eeb7259e45b218581fab70faf69f9cd8c2f19961))
+
 ## [1.11.1](https://github.com/ExaDev/github-runner/compare/v1.11.0...v1.11.1) (2026-10-03)
 
 # [1.11.0](https://github.com/ExaDev/github-runner/compare/v1.10.4...v1.11.0) (2026-10-03)
