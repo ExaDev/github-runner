@@ -1,0 +1,7 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ github_runner_arc_platform_priority_class_name | to_json }}
+value: {{ github_runner_arc_platform_priority_value | int }}
+globalDefault: false
+description: "The fleet-health platform's own pods: kept above runner pods so recovery tooling outlives the work it recovers."
