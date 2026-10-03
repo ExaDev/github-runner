@@ -1,3 +1,12 @@
+# [1.14.0](https://github.com/ExaDev/github-runner/compare/v1.13.0...v1.14.0) (2026-10-03)
+
+
+### Features
+
+* **arc:** let runner pods create events so jobs can record their peak memory ([8fcfe9d](https://github.com/ExaDev/github-runner/commit/8fcfe9d81987ac240685dfd3dde104f809b8754a))
+* **autoscaler:** collect the peaks the runners measured ([b72bf02](https://github.com/ExaDev/github-runner/commit/b72bf0263117b5acacc4671eb7cf920d142aebb5))
+* **runner:** record each job's peak memory from a job-completed hook ([850bbd8](https://github.com/ExaDev/github-runner/commit/850bbd8acb0ba2cfdc07776b90e872ad3c829256))
+
 # [1.13.0](https://github.com/ExaDev/github-runner/compare/v1.12.0...v1.13.0) (2026-10-03)
 
 
