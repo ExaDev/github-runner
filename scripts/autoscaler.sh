@@ -163,6 +163,8 @@ for i in "${!TARGETS[@]}"; do
   # R: the authoritative currently-running count, read from the AutoscalingRunnerSet CRD's own status (not a pod-label guess). The role gives every scale-set profile its own namespace, so each target namespace holds exactly this one scale set and no scale-set-specific label selector is needed for anything below.
   r="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" -o jsonpath='{.status.currentRunners}' 2>/dev/null)" \
     || die "could not read ${target}'s status.currentRunners"
+  # The API omits currentRunners from a scale set's status until it has run a pod (a freshly created one reports only its phase), so an empty answer to a read that succeeded means none are running.
+  r="${r:-0}"
   case "$r" in ''|*[!0-9]*) die "${target}'s status.currentRunners was not a plain integer ('$r')" ;; esac
   R[i]=$r
 
