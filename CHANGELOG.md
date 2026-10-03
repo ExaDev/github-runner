@@ -1,3 +1,10 @@
+# [1.11.0](https://github.com/ExaDev/github-runner/compare/v1.10.4...v1.11.0) (2026-10-03)
+
+
+### Features
+
+* **arc:** apply the controller chart's CRDs before installing or upgrading it ([78ae73c](https://github.com/ExaDev/github-runner/commit/78ae73c57d9ca91276d4f8f16f6c5a17ca40ecce))
+
 ## [1.10.4](https://github.com/ExaDev/github-runner/compare/v1.10.3...v1.10.4) (2026-10-03)
 
 
