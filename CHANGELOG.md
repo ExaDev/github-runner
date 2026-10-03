@@ -1,3 +1,16 @@
+# [1.9.0](https://github.com/ExaDev/github-runner/compare/v1.8.1...v1.9.0) (2026-10-03)
+
+
+### Bug Fixes
+
+* **platform:** render the priority class as a template the node recovery test also applies ([bcbdab7](https://github.com/ExaDev/github-runner/commit/bcbdab7f780b33e1157cdd4be694238c41de36a8))
+
+
+### Features
+
+* **heartbeat:** publish why the fleet is unhealthy and which nodes are under pressure ([56cb613](https://github.com/ExaDev/github-runner/commit/56cb6138d5d36900355f659d61490675cb3d625f))
+* **platform:** run the platform pods above runner pods with a local-storage request ([d6d4a69](https://github.com/ExaDev/github-runner/commit/d6d4a69a3f20e57e1ac03f3b8d2eea00abbb3af1))
+
 ## [1.8.1](https://github.com/ExaDev/github-runner/compare/v1.8.0...v1.8.1) (2026-10-03)
 
 # [1.8.0](https://github.com/ExaDev/github-runner/compare/v1.7.0...v1.8.0) (2026-10-03)
