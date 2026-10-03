@@ -1,3 +1,15 @@
+# [1.10.0](https://github.com/ExaDev/github-runner/compare/v1.9.0...v1.10.0) (2026-10-03)
+
+
+### Bug Fixes
+
+* **cluster:** leave the docker-prune container unnamed so projects on one daemon do not collide ([1a7133e](https://github.com/ExaDev/github-runner/commit/1a7133ef3c69a59a208559acf643acdddec1643e))
+
+
+### Features
+
+* **cluster:** prune stale build cache and dangling images on every host ([e683de7](https://github.com/ExaDev/github-runner/commit/e683de7d83b2eeeb2942b8e922885912de6a05a4))
+
 # [1.9.0](https://github.com/ExaDev/github-runner/compare/v1.8.1...v1.9.0) (2026-10-03)
 
 
