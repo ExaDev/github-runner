@@ -1,3 +1,10 @@
+## [1.10.3](https://github.com/ExaDev/github-runner/compare/v1.10.2...v1.10.3) (2026-10-03)
+
+
+### Bug Fixes
+
+* **image:** install python3-venv so actions that build a virtualenv can run ([4cb7352](https://github.com/ExaDev/github-runner/commit/4cb73522ea7ea65b25c2b6cff71d8fa1c8747efd))
+
 ## [1.10.2](https://github.com/ExaDev/github-runner/compare/v1.10.1...v1.10.2) (2026-10-03)
 
 
