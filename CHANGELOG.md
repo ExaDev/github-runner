@@ -1,3 +1,10 @@
+## [1.10.2](https://github.com/ExaDev/github-runner/compare/v1.10.1...v1.10.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **autoscaler:** read an absent currentRunners as zero running runners ([6149ed2](https://github.com/ExaDev/github-runner/commit/6149ed2f9dbddac9bb65a1fc1d55df137071115a))
+
 ## [1.10.1](https://github.com/ExaDev/github-runner/compare/v1.10.0...v1.10.1) (2026-10-03)
 
 
