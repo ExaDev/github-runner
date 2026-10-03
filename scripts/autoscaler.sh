@@ -135,6 +135,12 @@ raise_by_one() {
   NEW_MAX[best]=$(( NEW_MAX[best] + 1 ))
 }
 
+# For a failure before every target's current state is known: fail_safe patches from that state, so with none or part of it, the only honest outcome is to stop loudly (the API server is unreachable, so nothing could be patched anyway).
+die() {
+  echo "ERROR: $1" >&2
+  exit 1
+}
+
 fail_safe() {
   echo "FAIL-SAFE: $1 — lowering the pooled total toward the combined floor (${FLOOR})" >&2
   configmap_set "raise-confirm-count" "0"
@@ -146,8 +152,9 @@ fail_safe() {
 # ---- Gather signals ---------------------------------------------------------
 
 declare -a R MAX
-USAGE_MIB=0
-WH_MIB=0 # the largest pooled target's own pod memory limit, used as the headroom threshold: raising or lowering must leave room for whichever pooled target's next pod would be the largest.
+UNSCHEDULABLE_TOTAL=0
+
+# Phase 1: every target's own running count, maxRunners and unschedulable runner pods. fail_safe needs all of these to lower anything, so a failure here dies instead.
 for i in "${!TARGETS[@]}"; do
   namespace=${NAMESPACES[$i]}
   release=${RELEASES[$i]}
@@ -155,14 +162,30 @@ for i in "${!TARGETS[@]}"; do
 
   # R: the authoritative currently-running count, read from the AutoscalingRunnerSet CRD's own status (not a pod-label guess). The role gives every scale-set profile its own namespace, so each target namespace holds exactly this one scale set and no scale-set-specific label selector is needed for anything below.
   r="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" -o jsonpath='{.status.currentRunners}' 2>/dev/null)" \
-    || fail_safe "could not read ${target}'s status.currentRunners"
-  case "$r" in ''|*[!0-9]*) fail_safe "${target}'s status.currentRunners was not a plain integer ('$r')" ;; esac
+    || die "could not read ${target}'s status.currentRunners"
+  case "$r" in ''|*[!0-9]*) die "${target}'s status.currentRunners was not a plain integer ('$r')" ;; esac
   R[i]=$r
 
   max="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" -o jsonpath='{.spec.maxRunners}' 2>/dev/null)" \
-    || fail_safe "could not read ${target}'s current spec.maxRunners"
-  case "$max" in ''|*[!0-9]*) fail_safe "${target}'s spec.maxRunners was not a plain integer ('$max')" ;; esac
+    || die "could not read ${target}'s current spec.maxRunners"
+  case "$max" in ''|*[!0-9]*) die "${target}'s spec.maxRunners was not a plain integer ('$max')" ;; esac
   MAX[i]=$max
+
+  # Runner pods the scheduler has found no node for. The memory budget below sums every node's capacity, so it cannot see that a node is cordoned or tainted (disk pressure, for one) or that a pod's request fits no single node; a pod stuck Unschedulable is the direct evidence that the budgeted capacity is not real.
+  unschedulable="$(kubectl get pods -n "$namespace" -l actions-ephemeral-runner=True -o json 2>/dev/null \
+    | jq '[.items[] | select(any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))] | length')" \
+    || die "could not list ${target}'s unschedulable runner pods"
+  case "$unschedulable" in ''|*[!0-9]*) die "${target}'s unschedulable runner pod count was not a plain integer ('$unschedulable')" ;; esac
+  UNSCHEDULABLE_TOTAL=$(( UNSCHEDULABLE_TOTAL + unschedulable ))
+done
+
+# Phase 2: memory measurements. Any failure fails safe, which can now lower every target because phase 1 read them all.
+USAGE_MIB=0
+WH_MIB=0 # the largest pooled target's own pod memory limit, used as the headroom threshold: raising or lowering must leave room for whichever pooled target's next pod would be the largest.
+for i in "${!TARGETS[@]}"; do
+  namespace=${NAMESPACES[$i]}
+  release=${RELEASES[$i]}
+  target=${TARGETS[$i]}
 
   # Wh: the pod's own hard memory limit, read from the live deployed spec, not re-parsed from values/*.yaml, so this always matches what is actually running even after a manual --set override.
   wh_raw="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" \
@@ -212,17 +235,19 @@ fi
 USABLE_BUDGET_MIB=$(( USABLE_BUDGET_GI * 1024 ))
 HEADROOM_MIB=$(( USABLE_BUDGET_MIB - USAGE_MIB ))
 
-echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} targets=${TARGETS[*]}"
+echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} unschedulable=${UNSCHEDULABLE_TOTAL} targets=${TARGETS[*]}"
 
-if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ]; then
+if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDULABLE_TOTAL" -gt 0 ]; then
   # Lower immediately, no delay or averaging — lowering never disrupts in-flight jobs (ARC only gates new claims), so there is no cost to being trigger-happy in this direction. Can drop below FLOOR (even to 0, spread across targets by lower_to) if pressure is severe enough.
   configmap_set "raise-confirm-count" "0"
   target_total=$FLOOR
   [ "$pressure" = "true" ] && target_total=1
+  [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] && target_total=0 # clamped to R_TOTAL below: stop asking for runners no node can host, never orphan a running job
   [ "$target_total" -lt "$R_TOTAL" ] && target_total=$R_TOTAL
   if [ "$target_total" -lt "$MAX_TOTAL" ]; then
     reason="lower: headroom=${HEADROOM_MIB}MiB < Wh=${WH_MIB}MiB"
     [ "$pressure" = "true" ] && reason="lower: host pressure (mem_available=${mem_available_pct}%)"
+    [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] && reason="lower: ${UNSCHEDULABLE_TOTAL} runner pod(s) unschedulable, so the budgeted capacity is not all schedulable"
     lower_to "$target_total"
     apply_new_max "$reason" "$HEADROOM_MIB"
   else
