@@ -40,13 +40,29 @@ FAKE_KUBECTL = textwrap.dedent(
     if args[:2] == ["top", "pod"]:
         if state["top_pod_fails"]:
             sys.exit(1)
-        sys.stdout.write("runner 10m 500Mi\\n")
+        namespace = args[args.index("-n") + 1]
+        for name, mib in state["top"].get(namespace, {}).items():
+            sys.stdout.write("%s 10m %dMi\\n" % (name, mib))
+        sys.exit(0)
+    if args[:2] == ["get", "ephemeralrunner"]:
+        runner = state["runners"].get(args[2])
+        if runner is None:
+            sys.exit(1)
+        sys.stdout.write(json.dumps({"status": runner}))
         sys.exit(0)
     if args[:2] == ["top", "nodes"]:
         sys.stdout.write("node 100m 5% 1000Mi 20%\\n")
         sys.exit(0)
     if args[:2] == ["get", "configmap"]:
-        sys.stdout.write("0")
+        key = args[-1].split("data.")[-1].rstrip("}")
+        sys.stdout.write(state["job_memory"] if key == "job-memory" else "0")
+        sys.exit(0)
+    if args[:2] == ["patch", "configmap"]:
+        data = json.loads(args[args.index("-p") + 1])["data"]
+        if "job-memory" in data:
+            if state["job_memory_patch_fails"]:
+                sys.exit(1)
+            open(os.environ["FAKE_JOB_MEMORY_OUT"], "w").write(data["job-memory"])
         sys.exit(0)
     if args[:1] == ["patch"]:
         sys.exit(0)
@@ -57,6 +73,7 @@ FAKE_KUBECTL = textwrap.dedent(
 
 UNSCHEDULABLE_POD = {"status": {"conditions": [{"type": "PodScheduled", "status": "False", "reason": "Unschedulable"}]}}
 SCHEDULED_POD = {"status": {"conditions": [{"type": "PodScheduled", "status": "True"}]}}
+JOB_A = {"jobRepositoryName": "org/repo", "jobWorkflowRef": ".github/workflows/ci.yml@refs/heads/main", "jobDisplayName": "Build"}
 
 
 class AutoscalerTest(unittest.TestCase):
@@ -73,13 +90,33 @@ class AutoscalerTest(unittest.TestCase):
         top_pod_fails: bool = False,
         running: int | None = RUNNING,
         ceiling: int = 8,
+        top: dict[str, dict[str, int]] | None = None,
+        runners: dict[str, dict[str, str]] | None = None,
+        job_memory: str = "",
+        job_memory_patch_fails: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         state = self.dir / "state.json"
-        state.write_text(json.dumps({"running": running, "max_runners": MAX_RUNNERS, "pods": pods, "top_pod_fails": top_pod_fails}))
+        state.write_text(
+            json.dumps(
+                {
+                    "running": running,
+                    "max_runners": MAX_RUNNERS,
+                    "pods": pods,
+                    "top_pod_fails": top_pod_fails,
+                    "top": top or {},
+                    "runners": runners or {},
+                    "job_memory": job_memory,
+                    "job_memory_patch_fails": job_memory_patch_fails,
+                }
+            )
+        )
+        self.job_memory_out = self.dir / "job-memory.json"
+        self.job_memory_out.unlink(missing_ok=True)
         env = {
             **os.environ,
             "PATH": f"{self.dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_STATE": str(state),
+            "FAKE_JOB_MEMORY_OUT": str(self.job_memory_out),
             "AUTOSCALER_TARGETS": " ".join(f"{ns}/release-{ns}" for ns in NAMESPACES),
             "AUTOSCALER_DRY_RUN": "true",
             "AUTOSCALER_USABLE_BUDGET_GI": "33",
@@ -126,6 +163,38 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("unbound variable", result.stderr)
         self.assertIn("FAIL-SAFE", result.stderr)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    def recorded(self) -> dict[str, dict[str, object]]:
+        return json.loads(self.job_memory_out.read_text())
+
+    def test_a_jobs_highest_observed_memory_is_kept_across_polls(self) -> None:
+        runners = {"runner-1": JOB_A}
+        pods: dict[str, list[dict[str, object]]] = {}
+        stored = ""
+        for mib in (500, 900, 300):
+            self.assertEqual(self.poll(pods, top={"ns-a": {"runner-1": mib}}, runners=runners, job_memory=stored).returncode, 0)
+            stored = self.job_memory_out.read_text()
+        entry = self.recorded()["org/repo|.github/workflows/ci.yml@refs/heads/main|Build"]
+        self.assertEqual(entry["peak_mib"], 900)
+        self.assertEqual(entry["samples"], 3)
+
+    def test_a_pod_without_job_details_is_not_recorded(self) -> None:
+        result = self.poll({}, top={"ns-a": {"runner-1": 700}}, runners={"runner-1": {}})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.job_memory_out.exists())
+
+    def test_a_job_not_seen_within_the_retention_is_dropped(self) -> None:
+        stale = json.dumps({"old|wf|job": {"repo": "old", "workflow": "wf", "job": "job", "peak_mib": 4000, "samples": 9, "last_seen": 1}})
+        result = self.poll({}, top={"ns-a": {"runner-1": 600}}, runners={"runner-1": JOB_A}, job_memory=stale)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("old|wf|job", self.recorded())
+
+    def test_failing_to_record_does_not_stop_the_capacity_decision(self) -> None:
+        result = self.poll({"ns-a": [UNSCHEDULABLE_POD]}, top={"ns-a": {"runner-1": 600}}, runners={"runner-1": JOB_A}, job_memory_patch_fails=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("could not record", result.stderr)
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
 

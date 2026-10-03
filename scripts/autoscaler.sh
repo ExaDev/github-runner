@@ -23,6 +23,10 @@ RAISE_CONFIRM_POLLS="${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}"
 MEM_AVAILABLE_PRESSURE_PCT="${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}"
 STATE_NAMESPACE="${AUTOSCALER_STATE_NAMESPACE:-github-runner-platform}"
 CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
+# Where each job's observed peak memory is kept, in the same ConfigMap. A ConfigMap holds at most 1 MiB and an entry is under 512 bytes, so capping the entries at 2048 stays at half the limit; entries unseen for 30 days are dropped, since a job that has not run for that long no longer informs sizing.
+JOB_MEMORY_KEY="job-memory"
+JOB_MEMORY_MAX_ENTRIES=2048
+JOB_MEMORY_RETENTION_SECONDS=$(( 30 * 24 * 60 * 60 ))
 
 # Splits on whitespace: one token or several, however the Deployment env's own spacing renders.
 read -ra TARGETS <<< "$TARGETS_RAW"
@@ -135,6 +139,30 @@ raise_by_one() {
   NEW_MAX[best]=$(( NEW_MAX[best] + 1 ))
 }
 
+# Records, per job, the highest memory a runner pod running it has been seen at. This is a lower bound, not the true peak: it is sampled once per poll from the metrics server, so a spike shorter than the poll can pass unseen. It exists to show how far below a pod's request jobs actually sit, which decides whether an accurate in-pod measurement is worth building. The pod running a job is an EphemeralRunner of the same name, whose status names the job's repository, workflow and display name. $1 is a JSON array of {namespace, pod, mib} observations.
+record_job_peaks() {
+  local observations="$1" jobs="[]" obs namespace pod mib identity
+  while IFS= read -r obs; do
+    namespace="$(jq -r .namespace <<< "$obs")"
+    pod="$(jq -r .pod <<< "$obs")"
+    mib="$(jq -r .mib <<< "$obs")"
+    identity="$(kubectl get ephemeralrunner "$pod" -n "$namespace" -o json 2>/dev/null \
+      | jq -c --argjson mib "$mib" '{repo: .status.jobRepositoryName, workflow: .status.jobWorkflowRef, job: .status.jobDisplayName, mib: $mib} | select(.repo and .workflow and .job)')" || continue
+    [ -n "$identity" ] && jobs="$(jq -c --argjson one "$identity" '. + [$one]' <<< "$jobs")"
+  done < <(jq -c '.[]' <<< "$observations")
+  [ "$jobs" != "[]" ] || return 0
+  local existing updated
+  existing="$(configmap_get "$JOB_MEMORY_KEY")"
+  [ -n "$existing" ] || existing="{}"
+  updated="$(jq -c --argjson jobs "$jobs" --argjson now "$(date +%s)" --argjson retention "$JOB_MEMORY_RETENTION_SECONDS" --argjson cap "$JOB_MEMORY_MAX_ENTRIES" '
+    reduce $jobs[] as $o (.;
+      ($o.repo + "|" + $o.workflow + "|" + $o.job) as $k
+      | .[$k] = {repo: $o.repo, workflow: $o.workflow, job: $o.job, peak_mib: ([$o.mib, (.[$k].peak_mib // 0)] | max), samples: ((.[$k].samples // 0) + 1), last_seen: $now})
+    | with_entries(select(.value.last_seen >= ($now - $retention)))
+    | to_entries | sort_by(-.value.last_seen) | .[0:$cap] | from_entries' <<< "$existing")"
+  configmap_set "$JOB_MEMORY_KEY" "$updated"
+}
+
 # For a failure before every target's current state is known: fail_safe patches from that state, so with none or part of it, the only honest outcome is to stop loudly (the API server is unreachable, so nothing could be patched anyway).
 die() {
   echo "ERROR: $1" >&2
@@ -183,6 +211,7 @@ done
 
 # Phase 2: memory measurements. Any failure fails safe, which can now lower every target because phase 1 read them all.
 USAGE_MIB=0
+JOB_OBSERVATIONS="[]"
 WH_MIB=0 # the largest pooled target's own pod memory limit, used as the headroom threshold: raising or lowering must leave room for whichever pooled target's next pod would be the largest.
 for i in "${!TARGETS[@]}"; do
   namespace=${NAMESPACES[$i]}
@@ -201,12 +230,16 @@ for i in "${!TARGETS[@]}"; do
   top_output="$(kubectl top pod -n "$namespace" --no-headers 2>/dev/null)" \
     || fail_safe "kubectl top pod failed for ${namespace} (metrics-server unreachable?)"
   if [ -n "$top_output" ]; then
-    while read -r _name _cpu mem _rest; do
+    while read -r pod_name _cpu mem _rest; do
       pod_mib="$(to_mib "$mem")" || fail_safe "could not parse a runner pod's memory usage in ${namespace} ('$mem')"
       USAGE_MIB=$(( USAGE_MIB + pod_mib ))
+      JOB_OBSERVATIONS="$(jq -c --arg namespace "$namespace" --arg pod "$pod_name" --argjson mib "$pod_mib" '. + [{namespace: $namespace, pod: $pod, mib: $mib}]' <<< "$JOB_OBSERVATIONS")"
     done <<< "$top_output"
   fi
 done
+
+# Capacity decisions never depend on this record, so a failure to keep it is reported and the poll carries on.
+record_job_peaks "$JOB_OBSERVATIONS" || echo "WARN: could not record the jobs' observed memory" >&2
 
 R_TOTAL=0
 MAX_TOTAL=0
