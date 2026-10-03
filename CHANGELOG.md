@@ -1,3 +1,10 @@
+# [1.13.0](https://github.com/ExaDev/github-runner/compare/v1.12.0...v1.13.0) (2026-10-03)
+
+
+### Features
+
+* **autoscaler:** record each job's observed peak memory ([77ac920](https://github.com/ExaDev/github-runner/commit/77ac920e544d8b9872847afd87d1cfa7b180abe8))
+
 # [1.12.0](https://github.com/ExaDev/github-runner/compare/v1.11.1...v1.12.0) (2026-10-03)
 
 
