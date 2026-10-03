@@ -48,4 +48,8 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# The job-completed hook records each job's peak memory (see runner-hooks/job-completed.sh). It lives outside the runner user's home, owned by root, so a job cannot rewrite what runs at the end of the next one.
+COPY --chmod=0755 runner-hooks/job-completed.sh /usr/local/share/github-runner/hooks/job-completed.sh
+ENV ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/share/github-runner/hooks/job-completed.sh
+
 USER runner
