@@ -1,3 +1,15 @@
+# [1.8.0](https://github.com/ExaDev/github-runner/compare/v1.7.0...v1.8.0) (2026-10-03)
+
+
+### Bug Fixes
+
+* **autoscaler:** read every target before failing safe, lower on unschedulable runner pods ([9c3a824](https://github.com/ExaDev/github-runner/commit/9c3a8243a576f2763e163619a6026ab2f64a7ae9))
+
+
+### Features
+
+* **heartbeat:** stop vouching for the fleet while runner pods cannot be scheduled ([f875714](https://github.com/ExaDev/github-runner/commit/f875714c016bac0a01fced9b1983b2b818457903))
+
 # [1.7.0](https://github.com/ExaDev/github-runner/compare/v1.6.0...v1.7.0) (2026-09-30)
 
 
