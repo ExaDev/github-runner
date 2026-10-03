@@ -239,15 +239,24 @@ HEADROOM_MIB=$(( USABLE_BUDGET_MIB - USAGE_MIB ))
 
 echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} unschedulable=${UNSCHEDULABLE_TOTAL} targets=${TARGETS[*]}"
 
-if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDULABLE_TOTAL" -gt 0 ]; then
+# The ceiling is a hard cap on the pooled total, so a total above it (each profile's own static maxRunners can sum to more, and every Helm upgrade restores those) is lowered to it even when nothing else is wrong.
+over_ceiling=false
+[ "$MAX_TOTAL" -gt "$MAX_CEILING" ] && over_ceiling=true
+
+if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] || [ "$over_ceiling" = "true" ]; then
   # Lower immediately, no delay or averaging — lowering never disrupts in-flight jobs (ARC only gates new claims), so there is no cost to being trigger-happy in this direction. Can drop below FLOOR (even to 0, spread across targets by lower_to) if pressure is severe enough.
   configmap_set "raise-confirm-count" "0"
   target_total=$FLOOR
+  # Only the ceiling is exceeded: the pool is otherwise healthy, so it comes down to the ceiling, not to the floor.
+  if [ "$pressure" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$UNSCHEDULABLE_TOTAL" -eq 0 ]; then
+    target_total=$MAX_CEILING
+  fi
   [ "$pressure" = "true" ] && target_total=1
   [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] && target_total=0 # clamped to R_TOTAL below: stop asking for runners no node can host, never orphan a running job
   [ "$target_total" -lt "$R_TOTAL" ] && target_total=$R_TOTAL
   if [ "$target_total" -lt "$MAX_TOTAL" ]; then
     reason="lower: headroom=${HEADROOM_MIB}MiB < Wh=${WH_MIB}MiB"
+    [ "$over_ceiling" = "true" ] && reason="lower: pooled maxRunners ${MAX_TOTAL} is above the ceiling ${MAX_CEILING}"
     [ "$pressure" = "true" ] && reason="lower: host pressure (mem_available=${mem_available_pct}%)"
     [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] && reason="lower: ${UNSCHEDULABLE_TOTAL} runner pod(s) unschedulable, so the budgeted capacity is not all schedulable"
     lower_to "$target_total"
