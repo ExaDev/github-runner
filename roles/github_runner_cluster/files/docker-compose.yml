@@ -93,6 +93,26 @@ services:
       - k3s-agent-tailscale-data:/var/lib/tailscale
       - ./k3s/node-entrypoint.sh:/usr/local/bin/github-runner-node:ro
 
+  # Keeps the Docker host's disk from filling with build cache. The node's ephemeral storage lives on the host's Docker disk, shared with whatever else builds there, so a cache nobody trims eventually puts the node under disk pressure, which taints it unschedulable (the kubelet can reclaim nothing, since the data is not in a pod). Removes only build cache and dangling images older than DOCKER_PRUNE_AFTER (a week by default, long enough that a layer still in use has been rebuilt and so refreshed), once every DOCKER_PRUNE_INTERVAL_SECONDS (daily). Tagged images, containers and volumes are never touched. Runs on every host whatever its k3s role.
+  docker-prune:
+    image: docker:cli
+    container_name: github-runner-docker-prune
+    restart: unless-stopped
+    profiles: ["server", "agent"]
+    environment:
+      - DOCKER_PRUNE_AFTER=${DOCKER_PRUNE_AFTER:-168h}
+      - DOCKER_PRUNE_INTERVAL_SECONDS=${DOCKER_PRUNE_INTERVAL_SECONDS:-86400}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          docker builder prune --force --filter "until=$${DOCKER_PRUNE_AFTER}"
+          docker image prune --force --filter "until=$${DOCKER_PRUNE_AFTER}"
+          sleep "$${DOCKER_PRUNE_INTERVAL_SECONDS}"
+        done
+
 volumes:
   k3s-data: {}
   k3s-agent-data: {}
