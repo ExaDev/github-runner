@@ -14,6 +14,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "heartbeat.sh"
 UNSCHEDULABLE_AFTER_SECONDS = 180
+EXPECTED = ("arc-runners-a/runners-a", "arc-runners-b/runners-b")
 
 # Answers the reads heartbeat.sh makes from FAKE_STATE (a JSON file): whether a node is Ready, whether the controller has a ready replica, and the runner pods.
 FAKE_KUBECTL = textwrap.dedent(
@@ -28,6 +29,13 @@ FAKE_KUBECTL = textwrap.dedent(
     if args[:2] == ["get", "deployment"]:
         sys.stdout.write(str(state["controller_replicas"]))
         sys.exit(0)
+    if args[:2] == ["get", "autoscalingrunnerset"]:
+        sys.exit(0 if args[2] in state["scale_sets"] else 1)
+    if args[:2] == ["get", "pods"] and "-A" not in args:
+        selector = args[args.index("-l") + 1]
+        release = next(part.split("=")[1] for part in selector.split(",") if part.startswith("actions.github.com/scale-set-name"))
+        sys.stdout.write("Running\\n" * state["listeners"].get(release, 0))
+        sys.exit(0)
     if args[:2] == ["get", "pods"]:
         sys.stdout.write(json.dumps({"items": state["pods"]}))
         sys.exit(0)
@@ -38,13 +46,18 @@ FAKE_KUBECTL = textwrap.dedent(
     """
 )
 
-# Records that the gist was written; heartbeat.sh discards curl's output, so a file is the only way to see the call.
+# Records the body of the gist update; heartbeat.sh discards curl's output, so a file is the only way to see the call.
 FAKE_CURL = textwrap.dedent(
     """\
-    #!/bin/sh
-    touch "$FAKE_CURL_CALLED"
+    #!/usr/bin/env python3
+    import os, sys
+    args = sys.argv[1:]
+    open(os.environ["FAKE_CURL_BODY"], "w").write(args[args.index("-d") + 1])
     """
 )
+
+TIMESTAMP_FILE = "arc-healthy-until"
+HEALTH_FILE = "fleet-health.json"
 
 
 def unschedulable_pod(seconds_ago: int) -> dict[str, object]:
@@ -61,42 +74,81 @@ class HeartbeatTest(unittest.TestCase):
             path.write_text(body)
             path.chmod(0o755)
 
-    def tick(self, pods: list[dict[str, object]] | None = None, node_ready: bool = True, controller_replicas: int = 1) -> tuple[subprocess.CompletedProcess[str], bool]:
+    def tick(
+        self,
+        pods: list[dict[str, object]] | None = None,
+        node_ready: bool = True,
+        controller_replicas: int = 1,
+        scale_sets: tuple[str, ...] = ("runners-a", "runners-b"),
+        listeners: dict[str, int] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         state = self.dir / "state.json"
-        state.write_text(json.dumps({"node_ready": node_ready, "controller_replicas": controller_replicas, "pods": pods or []}))
-        called = self.dir / "curl-called"
+        state.write_text(
+            json.dumps(
+                {
+                    "node_ready": node_ready,
+                    "controller_replicas": controller_replicas,
+                    "pods": pods or [],
+                    "scale_sets": list(scale_sets),
+                    "listeners": {"runners-a": 1, "runners-b": 1} if listeners is None else listeners,
+                }
+            )
+        )
+        body = self.dir / "curl-body.json"
         env = {
             **os.environ,
             "PATH": f"{self.dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_STATE": str(state),
-            "FAKE_CURL_CALLED": str(called),
+            "FAKE_CURL_BODY": str(body),
             "HEARTBEAT_GH_TOKEN": "test-token",
             "HEARTBEAT_GIST_ID": "test-gist",
             "HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS": str(UNSCHEDULABLE_AFTER_SECONDS),
+            "HEARTBEAT_EXPECTED_SCALE_SETS": " ".join(EXPECTED),
         }
         result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
-        return result, called.exists()
+        files = {name: entry["content"] for name, entry in json.loads(body.read_text())["files"].items()} if body.exists() else {}
+        return result, files
+
+    def assertWithheld(self, files: dict[str, str]) -> None:
+        """The refresh is withheld: no timestamp is written, but the health file says why."""
+        self.assertNotIn(TIMESTAMP_FILE, files)
+        health = json.loads(files[HEALTH_FILE])
+        self.assertFalse(health["healthy"])
+        self.assertTrue(health["reasons"])
 
     def test_a_healthy_fleet_refreshes_the_gist(self) -> None:
-        result, wrote = self.tick()
+        result, files = self.tick()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(wrote)
+        self.assertIn(TIMESTAMP_FILE, files)
+        self.assertTrue(json.loads(files[HEALTH_FILE])["healthy"])
 
     def test_a_runner_pod_unschedulable_for_the_threshold_withholds_the_refresh(self) -> None:
-        result, wrote = self.tick(pods=[unschedulable_pod(UNSCHEDULABLE_AFTER_SECONDS + 1)])
+        result, files = self.tick(pods=[unschedulable_pod(UNSCHEDULABLE_AFTER_SECONDS + 1)])
         self.assertEqual(result.returncode, 1)
         self.assertIn("unschedulable", result.stderr)
-        self.assertFalse(wrote)
+        self.assertWithheld(files)
 
     def test_a_runner_pod_only_just_unschedulable_does_not_withhold_the_refresh(self) -> None:
-        result, wrote = self.tick(pods=[unschedulable_pod(0)])
+        result, files = self.tick(pods=[unschedulable_pod(0)])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(wrote)
+        self.assertIn(TIMESTAMP_FILE, files)
+
+    def test_a_missing_scale_set_withholds_the_refresh(self) -> None:
+        result, files = self.tick(scale_sets=("runners-a",))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("arc-runners-b/runners-b does not exist", result.stderr)
+        self.assertWithheld(files)
+
+    def test_a_scale_set_without_a_running_listener_withholds_the_refresh(self) -> None:
+        result, files = self.tick(listeners={"runners-a": 1, "runners-b": 0})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("arc-runners-b/runners-b has no running listener", result.stderr)
+        self.assertWithheld(files)
 
     def test_a_controller_without_a_ready_replica_withholds_the_refresh(self) -> None:
-        result, wrote = self.tick(controller_replicas=0)
+        result, files = self.tick(controller_replicas=0)
         self.assertEqual(result.returncode, 1)
-        self.assertFalse(wrote)
+        self.assertWithheld(files)
 
 
 if __name__ == "__main__":
