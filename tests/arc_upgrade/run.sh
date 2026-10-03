@@ -33,11 +33,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Renders the scale-set chart at a version and sends it to the API server for validation only; prints the server's answer and returns its status.
+# Renders the scale-set chart at a version and sends it to the API server for validation only; prints the server's answer and returns its status. The controller's service account is named because helm template cannot look it up in the cluster.
 dry_run_scale_set() {
-  helm template grtest-runners "$charts/gha-runner-scale-set" --version "$1" --namespace "$runner_namespace" \
+  local manifests
+  manifests="$(helm template grtest-runners "$charts/gha-runner-scale-set" --version "$1" --namespace "$runner_namespace" \
     --set githubConfigUrl=https://github.com/example --set githubConfigSecret.github_token=unused \
-    | kubectl apply --server-side --dry-run=server --force-conflicts -f - 2>&1
+    --set controllerServiceAccount.name=arc-gha-rs-controller --set controllerServiceAccount.namespace="$controller_namespace" 2>&1)" \
+    || { echo "helm template failed: $manifests"; exit 1; }
+  printf '%s\n' "$manifests" | kubectl apply --server-side --dry-run=server --force-conflicts -f - 2>&1
 }
 
 log "Creating the kind cluster"
