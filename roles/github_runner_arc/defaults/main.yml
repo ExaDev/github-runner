@@ -10,7 +10,10 @@ github_runner_arc_values_dir: ""
 # Kubeconfig path on the host the role runs against. Empty means the Kubernetes modules' own default (KUBECONFIG, then ~/.kube/config); a host brought up by github_runner_cluster uses the kubeconfig that role writes.
 github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path | default('') }}"
 
-# Helm chart version pins, left undefined so the tasks omit --version and Helm installs the latest chart. Set github_runner_arc_controller_chart_version and/or github_runner_arc_scaleset_chart_version (e.g. "0.14.2") to hold a chart back.
+# Helm chart version pins, left undefined so the tasks omit --version and Helm installs the latest chart (the controller's CRDs are applied at that same latest version first). Set github_runner_arc_controller_chart_version and/or github_runner_arc_scaleset_chart_version (e.g. "0.14.2") to hold a chart back.
+
+# The ARC controller's chart. Its CRDs are applied from the same reference and version before the controller is installed or upgraded (tasks/install_crds.yml), since Helm never upgrades a chart's CRDs itself.
+github_runner_arc_controller_chart_ref: "oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller"
 
 # The ARC controller's Helm release name and namespace. The stale-listener check, the heartbeat's RBAC and the heartbeat itself look for the controller here too, so a cluster whose controller was installed under other names sets both to those names rather than getting a second controller.
 github_runner_arc_controller_release_name: "arc"

@@ -22,9 +22,13 @@ argument_specs:
       github_runner_arc_kubeconfig_path:
         type: str
         description: Kubeconfig on the host the role runs against. Empty means KUBECONFIG, then ~/.kube/config.
+      github_runner_arc_controller_chart_ref:
+        type: str
+        default: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller
+        description: The controller chart. Its CRDs are applied from it, at the version below, before the controller is installed or upgraded.
       github_runner_arc_controller_chart_version:
         type: str
-        description: Pins the controller chart. Unset installs the latest chart.
+        description: Pins the controller chart and the CRDs applied from it. Unset installs the latest chart and its CRDs.
       github_runner_arc_scaleset_chart_version:
         type: str
         description: Pins the scale-set chart. Unset installs the latest chart.

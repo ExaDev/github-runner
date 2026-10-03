@@ -63,6 +63,9 @@
       ansible.builtin.include_tasks: install_platform.yml
       when: github_runner_arc_heartbeat_gist_id | length > 0
 
+    - name: Apply the ARC controller chart's CRDs, which Helm never upgrades
+      ansible.builtin.include_tasks: install_crds.yml
+
     - name: Install/upgrade the ARC controller (shared by every org on this host)
       ansible.builtin.include_tasks: install_controller.yml
       when: github_runner_arc_orgs | length > 0
