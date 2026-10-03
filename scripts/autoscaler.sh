@@ -82,8 +82,9 @@ write_status() {
     --argjson current_max_runners "$current_max_total" \
     --arg headroom_gi "$headroom_gi" \
     --arg mode "$mode" \
+    --argjson pod_limit_mib "$WH_MIB" \
     --argjson targets "$(targets_json)" \
-    '{last_run: $last_run, current_max_runners: $current_max_runners, headroom_gi: ($headroom_gi | tonumber? // null), mode: $mode, targets: $targets}')"
+    '{last_run: $last_run, current_max_runners: $current_max_runners, headroom_gi: ($headroom_gi | tonumber? // null), mode: $mode, pod_limit_mib: $pod_limit_mib, targets: $targets}')"
   configmap_set "status.json" "$status_json"
 }
 
