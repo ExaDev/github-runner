@@ -53,16 +53,22 @@ FAKE_KUBECTL = textwrap.dedent(
     if args[:2] == ["top", "nodes"]:
         sys.stdout.write("node 100m 5% 1000Mi 20%\\n")
         sys.exit(0)
+    if args[:2] == ["get", "events"]:
+        namespace = args[args.index("-n") + 1]
+        sys.stdout.write(json.dumps({"items": [{"message": m} for m in state["events"].get(namespace, [])]}))
+        sys.exit(0)
     if args[:2] == ["get", "configmap"]:
         key = args[-1].split("data.")[-1].rstrip("}")
-        sys.stdout.write(state["job_memory"] if key == "job-memory" else "0")
+        stored = {"job-memory": state["job_memory"], "job-peak": state["job_peak"]}
+        sys.stdout.write(stored.get(key, "0"))
         sys.exit(0)
     if args[:2] == ["patch", "configmap"]:
         data = json.loads(args[args.index("-p") + 1])["data"]
-        if "job-memory" in data:
-            if state["job_memory_patch_fails"]:
-                sys.exit(1)
-            open(os.environ["FAKE_JOB_MEMORY_OUT"], "w").write(data["job-memory"])
+        for key, out in (("job-memory", "FAKE_JOB_MEMORY_OUT"), ("job-peak", "FAKE_JOB_PEAK_OUT")):
+            if key in data:
+                if state["job_memory_patch_fails"]:
+                    sys.exit(1)
+                open(os.environ[out], "w").write(data[key])
         sys.exit(0)
     if args[:1] == ["patch"]:
         sys.exit(0)
@@ -94,6 +100,8 @@ class AutoscalerTest(unittest.TestCase):
         runners: dict[str, dict[str, str]] | None = None,
         job_memory: str = "",
         job_memory_patch_fails: bool = False,
+        events: dict[str, list[str]] | None = None,
+        job_peak: str = "",
     ) -> subprocess.CompletedProcess[str]:
         state = self.dir / "state.json"
         state.write_text(
@@ -106,17 +114,22 @@ class AutoscalerTest(unittest.TestCase):
                     "top": top or {},
                     "runners": runners or {},
                     "job_memory": job_memory,
+                    "job_peak": job_peak,
+                    "events": events or {},
                     "job_memory_patch_fails": job_memory_patch_fails,
                 }
             )
         )
         self.job_memory_out = self.dir / "job-memory.json"
         self.job_memory_out.unlink(missing_ok=True)
+        self.job_peak_out = self.dir / "job-peak.json"
+        self.job_peak_out.unlink(missing_ok=True)
         env = {
             **os.environ,
             "PATH": f"{self.dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_STATE": str(state),
             "FAKE_JOB_MEMORY_OUT": str(self.job_memory_out),
+            "FAKE_JOB_PEAK_OUT": str(self.job_peak_out),
             "AUTOSCALER_TARGETS": " ".join(f"{ns}/release-{ns}" for ns in NAMESPACES),
             "AUTOSCALER_DRY_RUN": "true",
             "AUTOSCALER_USABLE_BUDGET_GI": "33",
@@ -197,6 +210,33 @@ class AutoscalerTest(unittest.TestCase):
         self.assertIn("could not record", result.stderr)
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    @staticmethod
+    def event(peak_bytes: int, job: str = "build") -> str:
+        return json.dumps({"repo": "org/repo", "workflow": "org/repo/.github/workflows/ci.yml@refs/heads/main", "job": job, "peak_bytes": peak_bytes})
+
+    def measured(self) -> dict[str, dict[str, object]]:
+        return json.loads(self.job_peak_out.read_text())
+
+    def test_a_runners_own_measured_peak_is_kept_as_whole_mebibytes_rounded_up(self) -> None:
+        result = self.poll({}, events={"ns-a": [self.event(3 * 1024 * 1024 + 1)]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = self.measured()["org/repo|org/repo/.github/workflows/ci.yml@refs/heads/main|build"]
+        self.assertEqual(entry["peak_mib"], 4)
+        self.assertNotIn("samples", entry)
+
+    def test_a_forged_lower_peak_cannot_lower_a_stored_one(self) -> None:
+        key = "org/repo|org/repo/.github/workflows/ci.yml@refs/heads/main|build"
+        stored = json.dumps({key: {"repo": "org/repo", "workflow": "org/repo/.github/workflows/ci.yml@refs/heads/main", "job": "build", "peak_mib": 900, "last_seen": 4102444800}})
+        result = self.poll({}, events={"ns-a": [self.event(10 * 1024 * 1024)]}, job_peak=stored)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.measured()[key]["peak_mib"], 900)
+
+    def test_an_event_that_is_not_the_expected_message_is_ignored(self) -> None:
+        events = {"ns-a": ["not json", json.dumps({"repo": "org/repo"}), json.dumps({"repo": "r", "workflow": "w", "job": "j", "peak_bytes": "big"})]}
+        result = self.poll({}, events=events)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.job_peak_out.exists())
 
 
 if __name__ == "__main__":

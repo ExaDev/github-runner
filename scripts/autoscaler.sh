@@ -25,6 +25,8 @@ STATE_NAMESPACE="${AUTOSCALER_STATE_NAMESPACE:-github-runner-platform}"
 CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 # Where each job's observed peak memory is kept, in the same ConfigMap. A ConfigMap holds at most 1 MiB and an entry is under 512 bytes, so capping the entries at 2048 stays at half the limit; entries unseen for 30 days are dropped, since a job that has not run for that long no longer informs sizing.
 JOB_MEMORY_KEY="job-memory"
+# The peaks the runners' own job-completed hook measured (runner-hooks/job-completed.sh), kept apart from the sampled ones above because they are keyed by the job's id, not its display name, and are exact, not a lower bound.
+JOB_PEAK_KEY="job-peak"
 JOB_MEMORY_MAX_ENTRIES=2048
 JOB_MEMORY_RETENTION_SECONDS=$(( 30 * 24 * 60 * 60 ))
 
@@ -139,6 +141,21 @@ raise_by_one() {
   NEW_MAX[best]=$(( NEW_MAX[best] + 1 ))
 }
 
+# Merges {repo, workflow, job, mib} entries into the JSON object kept under a ConfigMap key, one entry per repository, workflow ref and job, holding the highest figure seen and when it was last seen. $3 is true when each merge counts as an observation (the sampled record, where one job is seen many times); the measured record is re-read from Events that stay around, so counting there would count the same job again. Entries unseen for the retention are dropped, and the oldest go first past the cap.
+store_job_entries() {
+  local key="$1" jobs="$2" count="$3" existing updated
+  existing="$(configmap_get "$key")"
+  [ -n "$existing" ] || existing="{}"
+  updated="$(jq -c --argjson jobs "$jobs" --argjson count "$count" --argjson now "$(date +%s)" --argjson retention "$JOB_MEMORY_RETENTION_SECONDS" --argjson cap "$JOB_MEMORY_MAX_ENTRIES" '
+    reduce $jobs[] as $o (.;
+      ($o.repo + "|" + $o.workflow + "|" + $o.job) as $k
+      | .[$k] = ({repo: $o.repo, workflow: $o.workflow, job: $o.job, peak_mib: ([$o.mib, (.[$k].peak_mib // 0)] | max), last_seen: $now}
+        + (if $count then {samples: ((.[$k].samples // 0) + 1)} else {} end)))
+    | with_entries(select(.value.last_seen >= ($now - $retention)))
+    | to_entries | sort_by(-.value.last_seen) | .[0:$cap] | from_entries' <<< "$existing")"
+  configmap_set "$key" "$updated"
+}
+
 # Records, per job, the highest memory a runner pod running it has been seen at. This is a lower bound, not the true peak: it is sampled once per poll from the metrics server, so a spike shorter than the poll can pass unseen. It exists to show how far below a pod's request jobs actually sit, which decides whether an accurate in-pod measurement is worth building. The pod running a job is an EphemeralRunner of the same name, whose status names the job's repository, workflow and display name. $1 is a JSON array of {namespace, pod, mib} observations.
 record_job_peaks() {
   local observations="$1" jobs="[]" obs namespace pod mib identity
@@ -151,16 +168,21 @@ record_job_peaks() {
     [ -n "$identity" ] && jobs="$(jq -c --argjson one "$identity" '. + [$one]' <<< "$jobs")"
   done < <(jq -c '.[]' <<< "$observations")
   [ "$jobs" != "[]" ] || return 0
-  local existing updated
-  existing="$(configmap_get "$JOB_MEMORY_KEY")"
-  [ -n "$existing" ] || existing="{}"
-  updated="$(jq -c --argjson jobs "$jobs" --argjson now "$(date +%s)" --argjson retention "$JOB_MEMORY_RETENTION_SECONDS" --argjson cap "$JOB_MEMORY_MAX_ENTRIES" '
-    reduce $jobs[] as $o (.;
-      ($o.repo + "|" + $o.workflow + "|" + $o.job) as $k
-      | .[$k] = {repo: $o.repo, workflow: $o.workflow, job: $o.job, peak_mib: ([$o.mib, (.[$k].peak_mib // 0)] | max), samples: ((.[$k].samples // 0) + 1), last_seen: $now})
-    | with_entries(select(.value.last_seen >= ($now - $retention)))
-    | to_entries | sort_by(-.value.last_seen) | .[0:$cap] | from_entries' <<< "$existing")"
-  configmap_set "$JOB_MEMORY_KEY" "$updated"
+  store_job_entries "$JOB_MEMORY_KEY" "$jobs" true
+}
+
+# The runners' own job-completed hook posts each job's cgroup peak as an Event in the pod's namespace (runner-hooks/job-completed.sh). The Events outlive the pod for the cluster's event TTL, so reading them each poll catches every job, and keeping the maximum per job makes re-reading one harmless and a forged low figure unable to lower a job's size. A message that is not the expected JSON is ignored.
+record_measured_peaks() {
+  local namespace jobs="[]" found
+  for namespace in "${NAMESPACES[@]}"; do
+    found="$(kubectl get events -n "$namespace" --field-selector reason=JobMemoryPeak -o json 2>/dev/null \
+      | jq -c '[.items[] | (.message | fromjson?) // empty
+        | select((.repo | type) == "string" and (.workflow | type) == "string" and (.job | type) == "string" and (.peak_bytes | type) == "number")
+        | {repo, workflow, job, mib: (((.peak_bytes + 1048575) / 1048576) | floor)}]')" || return 1
+    jobs="$(jq -c --argjson found "$found" '. + $found' <<< "$jobs")"
+  done
+  [ "$jobs" != "[]" ] || return 0
+  store_job_entries "$JOB_PEAK_KEY" "$jobs" false
 }
 
 # For a failure before every target's current state is known: fail_safe patches from that state, so with none or part of it, the only honest outcome is to stop loudly (the API server is unreachable, so nothing could be patched anyway).
@@ -240,6 +262,7 @@ done
 
 # Capacity decisions never depend on this record, so a failure to keep it is reported and the poll carries on.
 record_job_peaks "$JOB_OBSERVATIONS" || echo "WARN: could not record the jobs' observed memory" >&2
+record_measured_peaks || echo "WARN: could not record the jobs' measured peak memory" >&2
 
 R_TOTAL=0
 MAX_TOTAL=0
