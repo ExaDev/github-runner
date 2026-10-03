@@ -100,6 +100,9 @@
       }}
 
 # A Helm upgrade that changes the pod template renames the EphemeralRunnerSet the release owns (it carries a spec-hash suffix). The AutoscalingListener should follow the rename but can be left pointing at the deleted name, crash-looping on every patch while the scale set's queue goes unserviced; see the README's Non-obvious behaviour section. Deleting the stale listener makes the controller recreate it against the EphemeralRunnerSet that exists now.
+- name: Grant the runner pods the permission to record job peaks for {{ profile.label }}
+  ansible.builtin.include_tasks: install_job_peak_rbac.yml
+
 - name: Find the AutoscalingListener for {{ profile.label }}
   kubernetes.core.k8s_info:
     api_version: actions.github.com/v1alpha1

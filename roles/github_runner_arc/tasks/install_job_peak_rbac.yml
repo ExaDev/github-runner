@@ -1,0 +1,34 @@
+---
+# Lets a scale set's runner pods record each job's peak memory: the runner image's job-completed hook (runner-hooks/job-completed.sh) posts a Kubernetes Event from inside the pod, using the pod's own service account token. The chart's service account for runner pods holds no permission at all, so this grants it the one it needs and nothing else: create on events, in its own namespace only. It cannot read or change any object, and a job's code, which runs in the same container and can read the same token, can do no more than post events there. The autoscaler collects the Events (scripts/autoscaler.sh, record_measured_peaks) and keeps the maximum per job, so a forged low figure lowers nothing. Included once per scale-set profile, after its release, so the namespace exists. github_runner_arc_record_job_peaks false removes the grant.
+
+- name: "Job peaks: let the runner pods create events in their namespace for {{ profile.label }}"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if github_runner_arc_record_job_peaks | bool else 'absent' }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: github-runner-job-peak-writer
+        namespace: "{{ profile.namespace }}"
+      rules:
+        - apiGroups: [""]
+          resources: ["events"]
+          verbs: ["create"]
+
+- name: "Job peaks: bind it to the runner service account for {{ profile.label }}"
+  kubernetes.core.k8s:
+    state: "{{ 'present' if github_runner_arc_record_job_peaks | bool else 'absent' }}"
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: github-runner-job-peak-writer
+        namespace: "{{ profile.namespace }}"
+      subjects:
+        - kind: ServiceAccount
+          name: "{{ profile.release }}-gha-rs-no-permission"
+          namespace: "{{ profile.namespace }}"
+      roleRef:
+        kind: Role
+        name: github-runner-job-peak-writer
+        apiGroup: rbac.authorization.k8s.io
