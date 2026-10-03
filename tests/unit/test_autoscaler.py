@@ -72,6 +72,7 @@ class AutoscalerTest(unittest.TestCase):
         pods: dict[str, list[dict[str, object]]],
         top_pod_fails: bool = False,
         running: int | None = RUNNING,
+        ceiling: int = 8,
     ) -> subprocess.CompletedProcess[str]:
         state = self.dir / "state.json"
         state.write_text(json.dumps({"running": running, "max_runners": MAX_RUNNERS, "pods": pods, "top_pod_fails": top_pod_fails}))
@@ -82,7 +83,7 @@ class AutoscalerTest(unittest.TestCase):
             "AUTOSCALER_TARGETS": " ".join(f"{ns}/release-{ns}" for ns in NAMESPACES),
             "AUTOSCALER_DRY_RUN": "true",
             "AUTOSCALER_USABLE_BUDGET_GI": "33",
-            "AUTOSCALER_MAX_CEILING": "8",
+            "AUTOSCALER_MAX_CEILING": str(ceiling),
             "AUTOSCALER_FLOOR": "3",
         }
         return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
@@ -98,6 +99,19 @@ class AutoscalerTest(unittest.TestCase):
         result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("unschedulable=0", result.stdout)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_a_pooled_total_above_the_ceiling_is_lowered_to_the_ceiling(self) -> None:
+        ceiling = RUNNING * len(NAMESPACES)
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, running=0, ceiling=ceiling)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("above the ceiling", result.stdout)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    def test_a_pooled_total_at_the_ceiling_is_left_alone(self) -> None:
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES))
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("would patch", result.stdout)
 
     def test_a_scale_set_that_has_never_run_a_pod_counts_as_zero_runners(self) -> None:
