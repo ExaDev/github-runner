@@ -8,6 +8,10 @@ Which hosts are servers is decided automatically from the inventory group named 
 
 The role reads `docker compose version` first and fails, before changing anything on the host, if it is 2.37.1 or later but older than 2.39.0. Those releases create a container from an image they have just built without recording that image's ID on it ([docker/compose#13047](https://github.com/docker/compose/pull/13047)), so the next run sees a different image and recreates the container, which restarts every node on the run after the one that built the k3s image. Releases before 2.37.1 and from 2.39.0 on keep the containers. GitHub's ubuntu-latest runner image has shipped 2.38.2, so a CI job that runs the role there needs a different Compose installed first, as `.github/workflows/mesh-integration.yml` does.
 
+## Docker host disk
+
+Each host also runs a `docker-prune` service that removes Docker build cache and dangling images older than `DOCKER_PRUNE_AFTER` (a week by default) once every `DOCKER_PRUNE_INTERVAL_SECONDS` (daily). The node's ephemeral storage lives on the host's Docker disk, shared with anything else that builds there, so an untrimmed cache eventually puts the node under disk pressure and taints it unschedulable. Tagged images, containers and volumes are never touched. Set either variable in the host's `.env` to change them.
+
 ## Docker contexts
 
 By default the role drives whichever Docker daemon the host's current Docker context points at (`docker context show`), or the one `DOCKER_HOST` names when that is set. That is right for a host with one Docker engine, but the current context is shared, mutable state that other software changes. The case that matters: a Mac that runs its node in Colima and also has Docker Desktop installed. Launching Docker Desktop switches the current context to `desktop-linux` without asking, so the next run of the role would find no node in Docker Desktop and build a second, empty k3s node there, alongside the real one in Colima, instead of managing it.
