@@ -329,6 +329,7 @@
               app: heartbeat
           spec:
             serviceAccountName: heartbeat
+            priorityClassName: "{{ github_runner_arc_platform_priority_class_name }}"
             imagePullSecrets: "{{ github_runner_arc_platform_image_pull_secrets }}"
             containers:
               - name: heartbeat
@@ -338,9 +339,11 @@
                   requests:
                     cpu: "50m"
                     memory: "32Mi"
+                    ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_request }}"
                   limits:
                     cpu: "200m"
                     memory: "64Mi"
+                    ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_limit }}"
   vars:
     github_runner_arc_heartbeat_env:
       - name: HEARTBEAT_GIST_ID
@@ -407,6 +410,7 @@
               app: autoscaler
           spec:
             serviceAccountName: autoscaler
+            priorityClassName: "{{ github_runner_arc_platform_priority_class_name }}"
             imagePullSecrets: "{{ github_runner_arc_platform_image_pull_secrets }}"
             containers:
               - name: autoscaler
@@ -443,6 +447,8 @@
                   requests:
                     cpu: "50m"
                     memory: "32Mi"
+                    ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_request }}"
                   limits:
                     cpu: "200m"
                     memory: "64Mi"
+                    ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_limit }}"
