@@ -599,9 +599,32 @@ def arc_image_ref(image: str) -> dict[str, str]:
     return {"registry": registry, "repository": path, "reference": reference}
 
 
+def arc_upgrade_blocker(deployed_chart: str, desired_version: str, running_runners: int) -> str:
+    """Explain why a controller chart change must wait, or return an empty string when it may proceed.
+
+    ARC's controller deletes every scale set whose version differs from its own, together with its listener and ephemeral runners, until Helm upgrades that scale set. A running job is killed with its runner, so a controller version change belongs in a window with no running runners.
+
+    Args:
+        deployed_chart: the installed controller release's chart as Helm reports it, name and version joined by a dash (for example gha-runner-scale-set-controller-0.14.2); empty when there is no release yet.
+        desired_version: the controller chart version about to be installed; empty when it is not pinned, in which case the target is unknown and nothing is blocked.
+        running_runners: how many ephemeral runners exist across the cluster.
+
+    Returns:
+        A message when the version changes while runners are running, otherwise an empty string.
+    """
+    deployed = str(deployed_chart).rsplit("-", 1)[-1] if deployed_chart else ""
+    if not deployed or not desired_version or deployed == str(desired_version) or int(running_runners) == 0:
+        return ""
+    return (
+        f"The ARC controller is at chart {deployed} and this run installs {desired_version}, which deletes every scale set at the old version "
+        f"and the {int(running_runners)} running ephemeral runner(s) with it until the scale sets are upgraded. Run it when no runner is running, "
+        "or set github_runner_arc_allow_busy_controller_upgrade to accept killing the jobs on them."
+    )
+
+
 class FilterModule:
     """Registers the ARC role's filters with Ansible."""
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"arc_profiles": arc_profiles, "arc_max_runners": arc_max_runners, "arc_measured_max_runners": arc_measured_max_runners, "arc_image_ref": arc_image_ref, "arc_runner_placement": arc_runner_placement}
+        return {"arc_profiles": arc_profiles, "arc_max_runners": arc_max_runners, "arc_measured_max_runners": arc_measured_max_runners, "arc_upgrade_blocker": arc_upgrade_blocker, "arc_image_ref": arc_image_ref, "arc_runner_placement": arc_runner_placement}

@@ -458,6 +458,29 @@ class ImageRefTest(unittest.TestCase):
                 result = arc.arc_image_ref(image)
                 self.assertEqual((result["registry"], result["repository"], result["reference"]), expected)
 
+class ArcUpgradeBlockerTest(unittest.TestCase):
+    """The controller upgrade guard blocks only a version change made while runners are running."""
+
+    DEPLOYED = "gha-runner-scale-set-controller-0.14.2"
+
+    def test_a_version_change_with_running_runners_is_blocked(self) -> None:
+        message = arc.arc_upgrade_blocker(self.DEPLOYED, "0.15.0", 2)
+        self.assertIn("0.14.2", message)
+        self.assertIn("0.15.0", message)
+        self.assertIn("2 running", message)
+
+    def test_a_version_change_with_no_running_runners_proceeds(self) -> None:
+        self.assertEqual(arc.arc_upgrade_blocker(self.DEPLOYED, "0.15.0", 0), "")
+
+    def test_the_same_version_proceeds_whatever_is_running(self) -> None:
+        self.assertEqual(arc.arc_upgrade_blocker(self.DEPLOYED, "0.14.2", 5), "")
+
+    def test_an_unpinned_version_cannot_be_compared_so_proceeds(self) -> None:
+        self.assertEqual(arc.arc_upgrade_blocker(self.DEPLOYED, "", 5), "")
+
+    def test_a_first_install_proceeds(self) -> None:
+        self.assertEqual(arc.arc_upgrade_blocker("", "0.15.0", 5), "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,9 @@ github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path | d
 # The ARC controller's chart. Its CRDs are applied from the same reference and version before the controller is installed or upgraded (tasks/install_crds.yml), since Helm never upgrades a chart's CRDs itself.
 github_runner_arc_controller_chart_ref: "oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller"
 
+# A controller chart version change deletes every scale set at the old version, with its running ephemeral runners, until the scale sets are upgraded, so the run refuses it while any runner is running. true accepts killing the jobs on them.
+github_runner_arc_allow_busy_controller_upgrade: false
+
 # The ARC controller's Helm release name and namespace. The stale-listener check, the heartbeat's RBAC and the heartbeat itself look for the controller here too, so a cluster whose controller was installed under other names sets both to those names rather than getting a second controller.
 github_runner_arc_controller_release_name: "arc"
 github_runner_arc_controller_namespace: "actions-runner-controller"

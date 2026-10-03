@@ -22,6 +22,10 @@ argument_specs:
       github_runner_arc_kubeconfig_path:
         type: str
         description: Kubeconfig on the host the role runs against. Empty means KUBECONFIG, then ~/.kube/config.
+      github_runner_arc_allow_busy_controller_upgrade:
+        type: bool
+        default: false
+        description: Accepts changing the controller chart version while ephemeral runners are running, which kills their jobs. Off by default, so the run fails instead.
       github_runner_arc_controller_chart_ref:
         type: str
         default: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller

@@ -1,6 +1,32 @@
 ---
 # The controller's values are rendered on the control node and handed to the helm module as a mapping, which writes them to a temporary values file wherever the module runs, so no values file needs to exist on the target host.
 
+# A controller chart version change deletes every scale set at the old version, with its running ephemeral runners, until the scale sets are upgraded (see arc_upgrade_blocker in plugins/filter/arc.py), so it waits for an idle fleet unless told otherwise.
+- name: Look up the deployed ARC controller release
+  kubernetes.core.helm_info:
+    name: "{{ github_runner_arc_controller_release_name }}"
+    release_namespace: "{{ github_runner_arc_controller_namespace }}"
+  register: github_runner_arc_deployed_controller
+
+- name: Count the running ephemeral runners
+  kubernetes.core.k8s_info:
+    api_version: actions.github.com/v1alpha1
+    kind: EphemeralRunner
+  register: github_runner_arc_running_runners
+
+- name: Refuse a controller version change while runners are running
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_upgrade_blocker }}"
+  vars:
+    github_runner_arc_upgrade_blocker: >-
+      {{
+        github_runner_arc_deployed_controller.status.chart | default('')
+        | exadev.github_runner.arc_upgrade_blocker(github_runner_arc_controller_chart_version | default(''), github_runner_arc_running_runners.resources | length)
+      }}
+  when:
+    - not (github_runner_arc_allow_busy_controller_upgrade | bool)
+    - github_runner_arc_upgrade_blocker | length > 0
+
 - name: Install/upgrade the ARC controller release
   kubernetes.core.helm:
     name: "{{ github_runner_arc_controller_release_name }}"
