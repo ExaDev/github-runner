@@ -15,6 +15,9 @@ github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path | d
 # The ARC controller's chart. Its CRDs are applied from the same reference and version before the controller is installed or upgraded (tasks/install_crds.yml), since Helm never upgrades a chart's CRDs itself.
 github_runner_arc_controller_chart_ref: "oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller"
 
+# Whether the runner pods may record each job's peak memory: the runner image's job-completed hook posts it as a Kubernetes Event, so the pods' service account gets create on events in its own namespace (tasks/install_job_peak_rbac.yml). false removes that grant and the hook then records nothing.
+github_runner_arc_record_job_peaks: true
+
 # A controller chart version change deletes every scale set at the old version, with its running ephemeral runners, until the scale sets are upgraded, so the run refuses it while any runner is running. true accepts killing the jobs on them.
 github_runner_arc_allow_busy_controller_upgrade: false
 

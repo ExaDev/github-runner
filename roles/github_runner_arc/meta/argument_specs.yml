@@ -22,6 +22,10 @@ argument_specs:
       github_runner_arc_kubeconfig_path:
         type: str
         description: Kubeconfig on the host the role runs against. Empty means KUBECONFIG, then ~/.kube/config.
+      github_runner_arc_record_job_peaks:
+        type: bool
+        default: true
+        description: Lets runner pods record each job's peak memory as a Kubernetes Event, by granting their service account create on events in its own namespace. false removes the grant.
       github_runner_arc_allow_busy_controller_upgrade:
         type: bool
         default: false
