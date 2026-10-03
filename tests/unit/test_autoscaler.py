@@ -26,7 +26,8 @@ FAKE_KUBECTL = textwrap.dedent(
     joined = " ".join(args)
     if args[:2] == ["get", "autoscalingrunnerset"]:
         if "status.currentRunners" in joined:
-            sys.stdout.write(str(state["running"]))
+            if state["running"] is not None:
+                sys.stdout.write(str(state["running"]))
         elif "spec.maxRunners" in joined:
             sys.stdout.write(str(state["max_runners"]))
         elif "limits.memory" in joined:
@@ -66,9 +67,14 @@ class AutoscalerTest(unittest.TestCase):
         kubectl.write_text(FAKE_KUBECTL)
         kubectl.chmod(0o755)
 
-    def poll(self, pods: dict[str, list[dict[str, object]]], top_pod_fails: bool = False) -> subprocess.CompletedProcess[str]:
+    def poll(
+        self,
+        pods: dict[str, list[dict[str, object]]],
+        top_pod_fails: bool = False,
+        running: int | None = RUNNING,
+    ) -> subprocess.CompletedProcess[str]:
         state = self.dir / "state.json"
-        state.write_text(json.dumps({"running": RUNNING, "max_runners": MAX_RUNNERS, "pods": pods, "top_pod_fails": top_pod_fails}))
+        state.write_text(json.dumps({"running": running, "max_runners": MAX_RUNNERS, "pods": pods, "top_pod_fails": top_pod_fails}))
         env = {
             **os.environ,
             "PATH": f"{self.dir}{os.pathsep}{os.environ['PATH']}",
@@ -93,6 +99,13 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("unschedulable=0", result.stdout)
         self.assertNotIn("would patch", result.stdout)
+
+    def test_a_scale_set_that_has_never_run_a_pod_counts_as_zero_runners(self) -> None:
+        result = self.poll({"ns-a": [UNSCHEDULABLE_POD]}, running=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("R_total=0", result.stdout)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to 0", result.stdout)
 
     def test_a_failing_memory_measurement_fails_safe_for_every_target(self) -> None:
         result = self.poll({}, top_pod_fails=True)
