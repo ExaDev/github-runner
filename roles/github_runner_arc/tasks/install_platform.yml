@@ -79,6 +79,35 @@
         name: github-runner-heartbeat-pods-reader
         apiGroup: rbac.authorization.k8s.io
 
+# heartbeat: read each scale set's AutoscalingRunnerSet, to confirm every configured one exists (cluster-wide, since each profile has its own namespace).
+- name: "Platform: heartbeat RBAC - read scale sets"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: github-runner-heartbeat-scale-sets-reader
+      rules:
+        - apiGroups: ["actions.github.com"]
+          resources: ["autoscalingrunnersets"]
+          verbs: ["get", "list"]
+
+- name: "Platform: heartbeat RBAC - bind scale-sets-reader"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: github-runner-heartbeat-scale-sets-reader
+      subjects:
+        - kind: ServiceAccount
+          name: heartbeat
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: ClusterRole
+        name: github-runner-heartbeat-scale-sets-reader
+        apiGroup: rbac.authorization.k8s.io
+
 # heartbeat: read the ARC controller's own Deployment readiness, in its own namespace.
 - name: "Platform: heartbeat RBAC - read the ARC controller Deployment"
   kubernetes.core.k8s:
@@ -354,6 +383,8 @@
         value: "{{ github_runner_arc_heartbeat_interval_seconds | string }}"
       - name: HEARTBEAT_STATE_NAMESPACE
         value: "{{ github_runner_arc_platform_namespace }}"
+      - name: HEARTBEAT_EXPECTED_SCALE_SETS
+        value: "{{ github_runner_arc_fleet.profiles | map(attribute='target') | join(' ') }}"
       - name: HEARTBEAT_GH_TOKEN
         valueFrom:
           secretKeyRef:

@@ -5,6 +5,7 @@
 # - kubectl needs no KUBECONFIG here: running as a pod with a mounted ServiceAccount token, client-go auto-detects in-cluster config.
 # - HEARTBEAT_GH_TOKEN: a GitHub PAT with `gist` scope (write the gist), from a Secret
 # - HEARTBEAT_GIST_ID: the secret gist id to refresh
+# - HEARTBEAT_EXPECTED_SCALE_SETS: whitespace-separated namespace/release tokens, one per scale set the fleet is configured to run; each must exist and have a running listener or the fleet is not vouched for
 # - HEALTH_GIST_FILE: the gist file the health reason (healthy, why not, nodes under pressure) is written to every tick (default fleet-health.json)
 # - HEARTBEAT_STATE_NAMESPACE: namespace holding the autoscaler's own status ConfigMap (see scripts/autoscaler.sh)
 # - AUTOSCALER_STATUS_CONFIGMAP: name of that ConfigMap
@@ -16,6 +17,7 @@ HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT 
 HEARTBEAT_GIST_ID="${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set}"
 GIST_FILE="${GIST_FILE:-arc-healthy-until}"
 HEALTH_GIST_FILE="${HEALTH_GIST_FILE:-fleet-health.json}"
+HEARTBEAT_EXPECTED_SCALE_SETS="${HEARTBEAT_EXPECTED_SCALE_SETS:-}"
 HEARTBEAT_STATE_NAMESPACE="${HEARTBEAT_STATE_NAMESPACE:-github-runner-platform}"
 AUTOSCALER_STATUS_CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 AUTOSCALER_STATUS_GIST_FILE="${AUTOSCALER_STATUS_GIST_FILE:-autoscaler-status.json}"
@@ -38,6 +40,24 @@ if ! kubectl get deployment -n "$HEARTBEAT_CONTROLLER_NAMESPACE" -l app.kubernet
   reasons+=("the ARC controller has no ready replica")
   healthy=false
 fi
+
+# A scale set that is missing, or whose listener is not running, takes no jobs however healthy the nodes and controller look: a failed Helm upgrade once left every scale set deleted while this heartbeat kept vouching for the fleet, so jobs queued on runners that did not exist.
+for target in $HEARTBEAT_EXPECTED_SCALE_SETS; do
+  namespace="${target%%/*}"
+  release="${target#*/}"
+  if ! kubectl get autoscalingrunnerset "$release" -n "$namespace" >/dev/null 2>&1; then
+    reasons+=("scale set ${target} does not exist")
+    healthy=false
+    continue
+  fi
+  listeners="$(kubectl get pods -n "$HEARTBEAT_CONTROLLER_NAMESPACE" \
+    -l "actions.github.com/scale-set-name=${release},actions.github.com/scale-set-namespace=${namespace}" \
+    -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -c '^Running$' || true)"
+  if [ "$listeners" -lt 1 ]; then
+    reasons+=("scale set ${target} has no running listener")
+    healthy=false
+  fi
+done
 
 # A fleet with Ready nodes and a running controller can still have nowhere to put a runner (every schedulable node full, the rest cordoned or tainted for disk pressure, say). Jobs sent to it then queue behind the runners already busy, so stop vouching for it and let runner-fallback-action route to GitHub-hosted runners until the pods schedule again.
 now="$(date +%s)"
