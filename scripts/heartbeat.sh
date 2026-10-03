@@ -6,6 +6,7 @@
 # - HEARTBEAT_GH_TOKEN: a GitHub PAT with `gist` scope (write the gist), from a Secret
 # - HEARTBEAT_GIST_ID: the secret gist id to refresh
 # - HEARTBEAT_EXPECTED_SCALE_SETS: whitespace-separated namespace/release tokens, one per scale set the fleet is configured to run; each must exist and have a running listener or the fleet is not vouched for
+# - HEARTBEAT_JOB_PEAK_SUMMARY_GIST_FILE: the gist file the distribution of measured job peak memory is written to (default job-peak-summary.json)
 # - HEALTH_GIST_FILE: the gist file the health reason (healthy, why not, nodes under pressure) is written to every tick (default fleet-health.json)
 # - HEARTBEAT_STATE_NAMESPACE: namespace holding the autoscaler's own status ConfigMap (see scripts/autoscaler.sh)
 # - AUTOSCALER_STATUS_CONFIGMAP: name of that ConfigMap
@@ -17,6 +18,7 @@ HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT 
 HEARTBEAT_GIST_ID="${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set}"
 GIST_FILE="${GIST_FILE:-arc-healthy-until}"
 HEALTH_GIST_FILE="${HEALTH_GIST_FILE:-fleet-health.json}"
+JOB_PEAK_SUMMARY_GIST_FILE="${HEARTBEAT_JOB_PEAK_SUMMARY_GIST_FILE:-job-peak-summary.json}"
 HEARTBEAT_EXPECTED_SCALE_SETS="${HEARTBEAT_EXPECTED_SCALE_SETS:-}"
 HEARTBEAT_STATE_NAMESPACE="${HEARTBEAT_STATE_NAMESPACE:-github-runner-platform}"
 AUTOSCALER_STATUS_CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
@@ -91,6 +93,19 @@ if [ "$healthy" = "true" ]; then
   if [ -n "$status_json" ]; then
     files_json="$(jq --arg file "$AUTOSCALER_STATUS_GIST_FILE" --arg status "$status_json" \
       '. + {($file): {content: $status}}' <<< "$files_json")"
+  fi
+fi
+
+# The distribution of the peak memory jobs have measured, so whether the runner pods' memory request can come down is a lookup here and not a query of the cluster. It carries only figures, never a repository, workflow or job name: this gist is readable by anyone holding its link, and the names behind the figures stay in the cluster. Written whatever the fleet's health, since it describes past jobs.
+job_peak_json="$(kubectl get configmap "$AUTOSCALER_STATUS_CONFIGMAP" -n "$HEARTBEAT_STATE_NAMESPACE" -o jsonpath='{.data.job-peak}' 2>/dev/null || true)"
+if [ -n "$job_peak_json" ]; then
+  pod_limit_mib="$(kubectl get configmap "$AUTOSCALER_STATUS_CONFIGMAP" -n "$HEARTBEAT_STATE_NAMESPACE" -o jsonpath='{.data.status\.json}' 2>/dev/null | jq '.pod_limit_mib // null' 2>/dev/null || echo null)"
+  summary_json="$(jq -c --argjson limit "${pod_limit_mib:-null}" '
+    [.[].peak_mib] | sort as $p | ($p | length) as $n
+    | select($n > 0)
+    | {jobs: $n, p50_mib: $p[(($n * 0.5 | ceil) - 1)], p95_mib: $p[(($n * 0.95 | ceil) - 1)], max_mib: $p[-1], pod_limit_mib: $limit}' <<< "$job_peak_json")"
+  if [ -n "$summary_json" ]; then
+    files_json="$(jq --arg file "$JOB_PEAK_SUMMARY_GIST_FILE" --arg summary "$summary_json" '. + {($file): {content: $summary}}' <<< "$files_json")"
   fi
 fi
 

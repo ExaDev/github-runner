@@ -40,7 +40,12 @@ FAKE_KUBECTL = textwrap.dedent(
         sys.stdout.write(json.dumps({"items": state["pods"]}))
         sys.exit(0)
     if args[:2] == ["get", "configmap"]:
-        sys.exit(1)
+        key = args[-1].split("data.")[-1].rstrip("}").replace("\\.", ".")
+        value = state["configmap"].get(key)
+        if value is None:
+            sys.exit(1)
+        sys.stdout.write(value)
+        sys.exit(0)
     sys.stderr.write("unexpected kubectl call: %s\\n" % args)
     sys.exit(2)
     """
@@ -81,6 +86,7 @@ class HeartbeatTest(unittest.TestCase):
         controller_replicas: int = 1,
         scale_sets: tuple[str, ...] = ("runners-a", "runners-b"),
         listeners: dict[str, int] | None = None,
+        configmap: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         state = self.dir / "state.json"
         state.write_text(
@@ -91,6 +97,7 @@ class HeartbeatTest(unittest.TestCase):
                     "pods": pods or [],
                     "scale_sets": list(scale_sets),
                     "listeners": {"runners-a": 1, "runners-b": 1} if listeners is None else listeners,
+                    "configmap": configmap or {},
                 }
             )
         )
@@ -149,6 +156,40 @@ class HeartbeatTest(unittest.TestCase):
         result, files = self.tick(controller_replicas=0)
         self.assertEqual(result.returncode, 1)
         self.assertWithheld(files)
+
+    @staticmethod
+    def job_peaks(*peaks: int) -> str:
+        return json.dumps(
+            {
+                f"secret-org/private-repo|secret-org/private-repo/.github/workflows/ci.yml@refs/heads/main|job-{i}": {
+                    "repo": "secret-org/private-repo",
+                    "workflow": "ci.yml",
+                    "job": f"job-{i}",
+                    "peak_mib": peak,
+                    "last_seen": 1,
+                }
+                for i, peak in enumerate(peaks)
+            }
+        )
+
+    def test_the_distribution_of_measured_peaks_is_published_without_any_names(self) -> None:
+        configmap = {"job-peak": self.job_peaks(100, 200, 300, 4000), "status.json": json.dumps({"pod_limit_mib": 7168})}
+        result, files = self.tick(configmap=configmap)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads(files["job-peak-summary.json"])
+        self.assertEqual(summary, {"jobs": 4, "p50_mib": 200, "p95_mib": 4000, "max_mib": 4000, "pod_limit_mib": 7168})
+        self.assertNotIn("secret-org", files["job-peak-summary.json"])
+        self.assertNotIn("private-repo", files["job-peak-summary.json"])
+
+    def test_no_summary_is_published_before_any_peak_has_been_measured(self) -> None:
+        result, files = self.tick()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("job-peak-summary.json", files)
+
+    def test_the_summary_is_published_even_when_the_fleet_is_unhealthy(self) -> None:
+        result, files = self.tick(controller_replicas=0, configmap={"job-peak": self.job_peaks(150)})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(files["job-peak-summary.json"])["jobs"], 1)
 
 
 if __name__ == "__main__":
