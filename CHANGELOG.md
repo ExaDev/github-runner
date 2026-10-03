@@ -1,3 +1,10 @@
+## [1.10.4](https://github.com/ExaDev/github-runner/compare/v1.10.3...v1.10.4) (2026-10-03)
+
+
+### Bug Fixes
+
+* **autoscaler:** lower a pooled total that is above the ceiling ([473e733](https://github.com/ExaDev/github-runner/commit/473e733c5145296b04338dca6082fc155f83aa7f))
+
 ## [1.10.3](https://github.com/ExaDev/github-runner/compare/v1.10.2...v1.10.3) (2026-10-03)
 
 
