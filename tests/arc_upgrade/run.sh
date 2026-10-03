@@ -38,8 +38,8 @@ dry_run_scale_set() {
   local manifests
   manifests="$(helm template grtest-runners "$charts/gha-runner-scale-set" --version "$1" --namespace "$runner_namespace" \
     --set githubConfigUrl=https://github.com/example --set githubConfigSecret.github_token=unused \
-    --set controllerServiceAccount.name=arc-gha-rs-controller --set controllerServiceAccount.namespace="$controller_namespace" 2>&1)" \
-    || { echo "helm template failed: $manifests"; exit 1; }
+    --set controllerServiceAccount.name=arc-gha-rs-controller --set controllerServiceAccount.namespace="$controller_namespace" 2>"$work/helm-template.err")" \
+    || { echo "helm template failed: $(cat "$work/helm-template.err")"; return 1; }
   printf '%s\n' "$manifests" | kubectl apply --server-side --dry-run=server --force-conflicts -f - 2>&1
 }
 
