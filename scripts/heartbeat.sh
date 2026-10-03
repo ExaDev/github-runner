@@ -8,6 +8,7 @@
 # - HEARTBEAT_STATE_NAMESPACE: namespace holding the autoscaler's own status ConfigMap (see scripts/autoscaler.sh)
 # - AUTOSCALER_STATUS_CONFIGMAP: name of that ConfigMap
 # - HEARTBEAT_CONTROLLER_NAMESPACE: namespace of the ARC controller's Deployment, when it is not the default actions-runner-controller
+# - HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS: how long a runner pod may stay unschedulable before the heartbeat stops refreshing (default: one heartbeat interval)
 set -euo pipefail
 
 HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT with gist scope)}"
@@ -19,6 +20,8 @@ AUTOSCALER_STATUS_GIST_FILE="${AUTOSCALER_STATUS_GIST_FILE:-autoscaler-status.js
 # How far in the future to set the timestamp: comfortably longer than the loop interval, so a single missed/slow tick doesn't look like an outage, but short enough that a real outage is detected promptly.
 HEARTBEAT_WINDOW_SECONDS="${HEARTBEAT_WINDOW_SECONDS:-600}"
 HEARTBEAT_CONTROLLER_NAMESPACE="${HEARTBEAT_CONTROLLER_NAMESPACE:-actions-runner-controller}"
+# How long a runner pod may sit unschedulable before the fleet counts as unable to take work: one heartbeat interval (the loop's own, see heartbeat/loop.sh), so the condition has been seen on at least two consecutive ticks and a pod that is merely being placed never trips it.
+HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS="${HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS:-${HEARTBEAT_INTERVAL_SECONDS:-180}}"
 
 healthy=true
 
@@ -28,6 +31,17 @@ fi
 
 if ! kubectl get deployment -n "$HEARTBEAT_CONTROLLER_NAMESPACE" -l app.kubernetes.io/name=gha-rs-controller \
      -o jsonpath='{.items[0].status.readyReplicas}' 2>/dev/null | grep -q '^[1-9]'; then
+  healthy=false
+fi
+
+# A fleet with Ready nodes and a running controller can still have nowhere to put a runner (every schedulable node full, the rest cordoned or tainted for disk pressure, say). Jobs sent to it then queue behind the runners already busy, so stop vouching for it and let runner-fallback-action route to GitHub-hosted runners until the pods schedule again.
+now="$(date +%s)"
+if ! unschedulable="$(kubectl get pods -A -l actions-ephemeral-runner=True -o json 2>/dev/null \
+    | jq --argjson now "$now" --argjson after "$HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS" \
+      '[.items[] | select(any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable" and ($now - (.lastTransitionTime | fromdateiso8601)) >= $after))] | length')"; then
+  healthy=false
+elif [ "$unschedulable" -gt 0 ]; then
+  echo "${unschedulable} runner pod(s) unschedulable for at least ${HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS}s" >&2
   healthy=false
 fi
 

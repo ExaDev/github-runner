@@ -50,6 +50,35 @@
         name: github-runner-heartbeat-nodes-reader
         apiGroup: rbac.authorization.k8s.io
 
+# heartbeat: list runner pods in every scale-set namespace, to spot ones the scheduler cannot place (cluster-wide, since each profile has its own namespace).
+- name: "Platform: heartbeat RBAC - read runner pods"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: github-runner-heartbeat-pods-reader
+      rules:
+        - apiGroups: [""]
+          resources: ["pods"]
+          verbs: ["get", "list"]
+
+- name: "Platform: heartbeat RBAC - bind pods-reader"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: github-runner-heartbeat-pods-reader
+      subjects:
+        - kind: ServiceAccount
+          name: heartbeat
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      roleRef:
+        kind: ClusterRole
+        name: github-runner-heartbeat-pods-reader
+        apiGroup: rbac.authorization.k8s.io
+
 # heartbeat: read the ARC controller's own Deployment readiness, in its own namespace.
 - name: "Platform: heartbeat RBAC - read the ARC controller Deployment"
   kubernetes.core.k8s:
