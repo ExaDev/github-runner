@@ -128,3 +128,9 @@ github_runner_arc_app_setup_secret_namespaces: []
 github_runner_arc_app_setup_secret_name: ""
 # Whether to keep the private key file once the App Secret holds the key. false removes it, so the key is on disk only until the Secret is written; a run that stops earlier, for example because nobody installed the App within the wait, leaves the file so the App can still be finished without a new code.
 github_runner_arc_app_setup_keep_private_key: false
+
+# Name of the ConfigMap in the platform namespace that records the collection version the last run applied. scripts/heartbeat.sh reads it by this name (HEARTBEAT_DEPLOYED_STATE_CONFIGMAP).
+github_runner_arc_deployed_state_configmap: "deployed-state"
+
+# The collection version this role was released as, stamped by scripts/release/stamp_version.py. The role records it in the platform namespace's deployed-state ConfigMap once a run has applied everything, and the heartbeat publishes it in fleet-health.json. It is what was applied, not what is running.
+github_runner_arc_collection_version: "0.0.0"
