@@ -137,6 +137,9 @@
   delay: 2
   when: github_runner_cluster_wait_for_nodes | bool
 
+- name: Record the collection version this run applied on this host's own node
+  ansible.builtin.include_tasks: record_deployed_state.yml
+
 - name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
   # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See README's Non-obvious behaviour section; the same failure mode applies to a joining server's own container recreation, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name, as tasks/topology.yml recorded it), since that, not the inventory name, is what k3s names the Node and its node-password Secret after. Only ever touches cluster members that are NOT the bootstrap host (as tasks/topology.yml decided it), and of those only the ones whose node is missing or not Ready: the bootstrap host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway, and a Ready node's registration is not stale.
   when: github_runner_cluster_wait_for_nodes | bool

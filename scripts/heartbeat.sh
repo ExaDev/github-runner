@@ -10,6 +10,8 @@
 # - HEALTH_GIST_FILE: the gist file the health reason (healthy, why not, nodes under pressure) is written to every tick (default fleet-health.json)
 # - HEARTBEAT_STATE_NAMESPACE: namespace holding the autoscaler's own status ConfigMap (see scripts/autoscaler.sh)
 # - AUTOSCALER_STATUS_CONFIGMAP: name of that ConfigMap
+# - HEARTBEAT_DEPLOYED_STATE_CONFIGMAP: name of the ConfigMap, in the state namespace, holding the collection version the ARC role last applied (default deployed-state)
+# - HEARTBEAT_DEPLOYED_VERSION_ANNOTATION: the node annotation holding the collection version the cluster role last applied on that node's host
 # - HEARTBEAT_CONTROLLER_NAMESPACE: namespace of the ARC controller's Deployment, when it is not the default actions-runner-controller
 # - HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS: how long a runner pod may stay unschedulable before the heartbeat stops refreshing (default: one heartbeat interval)
 set -euo pipefail
@@ -23,6 +25,8 @@ HEARTBEAT_EXPECTED_SCALE_SETS="${HEARTBEAT_EXPECTED_SCALE_SETS:-}"
 HEARTBEAT_STATE_NAMESPACE="${HEARTBEAT_STATE_NAMESPACE:-github-runner-platform}"
 AUTOSCALER_STATUS_CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 AUTOSCALER_STATUS_GIST_FILE="${AUTOSCALER_STATUS_GIST_FILE:-autoscaler-status.json}"
+DEPLOYED_STATE_CONFIGMAP="${HEARTBEAT_DEPLOYED_STATE_CONFIGMAP:-deployed-state}"
+DEPLOYED_VERSION_ANNOTATION="${HEARTBEAT_DEPLOYED_VERSION_ANNOTATION:-github-runner.exadev.com/deployed-version}"
 # How far in the future to set the timestamp: comfortably longer than the loop interval, so a single missed/slow tick doesn't look like an outage, but short enough that a real outage is detected promptly.
 HEARTBEAT_WINDOW_SECONDS="${HEARTBEAT_WINDOW_SECONDS:-600}"
 HEARTBEAT_CONTROLLER_NAMESPACE="${HEARTBEAT_CONTROLLER_NAMESPACE:-actions-runner-controller}"
@@ -78,10 +82,16 @@ fi
 node_pressure="$(kubectl get nodes -o json 2>/dev/null \
   | jq -c '[.items[] | {node: .metadata.name, conditions: [.status.conditions[]? | select((.type | endswith("Pressure")) and .status == "True") | .type]} | select(.conditions | length > 0)]' || echo '[]')"
 
+# The collection version each playbook scope last recorded: the ARC and platform scope in a ConfigMap, each server host on its own node. A scope with no stamp is null (never applied by a release that stamps, or an agent host, which cannot stamp). This is what was applied, not what is running, but it makes a host that a run never reached show as behind the pinned version instead of looking identical to one that is current.
+platform_version="$(kubectl get configmap "$DEPLOYED_STATE_CONFIGMAP" -n "$HEARTBEAT_STATE_NAMESPACE" -o jsonpath='{.data.arc}' 2>/dev/null || true)"
+node_versions="$(kubectl get nodes -o json 2>/dev/null \
+  | jq -c --arg key "$DEPLOYED_VERSION_ANNOTATION" '[.items[] | {key: .metadata.name, value: (.metadata.annotations[$key] // null)}] | from_entries' || echo '{}')"
+deployed_json="$(jq -nc --arg platform "$platform_version" --argjson nodes "$node_versions" '{platform: (if $platform == "" then null else $platform end), nodes: $nodes}')"
+
 # The reason file is written on every tick, healthy or not, so the gist always says why the fleet is or is not being vouched for. GitHub deletes a gist file whose content is empty, hence the JSON object rather than an empty string for the healthy case.
 reasons_json="$(printf '%s\n' "${reasons[@]}" | jq -R . | jq -sc 'map(select(length > 0))')"
-health_json="$(jq -nc --argjson healthy "$healthy" --argjson reasons "$reasons_json" --argjson node_pressure "$node_pressure" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{healthy: $healthy, reasons: $reasons, node_pressure: $node_pressure, at: $at}')"
+health_json="$(jq -nc --argjson healthy "$healthy" --argjson reasons "$reasons_json" --argjson node_pressure "$node_pressure" --argjson deployed "$deployed_json" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{healthy: $healthy, reasons: $reasons, node_pressure: $node_pressure, deployed: $deployed, at: $at}')"
 files_json="$(jq -n --arg content "$health_json" --arg file "$HEALTH_GIST_FILE" '{($file): {content: $content}}')"
 
 if [ "$healthy" = "true" ]; then

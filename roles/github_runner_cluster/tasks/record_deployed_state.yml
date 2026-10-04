@@ -1,0 +1,19 @@
+---
+# Annotates this host's own k3s node with the collection version this run applied, for scripts/heartbeat.sh to publish in fleet-health.json. Only the host's own node: annotating every node from one host would claim a version for hosts a --limit run never touched. Runs for a server host only, since an agent has no kubeconfig (the role has already ended there); a server's node registers shortly after its container starts, so the annotate retries until the API accepts it.
+
+- name: Annotate this host's own node with the collection version it was last applied
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - annotate
+      - node
+      - "{{ github_runner_cluster_effective_node_name }}"
+      - "{{ github_runner_cluster_deployed_version_annotation }}={{ github_runner_cluster_collection_version }}"
+      - --overwrite
+  environment:
+    KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
+  register: github_runner_cluster_stamp
+  until: github_runner_cluster_stamp.rc == 0
+  retries: 60
+  delay: 2
+  changed_when: "'annotated' in github_runner_cluster_stamp.stdout"

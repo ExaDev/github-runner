@@ -1,0 +1,13 @@
+---
+# Writes the collection version this role applied into the platform namespace's deployed-state ConfigMap, which scripts/heartbeat.sh publishes in fleet-health.json so a scope still on an older release shows as drift.
+
+- name: "Platform: record the collection version this run applied"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ github_runner_arc_deployed_state_configmap }}"
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      data:
+        arc: "{{ github_runner_arc_collection_version }}"

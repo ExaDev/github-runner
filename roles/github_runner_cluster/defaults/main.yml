@@ -124,3 +124,9 @@ github_runner_cluster_kubeconfig_path: "{{ github_runner_cluster_dir }}/kubeconf
 
 # Whether this host waits for every node to report Ready (self-healing stale node-password registrations on the way). Needs the kubernetes Python client, which this role installs through github_runner_k8s_client only when this is true, so it is off by default and turned on for the hosts that go on to talk to the Kubernetes API (see playbooks/site.yml).
 github_runner_cluster_wait_for_nodes: false
+
+# The node annotation that records the collection version the last run applied on that node's host. scripts/heartbeat.sh reads it by this key (HEARTBEAT_DEPLOYED_VERSION_ANNOTATION).
+github_runner_cluster_deployed_version_annotation: "github-runner.exadev.com/deployed-version"
+
+# The collection version this role was released as, stamped by scripts/release/stamp_version.py. A server host records it as an annotation on its own node once the node has registered, and the heartbeat publishes it in fleet-health.json. It is what was applied, not what is running, and an agent host, which has no API of its own, records nothing.
+github_runner_cluster_collection_version: "0.0.0"

@@ -139,7 +139,7 @@
         name: github-runner-heartbeat-controller-reader
         apiGroup: rbac.authorization.k8s.io
 
-# heartbeat: read the autoscaler's own shared status ConfigMap, scoped by resourceNames to the one object it actually touches.
+# heartbeat: read the autoscaler's own shared status ConfigMap and the deployed-state ConfigMap, scoped by resourceNames to the two objects it actually touches.
 - name: "Platform: heartbeat RBAC - read the autoscaler status ConfigMap"
   kubernetes.core.k8s:
     definition:
@@ -151,7 +151,7 @@
       rules:
         - apiGroups: [""]
           resources: ["configmaps"]
-          resourceNames: ["autoscaler-status"]
+          resourceNames: ["autoscaler-status", "{{ github_runner_arc_deployed_state_configmap }}"]
           verbs: ["get"]
 
 - name: "Platform: heartbeat RBAC - bind status-reader"
