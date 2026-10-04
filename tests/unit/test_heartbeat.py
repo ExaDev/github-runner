@@ -177,7 +177,10 @@ class HeartbeatTest(unittest.TestCase):
         result, files = self.tick(configmap=configmap)
         self.assertEqual(result.returncode, 0, result.stderr)
         summary = json.loads(files["job-peak-summary.json"])
-        self.assertEqual(summary, {"jobs": 4, "p50_mib": 200, "p95_mib": 4000, "max_mib": 4000, "pod_limit_mib": 7168})
+        self.assertEqual(
+            summary,
+            {"jobs": 4, "repos": 1, "first_seen": "1970-01-01T00:00:01Z", "last_seen": "1970-01-01T00:00:01Z", "p50_mib": 200, "p95_mib": 4000, "max_mib": 4000, "pod_limit_mib": 7168},
+        )
         self.assertNotIn("secret-org", files["job-peak-summary.json"])
         self.assertNotIn("private-repo", files["job-peak-summary.json"])
 
@@ -190,6 +193,19 @@ class HeartbeatTest(unittest.TestCase):
         result, files = self.tick(controller_replicas=0, configmap={"job-peak": self.job_peaks(150)})
         self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(files["job-peak-summary.json"])["jobs"], 1)
+
+    def test_the_summary_counts_distinct_repositories_and_the_period_covered(self) -> None:
+        entries = {
+            "a|w|j1": {"repo": "org/a", "workflow": "w", "job": "j1", "peak_mib": 100, "last_seen": 1000},
+            "a|w|j2": {"repo": "org/a", "workflow": "w", "job": "j2", "peak_mib": 200, "last_seen": 3000},
+            "b|w|j1": {"repo": "org/b", "workflow": "w", "job": "j1", "peak_mib": 300, "last_seen": 2000},
+        }
+        result, files = self.tick(configmap={"job-peak": json.dumps(entries)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = json.loads(files["job-peak-summary.json"])
+        self.assertEqual((summary["jobs"], summary["repos"]), (3, 2))
+        self.assertEqual((summary["first_seen"], summary["last_seen"]), ("1970-01-01T00:16:40Z", "1970-01-01T00:50:00Z"))
+        self.assertNotIn("org/a", files["job-peak-summary.json"])
 
 
 if __name__ == "__main__":

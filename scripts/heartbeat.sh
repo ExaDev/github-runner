@@ -101,9 +101,9 @@ job_peak_json="$(kubectl get configmap "$AUTOSCALER_STATUS_CONFIGMAP" -n "$HEART
 if [ -n "$job_peak_json" ]; then
   pod_limit_mib="$(kubectl get configmap "$AUTOSCALER_STATUS_CONFIGMAP" -n "$HEARTBEAT_STATE_NAMESPACE" -o jsonpath='{.data.status\.json}' 2>/dev/null | jq '.pod_limit_mib // null' 2>/dev/null || echo null)"
   summary_json="$(jq -c --argjson limit "${pod_limit_mib:-null}" '
-    [.[].peak_mib] | sort as $p | ($p | length) as $n
+    ([.[].peak_mib] | sort) as $p | ($p | length) as $n
     | select($n > 0)
-    | {jobs: $n, p50_mib: $p[(($n * 0.5 | ceil) - 1)], p95_mib: $p[(($n * 0.95 | ceil) - 1)], max_mib: $p[-1], pod_limit_mib: $limit}' <<< "$job_peak_json")"
+    | {jobs: $n, repos: ([.[].repo] | unique | length), first_seen: ([.[].last_seen] | min | todate), last_seen: ([.[].last_seen] | max | todate), p50_mib: $p[(($n * 0.5 | ceil) - 1)], p95_mib: $p[(($n * 0.95 | ceil) - 1)], max_mib: $p[-1], pod_limit_mib: $limit}' <<< "$job_peak_json")"
   if [ -n "$summary_json" ]; then
     files_json="$(jq --arg file "$JOB_PEAK_SUMMARY_GIST_FILE" --arg summary "$summary_json" '. + {($file): {content: $summary}}' <<< "$files_json")"
   fi
