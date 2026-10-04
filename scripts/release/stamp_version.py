@@ -15,6 +15,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GALAXY_YML = REPO_ROOT / "galaxy.yml"
 ARC_DEFAULTS = REPO_ROOT / "roles" / "github_runner_arc" / "defaults" / "main.yml"
+CLUSTER_DEFAULTS = REPO_ROOT / "roles" / "github_runner_cluster" / "defaults" / "main.yml"
+
+# The variable in each role's defaults that records the collection version the role was released as.
+VERSION_VARS = (
+    (ARC_DEFAULTS, "github_runner_arc_collection_version"),
+    (CLUSTER_DEFAULTS, "github_runner_cluster_collection_version"),
+)
 
 # One entry per image-tag default this script stamps. Matched by variable name at the start of the line, with the existing tag (whatever it currently is, not necessarily "latest") replaced. This is what makes the regex robust against manual edits to the surrounding file, rather than tied to today's exact "latest" value or to a specific line number.
 IMAGE_VARS = (
@@ -53,12 +60,22 @@ def stamp_image_tags(version: str) -> None:
     ARC_DEFAULTS.write_text(text)
 
 
+def stamp_role_versions(version: str) -> None:
+    for defaults, var_name in VERSION_VARS:
+        text = defaults.read_text()
+        new_text, count = re.subn(rf'^({re.escape(var_name)}:\s*)"[^"]*"$', rf'\g<1>"{version}"', text, flags=re.MULTILINE)
+        if count != 1:
+            raise SystemExit(f"expected exactly one {var_name} line in {defaults}, found {count}")
+        defaults.write_text(new_text)
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(f"usage: {sys.argv[0]} <version>")
     version = sys.argv[1]
     stamp_galaxy_version(version)
     stamp_image_tags(version)
+    stamp_role_versions(version)
     print(f"Stamped version {version} into {GALAXY_YML.relative_to(REPO_ROOT)} and {ARC_DEFAULTS.relative_to(REPO_ROOT)}")
 
 

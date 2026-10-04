@@ -76,3 +76,8 @@
       loop_control:
         loop_var: org
         label: "{{ org.name }}"
+
+    # Last, so the stamp says a run applied everything above, and only when the platform namespace exists. Records what was applied, not what is running: a pod that failed to start still leaves the stamp.
+    - name: Record the collection version this run applied
+      ansible.builtin.include_tasks: record_deployed_state.yml
+      when: github_runner_arc_heartbeat_gist_id | length > 0

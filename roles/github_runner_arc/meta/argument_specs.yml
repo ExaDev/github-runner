@@ -167,6 +167,14 @@ argument_specs:
         type: str
         default: github-runner-platform
         description: Namespace of the heartbeat and autoscaler.
+      github_runner_arc_deployed_state_configmap:
+        type: str
+        default: deployed-state
+        description: ConfigMap in the platform namespace recording the collection version the last run applied, which the heartbeat publishes in fleet-health.json.
+      github_runner_arc_collection_version:
+        type: str
+        default: "0.0.0"
+        description: The collection version this role was released as, stamped by scripts/release/stamp_version.py at release.
       github_runner_arc_heartbeat_image:
         type: str
         description: Heartbeat image.

@@ -23,6 +23,9 @@ FAKE_KUBECTL = textwrap.dedent(
     import json, os, sys
     args = sys.argv[1:]
     state = json.load(open(os.environ["FAKE_STATE"]))
+    if args[:2] == ["get", "nodes"] and "-o" in args:
+        sys.stdout.write(json.dumps({"items": state.get("nodes", [])}))
+        sys.exit(0)
     if args[:2] == ["get", "nodes"]:
         sys.stdout.write("node1 Ready\\n" if state["node_ready"] else "node1 NotReady\\n")
         sys.exit(0)
@@ -87,6 +90,7 @@ class HeartbeatTest(unittest.TestCase):
         scale_sets: tuple[str, ...] = ("runners-a", "runners-b"),
         listeners: dict[str, int] | None = None,
         configmap: dict[str, str] | None = None,
+        nodes: list[dict[str, object]] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         state = self.dir / "state.json"
         state.write_text(
@@ -98,6 +102,7 @@ class HeartbeatTest(unittest.TestCase):
                     "scale_sets": list(scale_sets),
                     "listeners": {"runners-a": 1, "runners-b": 1} if listeners is None else listeners,
                     "configmap": configmap or {},
+                    "nodes": nodes or [],
                 }
             )
         )
@@ -206,6 +211,31 @@ class HeartbeatTest(unittest.TestCase):
         self.assertEqual((summary["jobs"], summary["repos"]), (3, 2))
         self.assertEqual((summary["first_seen"], summary["last_seen"]), ("1970-01-01T00:16:40Z", "1970-01-01T00:50:00Z"))
         self.assertNotIn("org/a", files["job-peak-summary.json"])
+
+    ANNOTATION = "github-runner.exadev.com/deployed-version"
+
+    def node(self, name: str, version: str | None) -> dict[str, object]:
+        annotations = {} if version is None else {self.ANNOTATION: version}
+        return {"metadata": {"name": name, "annotations": annotations}}
+
+    def deployed(self, **kwargs: object) -> dict[str, object]:
+        result, files = self.tick(**kwargs)  # type: ignore[arg-type]
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deployed: dict[str, object] = json.loads(files[HEALTH_FILE])["deployed"]
+        return deployed
+
+    def test_each_scope_reports_the_version_it_last_recorded(self) -> None:
+        deployed = self.deployed(configmap={"arc": "1.17.0"}, nodes=[self.node("mini", "1.17.0"), self.node("m3", "1.16.0")])
+        self.assertEqual(deployed, {"platform": "1.17.0", "nodes": {"mini": "1.17.0", "m3": "1.16.0"}})
+
+    def test_a_scope_with_no_stamp_is_null_so_it_shows_as_behind(self) -> None:
+        deployed = self.deployed(nodes=[self.node("mini", None)])
+        self.assertEqual(deployed, {"platform": None, "nodes": {"mini": None}})
+
+    def test_the_deployed_state_is_published_even_when_the_fleet_is_unhealthy(self) -> None:
+        result, files = self.tick(controller_replicas=0, configmap={"arc": "1.17.0"})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(files[HEALTH_FILE])["deployed"]["platform"], "1.17.0")
 
 
 if __name__ == "__main__":
