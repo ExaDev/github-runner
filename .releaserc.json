@@ -38,7 +38,7 @@
     [
       "@semantic-release/git",
       {
-        "assets": ["CHANGELOG.md", "galaxy.yml", "roles/github_runner_arc/defaults/main.yml"],
+        "assets": ["CHANGELOG.md", "galaxy.yml", "roles/github_runner_arc/defaults/main.yml", "roles/github_runner_cluster/defaults/main.yml"],
         "message": "chore(release): ${nextRelease.version} [skip ci]"
       }
     ],
