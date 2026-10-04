@@ -1,3 +1,10 @@
+# [1.16.0](https://github.com/ExaDev/github-runner/compare/v1.15.0...v1.16.0) (2026-10-04)
+
+
+### Features
+
+* **heartbeat:** show how broad and how long the measured peaks are ([a9d8076](https://github.com/ExaDev/github-runner/commit/a9d8076ae8a253d44a58780a73797360ee0f6ad8))
+
 # [1.15.0](https://github.com/ExaDev/github-runner/compare/v1.14.0...v1.15.0) (2026-10-03)
 
 
