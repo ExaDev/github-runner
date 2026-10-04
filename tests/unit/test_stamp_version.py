@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import shutil
 import tempfile
@@ -43,6 +44,17 @@ class StampVersionTest(unittest.TestCase):
         self.assertRegex((root / "galaxy.yml").read_text(), rf"(?m)^version: {re.escape(VERSION)}$")
         for defaults, var_name in module.VERSION_VARS:
             self.assertRegex(defaults.read_text(), rf'(?m)^{var_name}: "{re.escape(VERSION)}"$')
+
+    def test_every_file_the_script_stamps_is_committed_by_the_release(self) -> None:
+        """A stamped file missing from the git plugin's assets is stamped in the release build but never reaches the tag the fleet installs from."""
+        spec = importlib.util.spec_from_file_location("stamp_version", SCRIPT)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config = json.loads((REPO_ROOT / ".releaserc.json").read_text())
+        assets = next(plugin[1]["assets"] for plugin in config["plugins"] if isinstance(plugin, list) and plugin[0] == "@semantic-release/git")
+        stamped = {path.relative_to(REPO_ROOT).as_posix() for path in (module.GALAXY_YML, module.ARC_DEFAULTS, module.CLUSTER_DEFAULTS)}
+        self.assertLessEqual(stamped, set(assets))
 
 
 if __name__ == "__main__":
