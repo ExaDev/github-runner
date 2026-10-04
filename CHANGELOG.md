@@ -1,3 +1,10 @@
+## [1.17.1](https://github.com/ExaDev/github-runner/compare/v1.17.0...v1.17.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **release:** commit the cluster role's stamped version with the release ([1f335cd](https://github.com/ExaDev/github-runner/commit/1f335cd65ab9cb90a71e085a1264a67f8eba4614))
+
 # [1.17.0](https://github.com/ExaDev/github-runner/compare/v1.16.0...v1.17.0) (2026-10-04)
 
 
