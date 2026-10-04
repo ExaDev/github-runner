@@ -1,3 +1,16 @@
+# [1.17.0](https://github.com/ExaDev/github-runner/compare/v1.16.0...v1.17.0) (2026-10-04)
+
+
+### Bug Fixes
+
+* **arc:** restore the collection version and deployed-state defaults the release stamps ([beeba32](https://github.com/ExaDev/github-runner/commit/beeba32e965f77d1adfc6dea80d6142f6f2b664f))
+
+
+### Features
+
+* **cluster:** let a host without API access skip the node version stamp ([5d3829b](https://github.com/ExaDev/github-runner/commit/5d3829b6f5ebccf842aef3e20fb01dfc54064541))
+* publish each scope's deployed collection version in fleet-health.json ([485ea54](https://github.com/ExaDev/github-runner/commit/485ea54901dfd2fdb0e4eccea800858cf8bbdcf1))
+
 # [1.16.0](https://github.com/ExaDev/github-runner/compare/v1.15.0...v1.16.0) (2026-10-04)
 
 
