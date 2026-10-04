@@ -3,5 +3,8 @@
 - name: Bring up the test cluster
   hosts: github_runner_cluster
   gather_facts: false
+  vars:
+    # Every test node runs in Docker with no published API port, so the host cannot reach it to annotate its node.
+    github_runner_cluster_record_deployed_version: false
   roles:
     - exadev.github_runner.github_runner_cluster
