@@ -125,6 +125,9 @@ github_runner_cluster_kubeconfig_path: "{{ github_runner_cluster_dir }}/kubeconf
 # Whether this host waits for every node to report Ready (self-healing stale node-password registrations on the way). Needs the kubernetes Python client, which this role installs through github_runner_k8s_client only when this is true, so it is off by default and turned on for the hosts that go on to talk to the Kubernetes API (see playbooks/site.yml).
 github_runner_cluster_wait_for_nodes: false
 
+# Whether a server host annotates its own node with the collection version it applied. It needs kubectl on the host and a kubeconfig whose API server the host can reach, which a host does not have when the cluster's API is published nowhere on it (tests/mesh runs every node in Docker with no host port).
+github_runner_cluster_record_deployed_version: true
+
 # The node annotation that records the collection version the last run applied on that node's host. scripts/heartbeat.sh reads it by this key (HEARTBEAT_DEPLOYED_VERSION_ANNOTATION).
 github_runner_cluster_deployed_version_annotation: "github-runner.exadev.com/deployed-version"
 
