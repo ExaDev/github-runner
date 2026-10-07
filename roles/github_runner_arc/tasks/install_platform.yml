@@ -224,10 +224,10 @@
             - apiGroups: [""]
               resources: ["events"]
               verbs: ["get", "list"]
-            # The runner pod running a job is an EphemeralRunner of the same name, whose status names the job; read to record each job's observed memory (scripts/autoscaler.sh, record_job_peaks). Not limited by name, since runner names are generated.
+            # The runner pod running a job is an EphemeralRunner of the same name, whose status names the job; read to record each job's observed memory (scripts/autoscaler.sh, record_job_peaks), and listed to count the runners a scale set holds (the AutoscalingRunnerSet's own status carries no count in the pinned ARC release). Not limited by name, since runner names are generated. `list` is needed by a script that counts them, so apply this role before rolling out an autoscaler image that does.
             - apiGroups: ["actions.github.com"]
               resources: ["ephemeralrunners"]
-              verbs: ["get"]
+              verbs: ["get", "list"]
             - apiGroups: ["metrics.k8s.io"]
               resources: ["pods"]
               verbs: ["get", "list"]
