@@ -1,3 +1,11 @@
+# [1.18.0](https://github.com/ExaDev/github-runner/compare/v1.17.2...v1.18.0) (2026-10-07)
+
+
+### Features
+
+* **arc:** add capabilities to scale-set profiles ([e0e6ce9](https://github.com/ExaDev/github-runner/commit/e0e6ce9817d9ed39cb0174879ffddb080d2411ca)), closes [#55](https://github.com/ExaDev/github-runner/issues/55)
+* **tool-images:** add reference tool-cache capability images ([f33107f](https://github.com/ExaDev/github-runner/commit/f33107fa7693b3040bff3d9b30db06785e46ab1f)), closes [#55](https://github.com/ExaDev/github-runner/issues/55)
+
 ## [1.17.2](https://github.com/ExaDev/github-runner/compare/v1.17.1...v1.17.2) (2026-10-07)
 
 ## [1.17.1](https://github.com/ExaDev/github-runner/compare/v1.17.0...v1.17.1) (2026-10-04)
