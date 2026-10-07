@@ -1,0 +1,44 @@
+name: Capabilities
+
+# Runs the ARC role's scale-set profile capabilities in a kind cluster (tests/capabilities/run.sh): the reference Node.js tool image built from this checkout, values rendered through the role's own tasks, the scale-set chart rendered with them and checked against the ARC CRDs, and a pod from the chart's runner pod template whose init container fills the tool cache, whose job-started hook puts the tool on PATH, and whose step finds the tool through @actions/tool-cache. Only on changes that can affect them. Builds nothing it publishes.
+#
+# GitHub-hosted ubuntu-latest has Docker, kind, kubectl and helm already.
+
+on:
+  pull_request:
+    paths:
+      - roles/github_runner_arc/**
+      - plugins/filter/arc.py
+      - tool-images/**
+      - tests/capabilities/**
+      - .github/workflows/capabilities.yml
+  workflow_dispatch:
+
+concurrency:
+  group: capabilities-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  capabilities:
+    name: Capabilities in kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core pyyaml
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run the capabilities test
+        run: tests/capabilities/run.sh
