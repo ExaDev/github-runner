@@ -1,0 +1,55 @@
+name: System libraries
+
+# Builds each reference system-library capability image in tool-images/ (Open MPI, HiGHS, libpq) natively on amd64 and arm64 and proves it works relocated (tests/system_libraries/run.sh): its payload is copied to /opt/sysroot as the role's init container copies it, the role's own job-started hook applies the environment the role renders for it, and inside the stock actions-runner image a program compiled against the payload runs from there (for Open MPI, a two-process mpirun). Only on changes that can affect them. Builds nothing it publishes.
+
+on:
+  pull_request:
+    paths:
+      - tool-images/openmpi/**
+      - tool-images/highs/**
+      - tool-images/libpq/**
+      - tests/system_libraries/**
+      - tests/capabilities/render.yml
+      - roles/github_runner_arc/files/job-started.sh
+      - roles/github_runner_arc/tasks/render_scale_set_values.yml
+      - plugins/filter/arc.py
+      - .github/workflows/system-libraries.yml
+  workflow_dispatch:
+
+concurrency:
+  group: system-libraries-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  relocation:
+    name: ${{ matrix.payload }} relocated (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        payload: [openmpi, highs, libpq]
+        platform:
+          - {arch: amd64, runner: ubuntu-latest}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core pyyaml
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run the relocation test
+        env:
+          PAYLOAD: ${{ matrix.payload }}
+        run: tests/system_libraries/run.sh "$PAYLOAD"
