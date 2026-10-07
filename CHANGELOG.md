@@ -1,3 +1,10 @@
+# [1.22.0](https://github.com/ExaDev/github-runner/compare/v1.21.0...v1.22.0) (2026-10-07)
+
+
+### Features
+
+* **cluster:** register a node with taints set per host ([85171e6](https://github.com/ExaDev/github-runner/commit/85171e6ff1472f36df6235dc87b493450f90503e))
+
 # [1.21.0](https://github.com/ExaDev/github-runner/compare/v1.20.0...v1.21.0) (2026-10-07)
 
 
