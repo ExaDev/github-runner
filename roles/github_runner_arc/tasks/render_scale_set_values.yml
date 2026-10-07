@@ -1,0 +1,37 @@
+---
+# Renders one scale-set profile's Helm values on the control node, with `profile` (the expanded profile from plugins/filter/arc.py) set by the includer: the profile's values file (or the role's default template), the role's own overlay merged over it, and then the profile's capabilities added (plugins/filter/arc.py's arc_capability_pod). Sets github_runner_arc_scale_set_values, the release's values, and github_runner_arc_job_started_data, the job-started ConfigMap's data (empty when the profile needs none). Included by install_scale_set_profile.yml, and by tests/capabilities/render.yml so the test renders exactly what the role installs.
+
+- name: Render the Helm values for {{ profile.label }}
+  ansible.builtin.set_fact:
+    # Helm merges nested mappings the same way as combine, so merging the overlay here is the same as passing the two as separate values files. The capabilities are added after the merge, since they append to lists (init containers, volumes, the runner's env and mounts) that a values-file merge would replace.
+    github_runner_arc_capability_render: >-
+      {{
+        ((lookup('ansible.builtin.template', github_runner_arc_values_source) | from_yaml | default({}, true))
+         | combine(lookup('ansible.builtin.template', 'scale-set-overlay.yaml.j2') | from_yaml, recursive=true))
+        | exadev.github_runner.arc_capability_pod(
+            profile.capabilities, github_runner_arc_capabilities, github_runner_arc_tool_cache_path,
+            github_runner_arc_runner_uid, github_runner_arc_runner_gid,
+            github_runner_arc_job_started_hooks_dir, github_runner_arc_job_started_configmap)
+      }}
+  vars:
+    github_runner_arc_values_source: >-
+      {{
+        'runner-scale-set-values.yaml.j2' if profile.values_file | length == 0
+        else profile.values_file if profile.values_file is abs
+        else github_runner_arc_values_dir ~ '/' ~ profile.values_file
+      }}
+
+- name: Fail when the values cannot carry the capabilities of {{ profile.label }}
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_capability_render.errors | map('regex_replace', '^', profile.label ~ ': ') | list }}"
+  when: github_runner_arc_capability_render.errors | length > 0
+
+- name: Keep the rendered values and job-started hook data for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_scale_set_values: "{{ github_runner_arc_capability_render['values'] }}"
+    # The dispatcher the runner runs comes from the role's own file, beside the profile's tool paths and hook scripts.
+    github_runner_arc_job_started_data: >-
+      {{
+        github_runner_arc_capability_render.hooks | combine({'job-started.sh': lookup('ansible.builtin.file', 'job-started.sh')})
+        if github_runner_arc_capability_render.hooks | length > 0 else {}
+      }}

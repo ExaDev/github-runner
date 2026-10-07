@@ -10,11 +10,31 @@ argument_specs:
         default: []
         description:
           - Orgs whose runner scale sets this host installs. Each entry has name, app_id (needed only when the role writes the App Secret; otherwise the existing Secret supplies it), image, private_key or private_key_op_reference, and optionally installation_id and app_secret_name (the App Secret's name, default <org>-github-app).
-          - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, autoscale, sizing and burst.
+          - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, capabilities, autoscale, sizing and burst.
           - max_runners, when set, is the release's maxRunners and takes precedence over its values file and its sizing.
           - scale_set_labels replaces runs_on_label with the whole list of scaleSetLabels; an empty list sets none, so jobs target the release name.
           - sizing derives a runner ceiling from uniform node figures, or with measured true from each eligible node's allocatable CPU and memory less its current requests and reserve_cpu and reserve_memory_gib.
+          - capabilities names entries of github_runner_arc_capabilities that the profile's runner pods carry, in order.
           - burst, on a profile with sizing and without max_runners or autoscale, lets its runner pods overflow onto nodes carrying burst.node_label_key (any value, or one of burst.node_label_values), with burst.tolerations for their taint, and adds burst.max_runners to the sized maxRunners. With burst.exclusive true (and no sizing, max_runners or autoscale) the pods run on burst nodes only and burst.max_runners is the whole maxRunners.
+      github_runner_arc_capabilities:
+        type: dict
+        default: {}
+        description:
+          - Capabilities a profile's runner pods can carry, by name; a profile lists the ones it wants in its capabilities key.
+          - A tool-cache capability is {image, path?}, a public image pinned to a version tag or digest whose /toolcache holds a tool in the Actions tool-cache layout; path (<tool>/<version>, optionally /<subdirectory>) also puts it on PATH at job start.
+          - A hook capability is {job_started_hook}, a bash script the runner runs before each job's first step.
+      github_runner_arc_tool_cache_path:
+        type: str
+        default: /opt/hostedtoolcache
+        description: Where the tool cache is mounted on the runner container, and RUNNER_TOOL_CACHE when a profile has a tool-cache capability.
+      github_runner_arc_runner_uid:
+        type: int
+        default: 1001
+        description: The runner container's user id, which the tool-cache init containers run as.
+      github_runner_arc_runner_gid:
+        type: int
+        default: 1001
+        description: The runner container's group id, which the tool-cache init containers run as.
       github_runner_arc_values_dir:
         type: str
         default: ""

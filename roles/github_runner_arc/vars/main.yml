@@ -12,3 +12,7 @@ github_runner_arc_pull_secret_field_manager: github-runner-pull-secret-renewer
 
 # Annotation the node recovery watcher writes alongside the out-of-service taint it applies, recording when it applied it. The watcher removes only a taint carrying this annotation, so an operator's own out-of-service taint is left alone.
 github_runner_arc_node_recovery_annotation: github-runner.exadev/out-of-service-applied-at
+
+# Where a profile's job-started hook ConfigMap is mounted on the runner container, and its name in the profile's namespace. ACTIONS_RUNNER_HOOK_JOB_STARTED names job-started.sh in this directory, and the capability scripts it runs are in job-started.d beneath it.
+github_runner_arc_job_started_hooks_dir: /etc/github-runner/hooks
+github_runner_arc_job_started_configmap: github-runner-job-started
