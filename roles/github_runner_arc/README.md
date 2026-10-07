@@ -22,8 +22,10 @@ Before touching the cluster the role then checks the secrets it is about to writ
   - `scale_set_labels`: the whole `scaleSetLabels` list, in place of `runs_on_label`. An empty list sets no `scaleSetLabels`, so jobs target the scale set by its release name.
   - `autoscale`: `true` on at most one profile in the whole inventory makes it the scale set the autoscaler manages.
   - `sizing`: derive a runner ceiling from node capacity, given as uniform figures or measured from each eligible node (see Sizing). On an ordinary profile without `max_runners` it sets `maxRunners`; on the autoscaled profile it sets the autoscaler's ceiling, leaving `maxRunners` as the floor.
+  - `capabilities`: names of entries in `github_runner_arc_capabilities` that the profile's runner pods carry, in order (see [Capabilities](#capabilities)).
   - `burst`: let the runner pods overflow onto nodes a cluster autoscaler adds on demand, and count those nodes' runners into `maxRunners` (see [Burst nodes](#burst-nodes)). Needs `sizing`, and no `max_runners` or `autoscale`; with `exclusive: true` the pods run on burst nodes only and `burst.max_runners` is the whole ceiling, with no `sizing`.
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
+- `github_runner_arc_capabilities`: the capabilities profiles can name, as a mapping of name to capability (see [Capabilities](#capabilities)). `github_runner_arc_tool_cache_path` (default `/opt/hostedtoolcache`) is where the tool cache is mounted, and `github_runner_arc_runner_uid` and `github_runner_arc_runner_gid` (default `1001`, the runner user of ARC's `actions-runner` image) are the ids the tool-cache init containers run as.
 - `github_runner_arc_kubeconfig_path`: the kubeconfig on the host the role runs against. Defaults to `github_runner_cluster`'s kubeconfig; empty means `KUBECONFIG` or `~/.kube/config`.
 - `github_runner_arc_controller_chart_version`, `github_runner_arc_scaleset_chart_version`: chart pins; unset installs the latest chart. The controller chart's CRDs are applied (server-side) from `github_runner_arc_controller_chart_ref` at the controller's version before every controller install or upgrade, because Helm never upgrades a chart's CRDs itself; without that, a newer scale-set chart is rejected for fields the cluster's CRDs predate. Move the two pins together, and the CRDs follow. `tests/arc_upgrade/run.sh` covers the upgrade in a kind cluster.
 
@@ -99,6 +101,88 @@ The runner pods then lose the eligibility `nodeSelector`, and get instead a requ
 `burst.max_runners` is added to the ceiling `sizing` derives from the fixed nodes (uniform or measured, safety margin included), so ARC creates more runner pods than the fixed nodes hold; the extra pods stay Pending, which is what makes the autoscaler add a burst node. The safety margin is not applied to it, since burst nodes carry nothing else. Derive it from what the autoscaler may launch: each node group's maximum size times the runners one of its nodes holds (`exadev.github_runner.arc_max_runners` with the node's allocatable figures works that out). The placement comes from the `exadev.github_runner.arc_runner_placement` filter.
 
 `burst.exclusive: true` puts a profile on the burst nodes only: the required node affinity has the burst term alone, with nothing preferred, and the eligibility label no longer applies to its runner pods. It suits work the fixed nodes cannot hold, such as image builds whose Docker daemon needs more memory than those nodes can spare, and pairs with `minRunners: 0` in the profile's values, so no burst node is kept for an idle runner. Such a profile takes no `sizing`, `max_runners` or `autoscale`: `burst.max_runners` is its whole `maxRunners`. Where it shares burst node groups with an overflowing profile, split the groups' capacity between the two `burst.max_runners`, since each is a claim on the same nodes.
+
+## Capabilities
+
+A capability adds something to a profile's runner pods when they start, so the runner image itself can stay a public, stock image such as `ghcr.io/actions/actions-runner`. `github_runner_arc_capabilities` defines them by name, and each profile lists the ones it wants in `capabilities`. There are two kinds.
+
+A tool-cache capability, `{image, path?}`, brings a tool. For each one the runner pod gets an init container, named `capability-<name>`, that copies the tool from the image into an `emptyDir` mounted on the runner container at `github_runner_arc_tool_cache_path`, and `RUNNER_TOOL_CACHE` is set to that path. The runner hands `RUNNER_TOOL_CACHE` to every step, and setup actions that consult the Actions tool cache before downloading, such as `actions/setup-node` and `terraform-linters/setup-tflint`, then find the tool there and skip the download, with no change to the workflow. The init containers run as the runner's user, so the copies belong to it and a setup action can still add another version beside them. `path`, `<tool>/<version>` optionally followed by `/<subdirectory>`, also puts the tool on `PATH` before the job's first step, for a tool no setup action looks up (Terraform, whose `hashicorp/setup-terraform` always downloads, or the AWS CLI).
+
+A hook capability, `{job_started_hook}`, is a bash script the runner runs before each job's first step, for anything small: configuring git, writing a proxy setting to `GITHUB_ENV`, checking a mount.
+
+```yaml
+github_runner_arc_capabilities:
+  node-24:
+    image: ghcr.io/example/toolcache-node:24.21.0
+  tflint:
+    image: ghcr.io/example/toolcache-tflint:0.64.0
+  terraform:
+    image: ghcr.io/example/toolcache-terraform:1.16.5
+    path: terraform/1.16.5
+  awscli:
+    image: ghcr.io/example/toolcache-awscli:2.37.10
+    path: aws-cli/2.37.10
+  git-identity:
+    job_started_hook: |
+      git config --global user.name "Example CI"
+      git config --global user.email ci@example.com
+github_runner_arc_orgs:
+  - name: ExampleOrg
+    image: ghcr.io/actions/actions-runner:latest
+    scale_set_profiles:
+      - max_runners: 4
+        capabilities: [node-24, git-identity]
+      - suffix: -infra
+        runs_on_label: example-infra
+        max_runners: 2
+        capabilities: [terraform, tflint, awscli, git-identity]
+```
+
+A capability image must be pinned to a version tag or a digest, never `latest` or no tag, so every runner pod gets the same tool; the role refuses an unpinned one. It is pulled with the pod's pull Secret, which a public image does not need.
+
+### Profiles select capabilities
+
+A profile is the unit a workflow selects, so a set of capabilities becomes a named runner by giving the profile its own `runs-on` label, as the `-infra` profile above does: `runs-on: example-infra` lands on a pod with Terraform, TFLint and the AWS CLI, while `runs-on: exampleorg-runners` keeps landing on the org's pooled profiles. Profiles that share a label share a pool, and a job for that label can land on any of them, so give a profile with capabilities a label of its own unless every profile in the pool carries the same ones. A tool-cache capability that a job's setup action finds is only a shortcut, since the action downloads the tool when it is missing, but a tool put on `PATH` through `path` is simply absent from a pod without it.
+
+### The tool-image contract
+
+A tool image is any image that has:
+
+- a POSIX `sh` and `cp` at `/bin/sh` and on its `PATH`, which the init container runs as `/bin/sh -c 'cp -R /toolcache/. "$1"/'`, with the tool-cache mount as `$1`;
+- the tool under `/toolcache`, already in the Actions tool-cache layout: `/toolcache/<tool>/<version>/<arch>/` holding the tool, and an empty `/toolcache/<tool>/<version>/<arch>.complete` file beside that directory, which `@actions/tool-cache` requires before it treats an entry as present;
+- files readable, and directories searchable, by any user, since the copy runs as the runner's user.
+
+`<tool>` and `<version>` are what the consuming setup action looks up: `node` and the plain version (`24.21.0`, no leading `v`) for `actions/setup-node`, `tflint` and the version without its `v` for `setup-tflint`. `<arch>` is named the way that action names the architecture, and actions differ: `actions/setup-node` uses Node's `os.arch()` (`x64`, `arm64`), while `setup-tflint` maps `x64` to `amd64` (`amd64`, `arm64`). For a tool used only through `path` the name does not matter, since `path` finds whichever architecture is there; the reference images use `os.arch()` names, the tool cache's own default. A multi-architecture image holds, for each platform, only that platform's `<arch>` directory, so the tool cache in any one pod has one architecture per tool, which is what `path` relies on. `path` adds `<tool>/<version>/<arch>[/<subdirectory>]` for the one `<arch>` with a `.complete` marker, and the job fails at its start if there is none or more than one.
+
+`tool-images/` holds Dockerfiles for reference images following this contract: Node.js, Terraform, TFLint and the AWS CLI. Each downloads the official release for the target architecture in a first stage, verifies it (against the release's checksums, and for Terraform and the AWS CLI against the vendor's signing key, pinned by fingerprint), lays it out under `/toolcache`, and copies that into `busybox`, which supplies `sh` and `cp`. They are not published from this repository; build and push them to a registry your clusters can pull from, for both architectures:
+
+```sh
+docker buildx build --platform linux/amd64,linux/arm64 --build-arg NODE_VERSION=24.21.0 \
+  -t ghcr.io/example/toolcache-node:24.21.0 --push tool-images/node
+```
+
+A capability image of your own takes a few lines. This one packages a static binary, `example-cli`, built beside the Dockerfile for each architecture, for use through `path`:
+
+```dockerfile
+FROM busybox:1.37
+ARG TARGETARCH
+COPY example-cli-linux-${TARGETARCH} /toolcache/example-cli/1.2.3/${TARGETARCH}/example-cli
+RUN touch "/toolcache/example-cli/1.2.3/${TARGETARCH}.complete" && chmod -R a+rX /toolcache
+```
+
+and is declared as `{image: ghcr.io/example/toolcache-example-cli:1.2.3, path: example-cli/1.2.3}`.
+
+### The job-started hook
+
+When a profile has a hook capability or a `path`, the role writes a ConfigMap named `github-runner-job-started` into the profile's namespace and mounts it on the runner container at `/etc/github-runner/hooks`, read-only. It holds `job-started.sh` (the role's `files/job-started.sh`), `tool-paths` (one `path` per line) and `job-started.d/`, the hook capabilities' scripts, numbered in the profile's order. `ACTIONS_RUNNER_HOOK_JOB_STARTED` names `job-started.sh`, the same runner mechanism the runner image uses for its job-completed hook (`ACTIONS_RUNNER_HOOK_JOB_COMPLETED`), so the runner runs it as the runner user before the job's first step, in a step named "Set up runner", with the job's default environment variables and its environment files. It appends each tool path to `GITHUB_PATH`, then runs every script in `job-started.d` in name order with `bash -e`. Unlike the job-completed hook, which never fails the job it ends, a failure here fails the job, since a job whose tools or setup did not arrive should stop before its first step. A profile without either gets no ConfigMap, and the role removes one an earlier run left. The scripts live in a ConfigMap owned by root, so a job cannot change what the next one runs, and each runner pod reads the ConfigMap when it starts, so a change reaches the next job without restarting anything.
+
+### Where capabilities apply
+
+The tool cache and the hook are on the runner container, so they serve the steps that run there: every step in the default container mode and in Docker-in-Docker mode (`container_mode: dind`). A job that runs in a `container:` reaches the tool cache only through the runner's own mapping of it, which in Docker-in-Docker mode points at the Docker daemon's filesystem, where the cache is not mounted. The `kubernetes` container modes run every step in a separate pod, so the role refuses capabilities on a profile whose values use them. It also refuses them when the values define no runner container (the role's own template does), when the runner container already sets `RUNNER_TOOL_CACHE` or `ACTIONS_RUNNER_HOOK_JOB_STARTED`, or when a volume already uses the name `tool-cache` or `job-started-hooks`. A values file's own init containers, volumes, environment and mounts are kept, and the capabilities' are added after them, by the `exadev.github_runner.arc_capability_pod` filter. `exadev.github_runner.arc_capability_errors` checks the catalogue and each profile's references during validation, before anything changes.
+
+Each tool-cache capability adds its copy to every pod's start, which is not yet measured. The `emptyDir` lives on the node's disk for the pod's lifetime, so a large tool set counts against the node's ephemeral storage.
+
+`tests/capabilities/run.sh` exercises all of this in a kind cluster: it builds the reference Node.js image, renders a profile through the role's own tasks, renders the scale-set chart with the result and checks it against the ARC CRDs, then starts a pod from the chart's runner pod template and checks that the init container filled the tool cache, that the hook ran and put the tool on `PATH`, and that `@actions/tool-cache`, the library behind `actions/setup-node`'s lookup, finds it. `.github/workflows/capabilities.yml` runs it on pull requests that touch the role, its filters, the tool images or the test.
 
 ## Image pull Secret from the GitHub App
 
