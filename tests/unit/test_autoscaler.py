@@ -265,6 +265,15 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.job_peak_out.exists())
 
+    def stored(self, key: str) -> str | None:
+        """What the script last wrote to a key of the shared state ConfigMap, or None when it never wrote it."""
+        path = self.dir / "state.json.configmap"
+        return json.loads(path.read_text()).get(key) if path.exists() else None
+
+    @staticmethod
+    def patched_maximums(result: subprocess.CompletedProcess[str]) -> dict[str, int]:
+        return {namespace: int(maximum) for namespace, maximum in re.findall(r"would patch (\S+)/release-\S+'s maxRunners to (\d+)", result.stdout)}
+
     def test_the_running_count_is_the_ephemeral_runners_that_have_not_finished(self) -> None:
         phases = ["Running", "Pending", "", "Succeeded", "Failed"]
         result = self.poll({}, ephemeral={"ns-a": phases, "ns-b": []})
@@ -276,6 +285,87 @@ class AutoscalerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("could not count", result.stderr)
         self.assertNotIn("R_total", result.stdout)
+
+    # Both targets hold three slots under a ceiling of six, so the pool is healthy and full: the state in which a saturated target used to wait while another sat idle.
+    FULL_POOL = {"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}
+
+    def test_one_slot_moves_to_a_saturated_target_once_the_imbalance_is_confirmed(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": []}
+        first = self.poll(self.FULL_POOL, ceiling=6, ephemeral=runners)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertNotIn("would patch", first.stdout)
+        self.assertEqual(self.stored("rebalance-confirm-count"), "1")
+        second = self.poll(self.FULL_POOL, ceiling=6, ephemeral=runners)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("rebalance:", second.stdout)
+        moved = self.patched_maximums(second)
+        self.assertEqual(moved, {"ns-a": MAX_RUNNERS + 1, "ns-b": MAX_RUNNERS - 1})
+        self.assertEqual(sum(moved.values()), MAX_RUNNERS * len(NAMESPACES))
+        self.assertEqual(self.stored("rebalance-confirm-count"), "0")
+
+    def test_nothing_moves_while_every_target_is_busy(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": ["Running"] * 3}
+        for _ in range(2):
+            result = self.poll(self.FULL_POOL, ceiling=6, ephemeral=runners)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("would patch", result.stdout)
+        self.assertEqual(self.stored("rebalance-confirm-count"), "0")
+
+    def test_a_confirmation_in_progress_is_dropped_when_the_imbalance_ends(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": ["Running"] * 3}
+        result = self.poll(self.FULL_POOL, ceiling=6, ephemeral=runners, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stored("rebalance-confirm-count"), "0")
+
+    def test_a_donor_with_one_spare_slot_ends_at_its_running_count(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": ["Running"] * 2}
+        poll = {"pods": self.FULL_POOL, "ceiling": 6, "ephemeral": runners, "configmap": {"rebalance-confirm-count": "1"}}
+        result = self.poll(**poll)
+        self.assertEqual(self.patched_maximums(result), {"ns-a": MAX_RUNNERS + 1, "ns-b": 2})
+
+    def test_a_donor_with_no_spare_slot_gives_nothing(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": ["Running"] * 2}
+        result = self.poll(self.FULL_POOL, ceiling=5, ephemeral=runners, max_runners={"ns-a": 3, "ns-b": 2}, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_a_target_is_never_rebalanced_below_one_runner(self) -> None:
+        result = self.poll(self.FULL_POOL, ceiling=4, ephemeral={"ns-a": ["Running"] * 3, "ns-b": []}, max_runners={"ns-a": 3, "ns-b": 1}, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_the_slot_comes_from_the_target_with_the_most_spare_slots(self) -> None:
+        three = ("ns-a", "ns-b", "ns-c")
+        runners = {"ns-a": ["Running"] * 3, "ns-b": ["Running"] * 2, "ns-c": []}
+        pods = {ns: [SCHEDULED_POD] for ns in three}
+        result = self.poll(pods, ceiling=9, namespaces=three, ephemeral=runners, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(self.patched_maximums(result), {"ns-a": MAX_RUNNERS + 1, "ns-c": MAX_RUNNERS - 1})
+
+    def test_no_slot_moves_under_memory_pressure(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": []}
+        result = self.poll(self.FULL_POOL, ceiling=6, ephemeral=runners, node_mem_pct=95, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pressure=true", result.stdout)
+        self.assertNotIn("rebalance:", result.stdout)
+
+    def test_no_slot_moves_while_a_runner_pod_cannot_be_scheduled(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": []}
+        result = self.poll({"ns-a": [UNSCHEDULABLE_POD], "ns-b": [SCHEDULED_POD]}, ceiling=6, ephemeral=runners, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("rebalance:", result.stdout)
+
+    def test_no_slot_moves_while_the_pool_is_above_its_ceiling(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": []}
+        result = self.poll(self.FULL_POOL, ceiling=4, ephemeral=runners, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("above the ceiling", result.stdout)
+        self.assertNotIn("rebalance:", result.stdout)
+
+    def test_no_slot_moves_while_the_pool_can_still_grow(self) -> None:
+        runners = {"ns-a": ["Running"] * 3, "ns-b": []}
+        result = self.poll(self.FULL_POOL, ceiling=8, ephemeral=runners, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("rebalance:", result.stdout)
 
     def test_a_record_larger_than_one_argument_may_be_is_still_stored(self) -> None:
         # More bytes than the kernel accepts for all arguments together (and far more than one argument may hold), so it can reach kubectl only through a file.
