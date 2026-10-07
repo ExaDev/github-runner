@@ -9,7 +9,7 @@
         ((lookup('ansible.builtin.template', github_runner_arc_values_source) | from_yaml | default({}, true))
          | combine(lookup('ansible.builtin.template', 'scale-set-overlay.yaml.j2') | from_yaml, recursive=true))
         | exadev.github_runner.arc_capability_pod(
-            profile.capabilities, github_runner_arc_capabilities, github_runner_arc_tool_cache_path,
+            profile.capabilities, github_runner_arc_capabilities, github_runner_arc_tool_cache_path, github_runner_arc_sysroot_path,
             github_runner_arc_runner_uid, github_runner_arc_runner_gid,
             github_runner_arc_job_started_hooks_dir, github_runner_arc_job_started_configmap)
       }}

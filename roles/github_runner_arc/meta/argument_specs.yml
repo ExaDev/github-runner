@@ -22,19 +22,24 @@ argument_specs:
         description:
           - Capabilities a profile's runner pods can carry, by name; a profile lists the ones it wants in its capabilities key.
           - A tool-cache capability is {image, path?}, a public image pinned to a version tag or digest whose /toolcache holds a tool in the Actions tool-cache layout; path (<tool>/<version>, optionally /<subdirectory>) also puts it on PATH at job start.
+          - A system-library capability is {sysroot_image, env?}, a public image pinned to a version tag or digest whose /sysroot is a relocatable prefix; it is copied into github_runner_arc_sysroot_path, whose bin, lib, include, lib/pkgconfig and the prefix itself are prepended to PATH, LD_LIBRARY_PATH, LIBRARY_PATH, CPATH, PKG_CONFIG_PATH and CMAKE_PREFIX_PATH at job start, and env is a mapping of further variables to single-line string values set at job start.
           - A hook capability is {job_started_hook}, a bash script the runner runs before each job's first step.
       github_runner_arc_tool_cache_path:
         type: str
         default: /opt/hostedtoolcache
         description: Where the tool cache is mounted on the runner container, and RUNNER_TOOL_CACHE when a profile has a tool-cache capability.
+      github_runner_arc_sysroot_path:
+        type: str
+        default: /opt/sysroot
+        description: Where the sysroot is mounted on the runner container when a profile has a system-library capability, an absolute path with no colon.
       github_runner_arc_runner_uid:
         type: int
         default: 1001
-        description: The runner container's user id, which the tool-cache init containers run as.
+        description: The runner container's user id, which the capabilities' init containers run as.
       github_runner_arc_runner_gid:
         type: int
         default: 1001
-        description: The runner container's group id, which the tool-cache init containers run as.
+        description: The runner container's group id, which the capabilities' init containers run as.
       github_runner_arc_values_dir:
         type: str
         default: ""

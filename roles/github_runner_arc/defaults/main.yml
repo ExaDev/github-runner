@@ -10,13 +10,16 @@ github_runner_arc_values_dir: ""
 # Kubeconfig path on the host the role runs against. Empty means the Kubernetes modules' own default (KUBECONFIG, then ~/.kube/config); a host brought up by github_runner_cluster uses the kubeconfig that role writes.
 github_runner_arc_kubeconfig_path: "{{ github_runner_cluster_kubeconfig_path | default('') }}"
 
-# Capabilities a scale-set profile's runner pods can carry, by name; a profile lists the ones it wants in its capabilities key (see the role README's Capabilities section). A tool-cache capability, {image, path?}, names a public, pinned image whose /toolcache holds a tool in the Actions tool-cache layout; an init container copies it into the pod's tool cache, where actions/setup-node, setup-tflint and other setup actions that consult the cache find it. path (<tool>/<version>, optionally /<subdirectory>) also puts the tool on PATH at job start, for a tool no setup action looks up. A hook capability, {job_started_hook}, is a bash script the runner runs before each job's first step.
+# Capabilities a scale-set profile's runner pods can carry, by name; a profile lists the ones it wants in its capabilities key (see the role README's Capabilities section). A tool-cache capability, {image, path?}, names a public, pinned image whose /toolcache holds a tool in the Actions tool-cache layout; an init container copies it into the pod's tool cache, where actions/setup-node, setup-tflint and other setup actions that consult the cache find it. path (<tool>/<version>, optionally /<subdirectory>) also puts the tool on PATH at job start, for a tool no setup action looks up. A system-library capability, {sysroot_image, env?}, names a public, pinned image whose /sysroot is a relocatable prefix (bin/, lib/, include/, lib/pkgconfig/) holding shared libraries, their headers and programs; an init container copies it into the pod's sysroot (github_runner_arc_sysroot_path), and at job start its directories are prepended to PATH, LD_LIBRARY_PATH, LIBRARY_PATH, CPATH, PKG_CONFIG_PATH and CMAKE_PREFIX_PATH and env's variables (such as a relocation variable a library needs) are set. A hook capability, {job_started_hook}, is a bash script the runner runs before each job's first step.
 github_runner_arc_capabilities: {}
 
 # Where the tool cache is mounted on the runner container, and what RUNNER_TOOL_CACHE is set to when a profile has a tool-cache capability. The default is where GitHub-hosted runners keep theirs.
 github_runner_arc_tool_cache_path: "/opt/hostedtoolcache"
 
-# The runner container's user and group ids, which the tool-cache init containers run as so the copied tools belong to the runner user and a setup action can add another version beside them. The defaults are those of the runner user in ARC's actions-runner image; an image with a different runner user sets them to its own.
+# Where the sysroot is mounted on the runner container when a profile has a system-library capability: the prefix the capabilities' payloads are copied into and their search paths point at. A capability whose env names the prefix (OPAL_PREFIX, for example) should take it from this variable.
+github_runner_arc_sysroot_path: "/opt/sysroot"
+
+# The runner container's user and group ids, which the capabilities' init containers run as so the copied tools and libraries belong to the runner user and a setup action can add another version beside them. The defaults are those of the runner user in ARC's actions-runner image; an image with a different runner user sets them to its own.
 github_runner_arc_runner_uid: 1001
 github_runner_arc_runner_gid: 1001
 

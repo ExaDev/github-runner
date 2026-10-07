@@ -22,12 +22,15 @@ arc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(arc)
 
 TOOL_CACHE = "/opt/hostedtoolcache"
+SYSROOT = "/opt/sysroot"
 HOOKS_DIR = "/etc/github-runner/hooks"
 CONFIGMAP = "github-runner-job-started"
 NODE_IMAGE = "ghcr.io/example/toolcache-node:22.11.0"
 CATALOGUE: dict[str, Any] = {
     "node": {"image": NODE_IMAGE},
     "terraform": {"image": "ghcr.io/example/toolcache-terraform@sha256:" + "0" * 64, "path": "terraform/1.9.8"},
+    "mpi": {"sysroot_image": "ghcr.io/example/sysroot-openmpi:5.0.11", "env": {"OPAL_PREFIX": SYSROOT}},
+    "libpq": {"sysroot_image": "ghcr.io/example/sysroot-libpq@sha256:" + "1" * 64},
     "git-identity": {"job_started_hook": "git config --global user.name example\n"},
     "proxy": {"job_started_hook": "echo HTTPS_PROXY=http://proxy.example:3128 >> \"$GITHUB_ENV\"\n"},
 }
@@ -44,7 +47,7 @@ def expanded(profile: dict[str, Any]) -> dict[str, Any]:
 
 def pod(values: dict[str, Any], names: list[str]) -> dict[str, Any]:
     """Add names' capabilities from CATALOGUE to values with the role's default settings."""
-    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, SYSROOT, 1001, 1001, HOOKS_DIR, CONFIGMAP)
     return result
 
 
@@ -98,6 +101,36 @@ class CatalogueTest(unittest.TestCase):
             with self.subTest(case):
                 errors = self.errors(catalogue)
                 self.assertTrue(any(message in error for error in errors), errors)
+
+    def test_bad_system_library_entries_are_errors(self) -> None:
+        image = "ghcr.io/example/sysroot-openmpi:5.0.11"
+        cases = {
+            "a sysroot image floating on latest": ({"mpi": {"sysroot_image": "ghcr.io/example/sysroot-openmpi:latest"}}, "sysroot_image must be pinned"),
+            "an untagged sysroot image": ({"mpi": {"sysroot_image": "ghcr.io/example/sysroot-openmpi"}}, "sysroot_image must be pinned"),
+            "a tool image and a sysroot image at once": ({"mpi": {"image": NODE_IMAGE, "sysroot_image": image}}, "exactly one of image"),
+            "env on a tool-cache capability": ({"node": {"image": NODE_IMAGE, "env": {"A": "1"}}}, "env is only for a system-library capability"),
+            "env on a hook": ({"setup": {"job_started_hook": "true", "env": {"A": "1"}}}, "env is only for a system-library capability"),
+            "a path on a system-library capability": ({"mpi": {"sysroot_image": image, "path": "mpi/5"}}, "only for a tool-cache capability"),
+            "env that is not a mapping": ({"mpi": {"sysroot_image": image, "env": ["OPAL_PREFIX=/opt/sysroot"]}}, "must be a mapping of variable name to value"),
+            "a variable name that is not one": ({"mpi": {"sysroot_image": image, "env": {"OPAL-PREFIX": "/opt/sysroot"}}}, "is not a variable name"),
+            "a variable starting with a digit": ({"mpi": {"sysroot_image": image, "env": {"1X": "y"}}}, "is not a variable name"),
+            "a search path the role sets": ({"mpi": {"sysroot_image": image, "env": {"LD_LIBRARY_PATH": "/x"}}}, "LD_LIBRARY_PATH is set by the role itself"),
+            "PATH": ({"mpi": {"sysroot_image": image, "env": {"PATH": "/x"}}}, "PATH is set by the role itself"),
+            "the tool cache variable": ({"mpi": {"sysroot_image": image, "env": {"RUNNER_TOOL_CACHE": "/x"}}}, "RUNNER_TOOL_CACHE is set by the role itself"),
+            "a number": ({"mpi": {"sysroot_image": image, "env": {"OMPI_MCA_rmaps_base_oversubscribe": 1}}}, "must be a single-line string"),
+            "a value with a line break, which would add a second GITHUB_ENV line": ({"mpi": {"sysroot_image": image, "env": {"A": "x\nLD_PRELOAD=/evil.so"}}}, "must be a single-line string"),
+        }
+        for case, (catalogue, message) in cases.items():
+            with self.subTest(case):
+                errors = self.errors(catalogue)
+                self.assertTrue(any(message in error for error in errors), errors)
+
+    def test_two_system_libraries_setting_one_variable_differently_in_a_profile_is_an_error(self) -> None:
+        catalogue = {"a": {"sysroot_image": "ghcr.io/example/a:1", "env": {"SHARED": "one"}}, "b": {"sysroot_image": "ghcr.io/example/b:1", "env": {"SHARED": "two"}}, "c": {"sysroot_image": "ghcr.io/example/c:1", "env": {"SHARED": "one"}}}
+        self.assertEqual(self.errors(catalogue, ["a", "b"]), ["Example: capabilities 'a' and 'b' set SHARED to different values"])
+        # The same value twice agrees, and capabilities that are defined but not in the same profile never conflict.
+        self.assertEqual(self.errors(catalogue, ["a", "c"]), [])
+        self.assertEqual(self.errors(catalogue, ["b"]), [])
 
     def test_a_digest_pins_an_image(self) -> None:
         self.assertEqual(self.errors({"node": {"image": "ghcr.io/example/node@sha256:" + "a" * 64}}), [])
@@ -201,6 +234,74 @@ class CapabilityPodTest(unittest.TestCase):
                 self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
                 self.assertIs(result["values"], values)
 
+    def test_a_system_library_capability_copies_its_sysroot_and_the_hook_extends_the_search_paths(self) -> None:
+        result = pod(DEFAULT_VALUES, ["mpi"])
+        self.assertEqual(result["errors"], [])
+        spec = result["values"]["template"]["spec"]
+        self.assertEqual(
+            spec["initContainers"],
+            [
+                {
+                    "name": "capability-mpi",
+                    "image": CATALOGUE["mpi"]["sysroot_image"],
+                    "command": ["/bin/sh", "-c", 'cp -R /sysroot/. "$1"/', "copy-sysroot", SYSROOT],
+                    "securityContext": {"runAsUser": 1001, "runAsGroup": 1001, "runAsNonRoot": True, "allowPrivilegeEscalation": False},
+                    "volumeMounts": [{"name": "sysroot", "mountPath": SYSROOT}],
+                }
+            ],
+        )
+        self.assertEqual([volume["name"] for volume in spec["volumes"]], ["sysroot", "job-started-hooks"])
+        self.assertEqual(runner(result["values"])["volumeMounts"], [{"name": "sysroot", "mountPath": SYSROOT}, {"name": "job-started-hooks", "mountPath": HOOKS_DIR, "readOnly": True}])
+        # The search paths are set by the hook at job start, never on the container, whose PATH would replace the image's own.
+        self.assertEqual(runner(result["values"])["env"], [{"name": "ACTIONS_RUNNER_HOOK_JOB_STARTED", "value": f"{HOOKS_DIR}/job-started.sh"}])
+        self.assertEqual(
+            result["hooks"],
+            {
+                "sysroot-env": "PATH+=/opt/sysroot/bin\nLD_LIBRARY_PATH+=/opt/sysroot/lib\nLIBRARY_PATH+=/opt/sysroot/lib\nCPATH+=/opt/sysroot/include\nPKG_CONFIG_PATH+=/opt/sysroot/lib/pkgconfig\nCMAKE_PREFIX_PATH+=/opt/sysroot\nOPAL_PREFIX=/opt/sysroot\n",
+            },
+        )
+        self.assertIn({"key": "sysroot-env", "path": "sysroot-env"}, spec["volumes"][1]["configMap"]["items"])
+
+    def test_every_kind_together_keeps_the_profiles_order_and_shares_one_sysroot(self) -> None:
+        result = pod(DEFAULT_VALUES, ["libpq", "node", "git-identity", "mpi", "terraform"])
+        self.assertEqual(result["errors"], [])
+        spec = result["values"]["template"]["spec"]
+        self.assertEqual([container["name"] for container in spec["initContainers"]], ["capability-libpq", "capability-node", "capability-mpi", "capability-terraform"])
+        self.assertEqual([container["volumeMounts"][0]["name"] for container in spec["initContainers"]], ["sysroot", "tool-cache", "sysroot", "tool-cache"])
+        self.assertEqual([volume["name"] for volume in spec["volumes"]], ["tool-cache", "sysroot", "job-started-hooks"])
+        self.assertEqual([item["path"] for item in spec["volumes"][2]["configMap"]["items"]], ["job-started.sh", "tool-paths", "sysroot-env", "job-started.d/1-git-identity.sh"])
+        self.assertEqual([variable["name"] for variable in runner(result["values"])["env"]], ["RUNNER_TOOL_CACHE", "ACTIONS_RUNNER_HOOK_JOB_STARTED"])
+        self.assertTrue(result["hooks"]["sysroot-env"].endswith("CMAKE_PREFIX_PATH+=/opt/sysroot\nOPAL_PREFIX=/opt/sysroot\n"))
+
+    def test_the_sysroot_follows_its_configured_path(self) -> None:
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], {"mpi": {"sysroot_image": "ghcr.io/example/m:1"}}, TOOL_CACHE, "/srv/libs/", 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["values"]["template"]["spec"]["initContainers"][0]["command"][-1], "/srv/libs/")
+        self.assertEqual(result["hooks"]["sysroot-env"].splitlines()[:2], ["PATH+=/srv/libs/bin", "LD_LIBRARY_PATH+=/srv/libs/lib"])
+
+    def test_a_sysroot_path_that_cannot_carry_a_sysroot_is_an_error(self) -> None:
+        cases = {
+            "a relative path": ("opt/sysroot", "must be an absolute directory"),
+            "the root": ("/", "must be an absolute directory"),
+            "a colon, which would split the search paths": ("/opt/sys:root", "must be an absolute directory"),
+            "the tool cache": (TOOL_CACHE, "overlaps the tool cache path"),
+            "inside the tool cache": (f"{TOOL_CACHE}/sysroot", "overlaps the tool cache path"),
+            "around the hooks directory": ("/etc/github-runner", "overlaps the job-started hooks directory"),
+        }
+        for case, (path, message) in cases.items():
+            with self.subTest(case):
+                result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], CATALOGUE, TOOL_CACHE, path, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+                self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
+                self.assertIs(result["values"], DEFAULT_VALUES)
+
+    def test_the_sysroot_path_is_not_checked_for_a_profile_without_a_system_library(self) -> None:
+        self.assertEqual(arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, "relative", 1001, 1001, HOOKS_DIR, CONFIGMAP)["errors"], [])
+
+    def test_a_volume_already_named_sysroot_is_an_error(self) -> None:
+        values = {"template": {"spec": {"volumes": [{"name": "sysroot", "emptyDir": {}}], "containers": [{"name": "runner"}]}}}
+        result = pod(values, ["libpq"])
+        self.assertIn("the values already define a volume named sysroot, which capabilities add", result["errors"])
+
     def test_dind_mode_keeps_the_capabilities_beside_the_charts_own_containers(self) -> None:
         # In dind mode the chart builds the runner and dind containers itself but keeps the values' init containers, volumes (other than work) and the runner's env and mounts, so the capabilities are added the same way.
         result = pod({**DEFAULT_VALUES, "containerMode": {"type": "dind"}}, ["node"])
@@ -235,6 +336,14 @@ class RenderedValuesTest(unittest.TestCase):
         self.assertEqual(job_started["job-started.sh"], DISPATCHER.read_text().rstrip("\n"))
         self.assertEqual(job_started["tool-paths"], "terraform/1.9.8\n")
 
+    def test_the_role_renders_a_system_library_capability_at_its_sysroot_path(self) -> None:
+        rendered = self.render({"max_runners": 1, "capabilities": ["mpi"]})
+        values = rendered["values"]
+        self.assertEqual(values["template"]["spec"]["initContainers"][0]["volumeMounts"], [{"name": "sysroot", "mountPath": SYSROOT}])
+        self.assertIn({"name": "sysroot", "mountPath": SYSROOT}, runner(values)["volumeMounts"])
+        self.assertEqual(set(rendered["job_started"]), {"job-started.sh", "sysroot-env"})
+        self.assertIn("LD_LIBRARY_PATH+=/opt/sysroot/lib\n", rendered["job_started"]["sysroot-env"])
+
     def test_a_profile_without_capabilities_renders_as_before(self) -> None:
         rendered = self.render({"max_runners": 3, "container_mode": "dind"})
         self.assertEqual(rendered["job_started"], {})
@@ -263,7 +372,9 @@ class DispatcherTest(unittest.TestCase):
         return directory
 
     def run_hook(self) -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "RUNNER_TOOL_CACHE": str(self.cache), "GITHUB_PATH": str(self.github_path), "HOOK_LOG": str(self.log)}
+        # Without the GITHUB_ENV of a workflow these tests may themselves run in, so nothing is written to it.
+        env = {key: value for key, value in os.environ.items() if key != "GITHUB_ENV"}
+        env.update({"RUNNER_TOOL_CACHE": str(self.cache), "GITHUB_PATH": str(self.github_path), "HOOK_LOG": str(self.log)})
         return subprocess.run(["bash", "-e", str(self.hooks / "job-started.sh")], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
 
     def test_tool_paths_are_put_on_path_for_the_cached_architecture(self) -> None:
@@ -308,6 +419,26 @@ class DispatcherTest(unittest.TestCase):
         completed = self.run_hook()
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("more than one architecture", completed.stderr)
+
+    def test_the_sysroot_env_prepends_search_paths_and_sets_variables_for_the_steps_and_later_scripts(self) -> None:
+        github_env = self.dir / "github_env"
+        github_env.touch()
+        (self.hooks / "sysroot-env").write_text("PATH+=/opt/sysroot/bin\nLD_LIBRARY_PATH+=/opt/sysroot/lib\nCPATH+=/opt/sysroot/include\nOPAL_PREFIX=/opt/sysroot\nEXAMPLE_FLAGS=a=b c\n")
+        (self.hooks / "job-started.d" / "1-check.sh").write_text('echo "$LD_LIBRARY_PATH|$CPATH|$OPAL_PREFIX|$EXAMPLE_FLAGS|${PATH%%:*}" >> "$HOOK_LOG"\n')
+        env = {key: value for key, value in os.environ.items() if key not in {"CPATH", "OPAL_PREFIX", "EXAMPLE_FLAGS"}}
+        env.update({"RUNNER_TOOL_CACHE": str(self.cache), "GITHUB_PATH": str(self.github_path), "GITHUB_ENV": str(github_env), "HOOK_LOG": str(self.log), "LD_LIBRARY_PATH": "/usr/local/lib"})
+        completed = subprocess.run(["bash", "-e", str(self.hooks / "job-started.sh")], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.github_path.read_text(), "/opt/sysroot/bin\n")
+        # An existing value is kept after the sysroot's directory, an unset one is not given an empty entry, and a value may hold '=' and spaces.
+        self.assertEqual(github_env.read_text().splitlines(), ["LD_LIBRARY_PATH=/opt/sysroot/lib:/usr/local/lib", "CPATH=/opt/sysroot/include", "OPAL_PREFIX=/opt/sysroot", "EXAMPLE_FLAGS=a=b c"])
+        self.assertEqual(self.log.read_text().splitlines(), ["/opt/sysroot/lib:/usr/local/lib|/opt/sysroot/include|/opt/sysroot|a=b c|/opt/sysroot/bin"])
+
+    def test_a_sysroot_env_without_github_env_fails_the_job(self) -> None:
+        (self.hooks / "sysroot-env").write_text("OPAL_PREFIX=/opt/sysroot\n")
+        completed = self.run_hook()
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("GITHUB_ENV is not set", completed.stderr)
 
     def test_a_missing_subdirectory_fails_the_job(self) -> None:
         self.cache_tool("node", "22.11.0", "x64")
