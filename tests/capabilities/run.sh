@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Integration test for scale-set profile capabilities: builds the reference Node.js tool image from tool-images/node, renders a profile carrying it (with a path, so the job-started hook puts it on PATH) and a hook capability through the role's own tasks, renders the gha-runner-scale-set chart with those values, and checks the AutoscalingRunnerSet against the ARC CRDs with a server-side dry run in a kind cluster. It then starts a pod from the chart's own runner pod template in that cluster, with the runner's command replaced by what the runner does at job start (run the ACTIONS_RUNNER_HOOK_JOB_STARTED hook with GITHUB_PATH and GITHUB_ENV) followed by a step that asserts the cached Node.js is on PATH and that @actions/tool-cache's find, the lookup actions/setup-node makes before downloading, returns the copy the init container put in the tool cache.
+# Integration test for scale-set profile capabilities: builds the reference Node.js tool image from tool-images/node and the reference libpq system-library image from tool-images/libpq, renders a profile carrying them (the tool with a path, so the job-started hook puts it on PATH; the library with an extra variable) and a hook capability through the role's own tasks, renders the gha-runner-scale-set chart with those values, and checks the AutoscalingRunnerSet against the ARC CRDs with a server-side dry run in a kind cluster. It then starts a pod from the chart's own runner pod template in that cluster, with the runner's command replaced by what the runner does at job start (run the ACTIONS_RUNNER_HOOK_JOB_STARTED hook with GITHUB_PATH and GITHUB_ENV) followed by a step that asserts the cached Node.js is on PATH and that @actions/tool-cache's find, the lookup actions/setup-node makes before downloading, returns the copy the init container put in the tool cache, and that libpq's programs run from the sysroot its init container filled, with the search paths and the extra variable the hook set.
 #
 # Usage: tests/capabilities/run.sh. Needs Docker, kind, kubectl, helm, python3 with PyYAML, and ansible-playbook (ANSIBLE_PLAYBOOK overrides which); reaches the network for the chart, the runner image and the npm package. GRTEST_SCALESET_CHART_VERSION pins the scale-set chart and the controller chart its CRDs come from (default: the latest). Creates a kind cluster named grtest-capabilities and removes it on exit unless GRTEST_KEEP=1.
 set -euo pipefail
@@ -9,6 +9,8 @@ ansible_playbook="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 cluster=grtest-capabilities
 namespace=arc-runners-example
 tool_image=grtest/toolcache-node:test
+library_image=grtest/sysroot-libpq:test
+sysroot=/opt/sysroot
 runner_image=ghcr.io/actions/actions-runner:latest
 charts=oci://ghcr.io/actions/actions-runner-controller-charts
 chart_version="${GRTEST_SCALESET_CHART_VERSION:-}"
@@ -39,23 +41,26 @@ version_flag=()
 
 log "Building the reference Node.js ${node_version} tool image"
 docker build -q -t "$tool_image" "$repo_root/tool-images/node" >/dev/null
+log "Building the reference libpq system-library image"
+docker build -q -t "$library_image" "$repo_root/tool-images/libpq" >/dev/null
 
 log "Creating kind cluster ${cluster}"
 kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s >/dev/null
-kind load docker-image "$tool_image" --name "$cluster" >/dev/null
+kind load docker-image "$tool_image" "$library_image" --name "$cluster" >/dev/null
 
 log "Rendering the profile's values through the role"
-# The profile as arc_profiles expands it, and a catalogue with the tool image (put on PATH through its bin directory) and a hook capability that records it ran.
-python3 - "$repo_root/plugins/filter/arc.py" "$work/extra.json" "$tool_image" "$node_version" "$work/rendered.json" <<'EOF'
+# The profile as arc_profiles expands it, and a catalogue with the tool image (put on PATH through its bin directory), the library image (with PGSYSCONFDIR, where libpq looks for its service file, as its extra variable) and a hook capability that records it ran.
+python3 - "$repo_root/plugins/filter/arc.py" "$work/extra.json" "$tool_image" "$node_version" "$work/rendered.json" "$library_image" "$sysroot" <<'EOF'
 import importlib.util, json, sys
-plugin, extra, image, version, output = sys.argv[1:]
+plugin, extra, image, version, output, library_image, sysroot = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("arc", plugin)
 arc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(arc)
-result = arc.arc_profiles([{"name": "Example", "image": "unused:1", "scale_set_profiles": [{"max_runners": 1, "capabilities": ["node", "marker"]}]}], require_app_id=False)
+result = arc.arc_profiles([{"name": "Example", "image": "unused:1", "scale_set_profiles": [{"max_runners": 1, "capabilities": ["node", "libpq", "marker"]}]}], require_app_id=False)
 assert result["errors"] == [], result["errors"]
 catalogue = {
     "node": {"image": image, "path": f"node/{version}/bin"},
+    "libpq": {"sysroot_image": library_image, "env": {"PGSYSCONFDIR": f"{sysroot}/etc"}},
     "marker": {"job_started_hook": 'echo "CAPABILITY_HOOK_RAN=yes" >> "$GITHUB_ENV"\n'},
 }
 with open(extra, "w") as out:
@@ -95,11 +100,19 @@ cat >"$work/step.sh" <<EOF
 set -euo pipefail
 export GITHUB_PATH="\$(mktemp)" GITHUB_ENV="\$(mktemp)"
 bash -e "\$ACTIONS_RUNNER_HOOK_JOB_STARTED"
-export PATH="\$(paste -sd: "\$GITHUB_PATH"):\$PATH"
+while IFS= read -r directory; do PATH="\$directory:\$PATH"; done <"\$GITHUB_PATH"
+export PATH
+while IFS= read -r line; do export "\${line?}"; done <"\$GITHUB_ENV"
 grep -qx CAPABILITY_HOOK_RAN=yes "\$GITHUB_ENV"
 echo "hook capability ran"
 echo "node on PATH: \$(command -v node) \$(node --version)"
 [ "\$(node --version)" = "v${node_version}" ]
+echo "psql on PATH: \$(command -v psql) \$(psql --version)"
+[ "\$(command -v psql)" = "${sysroot}/bin/psql" ]
+[ "\$(pg_config --includedir)" = "${sysroot}/include" ]
+[ "\${LD_LIBRARY_PATH%%:*}" = "${sysroot}/lib" ]
+[ "\$PGSYSCONFDIR" = "${sysroot}/etc" ]
+echo "system library ran from ${sysroot}"
 cd "\$(mktemp -d)"
 npm install --silent --no-audit --no-fund "${tool_cache_package}" >/dev/null
 node --input-type=module -e "import * as tc from '@actions/tool-cache'; const found = tc.find('node', '${node_version%%.*}', process.arch); if (!found) { console.error('not found in ' + process.env.RUNNER_TOOL_CACHE); process.exit(1); } console.log('tool-cache find: ' + found);"
@@ -130,4 +143,6 @@ kubectl -n "$namespace" logs runner -c runner
 kubectl -n "$namespace" logs runner -c runner | grep -qx CAPABILITIES-OK || fail "the step did not reach its end"
 init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-node")].state.terminated.exitCode}')"
 [ "$init_state" = 0 ] || fail "the capability-node init container did not succeed (exit code '${init_state}')"
-log "PASS: the init container populated the tool cache, the hook ran and put the tool on PATH, and @actions/tool-cache found it"
+init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-libpq")].state.terminated.exitCode}')"
+[ "$init_state" = 0 ] || fail "the capability-libpq init container did not succeed (exit code '${init_state}')"
+log "PASS: the init containers populated the tool cache and the sysroot, the hook ran, put the tool on PATH and the library on its search paths, and @actions/tool-cache found the tool"

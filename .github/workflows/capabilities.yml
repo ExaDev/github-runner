@@ -1,6 +1,6 @@
 name: Capabilities
 
-# Runs the ARC role's scale-set profile capabilities in a kind cluster (tests/capabilities/run.sh): the reference Node.js tool image built from this checkout, values rendered through the role's own tasks, the scale-set chart rendered with them and checked against the ARC CRDs, and a pod from the chart's runner pod template whose init container fills the tool cache, whose job-started hook puts the tool on PATH, and whose step finds the tool through @actions/tool-cache. Only on changes that can affect them. Builds nothing it publishes.
+# Runs the ARC role's scale-set profile capabilities in a kind cluster (tests/capabilities/run.sh): the reference Node.js tool image and libpq system-library image built from this checkout, values rendered through the role's own tasks, the scale-set chart rendered with them and checked against the ARC CRDs, and a pod from the chart's runner pod template whose init containers fill the tool cache and the sysroot, whose job-started hook puts the tool on PATH and the library on its search paths, and whose step finds the tool through @actions/tool-cache and runs the library's programs. Only on changes that can affect them. Builds nothing it publishes.
 #
 # GitHub-hosted ubuntu-latest has Docker, kind, kubectl and helm already.
 
