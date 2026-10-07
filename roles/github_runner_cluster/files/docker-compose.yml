@@ -49,6 +49,7 @@ services:
       - K3S_MESH_SELF_HOSTED_HEALTH_URL=${K3S_MESH_SELF_HOSTED_HEALTH_URL:-}
       # Empty (not :?required) on the bootstrap host - the one server with nothing to join. Every OTHER server host's own .env sets this to the bootstrap host's own URL.
       - K3S_JOIN_SERVER_URL=${K3S_JOIN_SERVER_URL:-}
+      - K3S_NODE_TAINTS=${K3S_NODE_TAINTS:-}
     volumes:
       - k3s-data:/var/lib/rancher/k3s
       # Persists this container's own Tailscale device identity/keys across recreations - without this, every recreate would register a brand new device on the tailnet instead of reconnecting as the same one, since the join key is reusable by design.
@@ -87,6 +88,7 @@ services:
       # Not :?required, for the same reason as K3S_AGENT_SERVER_URL above: the self-hosted bootstrap server's first .env has no key yet, and Compose would reject it for this service too. k3s/node-entrypoint.sh fails fast without one instead.
       - K3S_VPN_AUTH_JOIN_KEY=${K3S_VPN_AUTH_JOIN_KEY:-}
       - K3S_VPN_AUTH_CONTROL_SERVER_URL=${K3S_VPN_AUTH_CONTROL_SERVER_URL:-}
+      - K3S_NODE_TAINTS=${K3S_NODE_TAINTS:-}
     volumes:
       - k3s-agent-data:/var/lib/rancher/k3s
       # Same reasoning as the k3s service's own tailscale volume.
