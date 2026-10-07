@@ -1,0 +1,16 @@
+# Renders one scale-set profile's Helm values and job-started ConfigMap data exactly as the github_runner_arc role installs them, through the role's own tasks/render_scale_set_values.yml, for tests/unit/test_capabilities.py and tests/capabilities/run.sh to read back. Takes profile (an expanded profile from the arc_profiles filter), github_runner_arc_capabilities and render_output (where the result is written, as JSON with values and job_started keys) as extra variables. Needs ANSIBLE_COLLECTIONS_PATH to include playbooks/collections, so the role and its filters are found in this checkout.
+- name: Render a scale-set profile's values
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Render through the role's own tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_arc
+        tasks_from: render_scale_set_values
+
+    - name: Write the values and the job-started hook data
+      ansible.builtin.copy:
+        content: "{{ {'values': github_runner_arc_scale_set_values, 'job_started': github_runner_arc_job_started_data} | to_nice_json }}"
+        dest: "{{ render_output }}"
+        mode: "0644"

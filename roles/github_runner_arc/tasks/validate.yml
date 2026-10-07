@@ -18,6 +18,14 @@
     msg: "{{ github_runner_arc_fleet.errors | union(github_runner_arc_local.errors) }}"
   when: (github_runner_arc_fleet.errors | union(github_runner_arc_local.errors)) | length > 0
 
+# This host's own profiles against this host's catalogue: a profile's capabilities are rendered from the catalogue of the host that installs it.
+- name: Fail on invalid capabilities, or a profile naming one that is not defined
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_capability_problems }}"
+  vars:
+    github_runner_arc_capability_problems: "{{ github_runner_arc_local.profiles | exadev.github_runner.arc_capability_errors(github_runner_arc_capabilities) }}"
+  when: github_runner_arc_capability_problems | length > 0
+
 - name: Fail when a profile's values file is missing on the control node
   ansible.builtin.fail:
     msg: >-

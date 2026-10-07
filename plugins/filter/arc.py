@@ -1,7 +1,8 @@
-"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, placing their runner pods (on the eligible nodes, or overflowing onto burst nodes), deriving a runner ceiling from node capacity (uniform figures, or each node's measured free capacity), and splitting an image reference."""
+"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, placing their runner pods (on the eligible nodes, or overflowing onto burst nodes), deriving a runner ceiling from node capacity (uniform figures, or each node's measured free capacity), adding a profile's capabilities (tool-cache init containers and job-started hooks) to its Helm values, and splitting an image reference."""
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Mapping, Sequence
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
@@ -73,6 +74,30 @@ _BURST_KEYS = frozenset({"node_label_key", "node_label_values", "tolerations", "
 _TOLERATION_KEYS = frozenset({"key", "operator", "value", "effect", "tolerationSeconds"})
 # The highest weight a preferred node affinity term may carry (1-100 in the Kubernetes API), so keeping runner pods on the fixed nodes outweighs any other preference the scheduler scores.
 _PREFER_FIXED_NODES_WEIGHT = 100
+
+# A capability's keys (see arc_capability_errors): a tool-cache capability names an image, and optionally a path put on PATH at job start; a hook capability carries a job-started script.
+_CAPABILITY_KEYS = frozenset({"image", "path", "job_started_hook"})
+# Each tool-cache capability becomes an init container named with this prefix, and a container name is a DNS label, so a capability name is at most what is left of one.
+_CAPABILITY_CONTAINER_PREFIX = "capability-"
+_CAPABILITY_NAME_MAX_LENGTH = _DNS_LABEL_MAX_LENGTH - len(_CAPABILITY_CONTAINER_PREFIX)
+# Where a tool image keeps its payload, already in the Actions tool-cache layout: <tool>/<version>/<arch>/ beside its <arch>.complete marker. Part of the tool-image contract in the role README.
+_TOOL_IMAGE_PAYLOAD = "/toolcache"
+# One component of a capability's path: a tool name, a version or a directory name, never '.' or '..'.
+_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$")
+# The pod volumes the capabilities add: the tool cache every tool-cache capability copies into, and the ConfigMap holding the job-started hook.
+_TOOL_CACHE_VOLUME = "tool-cache"
+_HOOKS_VOLUME = "job-started-hooks"
+# The runner's own variables the capabilities set on the runner container: where it and the setup actions look for cached tools, and the hook it runs before a job's first step.
+_TOOL_CACHE_ENV = "RUNNER_TOOL_CACHE"
+_JOB_STARTED_HOOK_ENV = "ACTIONS_RUNNER_HOOK_JOB_STARTED"
+# Keys of the job-started ConfigMap: the dispatcher the runner runs (roles/github_runner_arc/files/job-started.sh), the tool paths it puts on PATH, and the directory of capability scripts it runs after that.
+_HOOK_DISPATCHER = "job-started.sh"
+_HOOK_TOOL_PATHS = "tool-paths"
+_HOOK_SCRIPTS_DIR = "job-started.d"
+# Hook files are read by the runner user, never written, and the runner runs them with bash, so they need no execute bit: 0444.
+_HOOK_FILE_MODE = 0o444
+# Container modes whose job steps run in a separate pod (the chart's container hooks), which sees neither the runner container's tool cache nor its PATH.
+_SEPARATE_POD_CONTAINER_MODES = frozenset({"kubernetes", "kubernetes-novolume"})
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -359,6 +384,20 @@ def _scale_set_labels(profile: Mapping[str, Any], default: str, where: str, erro
     return list(labels)
 
 
+def _capability_names(profile: Mapping[str, Any], where: str, errors: list[str]) -> list[str]:
+    """Return the capabilities a profile names, in its order, recording an error when they are not a list of distinct non-empty strings."""
+    names = profile.get("capabilities")
+    if names is None:
+        return []
+    if not isinstance(names, Sequence) or isinstance(names, (str, bytes)) or not all(isinstance(name, str) and name for name in names):
+        errors.append(f"{where}.capabilities must be a list of capability names")
+        return []
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        errors.append(f"{where}.capabilities names {', '.join(duplicates)} more than once")
+    return list(dict.fromkeys(names))
+
+
 def _explicit_max_runners(profile: Mapping[str, Any], where: str, errors: list[str]) -> int | None:
     """Return the profile's own max_runners as a whole number, None when unset, recording an error when it is not a whole number of at least 0."""
     value = profile.get("max_runners")
@@ -490,6 +529,7 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
         "burst": burst,
         "burst_runners": burst_runners,
         "max_runners": max_runners,
+        "capabilities": _capability_names(profile, where, errors),
         "label": f"{org_name}{suffix}",
         "settings": dict(profile),
     }
@@ -511,7 +551,7 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
         orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes, and a profile without sizing may set burst with exclusive true to run on burst nodes only, with burst.max_runners as its maxRunners; see arc_runner_placement.
 
     Returns:
-        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, target (namespace/release, joined), app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
+        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, target (namespace/release, joined), app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), capabilities (the names of the capabilities its runner pods carry, in order; see arc_capability_pod), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
     """
     errors: list[str] = []
     profiles: list[dict[str, Any]] = []
@@ -564,6 +604,133 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
     if len(sized_autoscaled) > 1:
         errors.append(f"At most one autoscaled scale-set profile may set sizing, because it derives the shared pool's ceiling; found {', '.join(profile['label'] for profile in sized_autoscaled)}")
     return {"errors": errors, "profiles": profiles, "autoscaled": autoscaled}
+
+
+def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
+    """Return what is wrong with one entry of the capability catalogue."""
+    where = f"github_runner_arc_capabilities.{name}"
+    if not isinstance(name, str) or len(name) > _CAPABILITY_NAME_MAX_LENGTH or not _DNS_LABEL.match(name):
+        return [f"{where}: a capability name must be lower-case letters, digits and '-', at most {_CAPABILITY_NAME_MAX_LENGTH} characters, since its init container is named {_CAPABILITY_CONTAINER_PREFIX}<name>"]
+    if not isinstance(capability, Mapping):
+        return [f"{where} must be a mapping"]
+    errors = [f"{where} has an unknown key '{key}'" for key in sorted(set(capability) - _CAPABILITY_KEYS)]
+    image = capability.get("image")
+    hook = capability.get("job_started_hook")
+    if (image is None) == (hook is None):
+        errors.append(f"{where} must set exactly one of image (a tool-cache capability) and job_started_hook (a hook capability)")
+    if image is not None:
+        if not isinstance(image, str) or not image:
+            errors.append(f"{where}.image must be a non-empty image reference")
+        elif arc_image_ref(image)["reference"] == "latest":
+            errors.append(f"{where}.image must be pinned to a version tag or a digest, not latest or no tag (got {image!r}), so every runner pod gets the same tools")
+    if hook is not None and (not isinstance(hook, str) or not hook.strip()):
+        errors.append(f"{where}.job_started_hook must be a non-empty script")
+    path = capability.get("path")
+    if path is not None:
+        if image is None:
+            errors.append(f"{where}.path is only for a tool-cache capability, one with an image")
+        components = path.split("/") if isinstance(path, str) else []
+        if len(components) < 2 or not all(_PATH_COMPONENT.match(component) for component in components):
+            errors.append(f"{where}.path must be <tool>/<version>, optionally followed by /<subdirectory>, each part letters, digits and '._+-' (got {path!r})")
+    return errors
+
+
+def arc_capability_errors(profiles: Sequence[Mapping[str, Any]], catalogue: Any) -> list[str]:
+    """Check the capability catalogue, and that every capability a profile names is in it.
+
+    Args:
+        profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, a mapping of capability name to either {image, path?} (a tool-cache capability: a pinned image holding a payload in the tool-cache layout under /toolcache, and optionally a <tool>/<version>[/<subdirectory>] to put on PATH at job start) or {job_started_hook} (a hook capability: a script the runner runs before each job).
+
+    Returns:
+        The problems found, empty when there are none.
+    """
+    if not isinstance(catalogue, Mapping):
+        return ["github_runner_arc_capabilities must be a mapping of capability name to capability"]
+    errors = [error for name, capability in catalogue.items() for error in _capability_entry_errors(name, capability)]
+    for profile in profiles:
+        errors.extend(f"{profile['label']}: capability '{name}' is not defined in github_runner_arc_capabilities" for name in profile["capabilities"] if name not in catalogue)
+    return errors
+
+
+def _runner_container(spec: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the pod template's container named runner, which the chart builds the runner from, or None when the values define none."""
+    for container in spec.get("containers") or []:
+        if isinstance(container, dict) and container.get("name") == "runner":
+            return container
+    return None
+
+
+def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str) -> dict[str, Any]:
+    """Add a profile's capabilities to its scale set's Helm values.
+
+    Each tool-cache capability becomes an init container, running its image as the runner's user, that copies the image's /toolcache payload into an emptyDir mounted on the runner container at tool_cache_path, which RUNNER_TOOL_CACHE names; the files then belong to the runner user, so a setup action can still add a version beside them. Hook capabilities, and the path of any tool-cache capability that sets one, go into a ConfigMap mounted at hooks_dir, whose dispatcher ACTIONS_RUNNER_HOOK_JOB_STARTED names. Everything is appended after what the values already hold, so a values file's own init containers, volumes, environment and mounts are kept. Lists are replaced wholesale when Helm merges values, which is why this edits the merged values rather than adding an overlay.
+
+    Args:
+        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace.
+
+    Returns:
+        A dict with ``errors`` (empty when the values can carry the capabilities), ``values`` (the values with the capabilities added, or as given when there are none or errors) and ``hooks`` (the ConfigMap's data apart from the dispatcher, which the role adds from its own file; empty when the profile needs no ConfigMap).
+    """
+    if not names:
+        return {"errors": [], "values": values, "hooks": {}}
+    result = copy.deepcopy(dict(values))
+    errors: list[str] = []
+    mode = (result.get("containerMode") or {}).get("type") or ""
+    if mode in _SEPARATE_POD_CONTAINER_MODES:
+        errors.append(f"capabilities need the job's steps to run in the runner container, and containerMode {mode} runs them in a separate pod")
+    spec = result.setdefault("template", {}).setdefault("spec", {})
+    runner = _runner_container(spec)
+    if runner is None:
+        errors.append("capabilities need the values to define the runner container (template.spec.containers[] named runner), as the role's own values template does")
+    tool_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("image") is not None]
+    hook_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("job_started_hook") is not None]
+    tool_paths = [capability["path"] for _, capability in tool_capabilities if capability.get("path") is not None]
+    hooks: dict[str, str] = {}
+    if tool_paths:
+        hooks[_HOOK_TOOL_PATHS] = "".join(f"{path}\n" for path in tool_paths)
+    # Numbered in the profile's order so the dispatcher, which runs them in name order, runs them in that order.
+    width = len(str(len(hook_capabilities)))
+    scripts = {f"{index:0{width}d}-{name}.sh": capability["job_started_hook"] for index, (name, capability) in enumerate(hook_capabilities, start=1)}
+    hooks.update(scripts)
+
+    volumes: list[dict[str, Any]] = []
+    mounts: list[dict[str, Any]] = []
+    env: list[dict[str, Any]] = []
+    if tool_capabilities:
+        volumes.append({"name": _TOOL_CACHE_VOLUME, "emptyDir": {}})
+        mounts.append({"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path})
+        env.append({"name": _TOOL_CACHE_ENV, "value": tool_cache_path})
+    if hooks:
+        items = [{"key": _HOOK_DISPATCHER, "path": _HOOK_DISPATCHER}] + [{"key": key, "path": key if key == _HOOK_TOOL_PATHS else f"{_HOOK_SCRIPTS_DIR}/{key}"} for key in hooks]
+        volumes.append({"name": _HOOKS_VOLUME, "configMap": {"name": hooks_configmap, "defaultMode": _HOOK_FILE_MODE, "items": items}})
+        mounts.append({"name": _HOOKS_VOLUME, "mountPath": hooks_dir, "readOnly": True})
+        env.append({"name": _JOB_STARTED_HOOK_ENV, "value": f"{hooks_dir}/{_HOOK_DISPATCHER}"})
+
+    existing_volumes = {volume.get("name") for volume in spec.get("volumes") or []}
+    errors.extend(f"the values already define a volume named {volume['name']}, which capabilities add" for volume in volumes if volume["name"] in existing_volumes)
+    if runner is not None:
+        existing_env = {variable.get("name") for variable in runner.get("env") or []}
+        errors.extend(f"the runner container already sets {variable['name']}, which capabilities set" for variable in env if variable["name"] in existing_env)
+    if errors:
+        return {"errors": errors, "values": values, "hooks": {}}
+    assert runner is not None
+    init_containers = [
+        {
+            "name": f"{_CAPABILITY_CONTAINER_PREFIX}{name}",
+            "image": capability["image"],
+            # The tool-image contract: a POSIX sh and cp in the image, and the payload under /toolcache. cp -R without -p, so the copies belong to the runner user rather than keeping the image's owner.
+            "command": ["/bin/sh", "-c", f'cp -R {_TOOL_IMAGE_PAYLOAD}/. "$1"/', "copy-tool-cache", tool_cache_path],
+            "securityContext": {"runAsUser": int(runner_user), "runAsGroup": int(runner_group), "runAsNonRoot": True, "allowPrivilegeEscalation": False},
+            "volumeMounts": [{"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path}],
+        }
+        for name, capability in tool_capabilities
+    ]
+    if init_containers:
+        spec["initContainers"] = list(spec.get("initContainers") or []) + init_containers
+    spec["volumes"] = list(spec.get("volumes") or []) + volumes
+    runner["env"] = list(runner.get("env") or []) + env
+    runner["volumeMounts"] = list(runner.get("volumeMounts") or []) + mounts
+    return {"errors": [], "values": result, "hooks": hooks}
 
 
 def arc_image_ref(image: str) -> dict[str, str]:
@@ -627,4 +794,13 @@ class FilterModule:
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"arc_profiles": arc_profiles, "arc_max_runners": arc_max_runners, "arc_measured_max_runners": arc_measured_max_runners, "arc_upgrade_blocker": arc_upgrade_blocker, "arc_image_ref": arc_image_ref, "arc_runner_placement": arc_runner_placement}
+        return {
+            "arc_profiles": arc_profiles,
+            "arc_max_runners": arc_max_runners,
+            "arc_measured_max_runners": arc_measured_max_runners,
+            "arc_upgrade_blocker": arc_upgrade_blocker,
+            "arc_image_ref": arc_image_ref,
+            "arc_runner_placement": arc_runner_placement,
+            "arc_capability_errors": arc_capability_errors,
+            "arc_capability_pod": arc_capability_pod,
+        }

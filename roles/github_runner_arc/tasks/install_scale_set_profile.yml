@@ -66,6 +66,21 @@
     github_runner_arc_measure: "{{ profile }}"
   when: profile.sizing is not none and profile.sizing.measured and profile.max_runners is none and not profile.autoscale
 
+- name: Render the Helm values for {{ profile.label }}
+  ansible.builtin.include_tasks: render_scale_set_values.yml
+
+# The job-started hook and the scripts it runs, for a profile whose capabilities include a hook or a tool path; removed when the profile has none, so a profile that drops its last one leaves nothing behind. Each runner pod mounts it when it starts, so a change reaches the next job without a Helm upgrade restarting anything.
+- name: Create, update or remove the job-started hook ConfigMap for {{ profile.label }}
+  kubernetes.core.k8s:
+    state: "{{ 'present' if github_runner_arc_job_started_data | length > 0 else 'absent' }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ github_runner_arc_job_started_configmap }}"
+        namespace: "{{ profile.namespace }}"
+      data: "{{ github_runner_arc_job_started_data }}"
+
 - name: Install/upgrade the scale-set release for {{ profile.label }}
   # runnerScaleSetName is left to default to the release name: it is the scale set's registration identity on GitHub, so two releases sharing it make the second one's listener crash-loop registering a duplicate. scaleSetLabels is the pooling mechanism instead: an extra label every profile's runners carry alongside their own unique one, so runs-on: <label> matches every profile sharing it. A profile sets its own runs_on_label to stay out of the shared pool, or scale_set_labels to choose the whole list (empty sets none, leaving jobs to target the release name).
   kubernetes.core.helm:
@@ -73,12 +88,8 @@
     chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
     chart_version: "{{ github_runner_arc_scaleset_chart_version | default(omit) }}"
     release_namespace: "{{ profile.namespace }}"
-    # Rendered on the control node: the profile's values file (or the role's default template), with the role's own overlay merged over it. Helm merges nested mappings the same way, so this is the same as passing the two as separate values files.
-    values: >-
-      {{
-        (lookup('ansible.builtin.template', github_runner_arc_values_source) | from_yaml | default({}, true))
-        | combine(lookup('ansible.builtin.template', 'scale-set-overlay.yaml.j2') | from_yaml, recursive=true)
-      }}
+    # Rendered on the control node by render_scale_set_values.yml: the profile's values, the role's overlay and the profile's capabilities.
+    values: "{{ github_runner_arc_scale_set_values }}"
     # --set rather than values for containers[]: Helm replaces lists wholesale, so a values mapping naming containers would drop the values file's own command and resources for that container. scaleSetLabels is set one index at a time for the same reason, and not at all when the profile's scale_set_labels is empty.
     set_values: >-
       {{
@@ -90,13 +101,6 @@
         ]
         + range(profile.scale_set_labels | length) | zip(profile.scale_set_labels) | map('join', ']=') | map('regex_replace', '^', 'scaleSetLabels[')
           | map('community.general.dict_kv', 'value') | list
-      }}
-  vars:
-    github_runner_arc_values_source: >-
-      {{
-        'runner-scale-set-values.yaml.j2' if profile.values_file | length == 0
-        else profile.values_file if profile.values_file is abs
-        else github_runner_arc_values_dir ~ '/' ~ profile.values_file
       }}
 
 # A Helm upgrade that changes the pod template renames the EphemeralRunnerSet the release owns (it carries a spec-hash suffix). The AutoscalingListener should follow the rename but can be left pointing at the deleted name, crash-looping on every patch while the scale set's queue goes unserviced; see the README's Non-obvious behaviour section. Deleting the stale listener makes the controller recreate it against the EphemeralRunnerSet that exists now.
