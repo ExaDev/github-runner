@@ -56,9 +56,14 @@ configmap_get() {
   kubectl get configmap "$CONFIGMAP" -n "$STATE_NAMESPACE" -o jsonpath="{.data.$1}" 2>/dev/null || true
 }
 
+# The value is passed through stdin and the patch through a file, never as a command-line argument: a stored record can reach hundreds of KiB, and a single argument over the kernel's limit (128 KiB on Linux, MAX_ARG_STRLEN) fails the exec with "Argument list too long". printf is a shell builtin, so it is not subject to that limit either.
 configmap_set() {
-  kubectl patch configmap "$CONFIGMAP" -n "$STATE_NAMESPACE" --type merge \
-    -p "$(jq -n --arg k "$1" --arg v "$2" '{data: {($k): $v}}')"
+  local patch_file status=0
+  patch_file="$(mktemp)" || return 1
+  printf '%s' "$2" | jq -Rs --arg k "$1" '{data: {($k): .}}' > "$patch_file" \
+    && kubectl patch configmap "$CONFIGMAP" -n "$STATE_NAMESPACE" --type merge --patch-file "$patch_file" || status=$?
+  rm -f "$patch_file"
+  return "$status"
 }
 
 # targets_json: a compact JSON array, one object per target, built from the parallel NAMESPACES/RELEASES/MAX arrays - so the status ConfigMap (and the heartbeat gist it feeds) shows each pooled target's own current maxRunners, not just the combined total.
@@ -147,8 +152,8 @@ store_job_entries() {
   local key="$1" jobs="$2" count="$3" existing updated
   existing="$(configmap_get "$key")"
   [ -n "$existing" ] || existing="{}"
-  updated="$(jq -c --argjson jobs "$jobs" --argjson count "$count" --argjson now "$(date +%s)" --argjson retention "$JOB_MEMORY_RETENTION_SECONDS" --argjson cap "$JOB_MEMORY_MAX_ENTRIES" '
-    reduce $jobs[] as $o (.;
+  updated="$(jq -c --slurpfile jobs <(printf '%s' "$jobs") --argjson count "$count" --argjson now "$(date +%s)" --argjson retention "$JOB_MEMORY_RETENTION_SECONDS" --argjson cap "$JOB_MEMORY_MAX_ENTRIES" '
+    reduce $jobs[0][] as $o (.;
       ($o.repo + "|" + $o.workflow + "|" + $o.job) as $k
       | .[$k] = ({repo: $o.repo, workflow: $o.workflow, job: $o.job, peak_mib: ([$o.mib, (.[$k].peak_mib // 0)] | max), last_seen: $now}
         + (if $count then {samples: ((.[$k].samples // 0) + 1)} else {} end)))
@@ -211,12 +216,11 @@ for i in "${!TARGETS[@]}"; do
   release=${RELEASES[$i]}
   target=${TARGETS[$i]}
 
-  # R: the authoritative currently-running count, read from the AutoscalingRunnerSet CRD's own status (not a pod-label guess). The role gives every scale-set profile its own namespace, so each target namespace holds exactly this one scale set and no scale-set-specific label selector is needed for anything below.
-  r="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" -o jsonpath='{.status.currentRunners}' 2>/dev/null)" \
-    || die "could not read ${target}'s status.currentRunners"
-  # The API omits currentRunners from a scale set's status until it has run a pod (a freshly created one reports only its phase), so an empty answer to a read that succeeded means none are running.
-  r="${r:-0}"
-  case "$r" in ''|*[!0-9]*) die "${target}'s status.currentRunners was not a plain integer ('$r')" ;; esac
+  # R: how many runner slots the target holds right now, counted from its EphemeralRunners (an EphemeralRunner is one runner pod, from creation until it finishes), not from the AutoscalingRunnerSet's status: that object's status carries only `phase` and `observedGeneration` in the ARC release this role pins (0.15), so a count read from it is always empty. A runner that has finished (`Succeeded`) or given up (`Failed`) no longer holds a slot; a `Pending` one does, because its pod already counts against the pool. The role gives every scale-set profile its own namespace, so each target namespace holds exactly this one scale set's runners. A failed read stops the poll: a guessed zero would let every rule below that depends on a running count (never lower below it, slack per target) act on a number that is not real.
+  r="$(kubectl get ephemeralrunners -n "$namespace" -o json 2>/dev/null \
+    | jq '[.items[] | select((.status.phase // "") != "Succeeded" and (.status.phase // "") != "Failed")] | length')" \
+    || die "could not count ${target}'s ephemeral runners"
+  case "$r" in ''|*[!0-9]*) die "${target}'s ephemeral runner count was not a plain integer ('$r')" ;; esac
   R[i]=$r
 
   max="$(kubectl get autoscalingrunnerset "$release" -n "$namespace" -o jsonpath='{.spec.maxRunners}' 2>/dev/null)" \
