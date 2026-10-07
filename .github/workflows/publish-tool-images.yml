@@ -51,7 +51,10 @@ jobs:
         run: |
           set -euo pipefail
           version="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
-          [ "$(wc -l <<<"$version")" = 1 ] && [ -n "$version" ] || { echo "tool-images/${NAME}/Dockerfile must pin exactly one ARG <TOOL>_VERSION" >&2; exit 1; }
+          if [ -z "$version" ] || [ "$(wc -l <<<"$version")" != 1 ]; then
+            echo "tool-images/${NAME}/Dockerfile must pin exactly one ARG <TOOL>_VERSION" >&2
+            exit 1
+          fi
           echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
           echo "version=${version}" >>"$GITHUB_OUTPUT"
 
