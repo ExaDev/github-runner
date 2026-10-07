@@ -25,7 +25,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
   - `capabilities`: names of entries in `github_runner_arc_capabilities` that the profile's runner pods carry, in order (see [Capabilities](#capabilities)).
   - `burst`: let the runner pods overflow onto nodes a cluster autoscaler adds on demand, and count those nodes' runners into `maxRunners` (see [Burst nodes](#burst-nodes)). Needs `sizing`, and no `max_runners` or `autoscale`; with `exclusive: true` the pods run on burst nodes only and `burst.max_runners` is the whole ceiling, with no `sizing`.
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
-- `github_runner_arc_capabilities`: the capabilities profiles can name, as a mapping of name to capability (see [Capabilities](#capabilities)). `github_runner_arc_tool_cache_path` (default `/opt/hostedtoolcache`) is where the tool cache is mounted, and `github_runner_arc_runner_uid` and `github_runner_arc_runner_gid` (default `1001`, the runner user of ARC's `actions-runner` image) are the ids the tool-cache init containers run as.
+- `github_runner_arc_capabilities`: the capabilities profiles can name, as a mapping of name to capability (see [Capabilities](#capabilities)). `github_runner_arc_tool_cache_path` (default `/opt/hostedtoolcache`) is where the tool cache is mounted, `github_runner_arc_sysroot_path` (default `/opt/sysroot`) is where system-library capabilities are extracted, and `github_runner_arc_runner_uid` and `github_runner_arc_runner_gid` (default `1001`, the runner user of ARC's `actions-runner` image) are the ids the capabilities' init containers run as.
 - `github_runner_arc_kubeconfig_path`: the kubeconfig on the host the role runs against. Defaults to `github_runner_cluster`'s kubeconfig; empty means `KUBECONFIG` or `~/.kube/config`.
 - `github_runner_arc_controller_chart_version`, `github_runner_arc_scaleset_chart_version`: chart pins; unset installs the latest chart. The controller chart's CRDs are applied (server-side) from `github_runner_arc_controller_chart_ref` at the controller's version before every controller install or upgrade, because Helm never upgrades a chart's CRDs itself; without that, a newer scale-set chart is rejected for fields the cluster's CRDs predate. Move the two pins together, and the CRDs follow. `tests/arc_upgrade/run.sh` covers the upgrade in a kind cluster.
 
@@ -104,24 +104,34 @@ The runner pods then lose the eligibility `nodeSelector`, and get instead a requ
 
 ## Capabilities
 
-A capability adds something to a profile's runner pods when they start, so the runner image itself can stay a public, stock image such as `ghcr.io/actions/actions-runner`. `github_runner_arc_capabilities` defines them by name, and each profile lists the ones it wants in `capabilities`. There are two kinds.
+A capability adds something to a profile's runner pods when they start, so the runner image itself can stay a public, stock image such as `ghcr.io/actions/actions-runner`. `github_runner_arc_capabilities` defines them by name, and each profile lists the ones it wants in `capabilities`. There are three kinds.
 
 A tool-cache capability, `{image, path?}`, brings a tool. For each one the runner pod gets an init container, named `capability-<name>`, that copies the tool from the image into an `emptyDir` mounted on the runner container at `github_runner_arc_tool_cache_path`, and `RUNNER_TOOL_CACHE` is set to that path. The runner hands `RUNNER_TOOL_CACHE` to every step, and setup actions that consult the Actions tool cache before downloading, such as `actions/setup-node` and `terraform-linters/setup-tflint`, then find the tool there and skip the download, with no change to the workflow. The init containers run as the runner's user, so the copies belong to it and a setup action can still add another version beside them. `path`, `<tool>/<version>` optionally followed by `/<subdirectory>`, also puts the tool on `PATH` before the job's first step, for a tool no setup action looks up (Terraform, whose `hashicorp/setup-terraform` always downloads, or the AWS CLI).
+
+A system-library capability, `{sysroot_image, env?}`, brings shared libraries, their headers and their programs, for what cannot live in the tool cache: an MPI implementation, a solver library, a database client library, anything a compiler or the dynamic loader has to find. For each one the runner pod gets an init container, also named `capability-<name>`, that copies the image's relocatable prefix into an `emptyDir` mounted on the runner container at `github_runner_arc_sysroot_path` (`/opt/sysroot` by default); every system-library capability of a profile shares that one prefix, the init containers running in the profile's order, so a later capability's file replaces an earlier one's of the same name. Before the job's first step the job-started hook prepends the prefix's directories to the search paths a build and the loader use, `bin` to `PATH`, `lib` to `LD_LIBRARY_PATH` and `LIBRARY_PATH`, `include` to `CPATH`, `lib/pkgconfig` to `PKG_CONFIG_PATH` and the prefix itself to `CMAKE_PREFIX_PATH`, and then sets each variable in `env`, a mapping of name to single-line string for anything else the libraries need, such as the relocation variable Open MPI reads. This takes the place of an `apt-get install` layer in a runner image.
 
 A hook capability, `{job_started_hook}`, is a bash script the runner runs before each job's first step, for anything small: configuring git, writing a proxy setting to `GITHUB_ENV`, checking a mount.
 
 ```yaml
 github_runner_arc_capabilities:
   node-24:
-    image: ghcr.io/example/toolcache-node:24.21.0
+    image: ghcr.io/example/github-runner-toolcache-node:24.21.0@sha256:<digest>
   tflint:
-    image: ghcr.io/example/toolcache-tflint:0.64.0
+    image: ghcr.io/example/github-runner-toolcache-tflint:0.64.0@sha256:<digest>
   terraform:
-    image: ghcr.io/example/toolcache-terraform:1.16.5
+    image: ghcr.io/example/github-runner-toolcache-terraform:1.16.5@sha256:<digest>
     path: terraform/1.16.5
   awscli:
-    image: ghcr.io/example/toolcache-awscli:2.37.10
+    image: ghcr.io/example/github-runner-toolcache-awscli:2.37.10@sha256:<digest>
     path: aws-cli/2.37.10
+  openmpi:
+    sysroot_image: ghcr.io/example/github-runner-sysroot-openmpi:5.0.11@sha256:<digest>
+    env:
+      OPAL_PREFIX: "{{ github_runner_arc_sysroot_path }}"
+  highs:
+    sysroot_image: ghcr.io/example/github-runner-sysroot-highs:1.15.1@sha256:<digest>
+  libpq:
+    sysroot_image: ghcr.io/example/github-runner-sysroot-libpq:18.6@sha256:<digest>
   git-identity:
     job_started_hook: |
       git config --global user.name "Example CI"
@@ -136,13 +146,17 @@ github_runner_arc_orgs:
         runs_on_label: example-infra
         max_runners: 2
         capabilities: [terraform, tflint, awscli, git-identity]
+      - suffix: -scientific
+        runs_on_label: example-scientific
+        max_runners: 2
+        capabilities: [openmpi, highs, libpq]
 ```
 
-A capability image must be pinned to a version tag or a digest, never `latest` or no tag, so every runner pod gets the same tool; the role refuses an unpinned one. It is pulled with the pod's pull Secret, which a public image does not need.
+`<digest>` stands for the digest a published image has; see [Publishing the reference images](#publishing-the-reference-images). A capability image must be pinned to a version tag or a digest, never `latest` or no tag, so every runner pod gets the same tool; the role refuses an unpinned one. A digest, alone or after the tag as above, also pins what the tag could otherwise be moved to. Images are pulled with the pod's pull Secret, which a public image does not need.
 
 ### Profiles select capabilities
 
-A profile is the unit a workflow selects, so a set of capabilities becomes a named runner by giving the profile its own `runs-on` label, as the `-infra` profile above does: `runs-on: example-infra` lands on a pod with Terraform, TFLint and the AWS CLI, while `runs-on: exampleorg-runners` keeps landing on the org's pooled profiles. Profiles that share a label share a pool, and a job for that label can land on any of them, so give a profile with capabilities a label of its own unless every profile in the pool carries the same ones. A tool-cache capability that a job's setup action finds is only a shortcut, since the action downloads the tool when it is missing, but a tool put on `PATH` through `path` is simply absent from a pod without it.
+A profile is the unit a workflow selects, so a set of capabilities becomes a named runner by giving the profile its own `runs-on` label, as the `-infra` and `-scientific` profiles above do: `runs-on: example-infra` lands on a pod with Terraform, TFLint and the AWS CLI, `runs-on: example-scientific` on one with Open MPI, HiGHS and libpq, while `runs-on: exampleorg-runners` keeps landing on the org's pooled profiles. Profiles that share a label share a pool, and a job for that label can land on any of them, so give a profile with capabilities a label of its own unless every profile in the pool carries the same ones. A tool-cache capability that a job's setup action finds is only a shortcut, since the action downloads the tool when it is missing, but a tool put on `PATH` through `path`, or a library in the sysroot, is simply absent from a pod without it.
 
 ### The tool-image contract
 
@@ -154,7 +168,7 @@ A tool image is any image that has:
 
 `<tool>` and `<version>` are what the consuming setup action looks up: `node` and the plain version (`24.21.0`, no leading `v`) for `actions/setup-node`, `tflint` and the version without its `v` for `setup-tflint`. `<arch>` is named the way that action names the architecture, and actions differ: `actions/setup-node` uses Node's `os.arch()` (`x64`, `arm64`), while `setup-tflint` maps `x64` to `amd64` (`amd64`, `arm64`). For a tool used only through `path` the name does not matter, since `path` finds whichever architecture is there; the reference images use `os.arch()` names, the tool cache's own default. A multi-architecture image holds, for each platform, only that platform's `<arch>` directory, so the tool cache in any one pod has one architecture per tool, which is what `path` relies on. `path` adds `<tool>/<version>/<arch>[/<subdirectory>]` for the one `<arch>` with a `.complete` marker, and the job fails at its start if there is none or more than one.
 
-`tool-images/` holds Dockerfiles for reference images following this contract: Node.js, Terraform, TFLint and the AWS CLI. Each downloads the official release for the target architecture in a first stage, verifies it (against the release's checksums, and for Terraform and the AWS CLI against the vendor's signing key, pinned by fingerprint), lays it out under `/toolcache`, and copies that into `busybox`, which supplies `sh` and `cp`. They are not published from this repository; build and push them to a registry your clusters can pull from, for both architectures:
+`tool-images/` holds Dockerfiles for reference images following this contract: Node.js, Terraform, TFLint and the AWS CLI. Each downloads the official release for the target architecture in a first stage, verifies it (against the release's checksums, and for Terraform and the AWS CLI against the vendor's signing key, pinned by fingerprint), lays it out under `/toolcache`, and copies that into `busybox`, which supplies `sh` and `cp`. To build one yourself, for both architectures:
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 --build-arg NODE_VERSION=24.21.0 \
@@ -172,17 +186,66 @@ RUN touch "/toolcache/example-cli/1.2.3/${TARGETARCH}.complete" && chmod -R a+rX
 
 and is declared as `{image: ghcr.io/example/toolcache-example-cli:1.2.3, path: example-cli/1.2.3}`.
 
+### The system-library payload contract
+
+A system-library image is any image that has:
+
+- a POSIX `sh` and `cp` at `/bin/sh` and on its `PATH`, which the init container runs as `/bin/sh -c 'cp -R /sysroot/. "$1"/'`, with the sysroot mount as `$1`; `cp -R` keeps symbolic links as links, which a library's versioned names (`libfoo.so` to `libfoo.so.1`) rely on;
+- the payload under `/sysroot`, laid out as an install prefix: programs in `bin/`, shared libraries in `lib/` (not `lib64/` or a multiarch subdirectory, which the search paths do not include), headers in `include/`, pkg-config files in `lib/pkgconfig/` or `share/pkgconfig/`, and CMake packages anywhere CMake's search under a prefix finds them, such as `lib/cmake/<name>/`;
+- a payload that works from whatever directory it is copied to, given the search paths and the capability's `env`: it must not need its build prefix to exist. In practice that means pkg-config files that name their prefix relative to their own location (`prefix=${pcfiledir}/../..`, which pkg-config and pkgconf both expand), CMake packages that compute their paths relative to themselves (what `install(EXPORT)` generates), no libtool `.la` archives (they record absolute paths), and, for a library that records its install prefix in its binaries, an environment variable it reads to find its files elsewhere, set through `env`;
+- programs and libraries built for the runner image's own C library, on the same distribution release as the runner image or an older one, linking only libraries the runner image already has or the payload carries itself. The payload should not carry its own copy of a library the runner image has, such as the C library, OpenSSL or the C++ runtime: `LD_LIBRARY_PATH` puts the sysroot first for every step, so its copy would replace the image's for everything those steps run;
+- files readable, and directories searchable, by any user, since the copy runs as the runner's user.
+
+The search paths and `env` are applied by the job-started hook, through `GITHUB_PATH` and `GITHUB_ENV`, not set on the runner container. A container variable replaces the image's own value instead of extending it, which for `PATH` would remove every directory the image puts there, and the runner process itself then never loads a library from the sysroot. A value already in a search path when the job starts stays after the sysroot's directory.
+
+The reference images under `tool-images/` build from source in an `ubuntu` stage of the runner image's release, with `--prefix=/sysroot`, then drop `.la` files, rewrite each pkg-config file's `/sysroot` to `${pcfiledir}/../..`, fail the build if a pkg-config file (or, for HiGHS, a CMake package) still names `/sysroot`, and copy `/sysroot` into `busybox`. Each source archive is checked against a SHA-256: the release's own checksum file for PostgreSQL, and a checksum pinned in the Dockerfile for Open MPI (as Open MPI publishes it) and HiGHS (taken from GitHub's archive of the release tag). The payloads are built under `/sysroot` and copied to `/opt/sysroot`, so the default path is itself a relocation.
+
+| Image | What it holds | Declared with |
+|---|---|---|
+| `tool-images/openmpi` | Open MPI with its bundled hwloc, libevent, PMIx (built with zlib) and PRRTE, without Fortran bindings (the runner image has no Fortran runtime): `mpicc`, `mpirun`, `mpiexec`, `ompi_info`, `libmpi` and its headers, `ompi-c.pc` | `env: {OPAL_PREFIX: "{{ github_runner_arc_sysroot_path }}"}` |
+| `tool-images/highs` | HiGHS, the linear and mixed-integer programming solver: `libhighs`, its C and C++ headers under `include/highs/`, `highs.pc`, a CMake package and the `highs` command | nothing extra |
+| `tool-images/libpq` | PostgreSQL's client library, built against the runner image's OpenSSL: `libpq`, its headers, `libpq.pc` (without its `Requires.private` on OpenSSL's modules, so compiling against it needs no OpenSSL development package), `pg_config` and `psql` | nothing extra |
+
+Open MPI records its install prefix in its libraries and programs, and from `/opt/sysroot` without `OPAL_PREFIX` `mpirun` fails at start because it looks for its help files and components under `/sysroot`. With `OPAL_PREFIX` set to the sysroot, `mpirun` launches processes and `mpicc` compiles against the relocated headers and libraries; the bundled PMIx and PRRTE need no variable of their own. HiGHS reads no path at run time, and PostgreSQL's programs (`pg_config`, `psql`) work out their installation from their own location, so neither needs `env`.
+
+The stock `actions-runner` image has no C compiler, and its runner user has no passwordless `sudo`, so a job that compiles against a sysroot library needs a runner image that has one; a job that only runs a payload's programs, or loads its libraries from an interpreter, works on the stock image. `tests/system_libraries/run.sh` checks each reference image both ways: it copies the payload to `/opt/sysroot` as the init container does, renders the profile's hook data through the role's own tasks, runs the role's job-started hook as the runner user, and then, in the stock image, runs the payload's programs (a two-process `mpirun`, the `highs` command solving a model, `psql` and `pg_config`) and checks that every program and library resolves its dependencies; and, in the same image with `gcc` and `pkg-config` added, compiles a small program against the payload through its pkg-config file and runs it (for Open MPI, an `MPI_Allreduce` across two processes under `mpirun`). It also checks that `mpirun` fails without `OPAL_PREFIX`, so the declaration above stays necessary. `.github/workflows/system-libraries.yml` runs it for each image on amd64 and arm64 on pull requests that touch the images, the hook or the role's rendering.
+
+A system-library image of your own follows the same pattern: build the library in a stage of the runner image's distribution release with `--prefix=/sysroot` (for CMake, `-DCMAKE_INSTALL_PREFIX=/sysroot -DCMAKE_INSTALL_LIBDIR=lib`), finish the payload, and copy it into `busybox`:
+
+```dockerfile
+FROM ubuntu:24.04 AS build
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev make
+WORKDIR /build
+COPY example-lib-1.2.3.tar.gz .
+RUN tar -xzf example-lib-1.2.3.tar.gz --strip-components=1 \
+    && ./configure --prefix=/sysroot --disable-static && make -j"$(nproc)" && make install
+# hadolint ignore=SC2016
+RUN find /sysroot -name '*.la' -delete \
+    && find /sysroot -name '*.pc' -exec sed -i 's|/sysroot|${pcfiledir}/../..|g' {} + \
+    && ! grep -rl /sysroot --include='*.pc' /sysroot \
+    && chmod -R a+rX /sysroot
+
+FROM busybox:1.37
+COPY --from=build /sysroot /sysroot
+```
+
+Then prove it the way `tests/system_libraries/run.sh` does before relying on it: copy it to a prefix other than `/sysroot`, and run its programs and a program linked against it with only the search paths and its `env`, in the runner image the profile uses.
+
+### Publishing the reference images
+
+`.github/workflows/publish-tool-images.yml` builds every reference image in `tool-images/` natively for `linux/amd64` and `linux/arm64` and pushes it to the repository owner's GitHub Container Registry namespace, as `ghcr.io/<owner>/github-runner-toolcache-<name>` and `ghcr.io/<owner>/github-runner-sysroot-<name>`, tagged with the version its Dockerfile pins. It runs only when started by hand (`gh workflow run publish-tool-images.yml`) or by pushing a tag named `tool-images-<anything>`; the release workflow does not build these images. A version tag that already exists is left alone, so a published version never changes under anyone using it, and a run publishes only the images whose pinned version is new; to publish a new version, change the Dockerfile's version (and, for Open MPI and HiGHS, its checksum) and run it again. The run's summary prints each pushed image as `<image>:<version>@sha256:<digest>`, the reference to put in a capability. A newly created GitHub Container Registry package is private until its visibility is changed to public in the package's settings, which pods without a pull credential need.
+
 ### The job-started hook
 
-When a profile has a hook capability or a `path`, the role writes a ConfigMap named `github-runner-job-started` into the profile's namespace and mounts it on the runner container at `/etc/github-runner/hooks`, read-only. It holds `job-started.sh` (the role's `files/job-started.sh`), `tool-paths` (one `path` per line) and `job-started.d/`, the hook capabilities' scripts, numbered in the profile's order. `ACTIONS_RUNNER_HOOK_JOB_STARTED` names `job-started.sh`, the same runner mechanism the runner image uses for its job-completed hook (`ACTIONS_RUNNER_HOOK_JOB_COMPLETED`), so the runner runs it as the runner user before the job's first step, in a step named "Set up runner", with the job's default environment variables and its environment files. It appends each tool path to `GITHUB_PATH`, then runs every script in `job-started.d` in name order with `bash -e`. Unlike the job-completed hook, which never fails the job it ends, a failure here fails the job, since a job whose tools or setup did not arrive should stop before its first step. A profile without either gets no ConfigMap, and the role removes one an earlier run left. The scripts live in a ConfigMap owned by root, so a job cannot change what the next one runs, and each runner pod reads the ConfigMap when it starts, so a change reaches the next job without restarting anything.
+When a profile has a hook capability, a `path` or a system-library capability, the role writes a ConfigMap named `github-runner-job-started` into the profile's namespace and mounts it on the runner container at `/etc/github-runner/hooks`, read-only. It holds `job-started.sh` (the role's `files/job-started.sh`), `tool-paths` (one `path` per line), `sysroot-env` (the sysroot's search paths, as `NAME+=directory` lines the hook prepends, and the capabilities' `env`, as `NAME=value` lines it sets) and `job-started.d/`, the hook capabilities' scripts, numbered in the profile's order. `ACTIONS_RUNNER_HOOK_JOB_STARTED` names `job-started.sh`, the same runner mechanism the runner image uses for its job-completed hook (`ACTIONS_RUNNER_HOOK_JOB_COMPLETED`), so the runner runs it as the runner user before the job's first step, in a step named "Set up runner", with the job's default environment variables and its environment files, which the runner applies to the job's steps once the hook ends. It appends each tool path to `GITHUB_PATH`, applies `sysroot-env` through `GITHUB_PATH` and `GITHUB_ENV` (and exports it, so the scripts after it see it too), then runs every script in `job-started.d` in name order with `bash -e`. Unlike the job-completed hook, which never fails the job it ends, a failure here fails the job, since a job whose tools or setup did not arrive should stop before its first step. A profile without any of these gets no ConfigMap, and the role removes one an earlier run left. The scripts live in a ConfigMap owned by root, so a job cannot change what the next one runs, and each runner pod reads the ConfigMap when it starts, so a change reaches the next job without restarting anything.
 
 ### Where capabilities apply
 
-The tool cache and the hook are on the runner container, so they serve the steps that run there: every step in the default container mode and in Docker-in-Docker mode (`container_mode: dind`). A job that runs in a `container:` reaches the tool cache only through the runner's own mapping of it, which in Docker-in-Docker mode points at the Docker daemon's filesystem, where the cache is not mounted. The `kubernetes` container modes run every step in a separate pod, so the role refuses capabilities on a profile whose values use them. It also refuses them when the values define no runner container (the role's own template does), when the runner container already sets `RUNNER_TOOL_CACHE` or `ACTIONS_RUNNER_HOOK_JOB_STARTED`, or when a volume already uses the name `tool-cache` or `job-started-hooks`. A values file's own init containers, volumes, environment and mounts are kept, and the capabilities' are added after them, by the `exadev.github_runner.arc_capability_pod` filter. `exadev.github_runner.arc_capability_errors` checks the catalogue and each profile's references during validation, before anything changes.
+The tool cache, the sysroot and the hook are on the runner container, so they serve the steps that run there: every step in the default container mode and in Docker-in-Docker mode (`container_mode: dind`). A job that runs in a `container:` reaches the tool cache only through the runner's own mapping of it, which in Docker-in-Docker mode points at the Docker daemon's filesystem, where the cache is not mounted, and it does not see the sysroot at all. The `kubernetes` container modes run every step in a separate pod, so the role refuses capabilities on a profile whose values use them. It also refuses them when the values define no runner container (the role's own template does), when the runner container already sets `RUNNER_TOOL_CACHE` or `ACTIONS_RUNNER_HOOK_JOB_STARTED`, when a volume already uses the name `tool-cache`, `sysroot` or `job-started-hooks`, or, for a profile with a system-library capability, when `github_runner_arc_sysroot_path` is not an absolute directory without a `:` or overlaps the tool cache or the hooks directory. During validation it refuses a system-library capability whose `env` sets one of the search paths, `RUNNER_TOOL_CACHE` or `ACTIONS_RUNNER_HOOK_JOB_STARTED`, a name that is not a variable name or a value that is not a single-line string (a line break would add a line to `GITHUB_ENV`), and two of a profile's system-library capabilities that set one variable to different values, since they share one sysroot. A values file's own init containers, volumes, environment and mounts are kept, and the capabilities' are added after them, by the `exadev.github_runner.arc_capability_pod` filter. `exadev.github_runner.arc_capability_errors` checks the catalogue and each profile's references during validation, before anything changes.
 
-Each tool-cache capability adds its copy to every pod's start, which is not yet measured. The `emptyDir` lives on the node's disk for the pod's lifetime, so a large tool set counts against the node's ephemeral storage.
+Each tool-cache and system-library capability adds its copy to every pod's start, which is not yet measured. The `emptyDir` volumes live on the node's disk for the pod's lifetime, so a large tool set or sysroot counts against the node's ephemeral storage.
 
-`tests/capabilities/run.sh` exercises all of this in a kind cluster: it builds the reference Node.js image, renders a profile through the role's own tasks, renders the scale-set chart with the result and checks it against the ARC CRDs, then starts a pod from the chart's runner pod template and checks that the init container filled the tool cache, that the hook ran and put the tool on `PATH`, and that `@actions/tool-cache`, the library behind `actions/setup-node`'s lookup, finds it. `.github/workflows/capabilities.yml` runs it on pull requests that touch the role, its filters, the tool images or the test.
+`tests/capabilities/run.sh` exercises all of this in a kind cluster: it builds the reference Node.js and libpq images, renders a profile through the role's own tasks, renders the scale-set chart with the result and checks it against the ARC CRDs, then starts a pod from the chart's runner pod template and checks that the init containers filled the tool cache and the sysroot, that the hook ran, put the tool on `PATH` and the library on its search paths with its `env`, and that `@actions/tool-cache`, the library behind `actions/setup-node`'s lookup, finds the tool. `.github/workflows/capabilities.yml` runs it on pull requests that touch the role, its filters, the tool images or the test.
 
 ## Image pull Secret from the GitHub App
 
