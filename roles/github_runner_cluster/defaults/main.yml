@@ -132,4 +132,4 @@ github_runner_cluster_record_deployed_version: true
 github_runner_cluster_deployed_version_annotation: "github-runner.exadev.com/deployed-version"
 
 # The collection version this role was released as, stamped by scripts/release/stamp_version.py. A server host records it as an annotation on its own node once the node has registered, and the heartbeat publishes it in fleet-health.json. It is what was applied, not what is running, and an agent host, which has no API of its own, records nothing.
-github_runner_cluster_collection_version: "1.20.0"
+github_runner_cluster_collection_version: "1.21.0"

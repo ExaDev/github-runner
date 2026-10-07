@@ -1,3 +1,10 @@
+# [1.21.0](https://github.com/ExaDev/github-runner/compare/v1.20.0...v1.21.0) (2026-10-07)
+
+
+### Features
+
+* install a standalone Python on hosts that have none ([fb1b5d0](https://github.com/ExaDev/github-runner/commit/fb1b5d093c49296a5d5f8673133718011e141fa8))
+
 # [1.20.0](https://github.com/ExaDev/github-runner/compare/v1.19.0...v1.20.0) (2026-10-07)
 
 
