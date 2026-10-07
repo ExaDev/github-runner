@@ -1,4 +1,4 @@
-"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, placing their runner pods (on the eligible nodes, or overflowing onto burst nodes), deriving a runner ceiling from node capacity (uniform figures, or each node's measured free capacity), adding a profile's capabilities (tool-cache init containers and job-started hooks) to its Helm values, and splitting an image reference."""
+"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, placing their runner pods (on the eligible nodes, or overflowing onto burst nodes), deriving a runner ceiling from node capacity (uniform figures, or each node's measured free capacity), adding a profile's capabilities (tool-cache and system-library init containers and job-started hooks) to its Helm values, and splitting an image reference."""
 
 from __future__ import annotations
 
@@ -75,24 +75,43 @@ _TOLERATION_KEYS = frozenset({"key", "operator", "value", "effect", "tolerationS
 # The highest weight a preferred node affinity term may carry (1-100 in the Kubernetes API), so keeping runner pods on the fixed nodes outweighs any other preference the scheduler scores.
 _PREFER_FIXED_NODES_WEIGHT = 100
 
-# A capability's keys (see arc_capability_errors): a tool-cache capability names an image, and optionally a path put on PATH at job start; a hook capability carries a job-started script.
-_CAPABILITY_KEYS = frozenset({"image", "path", "job_started_hook"})
-# Each tool-cache capability becomes an init container named with this prefix, and a container name is a DNS label, so a capability name is at most what is left of one.
+# A capability's keys (see arc_capability_errors): a tool-cache capability names an image, and optionally a path put on PATH at job start; a system-library capability names a sysroot_image, and optionally env, extra variables its libraries need; a hook capability carries a job-started script.
+_CAPABILITY_KEYS = frozenset({"image", "path", "sysroot_image", "env", "job_started_hook"})
+# The keys of which a capability sets exactly one, each naming its kind.
+_CAPABILITY_KINDS = ("image", "sysroot_image", "job_started_hook")
+# Each tool-cache or system-library capability becomes an init container named with this prefix, and a container name is a DNS label, so a capability name is at most what is left of one.
 _CAPABILITY_CONTAINER_PREFIX = "capability-"
 _CAPABILITY_NAME_MAX_LENGTH = _DNS_LABEL_MAX_LENGTH - len(_CAPABILITY_CONTAINER_PREFIX)
 # Where a tool image keeps its payload, already in the Actions tool-cache layout: <tool>/<version>/<arch>/ beside its <arch>.complete marker. Part of the tool-image contract in the role README.
 _TOOL_IMAGE_PAYLOAD = "/toolcache"
+# Where a system-library image keeps its payload: a relocatable prefix (bin/, lib/, include/, lib/pkgconfig/) that is copied into the sysroot. Part of the payload contract in the role README.
+_SYSROOT_IMAGE_PAYLOAD = "/sysroot"
 # One component of a capability's path: a tool name, a version or a directory name, never '.' or '..'.
 _PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$")
-# The pod volumes the capabilities add: the tool cache every tool-cache capability copies into, and the ConfigMap holding the job-started hook.
+# A variable a system-library capability may set: a shell and POSIX environment variable name.
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The pod volumes the capabilities add: the tool cache every tool-cache capability copies into, the sysroot every system-library capability copies into, and the ConfigMap holding the job-started hook.
 _TOOL_CACHE_VOLUME = "tool-cache"
+_SYSROOT_VOLUME = "sysroot"
 _HOOKS_VOLUME = "job-started-hooks"
 # The runner's own variables the capabilities set on the runner container: where it and the setup actions look for cached tools, and the hook it runs before a job's first step.
 _TOOL_CACHE_ENV = "RUNNER_TOOL_CACHE"
 _JOB_STARTED_HOOK_ENV = "ACTIONS_RUNNER_HOOK_JOB_STARTED"
-# Keys of the job-started ConfigMap: the dispatcher the runner runs (roles/github_runner_arc/files/job-started.sh), the tool paths it puts on PATH, and the directory of capability scripts it runs after that.
+# The search paths a sysroot joins, as (variable, directory under the sysroot), in the order the job-started hook prepends them: commands, the dynamic loader's libraries, the linker's libraries, the compiler's headers, pkg-config files, and CMake packages. The hook prepends each to the variable's value at job start rather than the container's environment setting it, because a container variable replaces the image's own value (PATH above all) instead of extending it, and because the runner process itself then never loads a library from the sysroot.
+_SYSROOT_SEARCH_PATHS = (
+    ("PATH", "bin"),
+    ("LD_LIBRARY_PATH", "lib"),
+    ("LIBRARY_PATH", "lib"),
+    ("CPATH", "include"),
+    ("PKG_CONFIG_PATH", "lib/pkgconfig"),
+    ("CMAKE_PREFIX_PATH", ""),
+)
+# Variables a system-library capability's env may not set: the search paths the sysroot already extends, and the runner variables the capabilities set.
+_RESERVED_ENV = frozenset(name for name, _ in _SYSROOT_SEARCH_PATHS) | {_TOOL_CACHE_ENV, _JOB_STARTED_HOOK_ENV}
+# Keys of the job-started ConfigMap: the dispatcher the runner runs (roles/github_runner_arc/files/job-started.sh), the tool paths it puts on PATH, the sysroot's environment it applies, and the directory of capability scripts it runs after that.
 _HOOK_DISPATCHER = "job-started.sh"
 _HOOK_TOOL_PATHS = "tool-paths"
+_HOOK_SYSROOT_ENV = "sysroot-env"
 _HOOK_SCRIPTS_DIR = "job-started.d"
 # Hook files are read by the runner user, never written, and the runner runs them with bash, so they need no execute bit: 0444.
 _HOOK_FILE_MODE = 0o444
@@ -606,6 +625,31 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
     return {"errors": errors, "profiles": profiles, "autoscaled": autoscaled}
 
 
+def _pinned_image_errors(where: str, image: Any) -> list[str]:
+    """Return what is wrong with a capability's image reference: it must be a non-empty reference pinned to a version tag or a digest."""
+    if not isinstance(image, str) or not image:
+        return [f"{where} must be a non-empty image reference"]
+    if arc_image_ref(image)["reference"] == "latest":
+        return [f"{where} must be pinned to a version tag or a digest, not latest or no tag (got {image!r}), so every runner pod gets the same tools"]
+    return []
+
+
+def _env_errors(where: str, env: Any) -> list[str]:
+    """Return what is wrong with a system-library capability's env: a mapping of variable names to single-line strings, none of them a variable the role sets itself."""
+    if not isinstance(env, Mapping):
+        return [f"{where} must be a mapping of variable name to value"]
+    errors: list[str] = []
+    for name, value in env.items():
+        if not isinstance(name, str) or not _ENV_NAME.match(name):
+            errors.append(f"{where}: {name!r} is not a variable name (letters, digits and '_', not starting with a digit)")
+        elif name in _RESERVED_ENV:
+            errors.append(f"{where}.{name} is set by the role itself, so a capability may not set it")
+        # A string, so a YAML number or boolean is quoted rather than turned into text it was not written as; one line, because the job-started hook writes NAME=value lines to GITHUB_ENV.
+        if not isinstance(value, str) or "\n" in value or "\r" in value:
+            errors.append(f"{where}.{name} must be a single-line string (quote a number or a boolean)")
+    return errors
+
+
 def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
     """Return what is wrong with one entry of the capability catalogue."""
     where = f"github_runner_arc_capabilities.{name}"
@@ -615,14 +659,14 @@ def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
         return [f"{where} must be a mapping"]
     errors = [f"{where} has an unknown key '{key}'" for key in sorted(set(capability) - _CAPABILITY_KEYS)]
     image = capability.get("image")
+    sysroot_image = capability.get("sysroot_image")
     hook = capability.get("job_started_hook")
-    if (image is None) == (hook is None):
-        errors.append(f"{where} must set exactly one of image (a tool-cache capability) and job_started_hook (a hook capability)")
+    if sum(capability.get(kind) is not None for kind in _CAPABILITY_KINDS) != 1:
+        errors.append(f"{where} must set exactly one of image (a tool-cache capability), sysroot_image (a system-library capability) and job_started_hook (a hook capability)")
     if image is not None:
-        if not isinstance(image, str) or not image:
-            errors.append(f"{where}.image must be a non-empty image reference")
-        elif arc_image_ref(image)["reference"] == "latest":
-            errors.append(f"{where}.image must be pinned to a version tag or a digest, not latest or no tag (got {image!r}), so every runner pod gets the same tools")
+        errors.extend(_pinned_image_errors(f"{where}.image", image))
+    if sysroot_image is not None:
+        errors.extend(_pinned_image_errors(f"{where}.sysroot_image", sysroot_image))
     if hook is not None and (not isinstance(hook, str) or not hook.strip()):
         errors.append(f"{where}.job_started_hook must be a non-empty script")
     path = capability.get("path")
@@ -632,6 +676,27 @@ def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
         components = path.split("/") if isinstance(path, str) else []
         if len(components) < 2 or not all(_PATH_COMPONENT.match(component) for component in components):
             errors.append(f"{where}.path must be <tool>/<version>, optionally followed by /<subdirectory>, each part letters, digits and '._+-' (got {path!r})")
+    env = capability.get("env")
+    if env is not None:
+        if sysroot_image is None:
+            errors.append(f"{where}.env is only for a system-library capability, one with a sysroot_image")
+        errors.extend(_env_errors(f"{where}.env", env))
+    return errors
+
+
+def _sysroot_env_conflicts(label: str, names: Sequence[str], catalogue: Mapping[str, Any]) -> list[str]:
+    """Return the variables that two of a profile's system-library capabilities set to different values, since a sysroot has one environment."""
+    first: dict[str, tuple[str, Any]] = {}
+    errors: list[str] = []
+    for name in names:
+        capability = catalogue.get(name)
+        env = capability.get("env") if isinstance(capability, Mapping) else None
+        if not isinstance(env, Mapping):
+            continue
+        for variable, value in env.items():
+            if variable in first and first[variable][1] != value:
+                errors.append(f"{label}: capabilities '{first[variable][0]}' and '{name}' set {variable} to different values")
+            first.setdefault(variable, (name, value))
     return errors
 
 
@@ -639,16 +704,17 @@ def arc_capability_errors(profiles: Sequence[Mapping[str, Any]], catalogue: Any)
     """Check the capability catalogue, and that every capability a profile names is in it.
 
     Args:
-        profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, a mapping of capability name to either {image, path?} (a tool-cache capability: a pinned image holding a payload in the tool-cache layout under /toolcache, and optionally a <tool>/<version>[/<subdirectory>] to put on PATH at job start) or {job_started_hook} (a hook capability: a script the runner runs before each job).
+        profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, a mapping of capability name to one of {image, path?} (a tool-cache capability: a pinned image holding a payload in the tool-cache layout under /toolcache, and optionally a <tool>/<version>[/<subdirectory>] to put on PATH at job start), {sysroot_image, env?} (a system-library capability: a pinned image holding a relocatable prefix under /sysroot, and optionally extra variables its libraries need, such as a relocation variable) or {job_started_hook} (a hook capability: a script the runner runs before each job).
 
     Returns:
-        The problems found, empty when there are none.
+        The problems found, empty when there are none: invalid entries, a profile naming an undefined capability, and two of a profile's system-library capabilities setting one variable to different values.
     """
     if not isinstance(catalogue, Mapping):
         return ["github_runner_arc_capabilities must be a mapping of capability name to capability"]
     errors = [error for name, capability in catalogue.items() for error in _capability_entry_errors(name, capability)]
     for profile in profiles:
         errors.extend(f"{profile['label']}: capability '{name}' is not defined in github_runner_arc_capabilities" for name in profile["capabilities"] if name not in catalogue)
+        errors.extend(_sysroot_env_conflicts(profile["label"], profile["capabilities"], catalogue))
     return errors
 
 
@@ -660,13 +726,51 @@ def _runner_container(spec: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str) -> dict[str, Any]:
+def _sysroot_path_errors(sysroot_path: str, others: Mapping[str, str]) -> list[str]:
+    """Return what is wrong with the sysroot's mount path: it must be an absolute path that can sit in a colon-separated search path, apart from the other directories the capabilities mount."""
+    if not isinstance(sysroot_path, str) or not sysroot_path.startswith("/") or sysroot_path == "/" or any(character in sysroot_path for character in ":\n\r"):
+        return [f"the sysroot path must be an absolute directory with no ':' or line break, since it is joined into search paths such as LD_LIBRARY_PATH (got {sysroot_path!r})"]
+    root = sysroot_path.rstrip("/")
+    errors: list[str] = []
+    for what, other in others.items():
+        other_root = str(other).rstrip("/")
+        if root == other_root or root.startswith(f"{other_root}/") or other_root.startswith(f"{root}/"):
+            errors.append(f"the sysroot path {sysroot_path} overlaps the {what} {other}; each needs a directory of its own")
+    return errors
+
+
+def _sysroot_env(sysroot_path: str, capabilities: Sequence[tuple[str, Mapping[str, Any]]]) -> str:
+    """Return the job-started hook's sysroot-env: a NAME+=directory line for each search path the sysroot extends (the hook prepends it to the variable, and PATH goes through GITHUB_PATH), then a NAME=value line for each variable the system-library capabilities set, in the profile's order."""
+    root = sysroot_path.rstrip("/")
+    lines = [f"{name}+={root}/{directory}".rstrip("/") for name, directory in _SYSROOT_SEARCH_PATHS]
+    seen: set[str] = set()
+    for _, capability in capabilities:
+        for name, value in (capability.get("env") or {}).items():
+            if name not in seen:
+                seen.add(name)
+                lines.append(f"{name}={value}")
+    return "".join(f"{line}\n" for line in lines)
+
+
+def _copy_init_container(name: str, image: str, payload: str, volume: str, mount_path: str, runner_user: int, runner_group: int) -> dict[str, Any]:
+    """Return the init container that copies a capability image's payload directory into a volume, running as the runner's user."""
+    return {
+        "name": f"{_CAPABILITY_CONTAINER_PREFIX}{name}",
+        "image": image,
+        # The image contract: a POSIX sh and cp in the image, and the payload under the given directory. cp -R without -p, so the copies belong to the runner user rather than keeping the image's owner; cp -R keeps symbolic links as links, which a library's versioned names rely on.
+        "command": ["/bin/sh", "-c", f'cp -R {payload}/. "$1"/', f"copy-{volume}", mount_path],
+        "securityContext": {"runAsUser": int(runner_user), "runAsGroup": int(runner_group), "runAsNonRoot": True, "allowPrivilegeEscalation": False},
+        "volumeMounts": [{"name": volume, "mountPath": mount_path}],
+    }
+
+
+def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, sysroot_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str) -> dict[str, Any]:
     """Add a profile's capabilities to its scale set's Helm values.
 
-    Each tool-cache capability becomes an init container, running its image as the runner's user, that copies the image's /toolcache payload into an emptyDir mounted on the runner container at tool_cache_path, which RUNNER_TOOL_CACHE names; the files then belong to the runner user, so a setup action can still add a version beside them. Hook capabilities, and the path of any tool-cache capability that sets one, go into a ConfigMap mounted at hooks_dir, whose dispatcher ACTIONS_RUNNER_HOOK_JOB_STARTED names. Everything is appended after what the values already hold, so a values file's own init containers, volumes, environment and mounts are kept. Lists are replaced wholesale when Helm merges values, which is why this edits the merged values rather than adding an overlay.
+    Each tool-cache capability becomes an init container, running its image as the runner's user, that copies the image's /toolcache payload into an emptyDir mounted on the runner container at tool_cache_path, which RUNNER_TOOL_CACHE names; the files then belong to the runner user, so a setup action can still add a version beside them. Each system-library capability likewise becomes an init container that copies the image's /sysroot payload into an emptyDir mounted at sysroot_path; several share it, later ones overwriting a file an earlier one also wrote. Hook capabilities, the path of any tool-cache capability that sets one, and the sysroot's environment (its search paths and the capabilities' env) go into a ConfigMap mounted at hooks_dir, whose dispatcher ACTIONS_RUNNER_HOOK_JOB_STARTED names. Everything is appended after what the values already hold, so a values file's own init containers, volumes, environment and mounts are kept. Lists are replaced wholesale when Helm merges values, which is why this edits the merged values rather than adding an overlay.
 
     Args:
-        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace.
+        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. sysroot_path: where the sysroot is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace.
 
     Returns:
         A dict with ``errors`` (empty when the values can carry the capabilities), ``values`` (the values with the capabilities added, or as given when there are none or errors) and ``hooks`` (the ConfigMap's data apart from the dispatcher, which the role adds from its own file; empty when the profile needs no ConfigMap).
@@ -683,15 +787,19 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     if runner is None:
         errors.append("capabilities need the values to define the runner container (template.spec.containers[] named runner), as the role's own values template does")
     tool_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("image") is not None]
+    sysroot_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("sysroot_image") is not None]
     hook_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("job_started_hook") is not None]
+    if sysroot_capabilities:
+        errors.extend(_sysroot_path_errors(sysroot_path, {"tool cache path": tool_cache_path, "job-started hooks directory": hooks_dir}))
     tool_paths = [capability["path"] for _, capability in tool_capabilities if capability.get("path") is not None]
     hooks: dict[str, str] = {}
     if tool_paths:
         hooks[_HOOK_TOOL_PATHS] = "".join(f"{path}\n" for path in tool_paths)
+    if sysroot_capabilities:
+        hooks[_HOOK_SYSROOT_ENV] = _sysroot_env(sysroot_path, sysroot_capabilities)
     # Numbered in the profile's order so the dispatcher, which runs them in name order, runs them in that order.
     width = len(str(len(hook_capabilities)))
     scripts = {f"{index:0{width}d}-{name}.sh": capability["job_started_hook"] for index, (name, capability) in enumerate(hook_capabilities, start=1)}
-    hooks.update(scripts)
 
     volumes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
@@ -700,11 +808,15 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
         volumes.append({"name": _TOOL_CACHE_VOLUME, "emptyDir": {}})
         mounts.append({"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path})
         env.append({"name": _TOOL_CACHE_ENV, "value": tool_cache_path})
-    if hooks:
-        items = [{"key": _HOOK_DISPATCHER, "path": _HOOK_DISPATCHER}] + [{"key": key, "path": key if key == _HOOK_TOOL_PATHS else f"{_HOOK_SCRIPTS_DIR}/{key}"} for key in hooks]
+    if sysroot_capabilities:
+        volumes.append({"name": _SYSROOT_VOLUME, "emptyDir": {}})
+        mounts.append({"name": _SYSROOT_VOLUME, "mountPath": sysroot_path})
+    if hooks or scripts:
+        items = [{"key": _HOOK_DISPATCHER, "path": _HOOK_DISPATCHER}] + [{"key": key, "path": key} for key in hooks] + [{"key": key, "path": f"{_HOOK_SCRIPTS_DIR}/{key}"} for key in scripts]
         volumes.append({"name": _HOOKS_VOLUME, "configMap": {"name": hooks_configmap, "defaultMode": _HOOK_FILE_MODE, "items": items}})
         mounts.append({"name": _HOOKS_VOLUME, "mountPath": hooks_dir, "readOnly": True})
         env.append({"name": _JOB_STARTED_HOOK_ENV, "value": f"{hooks_dir}/{_HOOK_DISPATCHER}"})
+    hooks.update(scripts)
 
     existing_volumes = {volume.get("name") for volume in spec.get("volumes") or []}
     errors.extend(f"the values already define a volume named {volume['name']}, which capabilities add" for volume in volumes if volume["name"] in existing_volumes)
@@ -714,16 +826,13 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     if errors:
         return {"errors": errors, "values": values, "hooks": {}}
     assert runner is not None
+    # In the profile's order, so a later system-library capability's files overwrite an earlier one's.
     init_containers = [
-        {
-            "name": f"{_CAPABILITY_CONTAINER_PREFIX}{name}",
-            "image": capability["image"],
-            # The tool-image contract: a POSIX sh and cp in the image, and the payload under /toolcache. cp -R without -p, so the copies belong to the runner user rather than keeping the image's owner.
-            "command": ["/bin/sh", "-c", f'cp -R {_TOOL_IMAGE_PAYLOAD}/. "$1"/', "copy-tool-cache", tool_cache_path],
-            "securityContext": {"runAsUser": int(runner_user), "runAsGroup": int(runner_group), "runAsNonRoot": True, "allowPrivilegeEscalation": False},
-            "volumeMounts": [{"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path}],
-        }
-        for name, capability in tool_capabilities
+        _copy_init_container(name, catalogue[name]["image"], _TOOL_IMAGE_PAYLOAD, _TOOL_CACHE_VOLUME, tool_cache_path, runner_user, runner_group)
+        if catalogue[name].get("image") is not None
+        else _copy_init_container(name, catalogue[name]["sysroot_image"], _SYSROOT_IMAGE_PAYLOAD, _SYSROOT_VOLUME, sysroot_path, runner_user, runner_group)
+        for name in names
+        if catalogue[name].get("job_started_hook") is None
     ]
     if init_containers:
         spec["initContainers"] = list(spec.get("initContainers") or []) + init_containers
