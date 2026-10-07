@@ -1,3 +1,11 @@
+# [1.19.0](https://github.com/ExaDev/github-runner/compare/v1.18.0...v1.19.0) (2026-10-07)
+
+
+### Features
+
+* **arc:** add system-library capabilities ([fab2a78](https://github.com/ExaDev/github-runner/commit/fab2a78141a32d030b94d43b28e7470aaf8d1db3))
+* **tool-images:** add reference system-library payload images ([4b2b973](https://github.com/ExaDev/github-runner/commit/4b2b9730a862290249dcc508edf7d4e9f3f48ba5))
+
 # [1.18.0](https://github.com/ExaDev/github-runner/compare/v1.17.2...v1.18.0) (2026-10-07)
 
 
