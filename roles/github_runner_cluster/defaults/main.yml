@@ -18,6 +18,9 @@ github_runner_cluster_node_name: ""
 # Derived, never set directly: the name every template and check actually uses for this host (k3s node name, Tailscale device hostname, TLS SAN self-check).
 github_runner_cluster_effective_node_name: "{{ github_runner_cluster_node_name if github_runner_cluster_node_name | length > 0 else inventory_hostname }}"
 
+# Kubernetes taints this host's node registers with, as key=value:Effect strings (for example github-runner.example.com/excluded=true:NoExecute), none containing a space. A taint keeps pods without a matching toleration off the node; NoExecute also evicts the ones already there. They are applied by k3s each time the node registers, so they survive the node object being deleted and registering again, which a taint put on the node by hand does not. Per host, in its host_vars.
+github_runner_cluster_node_taints: []
+
 github_runner_cluster_k3s_version: "latest"
 
 # Secrets, as plain variables from any source Ansible reads (ansible-vault, a lookup, or a secrets adapter role such as github_runner_secrets_onepassword). github_runner_cluster_k3s_token is the shared node-join secret and has no default. github_runner_cluster_tailscale_join_key is, with the default tailscale mesh provider, what k3s's own --vpn-auth integration (see docker-compose.yml) uses on every host: it runs Tailscale INSIDE each node's own k3s container, joining the tailnet as its own device and using flannel's native "tailscale" backend for pod traffic. github_runner_cluster_tailscale_api_token, when set, lets tasks/mesh/tailscale_api.yml keep the tailnet's ACL grant and the join key itself provisioned; see that file's comments for what it manages and the one manual step (creating the API token) that has no API to automate.

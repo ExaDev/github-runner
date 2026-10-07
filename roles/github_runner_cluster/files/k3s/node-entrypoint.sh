@@ -10,6 +10,12 @@ join_key="${K3S_VPN_AUTH_JOIN_KEY:-}"
 control_server_url="${K3S_VPN_AUTH_CONTROL_SERVER_URL:-}"
 self_hosted_health_url="${K3S_MESH_SELF_HOSTED_HEALTH_URL:-}"
 
+# One --node-taint flag per entry of K3S_NODE_TAINTS (key=value:Effect entries separated by spaces, none containing a space), for the server and the agent alike. k3s applies them when the node registers, so a node object that is deleted and registers again gets them back; a taint put on a live node by hand is lost that way.
+node_taint_flags=""
+for node_taint in ${K3S_NODE_TAINTS:-}; do
+  node_taint_flags="$node_taint_flags --node-taint $node_taint"
+done
+
 # k3s's own vpn-auth integration only runs `tailscale up`; it does not start the daemon itself (without this, k3s fails outright with "tailscale up failed: ... it doesn't appear to be running"). Waits for the control socket before anything talks to it.
 mkdir -p /var/run/tailscale /var/lib/tailscale
 tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
@@ -124,8 +130,8 @@ supervise_self_hosted() {
     fi
     echo "Starting k3s server ($mode)"
     rm -f /output/kubeconfig.yaml
-    # shellcheck disable=SC2086 # Word splitting of server_args is deliberate: every argument is a flag or a value without spaces.
-    /bin/k3s server $server_args &
+    # shellcheck disable=SC2086 # Word splitting of server_args and node_taint_flags is deliberate: every argument is a flag or a value without spaces.
+    /bin/k3s server $server_args $node_taint_flags &
     k3s_pid=$!
     watcher_pid=""
     if [ "$mode" = direct ] && [ -n "$join_key" ]; then
@@ -148,10 +154,11 @@ case "$role" in
     rm -f /output/kubeconfig.yaml
     mesh_server_args
     # shellcheck disable=SC2086 # As above.
-    exec /bin/k3s server $server_args
+    exec /bin/k3s server $server_args $node_taint_flags
     ;;
   agent)
-    exec /bin/k3s agent --vpn-auth="$vpn_auth" --resolv-conf=/etc/k3s-resolv.conf
+    # shellcheck disable=SC2086 # As above.
+    exec /bin/k3s agent --vpn-auth="$vpn_auth" --resolv-conf=/etc/k3s-resolv.conf $node_taint_flags
     ;;
   *)
     echo "usage: node-entrypoint.sh server|agent" >&2
