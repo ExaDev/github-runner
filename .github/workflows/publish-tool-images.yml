@@ -1,0 +1,183 @@
+name: Publish tool images
+
+# Builds the reference capability images in tool-images/ (the tool-cache images and the system-library images; see the ARC role README's Capabilities section) for linux/amd64 and linux/arm64 and pushes them to this repository owner's GitHub Container Registry namespace, as ghcr.io/<owner>/github-runner-toolcache-<name> and ghcr.io/<owner>/github-runner-sysroot-<name>, each tagged with the version its Dockerfile pins (its ARG <TOOL>_VERSION default). A version tag that already exists is left alone, so a published version never changes under anyone pinning it and a run publishes only the images whose pinned version is new. The job summary lists each pushed image by digest, the reference to pin in a capability.
+#
+# Runs only when started by hand or by pushing a tag named tool-images-<anything>; the release workflow does not build these images. Each architecture is built natively, on GitHub's amd64 and arm64 hosted runners, and pushed by digest, and a second job joins the two into one multi-architecture tag (https://docs.docker.com/build/ci/github-actions/multi-platform/), because compiling the system libraries under emulation is far slower than natively.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - tool-images-*
+
+concurrency:
+  group: publish-tool-images
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.image.kind }}-${{ matrix.image.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - {name: node, kind: toolcache}
+          - {name: terraform, kind: toolcache}
+          - {name: tflint, kind: toolcache}
+          - {name: awscli, kind: toolcache}
+          - {name: openmpi, kind: sysroot}
+          - {name: highs, kind: sysroot}
+          - {name: libpq, kind: sysroot}
+        platform:
+          - {arch: amd64, runner: ubuntu-latest}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Name the image and its version
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+          KIND: ${{ matrix.image.kind }}
+          NAME: ${{ matrix.image.name }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
+          [ "$(wc -l <<<"$version")" = 1 ] && [ -n "$version" ] || { echo "tool-images/${NAME}/Dockerfile must pin exactly one ARG <TOOL>_VERSION" >&2; exit 1; }
+          echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Skip a version that is already published
+        id: published
+        env:
+          REFERENCE: ${{ steps.image.outputs.repository }}:${{ steps.image.outputs.version }}
+        run: |
+          if docker buildx imagetools inspect "$REFERENCE" >/dev/null 2>&1; then
+            echo "${REFERENCE} is already published; leaving it as it is."
+            echo "exists=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push by digest
+        id: build
+        if: steps.published.outputs.exists == 'false'
+        uses: docker/build-push-action@v7
+        with:
+          context: tool-images/${{ matrix.image.name }}
+          platforms: linux/${{ matrix.platform.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.image.outputs.version }}
+          outputs: type=image,name=${{ steps.image.outputs.repository }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record the digest
+        if: steps.published.outputs.exists == 'false'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        if: steps.published.outputs.exists == 'false'
+        with:
+          name: digests-${{ matrix.image.kind }}-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish ${{ matrix.image.kind }}-${{ matrix.image.name }}
+    needs: [build]
+    # Each image is joined on its own, so one image's failed build does not hold back the others; the join itself refuses an image missing an architecture.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - {name: node, kind: toolcache}
+          - {name: terraform, kind: toolcache}
+          - {name: tflint, kind: toolcache}
+          - {name: awscli, kind: toolcache}
+          - {name: openmpi, kind: sysroot}
+          - {name: highs, kind: sysroot}
+          - {name: libpq, kind: sysroot}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Name the image and its version
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+          KIND: ${{ matrix.image.kind }}
+          NAME: ${{ matrix.image.name }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
+          echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.image.kind }}-${{ matrix.image.name }}-*
+          merge-multiple: true
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Join the architectures under the version tag
+        env:
+          REPOSITORY: ${{ steps.image.outputs.repository }}
+          VERSION: ${{ steps.image.outputs.version }}
+          DIGESTS: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          digests=("${DIGESTS}"/*)
+          if [ "${#digests[@]}" = 0 ]; then
+            echo "${REPOSITORY}:${VERSION} was already published; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Both architectures or neither: a tag holding one would make the other's pods fail to pull.
+          [ "${#digests[@]}" = 2 ] || { echo "expected an amd64 and an arm64 digest, found ${#digests[@]}" >&2; exit 1; }
+          sources=()
+          for digest in "${digests[@]}"; do
+            sources+=("${REPOSITORY}@sha256:$(basename "$digest")")
+          done
+          docker buildx imagetools create -t "${REPOSITORY}:${VERSION}" "${sources[@]}"
+          digest="$(docker buildx imagetools inspect "${REPOSITORY}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
+          {
+            echo "Published \`${REPOSITORY}:${VERSION}\`. Pin it as:"
+            echo
+            echo "\`${REPOSITORY}:${VERSION}@${digest}\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
