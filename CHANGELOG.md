@@ -1,3 +1,15 @@
+# [1.20.0](https://github.com/ExaDev/github-runner/compare/v1.19.0...v1.20.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **autoscaler:** count runners from ephemeral runners and patch the state ConfigMap from a file ([0da00e9](https://github.com/ExaDev/github-runner/commit/0da00e919a6a8e9f15330f87d2b85bdae5b9b9dd))
+
+
+### Features
+
+* **autoscaler:** move a slot to a saturated pooled profile when the pool is at its ceiling ([0e75801](https://github.com/ExaDev/github-runner/commit/0e75801c4f3ec7f926ea551a254278f00cf8dcaa))
+
 # [1.19.0](https://github.com/ExaDev/github-runner/compare/v1.18.0...v1.19.0) (2026-10-07)
 
 
