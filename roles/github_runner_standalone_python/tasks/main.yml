@@ -1,0 +1,69 @@
+---
+# Installs a pinned, self-contained CPython on a host that has none, so Ansible can manage it. Runs before facts are gathered, and every command here is ansible.builtin.raw (a plain shell command over SSH) because no module can run on the host until it has a Python: raw is the one thing Ansible offers for this step. Idempotent: it installs only when the pinned version is not already in place.
+
+- name: Fail if the install directory is not set to an absolute path
+  ansible.builtin.assert:
+    that:
+      - github_runner_standalone_python_install_dir is string
+      - github_runner_standalone_python_install_dir.startswith('/')
+    fail_msg: >-
+      github_runner_standalone_python_install_dir must be an absolute path on storage that survives a reboot (on Unraid,
+      somewhere under /mnt/user/appdata or /boot, never / or ~, which live in RAM).
+
+- name: Read what is installed at the install directory, and whether this host can run the pinned build
+  # Prints exactly one machine= line and one installed= line. installed=foreign means the directory exists, is not empty and is not an install of this role, which the install step must never replace.
+  ansible.builtin.raw: |
+    set -u
+    dir={{ github_runner_standalone_python_install_dir | quote }}
+    echo "machine=$(uname -s)-$(uname -m)"
+    if [ -x "$dir/bin/python3" ]; then
+      echo "installed=$("$dir/bin/python3" -c 'import platform; print(platform.python_version())')"
+    elif [ -e "$dir" ] && [ -n "$(ls -A "$dir")" ]; then
+      echo "installed=foreign"
+    else
+      echo "installed=none"
+    fi
+  register: github_runner_standalone_python_probe
+  changed_when: false
+  check_mode: false
+
+- name: Fail if the build pinned here cannot run on this host
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_standalone_python_archive is a build for Linux on x86-64 and this host reports
+      {{ github_runner_standalone_python_probe.stdout_lines | select('match', '^machine=') | first | regex_replace('^machine=', '') }}.
+      Pin a build for this platform from the python-build-standalone release (and its SHA-256) before running again.
+  when: "'machine=Linux-x86_64' not in github_runner_standalone_python_probe.stdout_lines"
+
+- name: Fail if the install directory holds something that is not this role's install
+  ansible.builtin.fail:
+    msg: >-
+      {{ github_runner_standalone_python_install_dir }} exists, is not empty and has no bin/python3. The role replaces only
+      its own installs, so point github_runner_standalone_python_install_dir at an empty or new directory.
+  when: "'installed=foreign' in github_runner_standalone_python_probe.stdout_lines"
+
+- name: Download, verify and install the pinned interpreter
+  # Everything happens in a scratch directory beside the target and the target is replaced by one rename, so an interrupted run leaves either the old install or none, never half of one. The download is checked against the pinned SHA-256 before it is unpacked.
+  when: "('installed=' ~ github_runner_standalone_python_version) not in github_runner_standalone_python_probe.stdout_lines"
+  ansible.builtin.raw: |
+    set -eu
+    dir={{ github_runner_standalone_python_install_dir | quote }}
+    mkdir -p "$(dirname "$dir")"
+    scratch=$(mktemp -d "$(dirname "$dir")/.python-install.XXXXXX")
+    trap 'rm -rf "$scratch"' EXIT
+    curl -fsSL -o "$scratch/python.tar.gz" {{ github_runner_standalone_python_url | quote }}
+    echo "{{ github_runner_standalone_python_sha256 }}  $scratch/python.tar.gz" | sha256sum -c -
+    tar -xzf "$scratch/python.tar.gz" -C "$scratch"
+    rm -rf "$dir"
+    mv "$scratch/python" "$dir"
+    echo "installed_now=$("$dir/bin/python3" -c 'import platform; print(platform.python_version())')"
+  register: github_runner_standalone_python_install
+  changed_when: "'installed_now=' in github_runner_standalone_python_install.stdout"
+
+- name: Fail if the host is not set to use the interpreter this role installs
+  # Ansible reads ansible_python_interpreter before a play starts, so the role cannot switch the host over itself: without it set in the host's inventory entry the next play would look for /usr/bin/python3 and fail with a less helpful message.
+  ansible.builtin.assert:
+    that: ansible_python_interpreter | default('') == github_runner_standalone_python_install_dir ~ '/bin/python3'
+    fail_msg: >-
+      Set ansible_python_interpreter to {{ github_runner_standalone_python_install_dir }}/bin/python3 for this host in its
+      host_vars, so every later module task uses the interpreter this role installed.

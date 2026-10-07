@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: ExaDev
+  description: Installs a pinned, self-contained CPython on a Linux host that has none, so Ansible can manage it.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: GenericLinux
+      versions: [all]
+dependencies: []

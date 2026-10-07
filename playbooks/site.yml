@@ -1,6 +1,16 @@
 ---
 # Single entrypoint. Run it with an inventory of the fleet's hosts, as exadev.github_runner.site once the collection is installed or from this checkout, and scope a run to one machine with --limit, e.g.: ansible-playbook -i inventory.yml exadev.github_runner.site --limit node1
 # The roles read their secrets as plain variables, from any source Ansible reads (ansible-vault, SOPS, an env, HashiCorp Vault or SSM lookup). github_runner_secrets_source: onepassword adds the 1Password adapter role, which reads them from one 1Password item instead; none (the default) adds nothing.
+# First, because every later play runs Ansible modules, which need a Python on the host. Only a host that sets github_runner_standalone_python_install (a host with no Python of its own, such as Unraid) does anything here; the others skip it, and it needs no facts because none can be gathered without one.
+- name: Give hosts that have no Python a standalone one
+  hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
+  gather_facts: false
+  tasks:
+    - name: Install the standalone Python
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_standalone_python
+      when: github_runner_standalone_python_install | default(false) | bool
+
 # Checks the secrets source and the ARC configuration before k3s is started or changed, so bad input fails before anything changes. Needs no facts and no secrets.
 - name: Validate the ARC configuration
   hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"

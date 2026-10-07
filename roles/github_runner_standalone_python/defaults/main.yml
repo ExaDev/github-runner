@@ -1,0 +1,12 @@
+---
+# Where the interpreter is installed. Required, and it must be on storage that survives a reboot: a host whose root filesystem lives in RAM (Unraid) loses anything under / or ~ when it restarts. Set ansible_python_interpreter for the host to <this>/bin/python3 in its host_vars, because Ansible reads that before any play runs and this role cannot set it early enough.
+github_runner_standalone_python_install_dir: ""
+
+# The python-build-standalone release (https://github.com/astral-sh/python-build-standalone) the interpreter comes from: a CPython build that bundles its own libraries and depends only on the glibc already on the host, so it does not care which distribution or release the host runs. The release tag, the CPython version inside it and the archive's SHA-256 (from the release's SHA256SUMS) are pinned together, so a run installs exactly the bytes that were checked and a bump is one deliberate change to all three.
+github_runner_standalone_python_release: "20261003"
+github_runner_standalone_python_version: "3.12.15"
+github_runner_standalone_python_sha256: f937814031eab4698ca6d07ec606ede1825768f3f3e99af76d9db3900bee03c5
+
+# The archive's file name for the supported platform. Only x86-64 Linux is pinned above, so the role fails on any other machine rather than installing the wrong build.
+github_runner_standalone_python_archive: "cpython-{{ github_runner_standalone_python_version }}+{{ github_runner_standalone_python_release }}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+github_runner_standalone_python_url: "https://github.com/astral-sh/python-build-standalone/releases/download/{{ github_runner_standalone_python_release }}/{{ github_runner_standalone_python_archive | urlencode }}"
