@@ -311,6 +311,7 @@
       data:
         status.json: ""
         raise-confirm-count: "0"
+        rebalance-confirm-count: "0"
 
 - name: "Platform: create/update heartbeat's GitHub PAT secret"
   kubernetes.core.k8s:

@@ -27,6 +27,10 @@ CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 JOB_MEMORY_KEY="job-memory"
 # The peaks the runners' own job-completed hook measured (runner-hooks/job-completed.sh), kept apart from the sampled ones above because they are keyed by the job's id, not its display name, and are exact, not a lower bound.
 JOB_PEAK_KEY="job-peak"
+# The ConfigMap key counting consecutive polls in which one pooled target was saturated while another held spare slots (see rebalance_one), kept apart from the raise path's own `raise-confirm-count`.
+REBALANCE_CONFIRM_KEY="rebalance-confirm-count"
+# A pooled target is never rebalanced below this many runners, so a quiet one can always start a job.
+REBALANCE_MIN_MAX=1
 JOB_MEMORY_MAX_ENTRIES=2048
 JOB_MEMORY_RETENTION_SECONDS=$(( 30 * 24 * 60 * 60 ))
 
@@ -145,6 +149,32 @@ raise_by_one() {
   done
   for ((i = 0; i < ${#TARGETS[@]}; i++)); do NEW_MAX[i]=${MAX[$i]}; done
   NEW_MAX[best]=$(( NEW_MAX[best] + 1 ))
+}
+
+# Moves one slot from the pooled target with the most spare slots to a target that has used all of its own, without changing the combined total, so a pool at its ceiling is not stuck with an idle target's share while another queues. Sets NEW_MAX and returns 0 when a move applies, 1 when none does. A target counts as saturated when its running count has reached its own maxRunners; a donor must keep at least its running count and at least REBALANCE_MIN_MAX runners after giving one up. Ties go to the first target, so a poll's choice is stable.
+rebalance_one() {
+  local i saturated=-1 donor=-1 donor_slack=0 slack
+  for ((i = 0; i < ${#TARGETS[@]}; i++)); do
+    NEW_MAX[i]=${MAX[$i]}
+    if [ "$saturated" -lt 0 ] && [ "${R[$i]}" -ge "${MAX[$i]}" ]; then
+      saturated=$i
+    fi
+  done
+  [ "$saturated" -ge 0 ] || return 1
+  for ((i = 0; i < ${#TARGETS[@]}; i++)); do
+    [ "$i" -ne "$saturated" ] || continue
+    slack=$(( MAX[i] - R[i] ))
+    [ "$(( MAX[i] - 1 ))" -ge "$REBALANCE_MIN_MAX" ] || continue
+    if [ "$slack" -gt "$donor_slack" ]; then
+      donor_slack=$slack
+      donor=$i
+    fi
+  done
+  [ "$donor" -ge 0 ] || return 1
+  NEW_MAX[donor]=$(( MAX[donor] - 1 ))
+  NEW_MAX[saturated]=$(( MAX[saturated] + 1 ))
+  REBALANCE_FROM=$donor
+  REBALANCE_TO=$saturated
 }
 
 # Merges {repo, workflow, job, mib} entries into the JSON object kept under a ConfigMap key, one entry per repository, workflow ref and job, holding the highest figure seen and when it was last seen. $3 is true when each merge counts as an observation (the sampled record, where one job is seen many times); the measured record is re-read from Events that stay around, so counting there would count the same job again. Entries unseen for the retention are dropped, and the oldest go first past the cap.
@@ -307,6 +337,7 @@ over_ceiling=false
 if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] || [ "$over_ceiling" = "true" ]; then
   # Lower immediately, no delay or averaging — lowering never disrupts in-flight jobs (ARC only gates new claims), so there is no cost to being trigger-happy in this direction. Can drop below FLOOR (even to 0, spread across targets by lower_to) if pressure is severe enough.
   configmap_set "raise-confirm-count" "0"
+  configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   target_total=$FLOOR
   # Only the ceiling is exceeded: the pool is otherwise healthy, so it comes down to the ceiling, not to the floor.
   if [ "$pressure" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$UNSCHEDULABLE_TOTAL" -eq 0 ]; then
@@ -326,6 +357,7 @@ if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDU
     write_status "$MAX_TOTAL" "steady: already at or below the safe target" "$HEADROOM_MIB"
   fi
 elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ]; then
+  configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   confirm_count="$(configmap_get 'raise-confirm-count')"
   [ -n "$confirm_count" ] || confirm_count=0
   confirm_count=$(( confirm_count + 1 ))
@@ -338,6 +370,21 @@ elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ]; t
     write_status "$MAX_TOTAL" "watching: headroom confirmed for ${confirm_count}/${RAISE_CONFIRM_POLLS} polls" "$HEADROOM_MIB"
   fi
 else
+  # Here the pool is healthy and holds as many runners as it may (below the ceiling with enough headroom is the raise branch above; pressure, an unschedulable pod and a total over the ceiling are the lower branch). Slots are fixed per target, so a target that has used all of its own while another sits idle would queue for capacity the pool has. Move one slot at a time, and only once the same imbalance has been seen for as many polls as a raise needs, so a burst that ends within a poll or two moves nothing.
   configmap_set "raise-confirm-count" "0"
-  write_status "$MAX_TOTAL" "steady" "$HEADROOM_MIB"
+  if rebalance_one; then
+    rebalance_count="$(configmap_get "$REBALANCE_CONFIRM_KEY")"
+    case "$rebalance_count" in ''|*[!0-9]*) rebalance_count=0 ;; esac
+    rebalance_count=$(( rebalance_count + 1 ))
+    if [ "$rebalance_count" -ge "$RAISE_CONFIRM_POLLS" ]; then
+      configmap_set "$REBALANCE_CONFIRM_KEY" "0"
+      apply_new_max "rebalance: ${TARGETS[$REBALANCE_TO]} has used all ${MAX[$REBALANCE_TO]} of its runners while ${TARGETS[$REBALANCE_FROM]} runs ${R[$REBALANCE_FROM]} of ${MAX[$REBALANCE_FROM]}; moving one slot" "$HEADROOM_MIB"
+    else
+      configmap_set "$REBALANCE_CONFIRM_KEY" "$rebalance_count"
+      write_status "$MAX_TOTAL" "steady: ${TARGETS[$REBALANCE_TO]} is saturated, imbalance confirmed for ${rebalance_count}/${RAISE_CONFIRM_POLLS} polls" "$HEADROOM_MIB"
+    fi
+  else
+    configmap_set "$REBALANCE_CONFIRM_KEY" "0"
+    write_status "$MAX_TOTAL" "steady" "$HEADROOM_MIB"
+  fi
 fi
