@@ -1,3 +1,10 @@
+# [1.23.0](https://github.com/ExaDev/github-runner/compare/v1.22.1...v1.23.0) (2026-10-08)
+
+
+### Features
+
+* **arc:** run public images without a pull Secret ([f5fe08f](https://github.com/ExaDev/github-runner/commit/f5fe08f2c43d579e5f866710a4a17aed5e0679a9))
+
 ## [1.22.1](https://github.com/ExaDev/github-runner/compare/v1.22.0...v1.22.1) (2026-10-08)
 
 # [1.22.0](https://github.com/ExaDev/github-runner/compare/v1.21.0...v1.22.0) (2026-10-07)
