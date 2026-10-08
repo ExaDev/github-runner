@@ -1,3 +1,11 @@
+# [1.24.0](https://github.com/ExaDev/github-runner/compare/v1.23.0...v1.24.0) (2026-10-08)
+
+
+### Features
+
+* **tool-images:** add a build runner image with a C toolchain ([6df87bf](https://github.com/ExaDev/github-runner/commit/6df87bff8cd24897c41b93c7e6ce2ed952f5cd65))
+* **tool-images:** add GLPK and MariaDB Connector/C system-library images ([3d9e6b6](https://github.com/ExaDev/github-runner/commit/3d9e6b6c87250a3affa58b9136da4ac3aa7c1131))
+
 # [1.23.0](https://github.com/ExaDev/github-runner/compare/v1.22.1...v1.23.0) (2026-10-08)
 
 
