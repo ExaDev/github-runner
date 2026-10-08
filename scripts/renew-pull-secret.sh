@@ -23,9 +23,6 @@ EXPIRY_ANNOTATION="${EXPIRY_ANNOTATION:?EXPIRY_ANNOTATION must be set}"
 FIELD_MANAGER="${FIELD_MANAGER:?FIELD_MANAGER must be set}"
 GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 
-# GitHub rejects an App JWT whose exp is more than ten minutes after iat; iat is backdated a minute to absorb clock drift.
-JWT_BACKDATE_SECONDS=60
-JWT_LIFETIME_SECONDS=540
 # The username GitHub documents for authenticating to its registries with a token that belongs to no user.
 TOKEN_USERNAME="x-access-token"
 MANIFEST_ACCEPT="application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
@@ -39,47 +36,12 @@ umask 077
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-b64url() {
-  openssl base64 -A | tr '+/' '-_' | tr -d '='
-}
+# The image carries the shared token minting beside this script (see pull-secret-renewer/Dockerfile).
+# shellcheck source=roles/github_runner_arc/files/github-app-token.sh
+source "$(dirname "${BASH_SOURCE[0]}")/github-app-token.sh"
 
-# Writes a curl config line for a header or user value. curl config values are double-quoted strings in which a backslash escapes the next character.
-curl_config() {
-  local option="$1" value="$2"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '%s = "%s"\n' "$option" "$value"
-}
-
-for field in github_app_id github_app_installation_id github_app_private_key; do
-  [ -s "$GITHUB_APP_DIR/$field" ] || fail "the App Secret has no $field"
-done
-app_id="$(tr -d '[:space:]' < "$GITHUB_APP_DIR/github_app_id")"
-installation_id="$(tr -d '[:space:]' < "$GITHUB_APP_DIR/github_app_installation_id")"
-[[ "$app_id" =~ ^[0-9]+$ ]] || fail "the App Secret's github_app_id is not a number"
-[[ "$installation_id" =~ ^[0-9]+$ ]] || fail "the App Secret's github_app_installation_id is not a number"
-
-now="$(date +%s)"
-header="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
-claims="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - JWT_BACKDATE_SECONDS))" "$((now + JWT_LIFETIME_SECONDS))" "$app_id" | b64url)"
-signature="$(printf '%s.%s' "$header" "$claims" | openssl dgst -sha256 -sign "$GITHUB_APP_DIR/github_app_private_key" -binary | b64url)" \
-  || fail "could not sign the App JWT with the App Secret's private key"
-curl_config header "Authorization: Bearer ${header}.${claims}.${signature}" > "$work/github.curl"
-
-status="$(curl -sS -o "$work/mint.json" -w '%{http_code}' -K "$work/github.curl" -X POST \
-  -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
-  --data '{"permissions":{"packages":"read"}}' \
-  "${GITHUB_API_URL}/app/installations/${installation_id}/access_tokens")" || fail "could not reach the GitHub API"
-if [ "$status" != "201" ]; then
-  fail "GitHub refused to mint a packages: read installation token (HTTP ${status}: $(jq -r '.message // empty' "$work/mint.json" 2>/dev/null)). The App needs the packages: read permission, approved on this installation"
-fi
-jq -r '.token // empty' "$work/mint.json" > "$work/token"
-expires_at="$(jq -r '.expires_at // empty' "$work/mint.json")"
-rm -f "$work/mint.json"
-if [ ! -s "$work/token" ] || [ "$(wc -l < "$work/token")" -gt 1 ]; then
-  fail "GitHub's response held no token"
-fi
-[ -n "$expires_at" ] || fail "GitHub's response held no expiry"
+github_app_mint_token "$GITHUB_APP_DIR" "$GITHUB_API_URL" '{"packages":"read"}' "$work"
+expires_at="$(cat "$work/expires_at")"
 token="$(cat "$work/token")"
 
 # The registry's own two-step handshake against each real image: a bearer token scoped to pull it, then a manifest read. A token can authenticate to the registry and still be denied the package, which is only visible at the second step.

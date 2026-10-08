@@ -12,7 +12,10 @@ import textwrap
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "renew-pull-secret.sh"
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts" / "renew-pull-secret.sh"
+# The image carries the shared token minting beside the script, so the tests run the two from one directory as the image does.
+TOKEN_LIB = ROOT / "roles" / "github_runner_arc" / "files" / "github-app-token.sh"
 
 # A stand-in for curl that answers from a scenario file and records each call's arguments and config file. It understands only the options the script uses.
 FAKE_CURL = textwrap.dedent(
@@ -96,6 +99,10 @@ class RenewPullSecretTest(unittest.TestCase):
         root = Path(self.directory.name)
         self.bin = root / "bin"
         self.bin.mkdir()
+        self.script = root / "app-scripts" / SCRIPT.name
+        self.script.parent.mkdir()
+        shutil.copy(SCRIPT, self.script)
+        shutil.copy(TOKEN_LIB, self.script.parent / TOKEN_LIB.name)
         for name, body in (("curl", FAKE_CURL), ("kubectl", FAKE_KUBECTL)):
             path = self.bin / name
             path.write_text(body)
@@ -133,7 +140,7 @@ class RenewPullSecretTest(unittest.TestCase):
             "EXPIRY_ANNOTATION": "example.com/token-expires-at",
             "FIELD_MANAGER": "example-renewer",
         }
-        return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
+        return subprocess.run(["bash", str(self.script)], env=env, capture_output=True, text=True)
 
     def calls(self) -> list[dict]:
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []

@@ -4,6 +4,7 @@ FROM alpine:3.20
 RUN apk add --no-cache bash curl jq kubectl openssl
 
 COPY scripts/renew-pull-secret.sh /app/renew-pull-secret.sh
+COPY roles/github_runner_arc/files/github-app-token.sh /app/github-app-token.sh
 RUN chmod +x /app/renew-pull-secret.sh
 
 # A non-root user by number, so the CronJob's runAsNonRoot check can verify it without reading /etc/passwd.
