@@ -115,23 +115,23 @@ A hook capability, `{job_started_hook}`, is a bash script the runner runs before
 ```yaml
 github_runner_arc_capabilities:
   node-24:
-    image: ghcr.io/example/github-runner-toolcache-node:24.21.0@sha256:<digest>
+    image: ghcr.io/exadev/github-runner-toolcache-node:24.21.0@sha256:616bd7a064af10d868fb09546c4c34965b566b8765bb18c2d59045390c5c1df1
   tflint:
-    image: ghcr.io/example/github-runner-toolcache-tflint:0.64.0@sha256:<digest>
+    image: ghcr.io/exadev/github-runner-toolcache-tflint:0.64.0@sha256:76ec53ce3f0bab5cca9cc3708eb5971da9391d9a8ebbd85b292d7aedcd961178
   terraform:
-    image: ghcr.io/example/github-runner-toolcache-terraform:1.16.5@sha256:<digest>
+    image: ghcr.io/exadev/github-runner-toolcache-terraform:1.16.5@sha256:6d4caa59ec408a131710a99b439172999710acd9995d4c88e9f8c4883208861c
     path: terraform/1.16.5
   awscli:
-    image: ghcr.io/example/github-runner-toolcache-awscli:2.37.10@sha256:<digest>
+    image: ghcr.io/exadev/github-runner-toolcache-awscli:2.37.10@sha256:71f4676eb7ff73deb3941ecd4401b228b7a5d44aab14b5328c4f45817d84c80f
     path: aws-cli/2.37.10
   openmpi:
-    sysroot_image: ghcr.io/example/github-runner-sysroot-openmpi:5.0.11@sha256:<digest>
+    sysroot_image: ghcr.io/exadev/github-runner-sysroot-openmpi:5.0.11@sha256:3d9a127e8b83b7e1e4bbc3b3206fef130e3ae4a592ab1d73de9b28b0eea71ed6
     env:
       OPAL_PREFIX: "{{ github_runner_arc_sysroot_path }}"
   highs:
-    sysroot_image: ghcr.io/example/github-runner-sysroot-highs:1.15.1@sha256:<digest>
+    sysroot_image: ghcr.io/exadev/github-runner-sysroot-highs:1.15.1@sha256:c6b1e3d00449029bbb1837efbf56cfd915bf79efeba8364b4bef7e9c7fa1c66a
   libpq:
-    sysroot_image: ghcr.io/example/github-runner-sysroot-libpq:18.6@sha256:<digest>
+    sysroot_image: ghcr.io/exadev/github-runner-sysroot-libpq:18.6@sha256:c40931f581dfff62cc6e41b19dd5845444165f20d8cef77593158ad0e8161506
   git-identity:
     job_started_hook: |
       git config --global user.name "Example CI"
@@ -152,7 +152,7 @@ github_runner_arc_orgs:
         capabilities: [openmpi, highs, libpq]
 ```
 
-`<digest>` stands for the digest a published image has; see [Publishing the reference images](#publishing-the-reference-images). A capability image must be pinned to a version tag or a digest, never `latest` or no tag, so every runner pod gets the same tool; the role refuses an unpinned one. A digest, alone or after the tag as above, also pins what the tag could otherwise be moved to. Images are pulled with the pod's pull Secret, which a public image does not need.
+The images above are the reference images this repository publishes, which are public and can be pulled without a credential; see [Publishing the reference images](#publishing-the-reference-images) for how they are built and where a new version's reference comes from. A capability image must be pinned to a version tag or a digest, never `latest` or no tag, so every runner pod gets the same tool; the role refuses an unpinned one. A digest, alone or after the tag as above, also pins what the tag could otherwise be moved to. Images are pulled with the pod's pull Secret, which a public image does not need.
 
 ### Profiles select capabilities
 
