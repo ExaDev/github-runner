@@ -1,3 +1,15 @@
+# [1.25.0](https://github.com/ExaDev/github-runner/compare/v1.24.0...v1.25.0) (2026-10-08)
+
+
+### Bug Fixes
+
+* **arc:** let the registry cache answer referrers lookups ([3d1dc84](https://github.com/ExaDev/github-runner/commit/3d1dc849fc78e7ea3c783d04ca1caff837a8a9a3))
+
+
+### Features
+
+* **arc:** add an optional pull-through registry cache for dind runners ([223786b](https://github.com/ExaDev/github-runner/commit/223786b0b73bd0dae3ddb6179a786c41bf2a8cc7))
+
 # [1.24.0](https://github.com/ExaDev/github-runner/compare/v1.23.0...v1.24.0) (2026-10-08)
 
 
