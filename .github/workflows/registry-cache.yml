@@ -1,0 +1,44 @@
+name: Registry cache
+
+# Runs the ARC role's registry cache in a kind cluster (tests/registry_cache/run.sh): the cache installed as the role renders it, for Docker Hub, ghcr.io and a private registry behind basic auth whose credential the cache reads from a Secret, and a pod from the chart's runner pod template, rendered as the role renders a Docker-in-Docker profile with the cache on, that pulls from all three and builds through a docker-container builder without logging in, each pull checked in the cache's access logs; then, with the cache scaled to nothing, a second pod that must still pull and build from the registries directly. Only on changes that can affect it. Publishes nothing.
+#
+# GitHub-hosted ubuntu-latest has Docker, kind, kubectl and helm already.
+
+on:
+  pull_request:
+    paths:
+      - roles/github_runner_arc/**
+      - plugins/filter/arc.py
+      - tests/registry_cache/**
+      - tests/capabilities/render.yml
+      - .github/workflows/registry-cache.yml
+  workflow_dispatch:
+
+concurrency:
+  group: registry-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  registry-cache:
+    name: Registry cache in kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core pyyaml
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run the registry cache test
+        run: tests/registry_cache/run.sh
