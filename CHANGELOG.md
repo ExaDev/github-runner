@@ -1,3 +1,12 @@
+# [1.26.0](https://github.com/ExaDev/github-runner/compare/v1.25.0...v1.26.0) (2026-10-08)
+
+
+### Features
+
+* **arc:** add a runner reaper pass for runners that outlive their job ([f66a9c5](https://github.com/ExaDev/github-runner/commit/f66a9c56d6852a001473e7352c228be351ac3236))
+* **arc:** install an optional runner reaper CronJob in each runner namespace ([a60458f](https://github.com/ExaDev/github-runner/commit/a60458f9ce07a219fff16523433166087cbf90a4))
+* **arc:** set activeDeadlineSeconds on runner pods when configured ([7964cbd](https://github.com/ExaDev/github-runner/commit/7964cbd2f4fd16332ae8ec6f06d7753f5160c449))
+
 # [1.25.0](https://github.com/ExaDev/github-runner/compare/v1.24.0...v1.25.0) (2026-10-08)
 
 
