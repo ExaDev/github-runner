@@ -1,0 +1,21 @@
+# Renders the github_runner_arc role's runner reaper manifests (templates/runner-reaper.yaml.j2) with the role's defaults and constants and the ConfigMap data install_runner_reaper.yml gives them, for tests/runner_reaper/run.sh to apply to a test cluster and tests/unit/test_runner_reaper_role.py to read back. Takes reaper_namespace and reaper_output as extra variables; a role variable such as the image or the bound is overridden with an extra variable of its own name, since the defaults file loaded here outranks play variables.
+- name: Render the runner reaper manifests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+    - ../../roles/github_runner_arc/vars/main.yml
+  vars:
+    profile:
+      namespace: "{{ reaper_namespace }}"
+      app_secret: example-org-github-app
+    github_runner_arc_runner_reaper_scripts:
+      reap-runners.sh: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/github_runner_arc/files/reap-runners.sh') }}"
+      github-app-token.sh: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../roles/github_runner_arc/files/github-app-token.sh') }}"
+  tasks:
+    - name: Write the manifests
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_arc/templates/runner-reaper.yaml.j2') }}"
+        dest: "{{ reaper_output }}"
+        mode: "0644"

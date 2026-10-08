@@ -95,6 +95,22 @@
           and ([github_runner_arc_node_recovery_after_seconds, github_runner_arc_node_recovery_poll_seconds]
                | map('string') | reject('match', '^[1-9][0-9]*$') | list | length > 0)
         }}
+    - msg: github_runner_arc_runner_reaper_max_job_seconds must be a whole number of seconds, at least 1, and github_runner_arc_runner_reaper_completed_grace_seconds a whole number of seconds.
+      failed: >-
+        {{
+          github_runner_arc_runner_reaper_enabled | bool
+          and (github_runner_arc_runner_reaper_max_job_seconds | string is not match('^[1-9][0-9]*$')
+               or github_runner_arc_runner_reaper_completed_grace_seconds | string is not match('^[0-9]+$'))
+        }}
+    - msg: github_runner_arc_runner_reaper_schedule must be a cron schedule, five fields or a macro such as @hourly.
+      failed: >-
+        {{
+          github_runner_arc_runner_reaper_enabled | bool
+          and not (github_runner_arc_runner_reaper_schedule | string is match('^@[a-z]+$')
+                   or github_runner_arc_runner_reaper_schedule | string | split | length == 5)
+        }}
+    - msg: github_runner_arc_runner_active_deadline_seconds must be a whole number of seconds, at least 1, or unset.
+      failed: "{{ github_runner_arc_runner_active_deadline_seconds is not none and github_runner_arc_runner_active_deadline_seconds | string is not match('^[1-9][0-9]*$') }}"
     - msg: github_runner_arc_labelled_nodes needs github_runner_arc_node_label_key.
       failed: "{{ github_runner_arc_labelled_nodes | length > 0 and github_runner_arc_node_label_key | length == 0 }}"
     - msg: github_runner_arc_node_label_value must be set when github_runner_arc_node_label_key is.

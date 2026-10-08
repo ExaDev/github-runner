@@ -1,0 +1,139 @@
+{# The runner reaper for one scale-set profile (see tasks/install_runner_reaper.yml): a ServiceAccount, a Role that may only list and delete the namespace's EphemeralRunners, its RoleBinding, the ConfigMap holding files/reap-runners.sh and the token minting it sources, and the CronJob running them. `profile` is set by the including task, and github_runner_arc_runner_reaper_scripts holds the ConfigMap's data. #}
+{% set name = 'runner-reaper' %}
+{% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
+{% set scripts_dir = '/etc/runner-reaper' %}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ profile.namespace | to_json }}
+  labels: {{ labels | to_json }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ profile.namespace | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  # list to read every runner's recorded job, delete to remove one. Nothing else: no pods, no Secrets (the App Secret reaches the job as a volume the kubelet mounts) and no write to a runner's status.
+  - apiGroups: ["actions.github.com"]
+    resources: ["ephemeralrunners"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ profile.namespace | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ profile.namespace | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ name | to_json }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ profile.namespace | to_json }}
+  labels: {{ labels | to_json }}
+data: {{ github_runner_arc_runner_reaper_scripts | to_json }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ profile.namespace | to_json }}
+  labels: {{ labels | to_json }}
+spec:
+  schedule: {{ github_runner_arc_runner_reaper_schedule | to_json }}
+  # One pass at a time; a pass that misses its slot by more than this is skipped rather than run late, and the next one checks instead.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A pass that fails, because GitHub or the token was unavailable, is not retried: it deleted nothing it could not judge, the failed Job stays visible, and the next scheduled pass tries again.
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels: {{ labels | to_json }}
+        spec:
+          serviceAccountName: {{ name | to_json }}
+          restartPolicy: Never
+{% if github_runner_arc_node_label_key | length > 0 %}
+          nodeSelector: {{ {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} | to_json }}
+{% endif %}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            # Makes the mounted App Secret readable by that group, and by nobody else.
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reap
+              image: {{ github_runner_arc_runner_reaper_image | to_json }}
+              command: ["bash", {{ (scripts_dir ~ '/reap-runners.sh') | to_json }}]
+              env:
+                - name: RUNNER_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: MAX_JOB_SECONDS
+                  value: {{ github_runner_arc_runner_reaper_max_job_seconds | string | to_json }}
+                - name: COMPLETED_GRACE_SECONDS
+                  value: {{ github_runner_arc_runner_reaper_completed_grace_seconds | string | to_json }}
+                - name: DRY_RUN
+                  value: {{ (github_runner_arc_runner_reaper_dry_run | bool) | string | lower | to_json }}
+                - name: GITHUB_APP_DIR
+                  value: /var/run/github-app
+                # kubectl's cache and the script's working files go to the in-memory volume, since the root filesystem is read-only.
+                - name: HOME
+                  value: /tmp
+                - name: TMPDIR
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 200m
+                  memory: 64Mi
+              volumeMounts:
+                - name: scripts
+                  mountPath: {{ scripts_dir | to_json }}
+                  readOnly: true
+                - name: github-app
+                  mountPath: /var/run/github-app
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ name | to_json }}
+                # 0444: the scripts are run through bash, so nobody needs to execute or write them.
+                defaultMode: 292
+            - name: github-app
+              secret:
+                secretName: {{ profile.app_secret | to_json }}
+                # 0440: owner and group read.
+                defaultMode: 288
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 8Mi

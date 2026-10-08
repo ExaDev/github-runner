@@ -1,0 +1,33 @@
+---
+# Included once per scale-set profile from install_scale_set_profile.yml, with `org` and `profile` set. With github_runner_arc_runner_reaper_enabled it installs the runner reaper in the profile's namespace (templates/runner-reaper.yaml.j2): a CronJob that runs files/reap-runners.sh from a ConfigMap and deletes runners that have outlived their job. Otherwise it removes the CronJob, its ConfigMap and its RBAC, so turning it off leaves nothing behind.
+#
+# The job reads the App Secret through a volume, which the kubelet mounts for it, so its ServiceAccount needs no access to Secrets; its one Role grants list and delete on the namespace's EphemeralRunners and nothing else.
+
+- name: Describe the runner reaper for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_runner_reaper_resources: "{{ lookup('ansible.builtin.template', 'runner-reaper.yaml.j2') | from_yaml_all | list }}"
+  vars:
+    github_runner_arc_runner_reaper_scripts:
+      reap-runners.sh: "{{ lookup('ansible.builtin.file', 'reap-runners.sh') }}"
+      github-app-token.sh: "{{ lookup('ansible.builtin.file', 'github-app-token.sh') }}"
+
+- name: Install the runner reaper for {{ profile.label }}
+  kubernetes.core.k8s:
+    definition: "{{ item }}"
+  loop: "{{ github_runner_arc_runner_reaper_resources }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+  when: github_runner_arc_runner_reaper_enabled | bool
+
+# Deleted in the reverse order, so the CronJob goes before the script and permissions it runs with.
+- name: Remove any runner reaper for {{ profile.label }}
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ github_runner_arc_runner_reaper_resources | reverse | list }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+  when: not (github_runner_arc_runner_reaper_enabled | bool)

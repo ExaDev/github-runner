@@ -300,6 +300,35 @@ argument_specs:
       github_runner_arc_node_recovery_image:
         type: str
         description: Image the node recovery watcher runs, pulled without a pull Secret.
+      github_runner_arc_runner_reaper_enabled:
+        type: bool
+        default: false
+        description:
+          - Install the runner reaper in each runner namespace, a CronJob that deletes an EphemeralRunner whose job's run is completed or cancelled, whose own job is completed, or whose job has run past github_runner_arc_runner_reaper_max_job_seconds.
+          - The org's GitHub App needs the Actions repository permission (read), approved on its installation; without it the reaper deletes nothing and its Jobs fail saying so.
+          - false removes the CronJob, its RBAC and its ConfigMap.
+      github_runner_arc_runner_reaper_max_job_seconds:
+        type: int
+        default: 432000
+        description: Seconds a job may run before the reaper deletes its runner. The default is GitHub's own five-day limit on a self-hosted runner's job.
+      github_runner_arc_runner_reaper_completed_grace_seconds:
+        type: int
+        default: 300
+        description: Seconds a run or job must have been completed before the reaper deletes a runner still holding it.
+      github_runner_arc_runner_reaper_schedule:
+        type: str
+        default: "*/5 * * * *"
+        description: Cron schedule of the runner reaper.
+      github_runner_arc_runner_reaper_dry_run:
+        type: bool
+        default: false
+        description: Log what the reaper would delete and delete nothing.
+      github_runner_arc_runner_reaper_image:
+        type: str
+        description: Image the reaper CronJob runs, pulled without a pull Secret. Defaults to the pull Secret renewal's image.
+      github_runner_arc_runner_active_deadline_seconds:
+        type: int
+        description: activeDeadlineSeconds on every runner pod, counted from the pod's start. Unset leaves the runner pods without one.
       github_runner_arc_autoscaler_usable_budget_gi:
         type: int
         description: Memory runner pods may use across every node. Required for an autoscaled profile.
