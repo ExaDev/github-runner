@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Relocation test for the reference system-library capability images in tool-images/ (openmpi, highs, libpq). For each one named it builds the image for this machine's architecture, copies its /sysroot payload into a volume at /opt/sysroot exactly as the role's init container does (the same command, as the runner's uid, into a world-writable directory like an emptyDir), renders the job-started hook data for a profile carrying that capability through the role's own tasks, and then, as the runner user, runs the role's job-started dispatcher, applies the GITHUB_PATH and GITHUB_ENV it wrote as the runner does, and runs the checks in tests/system_libraries/checks/<payload>.sh twice: check_stock in the stock actions-runner image (the payload's programs and libraries resolve and run), and check_compiled in that image with a C compiler and pkg-config added, since the stock image has none and its runner user cannot install one (a small program compiled against the payload's headers through its pkg-config file runs). The payloads are built under /sysroot and run from /opt/sysroot, where the build prefix does not exist, so every check runs relocated.
+# Relocation test for the reference system-library capability images in tool-images/ (openmpi, highs, libpq). For each one named it builds the image for this machine's architecture, copies its /sysroot payload into a volume at /opt/sysroot exactly as the role's init container does (the same command, as the runner's uid, into a world-writable directory like an emptyDir), renders the job-started hook data for a profile carrying that capability through the role's own tasks, and then, as the runner user, runs the role's job-started dispatcher, applies the GITHUB_PATH and GITHUB_ENV it wrote as the runner does, and runs the checks in tests/system_libraries/checks/<payload>.sh twice: check_stock in the stock actions-runner image (the payload's programs and libraries resolve and run), and check_compiled in the reference build runner image (tool-images/build: that same stock image, at the version and digest it pins, with build-essential and pkg-config added), since the stock image has no compiler (a small program compiled against the payload's headers runs). The stock phase runs the build image's own base, so both phases share one runner release. The payloads are built under /sysroot and run from /opt/sysroot, where the build prefix does not exist, so every check runs relocated.
 #
 # Usage: tests/system_libraries/run.sh [openmpi|highs|libpq]... (default: all three). Needs Docker, python3 and ansible-playbook (ANSIBLE_PLAYBOOK overrides which); reaches the network for the sources, the runner image and its distribution's packages. Leaves the built images (grtest/sysroot-<payload>:test) in place so a rerun reuses their build cache; removes its volumes on exit.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 ansible_playbook="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
-runner_image=ghcr.io/actions/actions-runner:latest
-toolchain_image=grtest/actions-runner-toolchain:test
+build_dockerfile="${repo_root}/tool-images/build/Dockerfile"
+runner_image="ghcr.io/actions/actions-runner:$(sed -n 's/^ARG RUNNER_VERSION=//p' "$build_dockerfile")@$(sed -n 's/^ARG RUNNER_DIGEST=//p' "$build_dockerfile")"
+toolchain_image=grtest/runner-build:test
 sysroot=/opt/sysroot
 hooks_dir=/etc/github-runner/hooks
 runner_uid=1001
@@ -39,13 +40,8 @@ capability_env() {
 payloads=("$@")
 [ "${#payloads[@]}" -gt 0 ] || payloads=(openmpi highs libpq)
 
-log "Building ${toolchain_image}: ${runner_image} with gcc, the C library's headers and pkg-config"
-docker build -q -t "$toolchain_image" - >/dev/null <<DOCKERFILE
-FROM ${runner_image}
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config && rm -rf /var/lib/apt/lists/*
-USER runner
-DOCKERFILE
+log "Building ${toolchain_image} from tool-images/build: ${runner_image} with build-essential and pkg-config"
+docker build -q -t "$toolchain_image" "${repo_root}/tool-images/build" >/dev/null
 
 # What the runner does at job start: run the hook named by ACTIONS_RUNNER_HOOK_JOB_STARTED with fresh environment files, then apply them to the job's steps (each GITHUB_PATH line goes in front of the PATH so far, each GITHUB_ENV line is set). Then the payload's checks for the phase.
 cat >"${work}/step.sh" <<'EOF'

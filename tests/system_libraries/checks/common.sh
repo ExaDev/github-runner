@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared by the per-payload checks, sourced rather than run, as the runner user after the job-started hook's environment has been applied (tests/system_libraries/run.sh). Each payload's check file defines check_stock, run in the stock actions-runner image, which has no C compiler (and its runner user no passwordless sudo to install one), and check_compiled, run in that image with gcc, the C library's headers and pkg-config added, as a runner image built for compiling would have.
+# Shared by the per-payload checks, sourced rather than run, as the runner user after the job-started hook's environment has been applied (tests/system_libraries/run.sh). Each payload's check file defines check_stock, run in the stock actions-runner image, which has no C compiler, and check_compiled, run in the reference build runner image (tool-images/build), which adds build-essential and pkg-config to that same image.
 
 sysroot=/opt/sysroot
 
