@@ -71,6 +71,9 @@
 - name: Install or remove the pull Secret renewal for {{ profile.label }}
   ansible.builtin.include_tasks: install_pull_secret_renewal.yml
 
+- name: Install or remove the runner reaper for {{ profile.label }}
+  ansible.builtin.include_tasks: install_runner_reaper.yml
+
 # Only when the profile sets no max_runners of its own, which takes precedence; the autoscaled profile's measured sizing is its autoscaler's ceiling, measured in install_platform.yml.
 - name: Measure the eligible nodes' free capacity for {{ profile.label }}
   ansible.builtin.include_tasks: measure_sizing.yml
