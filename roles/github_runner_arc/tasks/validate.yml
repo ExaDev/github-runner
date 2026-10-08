@@ -56,8 +56,8 @@
       failed: "{{ github_runner_arc_listener_probes_enabled | bool and not (github_runner_arc_metrics_enabled | bool) }}"
     - msg: github_runner_arc_listener_probe_port must match the port in github_runner_arc_listener_metrics_addr.
       failed: "{{ github_runner_arc_listener_probes_enabled | bool and github_runner_arc_listener_metrics_addr is not match('.*:' ~ github_runner_arc_listener_probe_port ~ '$') }}"
-    - msg: github_runner_arc_image_pull_secret_source must be static or app.
-      failed: "{{ github_runner_arc_image_pull_secret_source not in ['static', 'app'] }}"
+    - msg: github_runner_arc_image_pull_secret_source must be static, app or none.
+      failed: "{{ github_runner_arc_image_pull_secret_source not in ['static', 'app', 'none'] }}"
     - msg: github_runner_arc_image_pull_secret_source app needs github_runner_arc_manage_image_pull_secret, since the role writes the Secret it renews.
       failed: "{{ github_runner_arc_image_pull_secret_source == 'app' and not (github_runner_arc_manage_image_pull_secret | bool) }}"
     # Kubernetes caps a CronJob's name at 52 characters, leaving room for the suffix it adds to each Job's name.

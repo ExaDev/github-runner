@@ -30,7 +30,7 @@
   kubernetes.core.k8s:
     definition: "{{ lookup('ansible.builtin.template', 'image-pull-secret.yaml.j2', template_vars=github_runner_arc_pull_secret_vars) | from_yaml }}"
   no_log: true
-  when: github_runner_arc_manage_image_pull_secret | bool
+  when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_pull_secret_in_use | bool
   vars:
     github_runner_arc_pull_secret_vars: >-
       {{
@@ -55,6 +55,18 @@
           kubectl.kubernetes.io/last-applied-configuration: null
   no_log: true
   when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_image_pull_secret_source == 'app'
+
+# With no pull Secret in use nothing references one, so a pull Secret an earlier run wrote (and the credential it holds) is removed rather than left behind. The renewal below is removed too, since it renews only an App-sourced Secret.
+- name: Remove any pull Secret no longer in use for {{ profile.label }}
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    namespace: "{{ profile.namespace }}"
+    name: "{{ github_runner_arc_image_pull_secret_name }}"
+  # The deleted Secret's data is the credential, and a --diff shows it.
+  no_log: true
+  when: not (github_runner_arc_pull_secret_in_use | bool)
 
 - name: Install or remove the pull Secret renewal for {{ profile.label }}
   ansible.builtin.include_tasks: install_pull_secret_renewal.yml
@@ -90,18 +102,8 @@
     release_namespace: "{{ profile.namespace }}"
     # Rendered on the control node by render_scale_set_values.yml: the profile's values, the role's overlay and the profile's capabilities.
     values: "{{ github_runner_arc_scale_set_values }}"
-    # --set rather than values for containers[]: Helm replaces lists wholesale, so a values mapping naming containers would drop the values file's own command and resources for that container. scaleSetLabels is set one index at a time for the same reason, and not at all when the profile's scale_set_labels is empty.
-    set_values: >-
-      {{
-        [
-          {'value': 'githubConfigUrl=https://github.com/' ~ org.name},
-          {'value': 'githubConfigSecret=' ~ profile.app_secret},
-          {'value': 'template.spec.imagePullSecrets[0].name=' ~ github_runner_arc_image_pull_secret_name},
-          {'value': 'template.spec.containers[0].image=' ~ org.image},
-        ]
-        + range(profile.scale_set_labels | length) | zip(profile.scale_set_labels) | map('join', ']=') | map('regex_replace', '^', 'scaleSetLabels[')
-          | map('community.general.dict_kv', 'value') | list
-      }}
+    # vars/main.yml says what is set this way and why.
+    set_values: "{{ github_runner_arc_scale_set_set_values }}"
 
 # A Helm upgrade that changes the pod template renames the EphemeralRunnerSet the release owns (it carries a spec-hash suffix). The AutoscalingListener should follow the rename but can be left pointing at the deleted name, crash-looping on every patch while the scale set's queue goes unserviced; see the README's Non-obvious behaviour section. Deleting the stale listener makes the controller recreate it against the EphemeralRunnerSet that exists now.
 - name: Grant the runner pods the permission to record job peaks for {{ profile.label }}
