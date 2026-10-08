@@ -1,0 +1,103 @@
+---
+# Installs the registry cache (templates/registry-cache.yaml.j2) when github_runner_arc_registry_cache_enabled is on, and otherwise removes everything an earlier run installed for it, so turning it off converges to an install that never had it. The runner pods' side (the hosts.toml and BuildKit configuration they mount, and the dind container written out to mount them) is rendered per profile by render_scale_set_values.yml and install_scale_set_profile.yml. Included from main.yml on a host that installs scale sets, before them, so the cache is there when their pods first pull.
+
+- name: "Registry cache: describe its resources"
+  ansible.builtin.include_tasks: render_registry_cache.yml
+  when: github_runner_arc_registry_cache_enabled | bool
+
+- name: "Registry cache: install it"
+  when: github_runner_arc_registry_cache_enabled | bool
+  block:
+    - name: "Registry cache: create its namespace"
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ github_runner_arc_registry_cache_namespace }}"
+
+    # Checked before the Deployment changes, so a missing credential fails the run rather than leaving a cache container that cannot start. Only the key names are compared; the values are never read into a variable that is printed.
+    - name: "Registry cache: find each credential Secret"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ github_runner_arc_registry_cache_namespace }}"
+        name: "{{ item.credentials.secret_name }}"
+      loop: "{{ github_runner_arc_registry_cache.registries | selectattr('credentials') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: github_runner_arc_registry_cache_secrets
+      no_log: true
+
+    # Reduced to messages first, without a loop, because a failing loop item is printed whole, and these items hold the Secrets' data.
+    - name: "Registry cache: work out which credential Secrets or keys are missing"
+      ansible.builtin.set_fact:
+        github_runner_arc_registry_cache_missing: "{{ github_runner_arc_registry_cache_secrets.results | exadev.github_runner.arc_registry_cache_secret_problems }}"
+      no_log: true
+
+    - name: "Registry cache: fail when a credential Secret or one of its keys is missing"
+      ansible.builtin.fail:
+        msg: >-
+          The registry cache reads each registry's credentials from a Secret in namespace {{ github_runner_arc_registry_cache_namespace }}:
+          {{ github_runner_arc_registry_cache_missing | join('; ') }}. Create it with a read-only credential, for example
+          kubectl -n {{ github_runner_arc_registry_cache_namespace }} create secret generic <name> --from-literal=username=<user> --from-file=password=<token file>.
+      when: github_runner_arc_registry_cache_missing | length > 0
+
+    # Applied rather than patched, so a field the template stops rendering (a registry's credentials, or the claim when the storage turns ephemeral) is removed from the live object instead of merged with the new one.
+    - name: "Registry cache: install the cache"
+      kubernetes.core.k8s:
+        definition: "{{ item }}"
+        apply: true
+      loop: "{{ github_runner_arc_registry_cache_resources }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+    # The claim only exists with persistent storage; switching to ephemeral storage deletes it with what it held, after the Deployment above has stopped using it.
+    - name: "Registry cache: remove the persistent storage claim when the storage is ephemeral"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: PersistentVolumeClaim
+        namespace: "{{ github_runner_arc_registry_cache_namespace }}"
+        name: "{{ github_runner_arc_registry_cache_claim }}"
+      when: github_runner_arc_registry_cache_storage != 'persistent'
+
+- name: "Registry cache: remove it"
+  when: not (github_runner_arc_registry_cache_enabled | bool)
+  block:
+    # Named here rather than rendered, so removal needs no valid registry list. The Deployment goes first, so nothing still holds the claim.
+    - name: "Registry cache: remove the cache and its storage"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: "{{ item.api_version }}"
+        kind: "{{ item.kind }}"
+        namespace: "{{ github_runner_arc_registry_cache_namespace }}"
+        name: "{{ item.name }}"
+        wait: "{{ item.kind == 'Deployment' }}"
+      loop:
+        - {api_version: apps/v1, kind: Deployment, name: "{{ github_runner_arc_registry_cache_service_name }}"}
+        - {api_version: v1, kind: Service, name: "{{ github_runner_arc_registry_cache_service_name }}"}
+        - {api_version: networking.k8s.io/v1, kind: NetworkPolicy, name: "{{ github_runner_arc_registry_cache_service_name }}"}
+        - {api_version: v1, kind: ConfigMap, name: "{{ github_runner_arc_registry_cache_service_name }}"}
+        - {api_version: v1, kind: PersistentVolumeClaim, name: "{{ github_runner_arc_registry_cache_claim }}"}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.name }}"
+
+    # The namespace goes too, unless it still holds Secrets: the credential Secrets are the operator's, not the role's, and deleting the namespace would delete them.
+    - name: "Registry cache: find Secrets left in its namespace"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        namespace: "{{ github_runner_arc_registry_cache_namespace }}"
+      register: github_runner_arc_registry_cache_left_secrets
+      no_log: true
+
+    - name: "Registry cache: remove its namespace when nothing of the operator's is left in it"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ github_runner_arc_registry_cache_namespace }}"
+      when: >-
+        github_runner_arc_registry_cache_left_secrets.resources
+        | rejectattr('type', 'equalto', 'kubernetes.io/service-account-token') | list | length == 0

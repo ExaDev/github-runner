@@ -70,6 +70,11 @@
       ansible.builtin.include_tasks: install_controller.yml
       when: github_runner_arc_orgs | length > 0
 
+    # Before the scale sets, so the cache is serving when their pods first pull; on a host with no scale sets there is nothing for it to serve.
+    - name: Install the registry cache, or remove it when turned off
+      ansible.builtin.include_tasks: install_registry_cache.yml
+      when: github_runner_arc_orgs | length > 0
+
     - name: Install/upgrade each org's runner scale sets
       ansible.builtin.include_tasks: install_org.yml
       loop: "{{ github_runner_arc_orgs }}"

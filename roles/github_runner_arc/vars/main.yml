@@ -26,6 +26,20 @@ github_runner_arc_scale_set_set_values: >-
       | map('community.general.dict_kv', 'value') | list
   }}
 
+# The registry cache's derived description (plugins/filter/arc.py's arc_registry_cache): each registry's port and address, the hosts.toml files and the BuildKit configuration runner pods mount. Empty when the cache is off.
+github_runner_arc_registry_cache: >-
+  {{
+    github_runner_arc_registry_cache_registries | exadev.github_runner.arc_registry_cache(
+      github_runner_arc_registry_cache_namespace, github_runner_arc_registry_cache_service_name,
+      github_runner_arc_registry_cache_cluster_domain, github_runner_arc_registry_cache_base_port | int)
+    if github_runner_arc_registry_cache_enabled | bool else {'errors': [], 'registries': [], 'hosts': {}, 'buildkitd': ''}
+  }}
+
+# The registry cache's ConfigMap in each runner namespace whose pods use it, the PersistentVolumeClaim its persistent storage uses, and where BUILDX_CONFIG points on a runner container that uses it: a writable directory holding buildkitd.default.toml.
+github_runner_arc_registry_cache_configmap: registry-cache
+github_runner_arc_registry_cache_claim: registry-cache
+github_runner_arc_registry_cache_buildx_config_dir: /etc/github-runner/buildx
+
 # Where a profile's job-started hook ConfigMap is mounted on the runner container, and its name in the profile's namespace. ACTIONS_RUNNER_HOOK_JOB_STARTED names job-started.sh in this directory, and the capability scripts it runs are in job-started.d beneath it.
 github_runner_arc_job_started_hooks_dir: /etc/github-runner/hooks
 github_runner_arc_job_started_configmap: github-runner-job-started

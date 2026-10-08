@@ -1,0 +1,16 @@
+# Renders the registry cache's resources exactly as the github_runner_arc role installs them, through the role's own tasks/render_registry_cache.yml, for tests/unit/test_registry_cache.py and tests/registry_cache/run.sh to read back. Takes github_runner_arc_fleet (the expanded profiles, as validate.yml sets it), the github_runner_arc_registry_cache_* settings and render_output (where the resources are written, as a JSON list) as extra variables. Needs ANSIBLE_COLLECTIONS_PATH to include playbooks/collections, so the role and its filters are found in this checkout.
+- name: Render the registry cache's resources
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Render through the role's own tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_arc
+        tasks_from: render_registry_cache
+
+    - name: Write the resources
+      ansible.builtin.copy:
+        content: "{{ github_runner_arc_registry_cache_resources | to_nice_json }}"
+        dest: "{{ render_output }}"
+        mode: "0644"

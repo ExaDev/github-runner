@@ -40,6 +40,66 @@ argument_specs:
         type: int
         default: 1001
         description: The runner container's group id, which the capabilities' init containers run as.
+      github_runner_arc_registry_cache_enabled:
+        type: bool
+        default: false
+        description:
+          - Installs a pull-through registry cache and points every scale set's Docker-in-Docker daemon, and the docker-container BuildKit builders its jobs create, at it, falling back to each registry when the cache is down or failing.
+          - false renders the scale sets as without it and removes everything an earlier run added for it.
+      github_runner_arc_registry_cache_registries:
+        type: list
+        elements: dict
+        default:
+          - {name: docker-hub, host: docker.io}
+          - {name: ghcr, host: ghcr.io}
+          - {name: quay, host: quay.io}
+        description:
+          - The registries the cache serves, each {name, host, url?, credentials?}. name names its container and Service port (at most 15 characters); host is the registry as image references name it; url is its registry API (default https://<host>, or https://registry-1.docker.io for docker.io).
+          - credentials is {secret_name, username_key?, password_key?}, a Secret in github_runner_arc_registry_cache_namespace holding a read-only credential (keys default to username and password). Credentials are never given inline.
+      github_runner_arc_registry_cache_namespace:
+        type: str
+        default: github-runner-registry-cache
+        description: The cache's namespace, where its credential Secrets live too.
+      github_runner_arc_registry_cache_service_name:
+        type: str
+        default: registry-cache
+        description: The cache's Service, Deployment and ConfigMap name.
+      github_runner_arc_registry_cache_cluster_domain:
+        type: str
+        default: cluster.local
+        description: The cluster's DNS domain, used in the cache address runner pods are given.
+      github_runner_arc_registry_cache_base_port:
+        type: int
+        default: 5000
+        description: The first registry's port; each later registry takes the next one.
+      github_runner_arc_registry_cache_image:
+        type: str
+        default: registry:3.1.2
+        description: The CNCF Distribution image each cache container runs in proxy mode.
+      github_runner_arc_registry_cache_ttl:
+        type: str
+        default: 168h
+        description: How long the cache keeps content it has not served again.
+      github_runner_arc_registry_cache_resources:
+        type: dict
+        description: Each cache container's requests and limits.
+      github_runner_arc_registry_cache_node_selector:
+        type: dict
+        default: {}
+        description: Extra nodeSelector for the cache pod.
+      github_runner_arc_registry_cache_storage:
+        type: str
+        choices: [persistent, ephemeral]
+        default: persistent
+        description: persistent keeps the cache in a PersistentVolumeClaim; ephemeral in an emptyDir capped at the size, emptied when the pod is replaced.
+      github_runner_arc_registry_cache_storage_size:
+        type: str
+        default: 20Gi
+        description: The claim's size, or the emptyDir's cap.
+      github_runner_arc_registry_cache_storage_class:
+        type: str
+        default: ""
+        description: The claim's storage class; empty means the cluster's default.
       github_runner_arc_values_dir:
         type: str
         default: ""
