@@ -156,7 +156,7 @@ grep -q "deleted ${namespace}/cancelled-runner: run 202 in example-org/example-r
 kubectl -n "$namespace" logs deploy/stub-github > "$work/stub.log"
 [ "$(jq -sc 'map(select(.method == "POST"))[0].body' "$work/stub.log")" = '{"permissions":{"actions":"read"}}' ] || fail "the mint did not ask for actions: read only"
 jq -se 'map(select(.method == "GET")) | all(.authorization == "Bearer ghs_stubreapertoken")' "$work/stub.log" >/dev/null || fail "a run was read without the minted token"
-jq -se 'map(select(.method == "GET" and (.path | contains("/runs/")))) | length == 3' "$work/stub.log" >/dev/null || fail "the reaper looked up something other than the three assigned runners' runs"
+jq -se '[.[] | select(.method == "GET") | .path | capture("/runs/(?<id>[0-9]+)").id] | unique == ["201", "202", "203"]' "$work/stub.log" >/dev/null || fail "the reaper read runs other than those of the three assigned runners"
 
 log "Refusing the token: the Job should fail and delete nothing"
 create_runner second-hung-runner 201
