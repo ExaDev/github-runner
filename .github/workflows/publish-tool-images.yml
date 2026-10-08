@@ -36,6 +36,8 @@ jobs:
           - {name: openmpi, kind: sysroot}
           - {name: highs, kind: sysroot}
           - {name: libpq, kind: sysroot}
+          - {name: glpk, kind: sysroot}
+          - {name: libmariadb, kind: sysroot}
           - {name: build, kind: runner}
         platform:
           - {arch: amd64, runner: ubuntu-latest}
@@ -130,6 +132,8 @@ jobs:
           - {name: openmpi, kind: sysroot}
           - {name: highs, kind: sysroot}
           - {name: libpq, kind: sysroot}
+          - {name: glpk, kind: sysroot}
+          - {name: libmariadb, kind: sysroot}
           - {name: build, kind: runner}
     steps:
       - uses: actions/checkout@v7

@@ -1,6 +1,6 @@
 name: System libraries
 
-# Builds each reference system-library capability image in tool-images/ (Open MPI, HiGHS, libpq) natively on amd64 and arm64 and proves it works relocated (tests/system_libraries/run.sh): its payload is copied to /opt/sysroot as the role's init container copies it, the role's own job-started hook applies the environment the role renders for it, and inside the stock actions-runner image the payload's programs run from there, and inside the reference build runner image (tool-images/build) a program compiled against the payload does (for Open MPI, a two-process mpirun). Only on changes that can affect them. Builds nothing it publishes.
+# Builds each reference system-library capability image in tool-images/ (Open MPI, HiGHS, libpq, GLPK, MariaDB Connector/C) natively on amd64 and arm64 and proves it works relocated (tests/system_libraries/run.sh): its payload is copied to /opt/sysroot as the role's init container copies it, the role's own job-started hook applies the environment the role renders for it, and inside the stock actions-runner image the payload's programs run from there, and inside the reference build runner image (tool-images/build) a program compiled against the payload does (for Open MPI, a two-process mpirun). Only on changes that can affect them. Builds nothing it publishes.
 
 on:
   pull_request:
@@ -8,6 +8,8 @@ on:
       - tool-images/openmpi/**
       - tool-images/highs/**
       - tool-images/libpq/**
+      - tool-images/glpk/**
+      - tool-images/libmariadb/**
       - tool-images/build/**
       - tests/system_libraries/**
       - tests/capabilities/render.yml
@@ -32,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        payload: [openmpi, highs, libpq]
+        payload: [openmpi, highs, libpq, glpk, libmariadb]
         platform:
           - {arch: amd64, runner: ubuntu-latest}
           - {arch: arm64, runner: ubuntu-24.04-arm}
