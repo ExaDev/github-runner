@@ -26,6 +26,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
   - `burst`: let the runner pods overflow onto nodes a cluster autoscaler adds on demand, and count those nodes' runners into `maxRunners` (see [Burst nodes](#burst-nodes)). Needs `sizing`, and no `max_runners` or `autoscale`; with `exclusive: true` the pods run on burst nodes only and `burst.max_runners` is the whole ceiling, with no `sizing`.
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
 - `github_runner_arc_capabilities`: the capabilities profiles can name, as a mapping of name to capability (see [Capabilities](#capabilities)). `github_runner_arc_tool_cache_path` (default `/opt/hostedtoolcache`) is where the tool cache is mounted, `github_runner_arc_sysroot_path` (default `/opt/sysroot`) is where system-library capabilities are extracted, and `github_runner_arc_runner_uid` and `github_runner_arc_runner_gid` (default `1001`, the runner user of ARC's `actions-runner` image) are the ids the capabilities' init containers run as.
+- `github_runner_arc_registry_cache_enabled` (default `false`) and the other `github_runner_arc_registry_cache_*` variables: a pull-through registry cache every Docker-in-Docker profile pulls through, falling back to each registry when the cache is down (see [Registry cache](#registry-cache)).
 - `github_runner_arc_kubeconfig_path`: the kubeconfig on the host the role runs against. Defaults to `github_runner_cluster`'s kubeconfig; empty means `KUBECONFIG` or `~/.kube/config`.
 - `github_runner_arc_controller_chart_version`, `github_runner_arc_scaleset_chart_version`: chart pins; unset installs the latest chart. The controller chart's CRDs are applied (server-side) from `github_runner_arc_controller_chart_ref` at the controller's version before every controller install or upgrade, because Helm never upgrades a chart's CRDs itself; without that, a newer scale-set chart is rejected for fields the cluster's CRDs predate. Move the two pins together, and the CRDs follow. `tests/arc_upgrade/run.sh` covers the upgrade in a kind cluster.
 
@@ -253,6 +254,54 @@ The tool cache, the sysroot and the hook are on the runner container, so they se
 Each tool-cache and system-library capability adds its copy to every pod's start, which is not yet measured. The `emptyDir` volumes live on the node's disk for the pod's lifetime, so a large tool set or sysroot counts against the node's ephemeral storage.
 
 `tests/capabilities/run.sh` exercises all of this in a kind cluster: it builds the reference Node.js and libpq images, renders a profile through the role's own tasks, renders the scale-set chart with the result and checks it against the ARC CRDs, then starts a pod from the chart's runner pod template and checks that the init containers filled the tool cache and the sysroot, that the hook ran, put the tool on `PATH` and the library on its search paths with its `env`, and that `@actions/tool-cache`, the library behind `actions/setup-node`'s lookup, finds the tool. `.github/workflows/capabilities.yml` runs it on pull requests that touch the role, its filters, the tool images or the test.
+
+## Registry cache
+
+Every runner pod in Docker-in-Docker mode starts with an empty Docker daemon, so nothing is cached between jobs and every base image, service container and container action is pulled from its registry each time. `github_runner_arc_registry_cache_enabled: true` installs a pull-through cache in the cluster and points every Docker-in-Docker profile at it, with no change to workflows, Dockerfiles or jobs. It is off by default; with it off the role renders the scale sets exactly as it would without the feature, and turning it off again removes everything it added.
+
+```yaml
+github_runner_arc_registry_cache_enabled: true
+github_runner_arc_registry_cache_registries:
+  - name: docker-hub
+    host: docker.io
+    credentials:
+      secret_name: docker-hub-read
+  - name: ghcr
+    host: ghcr.io
+    credentials:
+      secret_name: ghcr-read
+      password_key: token
+  - name: quay
+    host: quay.io
+  - name: internal
+    host: registry.example.com
+github_runner_arc_registry_cache_storage: persistent
+github_runner_arc_registry_cache_storage_size: 50Gi
+github_runner_arc_registry_cache_storage_class: ""
+```
+
+The cache is a Deployment in `github_runner_arc_registry_cache_namespace` (default `github-runner-registry-cache`) with one [CNCF Distribution](https://distribution.github.io/distribution/recipes/mirror/) container in proxy mode per registry, each serving its registry on its own port (`github_runner_arc_registry_cache_base_port` onwards, in list order) of one Service. Each entry of `github_runner_arc_registry_cache_registries` has:
+
+- `name`: names the entry's container and Service port, so at most 15 lower-case letters, digits and `-`.
+- `host`: the registry as image references name it, with its port if it has one: `docker.io` for Docker Hub, `ghcr.io`, `quay.io`, `registry.example.com:8443`.
+- `url`: the registry API the cache pulls from, and the server the runner pods fall back to. Default `https://<host>`, or `https://registry-1.docker.io` for `docker.io`.
+- `credentials`: optional, `{secret_name, username_key?, password_key?}`, naming a Secret in the cache's namespace and the keys holding the username and the password or token (default `username` and `password`, as a `kubernetes.io/basic-auth` Secret has). The cache container reads them through `secretKeyRef` when it starts; they never pass through Ansible, the inventory or the rendered manifests, and the role refuses an entry that gives a username or password inline. Before changing the Deployment the role checks that each named Secret exists and has the named keys, comparing key names only. The Secret is the operator's to create, for example `kubectl -n github-runner-registry-cache create secret generic ghcr-read --from-literal=username=<user> --from-file=token=<token file>`. A container reads it only when it starts, so after rotating a credential restart the cache with `kubectl -n github-runner-registry-cache rollout restart deployment/registry-cache`.
+
+`github_runner_arc_registry_cache_storage` is `persistent` (a PersistentVolumeClaim of `github_runner_arc_registry_cache_storage_size` from `github_runner_arc_registry_cache_storage_class`, the cluster's default class when empty, which keeps the cache when the pod is replaced) or `ephemeral` (an `emptyDir` capped at the size, emptied whenever the pod is replaced, and evicted by the kubelet if it outgrows the cap). Distribution has no size limit of its own: content it has not served again for `github_runner_arc_registry_cache_ttl` (default `168h`) is deleted, so size the storage for what the runners pull within that time. The Deployment runs one pod with the `Recreate` strategy, since a ReadWriteOnce claim cannot be mounted by a replacement on another node, and the Service serves runner pods on every node. `github_runner_arc_registry_cache_image`, `_resources` and `_node_selector` set its image, each container's requests and limits, and where it runs. The cache serves every scale set in the cluster, so a fleet with several installing hosts sets these variables the same way on each, as it does for the controller.
+
+### How runner pods use it
+
+Nothing in a job changes. The role mounts a `hosts.toml` per registry into the dind container's `/etc/docker/certs.d/<host>/`, listing the cache as a pull and resolve mirror ahead of the registry. dockerd (the chart's `docker:dind`, which uses the containerd image store) resolves every registry through those files, so the mirror serves `docker pull` and `docker run`, container actions, service containers, `docker compose`, the legacy builder, and `docker build` or `docker buildx build` with the default `docker` driver, which is the daemon's own BuildKit. A builder with the `docker-container` driver, which `docker/setup-buildx-action` creates, runs its own BuildKit in a container and inherits none of the daemon's settings; buildx gives it the configuration in `buildkitd.default.toml` under `$BUILDX_CONFIG` when `buildx create` is given none of its own, which is how `docker/setup-buildx-action` creates it unless a workflow passes `buildkitd-config` or `buildkitd-config-inline`. The runner container's `BUILDX_CONFIG` therefore points at a writable directory (`/etc/github-runner/buildx`) holding the same mirrors.
+
+Both resolvers try the mirror first and the registry itself when the mirror refuses the connection or answers with an error, so a cache that is down, being replaced or failing makes pulls go to the registries directly rather than fail. Each cache container has a readiness probe, so one that stops answering leaves the Service's endpoints and connections to it are refused at once; a request already waiting on a cache that hangs falls back only when containerd's own timeout gives up on it.
+
+What still bypasses the cache, and is pulled directly as without it: images from registries not in the list; a `docker-container` builder created with its own configuration (`--config`, or setup-buildx-action's `buildkitd-config` inputs) or under a `BUILDX_CONFIG` or `DOCKER_CONFIG` the job changed; a `kubernetes` driver builder or a remote builder; Docker run inside a job's own container rather than through the pod's daemon; and a dind daemon running the legacy graph-driver image store, which reads mirrors only for Docker Hub and only from `registry-mirrors`.
+
+The chart's own dind container cannot take an extra mount, so on a profile with `container_mode: dind` (or a values file setting `containerMode.type: dind`) the role writes the chart's dind wiring out in the profile's values, as the chart renders it on Kubernetes 1.29 and later (the dind container as a native sidecar, the externals copy, the runner's `DOCKER_HOST`, `RUNNER_WAIT_FOR_DOCKER_IN_SECONDS` and mounts), adds the mount to it, and drops `containerMode`, by the `exadev.github_runner.arc_registry_cache_pod` filter. The cache therefore needs Kubernetes 1.29 or later. A values file that already writes out a container named `dind` keeps it and gets the mount added, and a profile with no Docker daemon is left unchanged. The role refuses values that set `BUILDX_CONFIG` on the runner, use one of the volume names `registry-cache-hosts`, `registry-cache-buildx` or `registry-cache-buildkitd`, or combine `containerMode: dind` with a container named `dind`. Each runner namespace whose pods use the cache gets a `registry-cache` ConfigMap holding the files, removed when they no longer do.
+
+### Security
+
+With credentials configured, the cache pulls with them for anyone who reaches it: a job pulls whatever a configured credential can read without logging in, and the cache keeps those images on its volume. Give it read-only credentials scoped to what the runners should pull (a GitHub token with only `read:packages`, a Docker Hub personal access token with read-only access, a Quay robot account with read permission), never a credential that can push or administer. A NetworkPolicy admits only the scale sets' namespaces (every profile in the inventory) to the cache's ports, on a network plugin that enforces NetworkPolicy, as k3s's does; the traffic of the BuildKit containers dind starts leaves through the runner pod's own address, so it is admitted too. Every job in those namespaces shares the cache, so a fleet serving several organisations shares each credential's reach between them; give the cache credentials only for what every organisation on it may read. The cache is reached over plain HTTP inside the cluster, so no certificate authority is added to the runner pods and nothing intercepts their own TLS connections. The cache pod mounts no service account token.
 
 ## Image pull Secret from the GitHub App
 
