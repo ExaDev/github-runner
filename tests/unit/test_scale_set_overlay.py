@@ -81,5 +81,18 @@ class OverlayTest(unittest.TestCase):
         self.assertEqual(overlay["template"]["spec"]["tolerations"], BURST["tolerations"])
 
 
+class ActiveDeadlineTest(unittest.TestCase):
+    def test_unset_leaves_the_runner_pod_spec_exactly_as_without_it(self) -> None:
+        overlay = render(expanded({"sizing": SIZING}), github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true")
+        self.assertEqual(overlay["template"], {"spec": {"nodeSelector": {ELIGIBLE: "true"}}})
+
+    def test_set_adds_it_to_the_runner_pod_spec_and_nothing_else(self) -> None:
+        profile = expanded({"sizing": SIZING})
+        without = render(profile, github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true")
+        overlay = render(profile, github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true", github_runner_arc_runner_active_deadline_seconds=21600)
+        self.assertEqual(overlay["template"]["spec"].pop("activeDeadlineSeconds"), 21600)
+        self.assertEqual(overlay, without)
+
+
 if __name__ == "__main__":
     unittest.main()
