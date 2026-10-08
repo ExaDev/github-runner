@@ -101,7 +101,7 @@ class RegistriesTest(unittest.TestCase):
     def test_hosts_toml_lists_the_cache_ahead_of_the_registry(self) -> None:
         hosts = cache()["hosts"]
         self.assertEqual(set(hosts), {"docker-hub.hosts.toml", "ghcr.hosts.toml", "internal.hosts.toml"})
-        self.assertEqual(hosts["ghcr.hosts.toml"], f'server = "https://ghcr.io"\n\n[host."http://{ADDRESS}:5001"]\n  capabilities = ["pull", "resolve"]\n')
+        self.assertEqual(hosts["ghcr.hosts.toml"], f'server = "https://ghcr.io"\n\n[host."http://{ADDRESS}:5001"]\n  capabilities = ["pull", "resolve", "referrers"]\n')
         self.assertIn('server = "https://registry-1.docker.io"', hosts["docker-hub.hosts.toml"])
 
     def test_buildkitd_mirrors_every_registry_through_the_cache_over_http(self) -> None:

@@ -910,7 +910,7 @@ def _registry_credentials(where: str, credentials: Any, errors: list[str]) -> di
 def arc_registry_cache(registries: Any, namespace: str, service: str, cluster_domain: str, base_port: int) -> dict[str, Any]:
     """Describe the registry cache: one pull-through cache per upstream registry behind one Service, and the configuration that points a runner pod's Docker daemon and BuildKit at it.
 
-    Each entry becomes a container of the cache's Deployment, serving the registry on its own port (base_port plus the entry's index) of the Service. A runner pod's dockerd reads a hosts.toml per registry from /etc/docker/certs.d/<host>/ that lists the cache as a pull and resolve mirror ahead of the registry itself, and a docker-container BuildKit builder that buildx creates reads the same mirrors from buildx's default buildkitd.default.toml. Both resolvers try the mirror first and the registry itself when the mirror cannot be reached or answers with an error, so a cache that is down or unhealthy slows a pull rather than failing it.
+    Each entry becomes a container of the cache's Deployment, serving the registry on its own port (base_port plus the entry's index) of the Service. A runner pod's dockerd reads a hosts.toml per registry from /etc/docker/certs.d/<host>/ that lists the cache as a pull, resolve and referrers mirror ahead of the registry itself, and a docker-container BuildKit builder that buildx creates reads the same mirrors from buildx's default buildkitd.default.toml. Both resolvers try the mirror first and the registry itself when the mirror cannot be reached or answers with an error, so a cache that is down or unhealthy slows a pull rather than failing it.
 
     Args:
         registries: github_runner_arc_registry_cache_registries, a list of {name, host, url?, credentials?}: name (the container and port name, at most 15 characters), host (the registry as image references name it, docker.io for Docker Hub), url (the registry API the cache pulls from; default https://<host>, or https://registry-1.docker.io for docker.io) and credentials ({secret_name, username_key?, password_key?}, a Secret in the cache's namespace whose keys hold a read-only username and token; default keys username and password). namespace: the cache's namespace. service: the cache's Service name. cluster_domain: the cluster's DNS domain. base_port: the first entry's port.
@@ -954,10 +954,10 @@ def arc_registry_cache(registries: Any, namespace: str, service: str, cluster_do
         described.append({"name": name, "host": host, "url": url, "port": port, "address": f"{address}:{port}", "credentials": credentials})
     if errors:
         return {"errors": errors, "registries": [], "hosts": {}, "buildkitd": ""}
-    # Keyed by the entry's name rather than its host, since a ConfigMap key cannot hold the ':' of a host with a port.
+    # Keyed by the entry's name rather than its host, since a ConfigMap key cannot hold the ':' of a host with a port. The mirror also answers referrers lookups, which dockerd makes on every pull (containerd remotes/docker/referrers.go): without the capability they go to the registry alone, which for a registry that needs a login fails the pull, since the job has none.
     hosts_toml = {
         f"{registry['name']}{_REGISTRY_CACHE_HOSTS_KEY_SUFFIX}": (
-            f"server = {_toml_string(registry['url'])}\n\n[host.{_toml_string('http://' + registry['address'])}]\n  capabilities = [\"pull\", \"resolve\"]\n"
+            f"server = {_toml_string(registry['url'])}\n\n[host.{_toml_string('http://' + registry['address'])}]\n  capabilities = [\"pull\", \"resolve\", \"referrers\"]\n"
         )
         for registry in described
     }
