@@ -1,0 +1,185 @@
+{# The registry cache (see tasks/install_registry_cache.yml): the Distribution configuration its containers share, the PersistentVolumeClaim its persistent storage uses (only with that storage), the Deployment with one pull-through cache container per registry, the Service runner pods reach it through, and a NetworkPolicy admitting only the runner namespaces. The namespace is ensured separately, since the credential Secrets an operator puts there outlive these. `github_runner_arc_registry_cache` is the description plugins/filter/arc.py's arc_registry_cache derives from the registries; `github_runner_arc_registry_cache_runner_namespaces` lists the scale sets' namespaces across the inventory. #}
+{% set name = github_runner_arc_registry_cache_service_name %}
+{% set namespace = github_runner_arc_registry_cache_namespace %}
+{% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
+{% set config_path = '/etc/distribution' %}
+{% set storage_path = '/var/lib/registry' %}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+data:
+  # Shared by every container; each sets its own address, upstream, credentials and storage directory through REGISTRY_* variables, which override this file. No debug server, unlike the image's own file, since its fixed port would collide between the containers of one pod.
+  config.yml: |
+    version: 0.1
+    log:
+      level: info
+    storage:
+      delete:
+        enabled: true
+      cache:
+        blobdescriptor: inmemory
+      filesystem:
+        rootdirectory: {{ storage_path }}
+    http:
+      addr: :{{ github_runner_arc_registry_cache_base_port | int }}
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
+{% if github_runner_arc_registry_cache_storage == 'persistent' %}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ github_runner_arc_registry_cache_claim | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+{% if github_runner_arc_registry_cache_storage_class | length > 0 %}
+  storageClassName: {{ github_runner_arc_registry_cache_storage_class | to_json }}
+{% endif %}
+  resources:
+    requests:
+      storage: {{ github_runner_arc_registry_cache_storage_size | to_json }}
+{% endif %}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+spec:
+  replicas: 1
+  # One pod at a time: a ReadWriteOnce claim cannot be mounted by a replacement on another node while the old pod holds it. While no pod is ready the Service has no endpoints, connections to it are refused, and runner pods pull from the registries directly.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {{ {'app.kubernetes.io/name': name} | to_json }}
+  template:
+    metadata:
+      labels: {{ labels | to_json }}
+      annotations:
+        # A change to the shared configuration restarts the pod, which a ConfigMap change alone would not.
+        github-runner.exadev/registry-cache-config: {{ (github_runner_arc_registry_cache.registries | to_json ~ github_runner_arc_registry_cache_ttl) | hash('sha256') | to_json }}
+    spec:
+      priorityClassName: {{ github_runner_arc_platform_priority_class_name | to_json }}
+      # The pod needs no Kubernetes API access.
+      automountServiceAccountToken: false
+{% if github_runner_arc_registry_cache_node_selector | length > 0 %}
+      nodeSelector: {{ github_runner_arc_registry_cache_node_selector | to_json }}
+{% endif %}
+      containers:
+{% for registry in github_runner_arc_registry_cache.registries %}
+        - name: {{ registry.name | to_json }}
+          image: {{ github_runner_arc_registry_cache_image | to_json }}
+          args: [{{ (config_path ~ '/config.yml') | to_json }}]
+          env:
+            - name: REGISTRY_HTTP_ADDR
+              value: {{ (':' ~ registry.port) | to_json }}
+            - name: REGISTRY_PROXY_REMOTEURL
+              value: {{ registry.url | to_json }}
+            - name: REGISTRY_PROXY_TTL
+              value: {{ github_runner_arc_registry_cache_ttl | to_json }}
+            - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
+              value: {{ (storage_path ~ '/' ~ registry.name) | to_json }}
+            # The image's OpenTelemetry tracing otherwise exports to a collector that does not exist and logs every failure.
+            - name: OTEL_TRACES_EXPORTER
+              value: "none"
+{% if registry.credentials is not none %}
+            # Read from the operator's Secret when the container starts; the value never passes through the role or this manifest.
+            - name: REGISTRY_PROXY_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ registry.credentials.secret_name | to_json }}
+                  key: {{ registry.credentials.username_key | to_json }}
+            - name: REGISTRY_PROXY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ registry.credentials.secret_name | to_json }}
+                  key: {{ registry.credentials.password_key | to_json }}
+{% endif %}
+          ports:
+            - name: {{ registry.name | to_json }}
+              containerPort: {{ registry.port }}
+          # From inside the container rather than an HTTP probe from the kubelet, which the NetworkPolicy below might not admit on every network plugin. A cache that stops answering leaves the Service's endpoints, so runner pods' connections are refused and they fall back to the registry rather than waiting on it.
+          readinessProbe:
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "-T", "5", {{ ('http://127.0.0.1:' ~ registry.port ~ '/v2/') | to_json }}]
+            periodSeconds: 10
+            timeoutSeconds: 6
+            failureThreshold: 2
+          livenessProbe:
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "-T", "5", {{ ('http://127.0.0.1:' ~ registry.port ~ '/v2/') | to_json }}]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 6
+            failureThreshold: 3
+          resources: {{ github_runner_arc_registry_cache_resources | to_json }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: config
+              mountPath: {{ config_path | to_json }}
+              readOnly: true
+            - name: storage
+              mountPath: {{ storage_path | to_json }}
+{% endfor %}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ name | to_json }}
+        - name: storage
+{% if github_runner_arc_registry_cache_storage == 'persistent' %}
+          persistentVolumeClaim:
+            claimName: {{ github_runner_arc_registry_cache_claim | to_json }}
+{% else %}
+          emptyDir:
+            sizeLimit: {{ github_runner_arc_registry_cache_storage_size | to_json }}
+{% endif %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+spec:
+  type: ClusterIP
+  selector: {{ {'app.kubernetes.io/name': name} | to_json }}
+  ports:
+{% for registry in github_runner_arc_registry_cache.registries %}
+    - name: {{ registry.name | to_json }}
+      port: {{ registry.port }}
+      targetPort: {{ registry.name | to_json }}
+{% endfor %}
+---
+# A cache holding credentials serves the private images they can read to anyone who reaches it, so only the runner namespaces may: the Docker daemon in each runner pod, and the BuildKit containers it starts, whose traffic leaves through the pod's own address. Enforced only where the cluster's network plugin implements NetworkPolicy, as k3s's does.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+spec:
+  podSelector:
+    matchLabels: {{ {'app.kubernetes.io/name': name} | to_json }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: {{ github_runner_arc_registry_cache_runner_namespaces | to_json }}
+      ports:
+{% for registry in github_runner_arc_registry_cache.registries %}
+        - port: {{ registry.port }}
+          protocol: TCP
+{% endfor %}

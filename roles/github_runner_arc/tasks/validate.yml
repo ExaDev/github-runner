@@ -26,6 +26,24 @@
     github_runner_arc_capability_problems: "{{ github_runner_arc_local.profiles | exadev.github_runner.arc_capability_errors(github_runner_arc_capabilities) }}"
   when: github_runner_arc_capability_problems | length > 0
 
+- name: Fail on invalid registry cache settings
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_registry_cache_problems }}"
+  vars:
+    github_runner_arc_registry_cache_problems: >-
+      {{
+        github_runner_arc_registry_cache.errors
+        + ([] if github_runner_arc_registry_cache_storage in ['persistent', 'ephemeral'] else ['github_runner_arc_registry_cache_storage must be persistent or ephemeral'])
+        + ([] if github_runner_arc_registry_cache_storage_size | string is match('^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$')
+           else ['github_runner_arc_registry_cache_storage_size must be a Kubernetes quantity such as 20Gi'])
+        + ([] if [github_runner_arc_registry_cache_namespace, github_runner_arc_registry_cache_service_name] | reject('match', '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$') | list | length == 0
+           else ['github_runner_arc_registry_cache_namespace and github_runner_arc_registry_cache_service_name must be valid Kubernetes names'])
+        + ([] if github_runner_arc_registry_cache_node_selector is mapping else ['github_runner_arc_registry_cache_node_selector must be a mapping'])
+      }}
+  when:
+    - github_runner_arc_registry_cache_enabled | bool
+    - github_runner_arc_registry_cache_problems | length > 0
+
 - name: Fail when a profile's values file is missing on the control node
   ansible.builtin.fail:
     msg: >-

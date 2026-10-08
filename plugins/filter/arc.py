@@ -842,6 +842,263 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     return {"errors": [], "values": result, "hooks": hooks}
 
 
+# A registry cache entry's keys (see arc_registry_cache), and those of its credentials reference.
+_REGISTRY_CACHE_KEYS = frozenset({"name", "host", "url", "credentials"})
+_REGISTRY_CREDENTIALS_KEYS = frozenset({"secret_name", "username_key", "password_key"})
+# The keys a credentials reference reads from its Secret unless it names others: the field names a kubernetes.io/basic-auth Secret uses.
+_DEFAULT_USERNAME_KEY = "username"
+_DEFAULT_PASSWORD_KEY = "password"
+# An entry's name becomes its cache container's name and its Service port's name, and a Service port name is an IANA service name: at most 15 lower-case letters, digits and '-', with at least one letter and no '-' at either end or doubled.
+_PORT_NAME = re.compile(r"^(?=.*[a-z])[a-z0-9]([a-z0-9]|-(?!-))*[a-z0-9]$|^[a-z]$")
+_PORT_NAME_MAX_LENGTH = 15
+# A registry host as image references name it: a DNS name with an optional port, which is also the directory dockerd reads its hosts.toml from and the key of buildkitd's registry table.
+_REGISTRY_HOST = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*(:[0-9]{1,5})?$")
+# The upstream a cache container pulls from: an http or https URL with a host and an optional port, and nothing after it, since it is also the server dockerd falls back to.
+_REGISTRY_URL = re.compile(r"^https?://[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*(:[0-9]{1,5})?$")
+# Image references name Docker Hub docker.io, while its registry API is served from registry-1.docker.io; every other registry serves its API from the host its references name.
+_DOCKER_HUB_HOST = "docker.io"
+_DOCKER_HUB_URL = "https://registry-1.docker.io"
+# The highest TCP port number; each entry's port is the base port plus its index, so the last must not pass it.
+_MAX_PORT = 65535
+# The chart's Docker-in-Docker wiring (gha-runner-scale-set templates/_helpers.tpl: dind-init-container, dind-container, dind-runner-container and dind-volume), written out so that the dind container can carry the registry cache's configuration, which the chart's own dind container has no way to add. These are the chart's own names, paths and values for Kubernetes 1.29 and later, where it runs dind as a native sidecar.
+_DIND_IMAGE = "docker:dind"
+_DIND_SOCKET_DIR = "/var/run"
+_DIND_DOCKER_HOST = "unix:///var/run/docker.sock"
+_DIND_DOCKER_GROUP_GID = "123"
+_DIND_RUNNER_WAIT_SECONDS = "120"
+_RUNNER_WORK_DIR = "/home/runner/_work"
+_RUNNER_EXTERNALS_DIR = "/home/runner/externals"
+_DIND_EXTERNALS_COPY_DIR = "/home/runner/tmpDir"
+_DIND_STARTUP_PROBE = {"exec": {"command": ["docker", "info"]}, "initialDelaySeconds": 0, "failureThreshold": 24, "periodSeconds": 5}
+_DIND_CONTAINER = "dind"
+# Where dockerd reads each registry's hosts.toml, one directory per registry host (moby daemon/hosts.go RegistryHosts, through containerd's ConfigureHosts).
+_DOCKER_CERTS_DIR = "/etc/docker/certs.d"
+# The volumes the registry cache adds to a runner pod, and buildx's own name for its default BuildKit configuration file in its configuration directory (buildx util/confutil/config.go).
+_REGISTRY_CACHE_HOSTS_VOLUME = "registry-cache-hosts"
+_REGISTRY_CACHE_BUILDX_VOLUME = "registry-cache-buildx"
+_REGISTRY_CACHE_BUILDKITD_VOLUME = "registry-cache-buildkitd"
+_BUILDKITD_DEFAULT_CONFIG = "buildkitd.default.toml"
+_BUILDX_CONFIG_ENV = "BUILDX_CONFIG"
+# The registry cache ConfigMap holds the BuildKit configuration under buildx's file name, and each registry's hosts.toml under its entry's name with this suffix.
+_REGISTRY_CACHE_HOSTS_KEY_SUFFIX = ".hosts.toml"
+
+
+def _registry_credentials(where: str, credentials: Any, errors: list[str]) -> dict[str, str] | None:
+    """Return a registry entry's credentials reference with its keys filled in, or None when it has none, recording why it cannot be used."""
+    if credentials is None:
+        return None
+    if not isinstance(credentials, Mapping):
+        errors.append(f"{where}.credentials must be a mapping naming a Secret: {{secret_name, username_key?, password_key?}}")
+        return None
+    unknown = sorted(str(key) for key in set(credentials) - _REGISTRY_CREDENTIALS_KEYS)
+    if unknown:
+        # Named plainly, since a username or password written here would otherwise sit in the inventory and the rendered manifests.
+        errors.append(f"{where}.credentials has unknown key(s) {', '.join(unknown)}: credentials are only read from a Secret in the cache's namespace, by secret_name, username_key and password_key, never given inline")
+    reference = {
+        "secret_name": credentials.get("secret_name"),
+        "username_key": credentials.get("username_key", _DEFAULT_USERNAME_KEY),
+        "password_key": credentials.get("password_key", _DEFAULT_PASSWORD_KEY),
+    }
+    if not isinstance(reference["secret_name"], str) or len(reference["secret_name"]) > 253 or not re.match(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", reference["secret_name"]):
+        errors.append(f"{where}.credentials.secret_name must be the name of a Secret (lower-case letters, digits, '-' and '.')")
+    for key in ("username_key", "password_key"):
+        if not isinstance(reference[key], str) or not re.match(r"^[-._a-zA-Z0-9]+$", reference[key]):
+            errors.append(f"{where}.credentials.{key} must be a Secret data key (letters, digits, '-', '_' and '.')")
+    return {key: str(value) for key, value in reference.items()}
+
+
+def arc_registry_cache(registries: Any, namespace: str, service: str, cluster_domain: str, base_port: int) -> dict[str, Any]:
+    """Describe the registry cache: one pull-through cache per upstream registry behind one Service, and the configuration that points a runner pod's Docker daemon and BuildKit at it.
+
+    Each entry becomes a container of the cache's Deployment, serving the registry on its own port (base_port plus the entry's index) of the Service. A runner pod's dockerd reads a hosts.toml per registry from /etc/docker/certs.d/<host>/ that lists the cache as a pull and resolve mirror ahead of the registry itself, and a docker-container BuildKit builder that buildx creates reads the same mirrors from buildx's default buildkitd.default.toml. Both resolvers try the mirror first and the registry itself when the mirror cannot be reached or answers with an error, so a cache that is down or unhealthy slows a pull rather than failing it.
+
+    Args:
+        registries: github_runner_arc_registry_cache_registries, a list of {name, host, url?, credentials?}: name (the container and port name, at most 15 characters), host (the registry as image references name it, docker.io for Docker Hub), url (the registry API the cache pulls from; default https://<host>, or https://registry-1.docker.io for docker.io) and credentials ({secret_name, username_key?, password_key?}, a Secret in the cache's namespace whose keys hold a read-only username and token; default keys username and password). namespace: the cache's namespace. service: the cache's Service name. cluster_domain: the cluster's DNS domain. base_port: the first entry's port.
+
+    Returns:
+        A dict with ``errors`` (empty when the registries are valid), ``registries`` (each entry with its url, port, address (host:port of the Service as runner pods reach it) and credentials filled in, or None for credentials when it has none), ``hosts`` (a mapping of <name>.hosts.toml, each registry's key in the runner pods' ConfigMap, to its hosts.toml) and ``buildkitd`` (the BuildKit configuration).
+    """
+    errors: list[str] = []
+    if not isinstance(registries, Sequence) or isinstance(registries, (str, bytes)) or not registries:
+        return {"errors": ["github_runner_arc_registry_cache_registries must be a non-empty list of registries"], "registries": [], "hosts": {}, "buildkitd": ""}
+    address = f"{service}.{namespace}.svc.{cluster_domain}"
+    described: list[dict[str, Any]] = []
+    names: set[str] = set()
+    hosts: set[str] = set()
+    for index, entry in enumerate(registries):
+        where = f"github_runner_arc_registry_cache_registries[{index}]"
+        if not isinstance(entry, Mapping):
+            errors.append(f"{where} must be a mapping")
+            continue
+        errors.extend(f"{where} has an unknown key '{key}'" for key in sorted(str(key) for key in set(entry) - _REGISTRY_CACHE_KEYS))
+        name = entry.get("name")
+        if not isinstance(name, str) or len(name) > _PORT_NAME_MAX_LENGTH or not _PORT_NAME.match(name):
+            errors.append(f"{where}.name must be at most {_PORT_NAME_MAX_LENGTH} lower-case letters, digits and single '-', with at least one letter, since it names the entry's container and Service port (got {name!r})")
+        elif name in names:
+            errors.append(f"{where}.name {name} is used by another registry")
+        host = entry.get("host")
+        if not isinstance(host, str) or not _REGISTRY_HOST.match(host):
+            errors.append(f"{where}.host must be a registry host as image references name it, such as docker.io or ghcr.io, with an optional port (got {host!r})")
+        elif host in hosts:
+            errors.append(f"{where}.host {host} is cached by another entry")
+        default_url = _DOCKER_HUB_URL if host == _DOCKER_HUB_HOST else f"https://{host}"
+        url = entry.get("url", default_url)
+        if not isinstance(url, str) or not _REGISTRY_URL.match(url):
+            errors.append(f"{where}.url must be the registry's http or https base URL with no path, such as https://ghcr.io (got {url!r})")
+        credentials = _registry_credentials(where, entry.get("credentials"), errors)
+        port = int(base_port) + index
+        if port > _MAX_PORT:
+            errors.append(f"{where}: its port {port} (github_runner_arc_registry_cache_base_port plus its index) is above {_MAX_PORT}")
+        names.add(str(name))
+        hosts.add(str(host))
+        described.append({"name": name, "host": host, "url": url, "port": port, "address": f"{address}:{port}", "credentials": credentials})
+    if errors:
+        return {"errors": errors, "registries": [], "hosts": {}, "buildkitd": ""}
+    # Keyed by the entry's name rather than its host, since a ConfigMap key cannot hold the ':' of a host with a port.
+    hosts_toml = {
+        f"{registry['name']}{_REGISTRY_CACHE_HOSTS_KEY_SUFFIX}": (
+            f"server = {_toml_string(registry['url'])}\n\n[host.{_toml_string('http://' + registry['address'])}]\n  capabilities = [\"pull\", \"resolve\"]\n"
+        )
+        for registry in described
+    }
+    buildkitd = "".join(
+        f"[registry.{_toml_string(registry['host'])}]\n  mirrors = [{_toml_string(registry['address'])}]\n\n[registry.{_toml_string(registry['address'])}]\n  http = true\n\n" for registry in described
+    )
+    return {"errors": [], "registries": described, "hosts": hosts_toml, "buildkitd": buildkitd.rstrip("\n") + "\n"}
+
+
+def _toml_string(value: str) -> str:
+    """Return value as a TOML basic string."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _named(items: Sequence[Any], name: str) -> dict[str, Any] | None:
+    """Return the item in a list of named Kubernetes objects (containers, volumes, variables, mounts) that carries name, or None."""
+    for item in items:
+        if isinstance(item, dict) and item.get("name") == name:
+            return item
+    return None
+
+
+def _append_missing(items: list[dict[str, Any]], additions: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return items with each addition appended whose name none of them already carries, as the chart does for the dind runner's own variables and mounts."""
+    present = {item.get("name") for item in items if isinstance(item, dict)}
+    return items + [addition for addition in additions if addition["name"] not in present]
+
+
+def arc_registry_cache_pod(values: Mapping[str, Any], cache: Mapping[str, Any], runner_image: str, configmap: str, buildx_config_dir: str) -> dict[str, Any]:
+    """Point a scale set's Docker daemon, and the BuildKit builders its jobs create, at the registry cache.
+
+    A profile in the chart's Docker-in-Docker mode (containerMode dind) has its dind wiring written out in the values, as the chart itself renders it on Kubernetes 1.29 and later, because only then can the dind container mount the registries' hosts.toml files; containerMode is removed so the chart renders the pod from these values alone. Values that already write out a container named dind get the mount added to it. The runner container gets BUILDX_CONFIG, a writable directory holding buildkitd.default.toml, which buildx reads when it creates a docker-container builder without a configuration of its own, as docker/setup-buildx-action does by default. Values with no dind container, which run no Docker daemon, are returned unchanged.
+
+    Args:
+        values: the release's rendered Helm values (after the capabilities are added). cache: the result of arc_registry_cache. runner_image: the runner image, which the chart's dind mode copies the runner's externals from. configmap: the name of the ConfigMap in the profile's namespace holding the hosts.toml files and the BuildKit configuration. buildx_config_dir: where BUILDX_CONFIG points on the runner container.
+
+    Returns:
+        A dict with ``errors`` (empty when the values can carry the cache's configuration), ``values`` (with it added, or as given when there is no dind or there are errors) and ``wired`` (whether the values now use the cache, so the profile's namespace needs the ConfigMap).
+    """
+    result = copy.deepcopy(dict(values))
+    spec = result.setdefault("template", {}).setdefault("spec", {})
+    mode = (result.get("containerMode") or {}).get("type") or ""
+    containers: list[dict[str, Any]] = list(spec.get("containers") or [])
+    init_containers: list[dict[str, Any]] = list(spec.get("initContainers") or [])
+    dind = _named(containers, _DIND_CONTAINER) or _named(init_containers, _DIND_CONTAINER)
+    if mode != "dind" and dind is None:
+        return {"errors": [], "values": values, "wired": False}
+    errors: list[str] = []
+    runner = _runner_container(spec)
+    if runner is None:
+        errors.append("the registry cache needs the values to define the runner container (template.spec.containers[] named runner), as the role's own values template does")
+    volumes: list[dict[str, Any]] = list(spec.get("volumes") or [])
+    added_volumes = (_REGISTRY_CACHE_HOSTS_VOLUME, _REGISTRY_CACHE_BUILDX_VOLUME, _REGISTRY_CACHE_BUILDKITD_VOLUME)
+    errors.extend(f"the values already define a volume named {name}, which the registry cache adds" for name in added_volumes if _named(volumes, name) is not None)
+    if runner is not None and _named(list(runner.get("env") or []), _BUILDX_CONFIG_ENV) is not None:
+        errors.append(f"the runner container already sets {_BUILDX_CONFIG_ENV}, which the registry cache sets")
+    if mode == "dind" and dind is not None:
+        errors.append("containerMode dind and a container named dind in the values cannot be combined; the chart would render two")
+    if errors:
+        return {"errors": errors, "values": values, "wired": False}
+    assert runner is not None
+
+    hosts_mount = {"name": _REGISTRY_CACHE_HOSTS_VOLUME, "mountPath": _DOCKER_CERTS_DIR, "readOnly": True}
+    if mode == "dind":
+        del result["containerMode"]
+        dind = {
+            "name": _DIND_CONTAINER,
+            "image": _DIND_IMAGE,
+            "args": ["dockerd", f"--host={_DIND_DOCKER_HOST}", "--group=$(DOCKER_GROUP_GID)"],
+            "env": [{"name": "DOCKER_GROUP_GID", "value": _DIND_DOCKER_GROUP_GID}],
+            "securityContext": {"privileged": True},
+            "restartPolicy": "Always",
+            "startupProbe": copy.deepcopy(_DIND_STARTUP_PROBE),
+            "volumeMounts": [
+                {"name": "work", "mountPath": _RUNNER_WORK_DIR},
+                {"name": "dind-sock", "mountPath": _DIND_SOCKET_DIR},
+                {"name": "dind-externals", "mountPath": _RUNNER_EXTERNALS_DIR},
+            ],
+        }
+        externals = {
+            "name": "init-dind-externals",
+            "image": runner_image,
+            "command": ["cp"],
+            "args": ["-r", f"{_RUNNER_EXTERNALS_DIR}/.", f"{_DIND_EXTERNALS_COPY_DIR}/"],
+            "volumeMounts": [{"name": "dind-externals", "mountPath": _DIND_EXTERNALS_COPY_DIR}],
+        }
+        # Ahead of the values' own init containers, as the chart puts them, so the Docker daemon is up before any of them runs.
+        init_containers = [externals, dind] + init_containers
+        runner["env"] = _append_missing(list(runner.get("env") or []), [{"name": "DOCKER_HOST", "value": _DIND_DOCKER_HOST}, {"name": "RUNNER_WAIT_FOR_DOCKER_IN_SECONDS", "value": _DIND_RUNNER_WAIT_SECONDS}])
+        runner["volumeMounts"] = _append_missing(list(runner.get("volumeMounts") or []), [{"name": "work", "mountPath": _RUNNER_WORK_DIR}, {"name": "dind-sock", "mountPath": _DIND_SOCKET_DIR}])
+        volumes = _append_missing(volumes, [{"name": "dind-sock", "emptyDir": {}}, {"name": "dind-externals", "emptyDir": {}}, {"name": "work", "emptyDir": {}}])
+    assert dind is not None
+    dind["volumeMounts"] = list(dind.get("volumeMounts") or []) + [hosts_mount]
+    hosts_items = [{"key": f"{registry['name']}{_REGISTRY_CACHE_HOSTS_KEY_SUFFIX}", "path": f"{registry['host']}/hosts.toml"} for registry in cache["registries"]]
+    volumes += [
+        {"name": _REGISTRY_CACHE_HOSTS_VOLUME, "configMap": {"name": configmap, "items": hosts_items}},
+        # buildx writes its builder records beside its configuration, so the directory is a writable emptyDir with the read-only configuration file mounted into it.
+        {"name": _REGISTRY_CACHE_BUILDX_VOLUME, "emptyDir": {}},
+        {"name": _REGISTRY_CACHE_BUILDKITD_VOLUME, "configMap": {"name": configmap, "items": [{"key": _BUILDKITD_DEFAULT_CONFIG, "path": _BUILDKITD_DEFAULT_CONFIG}]}},
+    ]
+    runner["env"] = list(runner.get("env") or []) + [{"name": _BUILDX_CONFIG_ENV, "value": buildx_config_dir}]
+    runner["volumeMounts"] = list(runner.get("volumeMounts") or []) + [
+        {"name": _REGISTRY_CACHE_BUILDX_VOLUME, "mountPath": buildx_config_dir},
+        {"name": _REGISTRY_CACHE_BUILDKITD_VOLUME, "mountPath": f"{buildx_config_dir.rstrip('/')}/{_BUILDKITD_DEFAULT_CONFIG}", "subPath": _BUILDKITD_DEFAULT_CONFIG, "readOnly": True},
+    ]
+    spec["containers"] = containers
+    if init_containers:
+        spec["initContainers"] = init_containers
+    spec["volumes"] = volumes
+    return {"errors": [], "values": result, "wired": True}
+
+
+def arc_registry_cache_secret_problems(results: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Say which registry credential Secrets are missing, or lack a key their reference names, without repeating any of their data.
+
+    Args:
+        results: the results of a kubernetes.core.k8s_info loop over the cache's registries that have credentials, each with ``item`` (the registry, as arc_registry_cache describes it) and ``resources`` (the Secret, or nothing when it does not exist).
+
+    Returns:
+        One message per registry whose Secret is missing or lacks its username or password key; empty when every one is in place.
+    """
+    problems: list[str] = []
+    for result in results:
+        registry = result["item"]
+        credentials = registry["credentials"]
+        resources = result.get("resources") or []
+        if not resources:
+            problems.append(f"{registry['name']}: Secret {credentials['secret_name']} does not exist")
+            continue
+        keys = set((resources[0].get("data") or {}).keys())
+        missing = [credentials[key] for key in ("username_key", "password_key") if credentials[key] not in keys]
+        if missing:
+            problems.append(f"{registry['name']}: Secret {credentials['secret_name']} has no key {' or '.join(missing)}")
+    return problems
+
+
+def arc_registry_cache_configmap(cache: Mapping[str, Any]) -> dict[str, str]:
+    """Return the data of the ConfigMap a wired runner pod mounts: each registry's hosts.toml under its own key, and the BuildKit configuration."""
+    return {**cache["hosts"], _BUILDKITD_DEFAULT_CONFIG: cache["buildkitd"]}
+
+
 def arc_image_ref(image: str) -> dict[str, str]:
     """Split a container image reference into registry, repository and tag or digest.
 
@@ -912,4 +1169,8 @@ class FilterModule:
             "arc_runner_placement": arc_runner_placement,
             "arc_capability_errors": arc_capability_errors,
             "arc_capability_pod": arc_capability_pod,
+            "arc_registry_cache": arc_registry_cache,
+            "arc_registry_cache_pod": arc_registry_cache_pod,
+            "arc_registry_cache_configmap": arc_registry_cache_configmap,
+            "arc_registry_cache_secret_problems": arc_registry_cache_secret_problems,
         }

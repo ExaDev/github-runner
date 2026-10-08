@@ -1,5 +1,5 @@
 ---
-# Renders one scale-set profile's Helm values on the control node, with `profile` (the expanded profile from plugins/filter/arc.py) set by the includer: the profile's values file (or the role's default template), the role's own overlay merged over it, and then the profile's capabilities added (plugins/filter/arc.py's arc_capability_pod). Sets github_runner_arc_scale_set_values, the release's values, and github_runner_arc_job_started_data, the job-started ConfigMap's data (empty when the profile needs none). Included by install_scale_set_profile.yml, and by tests/capabilities/render.yml so the test renders exactly what the role installs.
+# Renders one scale-set profile's Helm values on the control node, with `profile` (the expanded profile from plugins/filter/arc.py) and `org` (its org entry) set by the includer: the profile's values file (or the role's default template), the role's own overlay merged over it, then the profile's capabilities added (plugins/filter/arc.py's arc_capability_pod), and then, with the registry cache on, its Docker daemon pointed at the cache (arc_registry_cache_pod). Sets github_runner_arc_scale_set_values, the release's values, github_runner_arc_job_started_data, the job-started ConfigMap's data (empty when the profile needs none), github_runner_arc_registry_cache_wired, whether the profile's pods use the registry cache, and github_runner_arc_registry_cache_data, the data of the registry cache ConfigMap they then mount. Included by install_scale_set_profile.yml, and by tests/capabilities/render.yml so the tests render exactly what the role installs.
 
 - name: Render the Helm values for {{ profile.label }}
   ansible.builtin.set_fact:
@@ -35,3 +35,25 @@
         github_runner_arc_capability_render.hooks | combine({'job-started.sh': lookup('ansible.builtin.file', 'job-started.sh')})
         if github_runner_arc_capability_render.hooks | length > 0 else {}
       }}
+
+# Last, so a dind container the chart's dind mode would have built is written out after the capabilities' init containers are added, and is put ahead of them as the chart puts it. With the cache off the values are left exactly as rendered above.
+- name: Point the Docker daemon at the registry cache for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_registry_cache_render: >-
+      {{
+        github_runner_arc_scale_set_values | exadev.github_runner.arc_registry_cache_pod(
+          github_runner_arc_registry_cache, org.image, github_runner_arc_registry_cache_configmap, github_runner_arc_registry_cache_buildx_config_dir)
+        if github_runner_arc_registry_cache_enabled | bool else {'errors': [], 'values': github_runner_arc_scale_set_values, 'wired': false}
+      }}
+
+- name: Fail when the values cannot carry the registry cache for {{ profile.label }}
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_registry_cache_render.errors | map('regex_replace', '^', profile.label ~ ': ') | list }}"
+  when: github_runner_arc_registry_cache_render.errors | length > 0
+
+- name: Keep the values with the registry cache for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_scale_set_values: "{{ github_runner_arc_registry_cache_render['values'] }}"
+    github_runner_arc_registry_cache_wired: "{{ github_runner_arc_registry_cache_render.wired }}"
+    # The registry cache ConfigMap's data for the profile's namespace; empty when its pods do not use the cache, and the ConfigMap is then removed.
+    github_runner_arc_registry_cache_data: "{{ (github_runner_arc_registry_cache | exadev.github_runner.arc_registry_cache_configmap) if github_runner_arc_registry_cache_render.wired else {} }}"

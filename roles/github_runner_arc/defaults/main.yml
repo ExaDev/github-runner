@@ -23,6 +23,44 @@ github_runner_arc_sysroot_path: "/opt/sysroot"
 github_runner_arc_runner_uid: 1001
 github_runner_arc_runner_gid: 1001
 
+# Registry cache (see the role README's Registry cache section and tasks/install_registry_cache.yml): a pull-through cache Deployment and Service, with one container per upstream registry, that every scale-set profile's Docker-in-Docker daemon, and any docker-container BuildKit builder its jobs create, pulls through, ahead of the registry itself. Workflows, Dockerfiles and jobs need no change, and a cache that is down or answering with errors slows a pull rather than failing it, since both resolvers fall back to the registry. Only profiles that run Docker (container_mode dind, or a values file that writes out a container named dind) are changed. false renders the scale sets exactly as without it and removes everything an earlier run added for it.
+github_runner_arc_registry_cache_enabled: false
+
+# The upstream registries the cache serves, each {name, host, url?, credentials?}. name (at most 15 lower-case letters, digits and '-') names the entry's cache container and Service port; host is the registry as image references name it (docker.io for Docker Hub); url is its registry API (default https://<host>, or https://registry-1.docker.io for docker.io); credentials, {secret_name, username_key?, password_key?}, names a Secret in github_runner_arc_registry_cache_namespace whose keys (default username and password) hold a read-only credential, which the cache pulls with so that jobs pull that registry's private images without logging in. Credentials are only ever read from a Secret, never written here. An image from a registry not listed is pulled directly, as without the cache.
+github_runner_arc_registry_cache_registries:
+  - name: docker-hub
+    host: docker.io
+  - name: ghcr
+    host: ghcr.io
+  - name: quay
+    host: quay.io
+
+# Namespace and Service name of the cache; runner pods reach it at <service>.<namespace>.svc.<cluster domain>.
+github_runner_arc_registry_cache_namespace: "github-runner-registry-cache"
+github_runner_arc_registry_cache_service_name: "registry-cache"
+github_runner_arc_registry_cache_cluster_domain: "cluster.local"
+# The first registry's port on the Service and its container; each later registry takes the next port, in list order.
+github_runner_arc_registry_cache_base_port: 5000
+
+# The pull-through cache: the CNCF Distribution registry in proxy mode, one container per registry.
+github_runner_arc_registry_cache_image: "registry:3.1.2"
+# How long the cache keeps a blob or manifest it has not served again before deleting it. The cache has no size limit of its own, so this, with the storage size, bounds what it holds.
+github_runner_arc_registry_cache_ttl: "168h"
+# Each cache container's requests and limits.
+github_runner_arc_registry_cache_resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    memory: "512Mi"
+# Extra nodeSelector for the cache pod. Empty places it anywhere; the node eligibility label (github_runner_arc_node_label_key) is not applied, since the cache serves runner pods from any node through its Service.
+github_runner_arc_registry_cache_node_selector: {}
+
+# Where the cache keeps what it pulls. persistent: a PersistentVolumeClaim of github_runner_arc_registry_cache_storage_size from github_runner_arc_registry_cache_storage_class (empty means the cluster's default class), which survives the pod being replaced. ephemeral: an emptyDir capped at the size, emptied whenever the pod is replaced; the kubelet evicts the pod if it outgrows the cap, and pulls go to the registries directly until its replacement is ready. Switching from persistent to ephemeral deletes the claim and what it holds.
+github_runner_arc_registry_cache_storage: persistent
+github_runner_arc_registry_cache_storage_size: "20Gi"
+github_runner_arc_registry_cache_storage_class: ""
+
 # Helm chart version pins, left undefined so the tasks omit --version and Helm installs the latest chart (the controller's CRDs are applied at that same latest version first). Set github_runner_arc_controller_chart_version and/or github_runner_arc_scaleset_chart_version (e.g. "0.14.2") to hold a chart back.
 
 # The ARC controller's chart. Its CRDs are applied from the same reference and version before the controller is installed or upgraded (tasks/install_crds.yml), since Helm never upgrades a chart's CRDs itself.

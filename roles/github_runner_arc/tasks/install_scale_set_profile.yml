@@ -81,6 +81,18 @@
 - name: Render the Helm values for {{ profile.label }}
   ansible.builtin.include_tasks: render_scale_set_values.yml
 
+# The hosts.toml files the dind container mounts and the BuildKit configuration the runner container mounts, for a profile whose pods use the registry cache; removed otherwise, so turning the cache off, or a profile that stops running Docker, leaves nothing behind.
+- name: Create, update or remove the registry cache ConfigMap for {{ profile.label }}
+  kubernetes.core.k8s:
+    state: "{{ 'present' if github_runner_arc_registry_cache_data | length > 0 else 'absent' }}"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ github_runner_arc_registry_cache_configmap }}"
+        namespace: "{{ profile.namespace }}"
+      data: "{{ github_runner_arc_registry_cache_data }}"
+
 # The job-started hook and the scripts it runs, for a profile whose capabilities include a hook or a tool path; removed when the profile has none, so a profile that drops its last one leaves nothing behind. Each runner pod mounts it when it starts, so a change reaches the next job without a Helm upgrade restarting anything.
 - name: Create, update or remove the job-started hook ConfigMap for {{ profile.label }}
   kubernetes.core.k8s:
