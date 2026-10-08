@@ -141,10 +141,11 @@ argument_specs:
       github_runner_arc_image_pull_secret_source:
         type: str
         default: static
-        choices: [static, app]
+        choices: [static, app, none]
         description:
           - Where a pull Secret the role writes gets its credential. static uses github_runner_arc_ghcr_username and github_runner_arc_ghcr_token.
           - app mints a packages read installation token from each org's GitHub App, proves it can read the org's image, writes it, and installs a CronJob in each runner namespace that renews it. The platform's Deployments then pull without a Secret.
+          - none is for public images only. Nothing references a pull Secret, the role writes and checks none whatever github_runner_arc_manage_image_pull_secret says, and it removes the Secret named github_runner_arc_image_pull_secret_name and any renewal an earlier run left.
       github_runner_arc_image_pull_secret_renewal_schedule:
         type: str
         default: "*/15 * * * *"
@@ -159,7 +160,7 @@ argument_specs:
       github_runner_arc_image_pull_secret_name:
         type: str
         default: ghcr-pull
-        description: Name of the pull Secret in each namespace, whether the role writes it or uses an existing one.
+        description: Name of the pull Secret in each namespace, whether the role writes it or uses an existing one. With source none, the name of the Secret the role removes.
       github_runner_arc_verify_image_pull:
         type: bool
         default: true

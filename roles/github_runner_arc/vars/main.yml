@@ -1,5 +1,5 @@
 ---
-# Fixed names the role uses, not settings: changing one would orphan what an earlier run wrote under the old one.
+# Fixed names the role uses, and values it derives from its settings, not settings themselves: changing a name would orphan what an earlier run wrote under the old one.
 
 # The username GitHub documents for authenticating to its registries with a token that belongs to no user, such as an App installation token.
 github_runner_arc_app_pull_token_username: x-access-token
@@ -12,6 +12,19 @@ github_runner_arc_pull_secret_field_manager: github-runner-pull-secret-renewer
 
 # Annotation the node recovery watcher writes alongside the out-of-service taint it applies, recording when it applied it. The watcher removes only a taint carrying this annotation, so an operator's own out-of-service taint is left alone.
 github_runner_arc_node_recovery_annotation: github-runner.exadev/out-of-service-applied-at
+
+# Whether the runner pods and the platform's Deployments reference a pull Secret at all. With github_runner_arc_image_pull_secret_source none every image they run is public, so the role writes, checks and references none, and removes one an earlier run wrote.
+github_runner_arc_pull_secret_in_use: "{{ github_runner_arc_image_pull_secret_source != 'none' }}"
+
+# The values install_scale_set_profile.yml passes to Helm with --set for a profile, with `org` and `profile` set: the org's URL and App Secret, the pull Secret (only while one is in use), the runner image, and the profile's scaleSetLabels one index at a time. --set rather than values for containers[] and the label list, since Helm replaces lists wholesale, so a values mapping naming containers would drop the values file's own command and resources for that container.
+github_runner_arc_scale_set_set_values: >-
+  {{
+    [{'value': 'githubConfigUrl=https://github.com/' ~ org.name}, {'value': 'githubConfigSecret=' ~ profile.app_secret}]
+    + ([{'value': 'template.spec.imagePullSecrets[0].name=' ~ github_runner_arc_image_pull_secret_name}] if github_runner_arc_pull_secret_in_use | bool else [])
+    + [{'value': 'template.spec.containers[0].image=' ~ org.image}]
+    + range(profile.scale_set_labels | length) | zip(profile.scale_set_labels) | map('join', ']=') | map('regex_replace', '^', 'scaleSetLabels[')
+      | map('community.general.dict_kv', 'value') | list
+  }}
 
 # Where a profile's job-started hook ConfigMap is mounted on the runner container, and its name in the profile's namespace. ACTIONS_RUNNER_HOOK_JOB_STARTED names job-started.sh in this directory, and the capability scripts it runs are in job-started.d beneath it.
 github_runner_arc_job_started_hooks_dir: /etc/github-runner/hooks
