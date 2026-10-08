@@ -80,7 +80,8 @@ helm template example-runners "$charts/gha-runner-scale-set" "${version_flag[@]}
   >"$work/chart.yaml" 2>"$work/helm.log" || { cat "$work/helm.log" >&2; fail "helm template failed"; }
 python3 - "$work/chart.yaml" "$work/autoscalingrunnerset.yaml" <<'EOF'
 import sys, yaml
-documents = [document for document in yaml.safe_load_all(open(sys.argv[1])) if document]
+# Helm 4 prints its "Pulled: ... Digest: ..." notice for an OCI chart on standard output too, which parses as a mapping with no kind.
+documents = [document for document in yaml.safe_load_all(open(sys.argv[1])) if isinstance(document, dict) and "kind" in document]
 sets = [document for document in documents if document["kind"] == "AutoscalingRunnerSet"]
 assert len(sets) == 1, [document["kind"] for document in documents]
 yaml.safe_dump(sets[0], open(sys.argv[2], "w"))
