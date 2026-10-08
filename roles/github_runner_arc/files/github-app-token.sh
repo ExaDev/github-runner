@@ -47,7 +47,7 @@ github_app_mint_token() {
     "${api_url}/app/installations/${installation_id}/access_tokens")" || fail "could not reach the GitHub API"
   rm -f "$work/github-app.curl"
   if [ "$status" != "201" ]; then
-    fail "GitHub refused to mint a ${wanted} installation token (HTTP ${status}: $(jq -r '.message // empty' "$work/mint.json" 2>/dev/null)). The App needs the ${wanted} permission, approved on this installation"
+    fail "GitHub refused to mint an installation token restricted to ${wanted} (HTTP ${status}: $(jq -r '.message // empty' "$work/mint.json" 2>/dev/null)). The App needs the ${wanted} permission, approved on this installation"
   fi
   jq -r '.token // empty' "$work/mint.json" > "$work/token"
   jq -r '.expires_at // empty' "$work/mint.json" > "$work/expires_at"
