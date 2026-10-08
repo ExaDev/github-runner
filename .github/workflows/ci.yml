@@ -98,7 +98,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ansible
+          sudo apt-get install -y -qq ansible pkg-config
           cd ansible
           for playbook in ../playbooks/*.yml; do
             echo "Syntax-checking ${playbook}"

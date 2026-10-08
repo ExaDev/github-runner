@@ -33,6 +33,8 @@ check_search_paths() {
 # Fails unless pkg-config resolves the module's library directory inside the sysroot, which shows its .pc file was made relocatable. The payloads' .pc files name their prefix as ${pcfiledir}/../.., which pkg-config does not simplify, so each -L directory is resolved before it is compared.
 check_pkg_config() {
   local module="$1" flags flag
+  # A step such as actions/setup-python replaces PKG_CONFIG_PATH, so the module must resolve without it.
+  PKG_CONFIG_PATH=/nonexistent/lib/pkgconfig pkg-config --exists "$module"
   flags="$(pkg-config --cflags --libs "$module")"
   echo "pkg-config ${module}: ${flags}"
   for flag in $flags; do

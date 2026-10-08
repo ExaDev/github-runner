@@ -434,6 +434,31 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(github_env.read_text().splitlines(), ["LD_LIBRARY_PATH=/opt/sysroot/lib:/usr/local/lib", "CPATH=/opt/sysroot/include", "OPAL_PREFIX=/opt/sysroot", "EXAMPLE_FLAGS=a=b c"])
         self.assertEqual(self.log.read_text().splitlines(), ["/opt/sysroot/lib:/usr/local/lib|/opt/sysroot/include|/opt/sysroot|a=b c|/opt/sysroot/bin"])
 
+    def test_the_sysroot_pkg_config_files_survive_a_step_that_replaces_pkg_config_path(self) -> None:
+        # actions/setup-python exports PKG_CONFIG_PATH as its own directory alone (src/find-python.ts), so the sysroot's .pc files must be reachable through a variable it leaves alone.
+        self.assertIsNotNone(shutil.which("pkg-config"), "this test needs pkg-config on PATH")
+        sysroot = self.dir / "sysroot"
+        (sysroot / "lib" / "pkgconfig").mkdir(parents=True)
+        (sysroot / "lib" / "pkgconfig" / "fixture.pc").write_text("Name: fixture\nDescription: fixture\nVersion: 1\n")
+        python = self.dir / "python" / "lib" / "pkgconfig"
+        python.mkdir(parents=True)
+        github_env = self.dir / "github_env"
+        github_env.touch()
+        (self.hooks / "sysroot-env").write_text(f"PKG_CONFIG_PATH+={sysroot}/lib/pkgconfig\n")
+        env = {key: value for key, value in os.environ.items() if key not in {"PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR"}}
+        env.update({"RUNNER_TOOL_CACHE": str(self.cache), "GITHUB_PATH": str(self.github_path), "GITHUB_ENV": str(github_env)})
+        completed = subprocess.run(["bash", "-e", str(self.hooks / "job-started.sh")], env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        # The next steps start from the hook's GITHUB_ENV, then setup-python overwrites PKG_CONFIG_PATH.
+        step_env = {key: value for key, value in env.items() if key != "GITHUB_ENV"}
+        step_env.update(line.split("=", 1) for line in github_env.read_text().splitlines())
+        self.assertEqual(subprocess.run(["pkg-config", "--exists", "fixture"], env=step_env).returncode, 0)
+        step_env["PKG_CONFIG_PATH"] = str(python)
+        self.assertEqual(subprocess.run(["pkg-config", "--exists", "fixture"], env=step_env).returncode, 0)
+        # The distribution's own .pc files stay reachable, which a bare PKG_CONFIG_LIBDIR of the sysroot would lose.
+        default_path = subprocess.run(["pkg-config", "--variable=pc_path", "pkg-config"], env=env, capture_output=True, text=True, check=True).stdout.strip()
+        self.assertTrue(step_env["PKG_CONFIG_LIBDIR"].endswith(f":{default_path}"), step_env["PKG_CONFIG_LIBDIR"])
+
     def test_a_sysroot_env_without_github_env_fails_the_job(self) -> None:
         (self.hooks / "sysroot-env").write_text("OPAL_PREFIX=/opt/sysroot\n")
         completed = self.run_hook()
