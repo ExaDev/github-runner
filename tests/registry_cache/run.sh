@@ -38,6 +38,7 @@ fail() {
     kubectl -n "$namespace" describe pod "$pod" >&2 || true
     kubectl -n "$namespace" logs "$pod" --all-containers >&2 || true
   done
+  kubectl -n "$cache_namespace" describe deployment,replicaset,pod >&2 || true
   kubectl -n "$cache_namespace" logs deployment/registry-cache --all-containers --tail=50 >&2 || true
   exit 1
 }
@@ -88,18 +89,18 @@ spec:
   ports: [{port: 5000}]
 EOF
 kubectl -n "$upstream_namespace" rollout status deployment/upstream --timeout=180s >/dev/null
-# Pushed from the host through a port-forward, under a localhost name Docker allows over plain HTTP, then pulled in the cluster under the Service's name.
-kubectl -n "$upstream_namespace" port-forward service/upstream 15000:5000 >"$work/port-forward.log" 2>&1 &
-port_forward=$!
-for _ in $(seq 30); do curl -s -o /dev/null http://localhost:15000/v2/ && break; sleep 1; done
-docker pull -q busybox:1.37 >/dev/null
-docker tag busybox:1.37 localhost:15000/grtest/private:1
-export DOCKER_CONFIG="$work/docker-config"
-printf '%s' "$private_password" | docker login -u "$private_user" --password-stdin localhost:15000 >/dev/null 2>&1
-docker push -q localhost:15000/grtest/private:1 >/dev/null
-docker logout localhost:15000 >/dev/null
-unset DOCKER_CONFIG
-kill "$port_forward"
+# Pushed from inside the cluster, so the test needs nothing of the host's Docker daemon but htpasswd, and the credential reaches crane only through a Secret.
+kubectl -n "$upstream_namespace" create secret generic push --from-literal=username="$private_user" --from-literal=password="$private_password" >/dev/null
+# shellcheck disable=SC2016 # $username, $password (the Secret's keys, as envFrom names them) and $1 are expanded by the pod's shell, not this one.
+push_script='crane auth login --insecure "$1" -u "$username" -p "$password" && crane copy --insecure busybox:1.37 "$1/grtest/private:1"'
+kubectl -n "$upstream_namespace" run push --restart=Never --image=gcr.io/go-containerregistry/crane:debug \
+  --overrides="$(python3 -c 'import json, sys; print(json.dumps({"spec": {"containers": [{"name": "push", "image": "gcr.io/go-containerregistry/crane:debug", "command": ["sh", "-c", sys.argv[1], "push", sys.argv[2]], "envFrom": [{"secretRef": {"name": "push"}}]}]}}))' "$push_script" "$upstream_host")" >/dev/null
+deadline=$(($(date +%s) + 300))
+until phase="$(kubectl -n "$upstream_namespace" get pod push -o jsonpath='{.status.phase}')" && { [ "$phase" = Succeeded ] || [ "$phase" = Failed ]; }; do
+  [ "$(date +%s)" -lt "$deadline" ] || break
+  sleep 5
+done
+[ "${phase:-}" = Succeeded ] || { kubectl -n "$upstream_namespace" logs push >&2 || true; fail "could not push the private image"; }
 
 log "Rendering and installing the registry cache through the role"
 python3 - "$repo_root/plugins/filter/arc.py" "$work" "$upstream_host" "$runner_image" <<'EOF'
@@ -131,6 +132,8 @@ export ANSIBLE_COLLECTIONS_PATH="$repo_root/playbooks/collections" ANSIBLE_LOCAL
 python3 -c 'import json, sys, yaml; yaml.safe_dump_all(json.load(open(sys.argv[1])), open(sys.argv[2], "w"))' "$work/cache.json" "$work/cache.yaml"
 python3 -c 'import json, sys, yaml; rendered = json.load(open(sys.argv[1])); assert rendered["registry_cache_wired"]; yaml.safe_dump(rendered["values"], open(sys.argv[2], "w")); yaml.safe_dump({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "registry-cache"}, "data": rendered["registry_cache_configmap"]}, open(sys.argv[3], "w"))' \
   "$work/rendered.json" "$work/values.yaml" "$work/configmap.yaml"
+# The cache runs at the platform's priority, whose class the role creates before installing anything (tasks/install_priority_class.yml).
+kubectl create priorityclass "$(sed -n 's/^github_runner_arc_platform_priority_class_name: "\(.*\)"$/\1/p' "$repo_root/roles/github_runner_arc/defaults/main.yml")" --value=1000000 >/dev/null
 kubectl create namespace "$cache_namespace" >/dev/null
 kubectl -n "$cache_namespace" create secret generic private-read --from-literal=username="$private_user" --from-literal=password="$private_password" >/dev/null
 kubectl create namespace "$namespace" >/dev/null
@@ -145,7 +148,8 @@ helm template example-runners "$charts/gha-runner-scale-set" "${version_flag[@]}
   >"$work/chart.yaml" 2>"$work/helm.log" || { cat "$work/helm.log" >&2; fail "helm template failed"; }
 python3 - "$work/chart.yaml" "$work/autoscalingrunnerset.yaml" <<'EOF'
 import sys, yaml
-documents = [document for document in yaml.safe_load_all(open(sys.argv[1])) if document]
+# Helm 4 prints its "Pulled: ... Digest: ..." notice for an OCI chart on standard output too, which parses as a mapping with no kind.
+documents = [document for document in yaml.safe_load_all(open(sys.argv[1])) if isinstance(document, dict) and "kind" in document]
 sets = [document for document in documents if document["kind"] == "AutoscalingRunnerSet"]
 assert len(sets) == 1, [document["kind"] for document in documents]
 yaml.safe_dump(sets[0], open(sys.argv[2], "w"))
@@ -194,6 +198,7 @@ docker pull -q ${private_image}
 ${builder}
 printf 'FROM ${hub_build}\nRUN true\n' | docker buildx build -q - >/dev/null
 printf 'FROM ${ghcr_build}\nRUN true\n' | docker buildx build -q - >/dev/null
+printf 'FROM ${private_image}\nRUN true\n' | docker buildx build -q - >/dev/null
 echo REGISTRY-CACHE-OK"
 kubectl -n "$namespace" logs runner-cached -c runner | grep -qx REGISTRY-CACHE-OK || fail "the cached step did not reach its end"
 # served <container> <repository path> <reference>: the cache container's access log has a successful manifest request for the image since the step started.
