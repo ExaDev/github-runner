@@ -1,3 +1,10 @@
+## [1.26.1](https://github.com/ExaDev/github-runner/compare/v1.26.0...v1.26.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **arc:** keep the sysroot's pkg-config files visible after actions/setup-python ([779c361](https://github.com/ExaDev/github-runner/commit/779c3615d28256eda019b36073f487c70149ad4a))
+
 # [1.26.0](https://github.com/ExaDev/github-runner/compare/v1.25.0...v1.26.0) (2026-10-08)
 
 
