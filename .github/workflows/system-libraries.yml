@@ -1,6 +1,6 @@
 name: System libraries
 
-# Builds each reference system-library capability image in tool-images/ (Open MPI, HiGHS, libpq) natively on amd64 and arm64 and proves it works relocated (tests/system_libraries/run.sh): its payload is copied to /opt/sysroot as the role's init container copies it, the role's own job-started hook applies the environment the role renders for it, and inside the stock actions-runner image a program compiled against the payload runs from there (for Open MPI, a two-process mpirun). Only on changes that can affect them. Builds nothing it publishes.
+# Builds each reference system-library capability image in tool-images/ (Open MPI, HiGHS, libpq) natively on amd64 and arm64 and proves it works relocated (tests/system_libraries/run.sh): its payload is copied to /opt/sysroot as the role's init container copies it, the role's own job-started hook applies the environment the role renders for it, and inside the stock actions-runner image the payload's programs run from there, and inside the reference build runner image (tool-images/build) a program compiled against the payload does (for Open MPI, a two-process mpirun). Only on changes that can affect them. Builds nothing it publishes.
 
 on:
   pull_request:
@@ -8,6 +8,7 @@ on:
       - tool-images/openmpi/**
       - tool-images/highs/**
       - tool-images/libpq/**
+      - tool-images/build/**
       - tests/system_libraries/**
       - tests/capabilities/render.yml
       - roles/github_runner_arc/files/job-started.sh
