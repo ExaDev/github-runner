@@ -1,3 +1,10 @@
+## [1.26.2](https://github.com/ExaDev/github-runner/compare/v1.26.1...v1.26.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* **arc:** stop the registry cache install loop resolving the container resources setting ([eb1c865](https://github.com/ExaDev/github-runner/commit/eb1c865a74eaa8bf7341f96e42b2075bf3d284de)), closes [#71](https://github.com/ExaDev/github-runner/issues/71)
+
 ## [1.26.1](https://github.com/ExaDev/github-runner/compare/v1.26.0...v1.26.1) (2026-10-08)
 
 
