@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugins" / "filter" / "arc.py"
 RENDER_VALUES = ROOT / "tests" / "capabilities" / "render.yml"
 RENDER_CACHE = ROOT / "tests" / "registry_cache" / "render.yml"
+INSTALL_CACHE = ROOT / "tests" / "registry_cache" / "install.yml"
 _spec = importlib.util.spec_from_file_location("arc_filters", PLUGIN)
 assert _spec is not None and _spec.loader is not None
 arc = importlib.util.module_from_spec(_spec)
@@ -76,6 +77,42 @@ def run_playbook(playbook: Path, extra: dict[str, Any]) -> subprocess.CompletedP
         completed = subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(playbook), "-e", f"@{extra_file}"], env=ansible_env(work), cwd=work, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         completed.rendered = json.loads(output.read_text()) if output.exists() else None  # type: ignore[attr-defined]
         return completed
+
+
+# A stand-in for the kubernetes.core modules the install tasks call: it appends the module name and its arguments to the file named by STUB_LOG, reports no change and finds no resources, so the tasks' control flow runs without a cluster.
+STUB_MODULE = """from ansible.module_utils.basic import AnsibleModule
+import json, os
+
+ARGUMENTS = ("api_version", "apply", "definition", "kind", "name", "namespace", "state", "wait")
+
+
+def main():
+    module = AnsibleModule(argument_spec={key: {"type": "raw"} for key in ARGUMENTS}, supports_check_mode=True)
+    with open(os.environ["STUB_LOG"], "a") as log:
+        log.write(json.dumps({"module": MODULE, **module.params}) + "\\n")
+    module.exit_json(changed=False, resources=[])
+
+
+main()
+"""
+
+
+def run_install(extra: dict[str, Any], *flags: str) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
+    """Run the role's install tasks against the stand-in kubernetes.core collection, returning the completed process and the module calls the stub recorded."""
+    with tempfile.TemporaryDirectory() as work:
+        modules = Path(work) / "stubs" / "ansible_collections" / "kubernetes" / "core" / "plugins" / "modules"
+        modules.mkdir(parents=True)
+        for module in ("k8s", "k8s_info"):
+            (modules / f"{module}.py").write_text(STUB_MODULE.replace("MODULE,", repr(module) + ","))
+        log = Path(work) / "calls.jsonl"
+        env = ansible_env(work)
+        env["ANSIBLE_COLLECTIONS_PATH"] = os.pathsep.join([str(Path(work) / "stubs"), env["ANSIBLE_COLLECTIONS_PATH"]])
+        env["STUB_LOG"] = str(log)
+        extra_file = Path(work) / "extra.json"
+        extra_file.write_text(json.dumps(extra))
+        completed = subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(INSTALL_CACHE), "-e", f"@{extra_file}", *flags], env=env, cwd=work, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return completed, calls
 
 
 def expanded(profile: dict[str, Any]) -> dict[str, Any]:
@@ -323,6 +360,30 @@ class RenderedCacheTest(unittest.TestCase):
         policy = self.render()["NetworkPolicy"]["spec"]
         self.assertEqual(policy["ingress"][0]["from"][0]["namespaceSelector"]["matchExpressions"][0]["values"], ["arc-runners-example", "arc-runners-example-big"])
         self.assertEqual([port["port"] for port in policy["ingress"][0]["ports"]], [5000, 5001, 5002])
+
+
+class InstalledCacheTest(unittest.TestCase):
+    """The role's install tasks, run against a stand-in for kubernetes.core, in a normal run and in check mode."""
+
+    def install(self, *flags: str, **settings: Any) -> list[dict[str, Any]]:
+        fleet = arc.arc_profiles([{"name": "Example", "image": RUNNER_IMAGE, "scale_set_profiles": [{"max_runners": 1}]}], require_app_id=False)
+        completed, calls = run_install({"github_runner_arc_fleet": fleet, **settings}, *flags)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        return calls
+
+    def test_off_removes_the_cache_without_rendering_or_applying_anything(self) -> None:
+        for flags in ((), ("--check",)):
+            with self.subTest(flags=flags):
+                calls = self.install(*flags)
+                self.assertEqual([(call["kind"], call["state"]) for call in calls if call["module"] == "k8s"], [("Deployment", "absent"), ("Service", "absent"), ("NetworkPolicy", "absent"), ("ConfigMap", "absent"), ("PersistentVolumeClaim", "absent"), ("Namespace", "absent")])
+                self.assertEqual([call for call in calls if call["apply"]], [])
+
+    def test_on_applies_each_rendered_resource(self) -> None:
+        for flags in ((), ("--check",)):
+            with self.subTest(flags=flags):
+                calls = self.install(*flags, github_runner_arc_registry_cache_enabled=True, github_runner_arc_registry_cache_registries=[{"name": "ghcr", "host": "ghcr.io"}])
+                applied = [call["definition"]["kind"] for call in calls if call["apply"]]
+                self.assertEqual(applied, ["ConfigMap", "PersistentVolumeClaim", "Deployment", "Service", "NetworkPolicy"])
 
 
 if __name__ == "__main__":

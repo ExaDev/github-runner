@@ -1,9 +1,9 @@
 ---
-# Renders the registry cache's resources (templates/registry-cache.yaml.j2) on the control node into github_runner_arc_registry_cache_resources. Needs github_runner_arc_fleet, the inventory's expanded profiles that validate.yml sets. Included by install_registry_cache.yml, and by tests/registry_cache/render.yml so the tests render exactly what the role installs.
+# Renders the registry cache's resources (templates/registry-cache.yaml.j2) on the control node into github_runner_arc_registry_cache_manifests, a name of its own because github_runner_arc_registry_cache_resources is the cache containers' requests and limits. Needs github_runner_arc_fleet, the inventory's expanded profiles that validate.yml sets. Included by install_registry_cache.yml, and by tests/registry_cache/render.yml so the tests render exactly what the role installs.
 
 - name: "Registry cache: describe its resources"
   ansible.builtin.set_fact:
-    github_runner_arc_registry_cache_resources: "{{ lookup('ansible.builtin.template', 'registry-cache.yaml.j2') | from_yaml_all | list }}"
+    github_runner_arc_registry_cache_manifests: "{{ lookup('ansible.builtin.template', 'registry-cache.yaml.j2') | from_yaml_all | list }}"
   vars:
     # Every scale set's namespace across the inventory, not only this host's, since the cache serves the whole cluster's runners.
     github_runner_arc_registry_cache_runner_namespaces: "{{ github_runner_arc_fleet.profiles | map(attribute='namespace') | unique | sort }}"

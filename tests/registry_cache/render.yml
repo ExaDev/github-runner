@@ -11,6 +11,6 @@
 
     - name: Write the resources
       ansible.builtin.copy:
-        content: "{{ github_runner_arc_registry_cache_resources | to_nice_json }}"
+        content: "{{ github_runner_arc_registry_cache_manifests | to_nice_json }}"
         dest: "{{ render_output }}"
         mode: "0644"

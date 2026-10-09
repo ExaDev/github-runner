@@ -1,0 +1,10 @@
+# Runs the ARC role's registry cache install tasks (tasks/install_registry_cache.yml) exactly as main.yml includes them, for tests/unit/test_registry_cache.py to read the outcome of. Takes github_runner_arc_fleet (the expanded profiles, as validate.yml sets it) and the github_runner_arc_registry_cache_* settings as extra variables, and needs ANSIBLE_COLLECTIONS_PATH to put a stand-in kubernetes.core collection ahead of playbooks/collections, so the role's tasks reach a stub that records nothing and changes nothing.
+- name: Install the registry cache, or remove it when turned off
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Include the role's own install tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_arc
+        tasks_from: install_registry_cache
