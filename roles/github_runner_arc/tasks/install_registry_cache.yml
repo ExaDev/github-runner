@@ -48,7 +48,7 @@
       kubernetes.core.k8s:
         definition: "{{ item }}"
         apply: true
-      loop: "{{ github_runner_arc_registry_cache_resources }}"
+      loop: "{{ github_runner_arc_registry_cache_manifests }}"
       loop_control:
         label: "{{ item.kind }}/{{ item.metadata.name }}"
 
