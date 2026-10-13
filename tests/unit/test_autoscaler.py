@@ -60,7 +60,11 @@ FAKE_KUBECTL = textwrap.dedent(
         sys.stdout.write(json.dumps({"status": runner}))
         sys.exit(0)
     if args[:2] == ["top", "nodes"]:
-        sys.stdout.write("node 100m 5%% 1000Mi %d%%\\n" % state["node_mem_pct"])
+        # -l takes one key=value selector, as the autoscaler passes it; a node is listed when it carries that label.
+        selector = args[args.index("-l") + 1] if "-l" in args else None
+        for node in state["nodes"]:
+            if selector is None or selector in node["labels"]:
+                sys.stdout.write("%s 100m 5%% 1000Mi %s\\n" % (node["name"], node["mem"]))
         sys.exit(0)
     if args[:2] == ["get", "events"]:
         namespace = args[args.index("-n") + 1]
@@ -118,6 +122,8 @@ class AutoscalerTest(unittest.TestCase):
         ephemeral: dict[str, list[str]] | None = None,
         ephemeral_fails: bool = False,
         node_mem_pct: int = 20,
+        nodes: list[dict[str, object]] | None = None,
+        node_selector: str | None = None,
         configmap: dict[str, str] | None = None,
         top: dict[str, dict[str, int]] | None = None,
         runners: dict[str, dict[str, str]] | None = None,
@@ -134,7 +140,7 @@ class AutoscalerTest(unittest.TestCase):
                     "max_runners": {f"release-{ns}": count for ns, count in (max_runners or {}).items()},
                     "ephemeral": ephemeral if ephemeral is not None else {ns: ["Running"] * (running or 0) for ns in namespaces},
                     "ephemeral_fails": ephemeral_fails,
-                    "node_mem_pct": node_mem_pct,
+                    "nodes": nodes if nodes is not None else [{"name": "node", "labels": [], "mem": f"{node_mem_pct}%"}],
                     "configmap": configmap or {},
                     "pods": pods,
                     "top_pod_fails": top_pod_fails,
@@ -163,6 +169,8 @@ class AutoscalerTest(unittest.TestCase):
             "AUTOSCALER_MAX_CEILING": str(ceiling),
             "AUTOSCALER_FLOOR": "3",
         }
+        if node_selector is not None:
+            env["AUTOSCALER_NODE_SELECTOR"] = node_selector
         return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
 
     def test_an_unschedulable_runner_pod_lowers_every_target_to_its_running_count(self) -> None:
@@ -203,6 +211,42 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("unbound variable", result.stderr)
         self.assertIn("FAIL-SAFE", result.stderr)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    # Two nodes runner pods may use and a third, outside the eligibility label, whose kubelet is unreachable so metrics-server reports no figures for it.
+    ELIGIBLE = "example.com/eligible=true"
+    UNREACHABLE_INELIGIBLE = (
+        {"name": "a", "labels": [ELIGIBLE], "mem": "20%"},
+        {"name": "b", "labels": [ELIGIBLE], "mem": "30%"},
+        {"name": "c", "labels": [], "mem": "<unknown>"},
+    )
+
+    def test_an_unreachable_node_outside_the_selector_does_not_fail_safe(self) -> None:
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=list(self.UNREACHABLE_INELIGIBLE), node_selector=self.ELIGIBLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("FAIL-SAFE", result.stderr)
+        self.assertIn("mem_available=70%", result.stdout)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_an_unreachable_node_fails_safe_without_a_selector(self) -> None:
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=list(self.UNREACHABLE_INELIGIBLE))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY%", result.stderr)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    def test_pressure_on_a_node_outside_the_selector_is_not_pressure(self) -> None:
+        nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "c", "labels": [], "mem": "95%"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("mem_available=80% pressure=false", result.stdout)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_a_selector_matching_no_node_fails_safe_naming_it(self) -> None:
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=[{"name": "c", "labels": [], "mem": "20%"}], node_selector=self.ELIGIBLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"kubectl top nodes returned no nodes matching {self.ELIGIBLE}", result.stderr)
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
 

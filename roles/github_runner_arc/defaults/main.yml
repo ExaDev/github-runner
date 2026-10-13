@@ -90,7 +90,7 @@ github_runner_arc_listener_metrics_endpoint: "/metrics"
 github_runner_arc_listener_probes_enabled: false
 github_runner_arc_listener_probe_port: 8080
 
-# Node eligibility by label. When the key is set, the controller, every listener and every runner pod get a nodeSelector for key=value, and the role labels each node named in github_runner_arc_labelled_nodes with it (nodes labelled some other way need not be listed). A label rather than a taint keeps the cluster's other workloads unaffected. A profile's own node_selector is merged over this.
+# Node eligibility by label. When the key is set, the controller, every listener and every runner pod get a nodeSelector for key=value, the autoscaler reads memory pressure only from nodes carrying it, and the role labels each node named in github_runner_arc_labelled_nodes with it (nodes labelled some other way need not be listed). A label rather than a taint keeps the cluster's other workloads unaffected. A profile's own node_selector is merged over this.
 github_runner_arc_node_label_key: ""
 github_runner_arc_node_label_value: "true"
 github_runner_arc_labelled_nodes: []

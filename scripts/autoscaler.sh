@@ -8,7 +8,8 @@
 # - AUTOSCALER_MAX_CEILING: hard operator cap on the pooled maxRunners total, independent of the live arithmetic
 # - AUTOSCALER_FLOOR: the combined floor every poll reverts the pooled total to under pressure; each Helm upgrade separately reverts its own target's maxRunners to that target's own values-file floor, which need not equal this combined figure divided evenly
 # - AUTOSCALER_RAISE_CONFIRM_POLLS: consecutive polls of confirmed headroom before raising
-# - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT: MemAvailable-of-MemTotal percentage treated as real pressure, evaluated as the worst case across all nodes (see the kubectl top nodes block below) - no swap-pressure equivalent, see that block's own comment for why
+# - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT: MemAvailable-of-MemTotal percentage treated as real pressure, evaluated as the worst case across the nodes runner pods may use (see the kubectl top nodes block below) - no swap-pressure equivalent, see that block's own comment for why
+# - AUTOSCALER_NODE_SELECTOR: a label selector (key=value) naming the nodes runner pods may be placed on, the role's node eligibility label; empty means every node. Only those nodes' memory is read, so a node that runs no runner pod, and whose metrics go missing when it drops out, never lowers the pool
 # - AUTOSCALER_TARGETS: the AutoscalingRunnerSets to pool, as whitespace-separated namespace/release tokens (one per scale-set profile with autoscale: true; see plugins/filter/arc.py's own target field, which is exactly this namespace/release form)
 # - AUTOSCALER_STATE_NAMESPACE, AUTOSCALER_STATUS_CONFIGMAP: the ConfigMap this pod's own status/raise-confirm-count state lives in (shared with scripts/heartbeat.sh, which reads status.json back out to republish in the heartbeat gist)
 set -euo pipefail
@@ -21,6 +22,7 @@ MAX_CEILING="${AUTOSCALER_MAX_CEILING:?AUTOSCALER_MAX_CEILING must be set}"
 FLOOR="${AUTOSCALER_FLOOR:?AUTOSCALER_FLOOR must be set}"
 RAISE_CONFIRM_POLLS="${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}"
 MEM_AVAILABLE_PRESSURE_PCT="${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}"
+NODE_SELECTOR="${AUTOSCALER_NODE_SELECTOR:-}"
 STATE_NAMESPACE="${AUTOSCALER_STATE_NAMESPACE:-github-runner-platform}"
 CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 # Where each job's observed peak memory is kept, in the same ConfigMap. A ConfigMap holds at most 1 MiB and an entry is under 512 bytes, so capping the entries at 2048 stays at half the limit; entries unseen for 30 days are dropped, since a job that has not run for that long no longer informs sizing.
@@ -307,9 +309,12 @@ for i in "${!TARGETS[@]}"; do
 done
 
 # Cluster-wide memory-availability pressure via `kubectl top nodes` (metrics-server), not a single node's own /proc/meminfo - the autoscaler pod is genuinely unpinned now (see docker-compose.yml's own removal of host pinning), so a single-node reading would only ever reflect wherever the scheduler happened to place THIS pod, not the pool as a whole. Takes the WORST-CASE (minimum) available-memory percentage across all nodes, not an average: a pool average can look healthy while the specific node a new runner pod would actually land on is not - consistent with the algorithm's own existing bias toward lowering eagerly, since lowering never disrupts in-flight jobs. No swap-pressure signal: metrics-server's API has no swap field at all (confirmed against its type, not just "probably not"), and the only alternative (the kubelet's own Summary API) needs a materially broader RBAC grant - node/proxy, effectively "reach anything a kubelet exposes" - for a signal most kubelet versions don't even surface unless the off-by-default NodeSwap feature gate is on. Real cluster-wide swap visibility needs Prometheus/node-exporter, which this fleet doesn't run and which would be genuine scope creep to add here - dropping swap detection is a deliberate, documented trade-off, not an oversight.
-TOP_NODES_OUTPUT="$(kubectl top nodes --no-headers 2>/dev/null)" \
+# Only the nodes runner pods may be placed on, when the role restricts them by label: a node they cannot use says nothing about where the next one lands, and one whose kubelet is unreachable reports no metrics, which would otherwise fail safe on every poll it is down.
+TOP_NODES_ARGS=(top nodes --no-headers)
+[ -n "$NODE_SELECTOR" ] && TOP_NODES_ARGS+=(-l "$NODE_SELECTOR")
+TOP_NODES_OUTPUT="$(kubectl "${TOP_NODES_ARGS[@]}" 2>/dev/null)" \
   || fail_safe "kubectl top nodes failed (metrics-server unreachable?)"
-[ -n "$TOP_NODES_OUTPUT" ] || fail_safe "kubectl top nodes returned no nodes"
+[ -n "$TOP_NODES_OUTPUT" ] || fail_safe "kubectl top nodes returned no nodes${NODE_SELECTOR:+ matching ${NODE_SELECTOR}}"
 mem_available_pct=100
 while read -r _name _cpu _cpu_pct _mem mem_pct; do
   mem_pct="${mem_pct%\%}"
