@@ -371,6 +371,7 @@ write_host_network_inventory() {
     echo "        github_runner_cluster_headscale_join_key: ${join_key}"
     echo "        github_runner_cluster_compose_files: [compose.grtest.yml]"
     echo "        github_runner_cluster_network_mode: host"
+    echo "        github_runner_cluster_lan_cidr: ${subnet_prefix}.0/24"
     echo "        github_runner_cluster_k3s_token: ${k3s_token}"
     echo "      hosts:"
     for index in $(seq 1 "$node_count"); do
