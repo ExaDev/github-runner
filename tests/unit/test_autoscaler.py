@@ -253,6 +253,14 @@ class AutoscalerTest(unittest.TestCase):
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
 
+    def test_an_unreachable_node_inside_the_selector_fails_safe(self) -> None:
+        nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "<unknown>"}, {"name": "c", "labels": [], "mem": "10%"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY% from kubectl top nodes ('<unknown>')", result.stderr)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
     def recorded(self) -> dict[str, dict[str, object]]:
         return json.loads(self.job_memory_out.read_text())
 
