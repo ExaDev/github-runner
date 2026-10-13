@@ -1155,6 +1155,26 @@ def arc_upgrade_blocker(deployed_chart: str, desired_version: str, running_runne
     )
 
 
+def arc_helm_server_side(version: str) -> bool:
+    """Report whether the Helm client applies releases with server-side apply, which decides whether the role forces field conflicts.
+
+    Helm 4 upgrades a release with server-side apply when it was installed that way (its default), and fails on any field another field manager has since set to a different value, such as a scale set's maxRunners after the autoscaler has patched it. Helm 3 has no server-side apply, and the helm module rejects its server_side and force_conflicts options there.
+
+    Args:
+        version: the client version as `helm version --short` prints it, for example v4.3.0+gbec5b06 or v3.16.2+g13654a5.
+
+    Returns:
+        True for Helm 4 or later, False for an earlier major version.
+
+    Raises:
+        ValueError: when the version has no leading major number.
+    """
+    match = re.match(r"^v?(\d+)\.", str(version).strip())
+    if match is None:
+        raise ValueError(f"cannot read a Helm major version from {version!r}")
+    return int(match.group(1)) >= 4
+
+
 class FilterModule:
     """Registers the ARC role's filters with Ansible."""
 
@@ -1165,6 +1185,7 @@ class FilterModule:
             "arc_max_runners": arc_max_runners,
             "arc_measured_max_runners": arc_measured_max_runners,
             "arc_upgrade_blocker": arc_upgrade_blocker,
+            "arc_helm_server_side": arc_helm_server_side,
             "arc_image_ref": arc_image_ref,
             "arc_runner_placement": arc_runner_placement,
             "arc_capability_errors": arc_capability_errors,

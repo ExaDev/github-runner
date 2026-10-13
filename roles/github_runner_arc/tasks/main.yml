@@ -66,6 +66,20 @@
     - name: Apply the ARC controller chart's CRDs, which Helm never upgrades
       ansible.builtin.include_tasks: install_crds.yml
 
+    # Helm 4 applies a release server-side and, without forcing, fails an upgrade on any field another manager changed since, so the controller and scale-set releases force conflicts on Helm 4 (see the helm tasks there). Read in check mode too, since the helm tasks' arguments depend on it.
+    - name: Read the Helm client's version
+      ansible.builtin.command:
+        argv: [helm, version, --short]
+      register: github_runner_arc_helm_version
+      changed_when: false
+      check_mode: false
+      when: github_runner_arc_orgs | length > 0
+
+    - name: Decide whether the helm releases are applied server-side
+      ansible.builtin.set_fact:
+        github_runner_arc_helm_server_side: "{{ github_runner_arc_helm_version.stdout | exadev.github_runner.arc_helm_server_side }}"
+      when: github_runner_arc_orgs | length > 0
+
     - name: Install/upgrade the ARC controller (shared by every org on this host)
       ansible.builtin.include_tasks: install_controller.yml
       when: github_runner_arc_orgs | length > 0

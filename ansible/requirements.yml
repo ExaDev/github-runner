@@ -1,5 +1,6 @@
 ---
 collections:
-  - name: kubernetes.core   # k8s, k8s_info, helm
+  - name: kubernetes.core   # k8s, k8s_info, helm; 6.5.0 adds helm's server_side and force_conflicts
+    version: ">=6.5.0"
   - name: community.docker  # docker_compose_v2
   - name: community.general  # homebrew (host prerequisites: helm, kubectl, docker)
