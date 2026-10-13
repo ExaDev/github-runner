@@ -1,0 +1,12 @@
+---
+# Runs some of the cluster role's task files (check_tasks, comma-separated: versions, the default, running_version, compose_files, or topology followed by another) through the role itself, for tests/unit/test_cluster_versions.py, so that its defaults load as role defaults do in a real run: below the inventory the test writes, and absent from every host's hostvars.
+- name: Run the cluster role's version checks
+  hosts: "{{ check_hosts | default('github_runner_cluster') }}"
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Include the role's checks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: "{{ item }}"
+      loop: "{{ (check_tasks | default('versions')).split(',') }}"
