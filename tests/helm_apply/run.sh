@@ -9,6 +9,8 @@
 #
 # No controller is installed, only the CRDs, so nothing reconciles the scale sets and no GitHub credential is needed.
 #
+# The floor version comes from tests/helm_apply/kubernetes-core-floor.sh, which the workflow uses too.
+#
 # Usage: HELM3=<helm 3 binary> HELM4=<helm 4 binary> KUBERNETES_CORE_FLOOR=<collections directory> tests/helm_apply/run.sh. Needs Docker, kind, kubectl, python3 with PyYAML, and ansible-playbook (ANSIBLE_PLAYBOOK overrides which) with the kubernetes.core collection (the version galaxy.yml accepts) and the kubernetes Python package; KUBERNETES_CORE_FLOOR is a collections directory holding kubernetes.core at exactly the lowest version galaxy.yml accepts. Creates a kind cluster named grtest-helm-apply and removes it on exit; GRTEST_KEEP=1 keeps it.
 set -euo pipefail
 
@@ -31,9 +33,13 @@ default_collections="${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr
 export ANSIBLE_LOCALHOST_WARNING=false ANSIBLE_INVENTORY_UNPARSED_WARNING=false ANSIBLE_COLLECTIONS_SCAN_SYS_PATH=false
 
 log() { echo "==> $*"; }
+# Set once the kind cluster exists, so a failure before then does not try to list resources from a cluster that is not there.
+cluster_created=0
 fail() {
   echo "FAIL: $*" >&2
-  kubectl get autoscalingrunnersets -A -o wide >&2 || true
+  if [ "$cluster_created" = 1 ]; then
+    kubectl get autoscalingrunnersets -A -o wide >&2 || true
+  fi
   exit 1
 }
 cleanup() {
@@ -96,21 +102,14 @@ live_max_runners() { kubectl get autoscalingrunnerset "$1" -n "$2" -o jsonpath='
 autoscaler_patch() { kubectl patch autoscalingrunnerset "$1" -n "$2" --type merge -p "{\"spec\":{\"maxRunners\":$3}}" >/dev/null; }
 
 # Before the cluster is created, so a missing or wrong floor installation fails first.
-floor="$(python3 - "$repo_root/galaxy.yml" <<'PY'
-import re, sys
-import yaml
-spec = yaml.safe_load(open(sys.argv[1]))["dependencies"]["kubernetes.core"]
-match = re.fullmatch(r">=\s*(\d+\.\d+\.\d+)", str(spec).strip())
-assert match, f"galaxy.yml's kubernetes.core requirement {spec!r} is not a plain lower bound"
-print(match.group(1))
-PY
-)"
+floor="$("$repo_root/tests/helm_apply/kubernetes-core-floor.sh")" || fail "could not read the lowest kubernetes.core galaxy.yml accepts (the reason is above)"
 floor_installed="$(kubernetes_core_version "$kubernetes_core_floor")"
-[ "$floor_installed" = "$floor" ] || fail "KUBERNETES_CORE_FLOOR ($kubernetes_core_floor) holds ${floor_installed:+kubernetes.core $floor_installed}${floor_installed:-no kubernetes.core}, not galaxy.yml's lowest accepted $floor"
+[ "$floor_installed" = "$floor" ] || fail "KUBERNETES_CORE_FLOOR ($kubernetes_core_floor) holds ${floor_installed:+kubernetes.core }${floor_installed:-no kubernetes.core}, not galaxy.yml's lowest accepted $floor"
 [ "$(kubernetes_core_version "$default_collections")" ] || fail "no kubernetes.core in $default_collections"
 
 log "Creating the kind cluster and applying the ARC CRDs (no controller)"
 kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s >/dev/null
+cluster_created=1
 "$work/helm4/helm" show crds "$charts/gha-runner-scale-set-controller" --version "$chart_version" | kubectl apply --server-side -f - >/dev/null
 
 # Runs every phase with the role's tasks resolving kubernetes.core from the given collections path; tag keeps each run's namespaces and logs apart.
