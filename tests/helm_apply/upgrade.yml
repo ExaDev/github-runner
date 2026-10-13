@@ -1,0 +1,22 @@
+---
+# Runs the github_runner_arc role's own Helm version read and its scale-set helm task against a test cluster, for tests/helm_apply/run.sh, which copies those tasks verbatim from the role into helm_tasks_file. Takes helm_tasks_file, release, namespace, chart_version, scale_set_values (the release's Helm values) and kubeconfig as extra vars. The role's defaults are not loaded: they would outrank these play variables, and the tasks need nothing from them.
+- name: Install or upgrade a scale set with the role's helm task
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # Any non-empty list: the version read runs only when the role installs at least one org.
+    github_runner_arc_orgs: [{name: example}]
+    github_runner_arc_scaleset_chart_version: "{{ chart_version }}"
+    profile:
+      release: "{{ release }}"
+      namespace: "{{ namespace }}"
+      label: "{{ release }}"
+    github_runner_arc_scale_set_values: "{{ scale_set_values }}"
+    github_runner_arc_scale_set_set_values: []
+  module_defaults:
+    group/kubernetes.core.helm:
+      kubeconfig: "{{ kubeconfig }}"
+  tasks:
+    - name: Include the role's version read and scale-set helm task
+      ansible.builtin.include_tasks: "{{ helm_tasks_file }}"
