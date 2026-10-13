@@ -3,11 +3,13 @@
 #
 # - Helm 4: a release the role installed, then patched by kubectl, is upgraded to a different maxRunners. A plain helm upgrade without --force-conflicts is shown to fail on that field first, so the test reproduces the conflict it guards against.
 # - Helm 4: a release first installed with client-side apply, then patched, is upgraded by the role, which needs server_side true and not auto.
-# - Helm 3: the role installs and upgrades a patched release, which fails if either option reaches the module there.
+# - Helm 3: the role installs and upgrades a patched release. kubernetes.core.helm refuses server_side in any form, and force_conflicts only when it is true, below Helm 4, so this phase fails if server_side or a true force_conflicts reaches the module. A false force_conflicts is accepted there, so this phase cannot show that the role omits it rather than passing false; only tests/unit/test_helm_apply.py's render test guards that.
+#
+# Every phase runs twice: with the kubernetes.core the environment provides, and with the oldest version galaxy.yml accepts, installed in KUBERNETES_CORE_FLOOR.
 #
 # No controller is installed, only the CRDs, so nothing reconciles the scale sets and no GitHub credential is needed.
 #
-# Usage: HELM3=<helm 3 binary> HELM4=<helm 4 binary> tests/helm_apply/run.sh. Needs Docker, kind, kubectl, python3 with PyYAML, and ansible-playbook (ANSIBLE_PLAYBOOK overrides which) with the kubernetes.core collection (6.5.0 or later) and the kubernetes Python package. Creates a kind cluster named grtest-helm-apply and removes it on exit; GRTEST_KEEP=1 keeps it.
+# Usage: HELM3=<helm 3 binary> HELM4=<helm 4 binary> KUBERNETES_CORE_FLOOR=<collections directory> tests/helm_apply/run.sh. Needs Docker, kind, kubectl, python3 with PyYAML, and ansible-playbook (ANSIBLE_PLAYBOOK overrides which) with the kubernetes.core collection (the version galaxy.yml accepts) and the kubernetes Python package; KUBERNETES_CORE_FLOOR is a collections directory holding kubernetes.core at exactly the lowest version galaxy.yml accepts. Creates a kind cluster named grtest-helm-apply and removes it on exit; GRTEST_KEEP=1 keeps it.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,8 +25,10 @@ chart_version=0.15.0
 controller_namespace=grtest-arc-systems
 work="$(mktemp -d "${TMPDIR:-/tmp}/grtest-helm-apply.XXXXXX")"
 export KUBECONFIG="$work/kubeconfig"
-export ANSIBLE_COLLECTIONS_PATH="$repo_root/playbooks/collections:${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}"
-export ANSIBLE_LOCALHOST_WARNING=false ANSIBLE_INVENTORY_UNPARSED_WARNING=false
+kubernetes_core_floor="${KUBERNETES_CORE_FLOOR:?KUBERNETES_CORE_FLOOR must name a collections directory holding the lowest kubernetes.core galaxy.yml accepts}"
+default_collections="${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}"
+# Python's own site-packages may hold another kubernetes.core (the full ansible package ships one), which would shadow the version each phase means to test.
+export ANSIBLE_LOCALHOST_WARNING=false ANSIBLE_INVENTORY_UNPARSED_WARNING=false ANSIBLE_COLLECTIONS_SCAN_SYS_PATH=false
 
 log() { echo "==> $*"; }
 fail() {
@@ -68,11 +72,17 @@ assert len(helm) == 1, f"expected one helm task in install_scale_set_profile.yml
 out.write_text(yaml.safe_dump(version + helm, sort_keys=False))
 PY
 
-# Runs the role's tasks with the Helm of the given major on PATH, for one release at one maxRunners; prints the play's output.
+# Runs the role's tasks with the Helm of the given major on PATH, for one release at one maxRunners, resolving kubernetes.core from the calling run_phases' collections path; prints the play's output.
 role_upgrade() {
   local major="$1" release="$2" namespace="$3" max_runners="$4"
   printf '%s' "{\"helm_tasks_file\": \"$work/helm-tasks.yml\", \"release\": \"$release\", \"namespace\": \"$namespace\", \"chart_version\": \"$chart_version\", \"kubeconfig\": \"$KUBECONFIG\", \"scale_set_values\": $(scale_set_values "$max_runners")}" > "$work/extra.json"
-  PATH="$work/helm$major:$PATH" "$ansible_playbook" "$repo_root/tests/helm_apply/upgrade.yml" -e "@$work/extra.json" 2>&1
+  PATH="$work/helm$major:$PATH" ANSIBLE_COLLECTIONS_PATH="$repo_root/playbooks/collections:$collections" \
+    "$ansible_playbook" "$repo_root/tests/helm_apply/upgrade.yml" -e "@$work/extra.json" 2>&1
+}
+
+# The kubernetes.core version a collections path resolves to, as ansible-galaxy reports it.
+kubernetes_core_version() {
+  ANSIBLE_COLLECTIONS_PATH="$1" ansible-galaxy collection list kubernetes.core 2>/dev/null | awk '$1 == "kubernetes.core" {print $2; exit}'
 }
 
 # The scale set's Helm values: no GitHub credential is used, since no controller runs, and the controller's service account is named because there is no controller to look it up from.
@@ -89,36 +99,57 @@ log "Creating the kind cluster and applying the ARC CRDs (no controller)"
 kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s >/dev/null
 "$work/helm4/helm" show crds "$charts/gha-runner-scale-set-controller" --version "$chart_version" | kubectl apply --server-side -f - >/dev/null
 
-log "Helm 4: the role installs a release, kubectl patches its maxRunners"
-kubectl create namespace grtest-helm4 >/dev/null
-role_upgrade 4 grtest-runners grtest-helm4 3 > "$work/helm4-install.log" || fail "the role could not install the release with Helm 4: $(tail -20 "$work/helm4-install.log")"
-[ "$(live_max_runners grtest-runners grtest-helm4)" = 3 ] || fail "maxRunners after install is not 3"
-"$work/helm4/helm" get metadata grtest-runners -n grtest-helm4 | grep -q "APPLY_METHOD: server-side apply" || fail "Helm 4 did not install the release server-side"
-autoscaler_patch grtest-runners grtest-helm4 5
+# Runs every phase with the role's tasks resolving kubernetes.core from the given collections path; tag keeps each run's namespaces and logs apart.
+run_phases() {
+  local tag="$1" collections="$2" version
+  local ns4="grtest-helm4-$tag" ns4_csa="grtest-helm4-csa-$tag" ns3="grtest-helm3-$tag"
+  version="$(kubernetes_core_version "$collections")"
+  [ -n "$version" ] || fail "no kubernetes.core in $collections"
+  log "[kubernetes.core $version] Helm 4: the role installs a release, kubectl patches its maxRunners"
+  kubectl create namespace "$ns4" >/dev/null
+  role_upgrade 4 grtest-runners "$ns4" 3 > "$work/helm4-install-$tag.log" || fail "the role could not install the release with Helm 4: $(tail -20 "$work/helm4-install-$tag.log")"
+  [ "$(live_max_runners grtest-runners "$ns4")" = 3 ] || fail "maxRunners after install is not 3"
+  "$work/helm4/helm" get metadata grtest-runners -n "$ns4" | grep -q "APPLY_METHOD: server-side apply" || fail "Helm 4 did not install the release server-side"
+  autoscaler_patch grtest-runners "$ns4" 5
 
-log "Helm 4: a plain upgrade without --force-conflicts fails on maxRunners"
-if output="$(printf '%s' "$(scale_set_values 2)" | "$work/helm4/helm" upgrade grtest-runners "$charts/gha-runner-scale-set" --version "$chart_version" -n grtest-helm4 -f - 2>&1)"; then
-  fail "a plain Helm 4 upgrade succeeded against the patched maxRunners, so this test no longer reproduces the conflict: $output"
-fi
-echo "$output" | grep -q "conflict" || fail "the plain upgrade failed, but not on a conflict: $output"
+  log "[kubernetes.core $version] Helm 4: a plain upgrade without --force-conflicts fails on maxRunners"
+  if output="$(printf '%s' "$(scale_set_values 2)" | "$work/helm4/helm" upgrade grtest-runners "$charts/gha-runner-scale-set" --version "$chart_version" -n "$ns4" -f - 2>&1)"; then
+    fail "a plain Helm 4 upgrade succeeded against the patched maxRunners, so this test no longer reproduces the conflict: $output"
+  fi
+  echo "$output" | grep -q "conflict" || fail "the plain upgrade failed, but not on a conflict: $output"
 
-log "Helm 4: the role upgrades the patched release to a different maxRunners"
-role_upgrade 4 grtest-runners grtest-helm4 2 > "$work/helm4-upgrade.log" || fail "the role's upgrade failed with Helm 4: $(tail -20 "$work/helm4-upgrade.log")"
-[ "$(live_max_runners grtest-runners grtest-helm4)" = 2 ] || fail "maxRunners after the role's upgrade is $(live_max_runners grtest-runners grtest-helm4), not 2"
+  log "[kubernetes.core $version] Helm 4: the role upgrades the patched release to a different maxRunners"
+  role_upgrade 4 grtest-runners "$ns4" 2 > "$work/helm4-upgrade-$tag.log" || fail "the role's upgrade failed with Helm 4: $(tail -20 "$work/helm4-upgrade-$tag.log")"
+  [ "$(live_max_runners grtest-runners "$ns4")" = 2 ] || fail "maxRunners after the role's upgrade is $(live_max_runners grtest-runners "$ns4"), not 2"
 
-log "Helm 4: a release first installed with client-side apply, then patched, is upgraded by the role"
-kubectl create namespace grtest-helm4-csa >/dev/null
-printf '%s' "$(scale_set_values 3)" | "$work/helm4/helm" install grtest-runners "$charts/gha-runner-scale-set" --version "$chart_version" -n grtest-helm4-csa --server-side=false -f - >/dev/null
-autoscaler_patch grtest-runners grtest-helm4-csa 5
-role_upgrade 4 grtest-runners grtest-helm4-csa 2 > "$work/helm4-csa.log" || fail "the role could not upgrade a client-side release with Helm 4: $(tail -20 "$work/helm4-csa.log")"
-[ "$(live_max_runners grtest-runners grtest-helm4-csa)" = 2 ] || fail "maxRunners after upgrading the client-side release is not 2"
-"$work/helm4/helm" get metadata grtest-runners -n grtest-helm4-csa | grep -q "APPLY_METHOD: server-side apply" || fail "the client-side release did not move to server-side apply"
+  log "[kubernetes.core $version] Helm 4: a release first installed with client-side apply, then patched, is upgraded by the role"
+  kubectl create namespace "$ns4_csa" >/dev/null
+  printf '%s' "$(scale_set_values 3)" | "$work/helm4/helm" install grtest-runners "$charts/gha-runner-scale-set" --version "$chart_version" -n "$ns4_csa" --server-side=false -f - >/dev/null
+  autoscaler_patch grtest-runners "$ns4_csa" 5
+  role_upgrade 4 grtest-runners "$ns4_csa" 2 > "$work/helm4-csa-$tag.log" || fail "the role could not upgrade a client-side release with Helm 4: $(tail -20 "$work/helm4-csa-$tag.log")"
+  [ "$(live_max_runners grtest-runners "$ns4_csa")" = 2 ] || fail "maxRunners after upgrading the client-side release is not 2"
+  "$work/helm4/helm" get metadata grtest-runners -n "$ns4_csa" | grep -q "APPLY_METHOD: server-side apply" || fail "the client-side release did not move to server-side apply"
 
-log "Helm 3: the role installs and upgrades a patched release, passing neither option"
-kubectl create namespace grtest-helm3 >/dev/null
-role_upgrade 3 grtest-runners grtest-helm3 3 > "$work/helm3-install.log" || fail "the role could not install the release with Helm 3: $(tail -20 "$work/helm3-install.log")"
-autoscaler_patch grtest-runners grtest-helm3 5
-role_upgrade 3 grtest-runners grtest-helm3 2 > "$work/helm3-upgrade.log" || fail "the role's upgrade failed with Helm 3: $(tail -20 "$work/helm3-upgrade.log")"
-[ "$(live_max_runners grtest-runners grtest-helm3)" = 2 ] || fail "maxRunners after the Helm 3 upgrade is not 2"
+  log "[kubernetes.core $version] Helm 3: the role installs and upgrades a patched release, passing neither option"
+  kubectl create namespace "$ns3" >/dev/null
+  role_upgrade 3 grtest-runners "$ns3" 3 > "$work/helm3-install-$tag.log" || fail "the role could not install the release with Helm 3: $(tail -20 "$work/helm3-install-$tag.log")"
+  autoscaler_patch grtest-runners "$ns3" 5
+  role_upgrade 3 grtest-runners "$ns3" 2 > "$work/helm3-upgrade-$tag.log" || fail "the role's upgrade failed with Helm 3: $(tail -20 "$work/helm3-upgrade-$tag.log")"
+  [ "$(live_max_runners grtest-runners "$ns3")" = 2 ] || fail "maxRunners after the Helm 3 upgrade is not 2"
+}
+
+floor="$(python3 - "$repo_root/galaxy.yml" <<'PY'
+import re, sys
+import yaml
+spec = yaml.safe_load(open(sys.argv[1]))["dependencies"]["kubernetes.core"]
+match = re.fullmatch(r">=\s*(\d+\.\d+\.\d+)", str(spec).strip())
+assert match, f"galaxy.yml's kubernetes.core requirement {spec!r} is not a plain lower bound"
+print(match.group(1))
+PY
+)"
+[ "$(kubernetes_core_version "$kubernetes_core_floor")" = "$floor" ] || fail "KUBERNETES_CORE_FLOOR holds kubernetes.core $(kubernetes_core_version "$kubernetes_core_floor"), not galaxy.yml's lowest accepted $floor"
+
+run_phases current "$default_collections"
+run_phases floor "$kubernetes_core_floor"
 
 log "PASS"
