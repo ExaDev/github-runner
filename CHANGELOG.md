@@ -1,3 +1,12 @@
+## [1.26.4](https://github.com/ExaDev/github-runner/compare/v1.26.3...v1.26.4) (2026-10-13)
+
+
+### Bug Fixes
+
+* **arc:** force field conflicts when Helm 4 upgrades the controller and scale sets ([1aaa0f8](https://github.com/ExaDev/github-runner/commit/1aaa0f8043174a6e40ede31b9eb7fe6371995c0b))
+* **arc:** pass neither server-side option to the helm module on Helm 3 ([6ebef08](https://github.com/ExaDev/github-runner/commit/6ebef080122a2ff0a7eeb1c53757ccbfbda58afc))
+* **ci:** install the lowest kubernetes.core even when it is also the newest ([3a424fc](https://github.com/ExaDev/github-runner/commit/3a424fc263fda1ae878fcf605fc13fb5bd4d7541))
+
 ## [1.26.3](https://github.com/ExaDev/github-runner/compare/v1.26.2...v1.26.3) (2026-10-13)
 
 
