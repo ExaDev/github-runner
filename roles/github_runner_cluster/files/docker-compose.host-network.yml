@@ -1,0 +1,9 @@
+# Merged last, after docker-compose.yml and every other override, when github_runner_cluster_network_mode is host. The node's container then shares the Docker host's own network namespace (on macOS, the Docker VM's) instead of sitting on a Compose bridge network behind its NAT. Its Tailscale client sees the host's own addresses and offers them to its peers as direct endpoints, so nodes on one LAN, each with an address of its own on it, connect directly; any other pair falls back to a relay or a hole-punched path, as on a bridge network. Nothing k3s uses changes: the node IP, etcd's peer URLs and the certificates' names stay the mesh's.
+#
+# ports is emptied because a container on the host network publishes nothing: every port it listens on, the API server's included, is already the host's. On a Docker VM the VM's own port forwarding (Lima's, for Colima) then makes the API server reach the host's loopback as a published port did.
+services:
+  k3s:
+    network_mode: host
+    ports: !reset []
+  k3s-agent:
+    network_mode: host

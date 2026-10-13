@@ -40,6 +40,13 @@
 - name: Check the k3s version against what this node and the cluster run now
   ansible.builtin.include_tasks: running_version.yml
 
+- name: Fail if the node's network mode is not one the role knows
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_network_mode is '{{ github_runner_cluster_network_mode }}'; it must be bridge (Compose's own
+      network, the default) or host (the Docker host's network). See the role's defaults for what each does.
+  when: github_runner_cluster_network_mode not in ['bridge', 'host']
+
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-
@@ -66,6 +73,7 @@
     mode: "{{ item.mode }}"
   loop:
     - {src: docker-compose.yml, mode: "0644"}
+    - {src: docker-compose.host-network.yml, mode: "0644"}
     - {src: k3s/Dockerfile, mode: "0644"}
     - {src: k3s/node-entrypoint.sh, mode: "0755"}
 
@@ -129,6 +137,21 @@
 
     - name: End the role here, since an agent host has no API of its own to wait on
       ansible.builtin.meta: end_role
+
+- name: Wait for the API server to answer on this host's loopback, with the node on the host network
+  # With github_runner_cluster_network_mode host nothing publishes the API server's port: the kubeconfig k3s writes (https://127.0.0.1:<port>) reaches it only if the port is the host's own, or, on a Docker VM, if the VM forwards it to the host as Lima does for Colima. Checked only when the role goes on to use that kubeconfig from the host, so a failure names the cause instead of surfacing as an unreachable API in a later task.
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ github_runner_cluster_api_port }}"
+    timeout: 300
+    msg: >-
+      Nothing answers on 127.0.0.1:{{ github_runner_cluster_api_port }} on {{ inventory_hostname }}, so the kubeconfig k3s writes
+      cannot reach the API server. With github_runner_cluster_network_mode host the port is not published; on a Docker VM it
+      must be forwarded from the VM to the host (Colima forwards a port a container on the VM's host network listens on). Check
+      the VM's port forwarding, or set github_runner_cluster_network_mode back to bridge.
+  when:
+    - github_runner_cluster_network_mode == 'host'
+    - github_runner_cluster_wait_for_nodes | bool or github_runner_cluster_record_deployed_version | bool
 
 - name: Give this host the kubernetes Python client before waiting on the API
   ansible.builtin.include_role:
