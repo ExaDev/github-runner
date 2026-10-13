@@ -95,6 +95,20 @@ live_max_runners() { kubectl get autoscalingrunnerset "$1" -n "$2" -o jsonpath='
 # Changes maxRunners the way the autoscaler does, which makes kubectl-patch that field's manager.
 autoscaler_patch() { kubectl patch autoscalingrunnerset "$1" -n "$2" --type merge -p "{\"spec\":{\"maxRunners\":$3}}" >/dev/null; }
 
+# Before the cluster is created, so a missing or wrong floor installation fails first.
+floor="$(python3 - "$repo_root/galaxy.yml" <<'PY'
+import re, sys
+import yaml
+spec = yaml.safe_load(open(sys.argv[1]))["dependencies"]["kubernetes.core"]
+match = re.fullmatch(r">=\s*(\d+\.\d+\.\d+)", str(spec).strip())
+assert match, f"galaxy.yml's kubernetes.core requirement {spec!r} is not a plain lower bound"
+print(match.group(1))
+PY
+)"
+floor_installed="$(kubernetes_core_version "$kubernetes_core_floor")"
+[ "$floor_installed" = "$floor" ] || fail "KUBERNETES_CORE_FLOOR ($kubernetes_core_floor) holds ${floor_installed:+kubernetes.core $floor_installed}${floor_installed:-no kubernetes.core}, not galaxy.yml's lowest accepted $floor"
+[ "$(kubernetes_core_version "$default_collections")" ] || fail "no kubernetes.core in $default_collections"
+
 log "Creating the kind cluster and applying the ARC CRDs (no controller)"
 kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s >/dev/null
 "$work/helm4/helm" show crds "$charts/gha-runner-scale-set-controller" --version "$chart_version" | kubectl apply --server-side -f - >/dev/null
@@ -137,17 +151,6 @@ run_phases() {
   role_upgrade 3 grtest-runners "$ns3" 2 > "$work/helm3-upgrade-$tag.log" || fail "the role's upgrade failed with Helm 3: $(tail -20 "$work/helm3-upgrade-$tag.log")"
   [ "$(live_max_runners grtest-runners "$ns3")" = 2 ] || fail "maxRunners after the Helm 3 upgrade is not 2"
 }
-
-floor="$(python3 - "$repo_root/galaxy.yml" <<'PY'
-import re, sys
-import yaml
-spec = yaml.safe_load(open(sys.argv[1]))["dependencies"]["kubernetes.core"]
-match = re.fullmatch(r">=\s*(\d+\.\d+\.\d+)", str(spec).strip())
-assert match, f"galaxy.yml's kubernetes.core requirement {spec!r} is not a plain lower bound"
-print(match.group(1))
-PY
-)"
-[ "$(kubernetes_core_version "$kubernetes_core_floor")" = "$floor" ] || fail "KUBERNETES_CORE_FLOOR holds kubernetes.core $(kubernetes_core_version "$kubernetes_core_floor"), not galaxy.yml's lowest accepted $floor"
 
 run_phases current "$default_collections"
 run_phases floor "$kubernetes_core_floor"
