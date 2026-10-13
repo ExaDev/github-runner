@@ -2,7 +2,7 @@ name: Helm apply
 
 # Runs the ARC role's Helm version read and scale-set helm task in a kind cluster with Helm 4 and Helm 3 (tests/helm_apply/run.sh): a release whose maxRunners kubectl has patched, as the autoscaler does, is upgraded to a different value, a release first installed client-side moves to server-side apply, and Helm 3 is passed neither server-side option.
 #
-# GitHub-hosted ubuntu-latest has Docker, kind and kubectl already; both Helm releases are downloaded and checked against their published checksums, so the test does not depend on the image's own Helm.
+# GitHub-hosted ubuntu-latest has Docker, kind and kubectl already; both Helm releases are downloaded and checked against their published checksums, so the test does not depend on the image's own Helm. Each phase also runs with the oldest kubernetes.core galaxy.yml accepts, as well as the newest.
 
 on:
   pull_request:
@@ -13,6 +13,7 @@ on:
       - plugins/filter/arc.py
       - tests/helm_apply/**
       - .github/workflows/helm-apply.yml
+      - galaxy.yml
   workflow_dispatch:
 
 concurrency:
@@ -43,7 +44,10 @@ jobs:
           fi
           "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core kubernetes pyyaml
           echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
-          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install 'kubernetes.core>=6.5.0'
+          # The newest kubernetes.core in the default path, and exactly the lowest one galaxy.yml accepts in a path of its own.
+          floor="$("${RUNNER_TEMP}/venv/bin/python" -c 'import re, yaml; spec = yaml.safe_load(open("galaxy.yml"))["dependencies"]["kubernetes.core"]; print(re.fullmatch(r">=\s*(\d+\.\d+\.\d+)", spec.strip()).group(1))')"
+          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install "kubernetes.core>=${floor}"
+          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install "kubernetes.core==${floor}" -p "${RUNNER_TEMP}/kubernetes-core-floor"
 
       - name: Download Helm 3 and Helm 4
         run: |
@@ -60,4 +64,5 @@ jobs:
         run: |
           HELM3="${RUNNER_TEMP}/${HELM3_VERSION}/linux-amd64/helm" \
           HELM4="${RUNNER_TEMP}/${HELM4_VERSION}/linux-amd64/helm" \
+          KUBERNETES_CORE_FLOOR="${RUNNER_TEMP}/kubernetes-core-floor" \
             tests/helm_apply/run.sh

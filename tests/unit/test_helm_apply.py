@@ -122,7 +122,7 @@ class HelmTasksTest(unittest.TestCase):
                 self.assertTrue(boolean(received["force_conflicts"]))
 
     def test_helm_3_is_passed_neither_option(self) -> None:
-        # The module refuses both below Helm 4 (server_side and force_conflicts require helm >= 4.0.0), so neither may reach it, not even as false.
+        # Below Helm 4 kubernetes.core.helm refuses server_side in any form and force_conflicts when it is true. Both are omitted rather than passed as false, so the role does not depend on how the module treats a false force_conflicts (and on Helm 3 needs no module version that knows the option). Only this test guards that: tests/helm_apply/run.sh's Helm 3 phase passes with a false force_conflicts.
         for name, args in helm_tasks():
             with self.subTest(task=name):
                 self.assertEqual(render_options({key: args[key] for key in OPTIONS if key in args}, False), {})
