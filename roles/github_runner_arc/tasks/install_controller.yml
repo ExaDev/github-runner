@@ -35,6 +35,6 @@
     release_namespace: "{{ github_runner_arc_controller_namespace }}"
     create_namespace: true
     values: "{{ lookup('ansible.builtin.template', 'controller-values.yaml.j2') | from_yaml | default({}, true) | combine(github_runner_arc_controller_extra_values, recursive=true) }}"
-    # On Helm 4, server-side apply with conflicts forced: the role's values win over a field another manager changed since the last upgrade, and only for the fields the chart sets, so a manager's other fields stay its own. Without forcing, the upgrade fails on such a field. server_side is set explicitly because Helm refuses --force-conflicts when its default (auto) picks client-side apply for a release first installed that way, so such a release moves to server-side apply on its next upgrade. Helm 3 has neither option.
+    # On Helm 4, server-side apply with conflicts forced: the role's values win over a field another manager changed since the last upgrade, and only for the fields the chart sets, so a manager's other fields stay its own. Without forcing, the upgrade fails on such a field. server_side is set explicitly because Helm refuses --force-conflicts when its default (auto) picks client-side apply for a release first installed that way, so such a release moves to server-side apply on its next upgrade. On Helm 3 neither option is passed, since the module rejects both there.
     server_side: "{{ 'true' if github_runner_arc_helm_server_side | bool else omit }}"
-    force_conflicts: "{{ github_runner_arc_helm_server_side | bool }}"
+    force_conflicts: "{{ true if github_runner_arc_helm_server_side | bool else omit }}"
