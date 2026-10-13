@@ -312,7 +312,7 @@ done
 # Only the nodes runner pods may be placed on, when the role restricts them by label: a node they cannot use says nothing about where the next one lands, and one whose kubelet is unreachable reports no metrics, which would otherwise fail safe on every poll it is down.
 TOP_NODES_ARGS=(top nodes --no-headers)
 [ -n "$NODE_SELECTOR" ] && TOP_NODES_ARGS+=(-l "$NODE_SELECTOR")
-# kubectl's own error is kept for the message, since its exit status alone does not say which failure it was: "Metrics API not available" when the metrics API is not registered at all, the API server's own error when listing metrics fails (metrics-server unreachable, for one), and "metrics not available yet" when the list succeeds with no node in it, which is what a selector matching no node, or matching only nodes whose kubelets are down, comes to.
+# kubectl's own error is kept for the message, since its exit status alone does not say which failure it was: "Metrics API not available" when API discovery lists no usable metrics.k8s.io version (not registered, or registered but marked unavailable), the API server's own error when the list request itself fails, and "metrics not available yet" when the list succeeds with no node in it, which is what a selector matching no node, or matching only nodes whose kubelets are down, comes to.
 TOP_NODES_ERR_FILE="$(mktemp)" || fail_safe "could not create a file for kubectl top nodes' errors"
 top_nodes_status=0
 TOP_NODES_OUTPUT="$(kubectl "${TOP_NODES_ARGS[@]}" 2>"$TOP_NODES_ERR_FILE")" || top_nodes_status=$?
