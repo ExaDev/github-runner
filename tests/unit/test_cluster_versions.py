@@ -647,5 +647,40 @@ class RoleTest(unittest.TestCase):
                 self.assertEqual(config["services"]["k3s"]["labels"], {"example.extra": "applied"})
 
 
+class BootstrapTest(unittest.TestCase):
+    """bootstrap.sh run against stand-ins for its virtualenv's ansible-galaxy and ansible-playbook, which record the variables file it passes."""
+
+    def setUp(self) -> None:
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work)
+        shutil.copy(ROOT / "bootstrap.sh", self.work / "bootstrap.sh")
+        (self.work / "ansible").mkdir()
+        venv = self.work / ".ansible-venv" / "bin"
+        venv.mkdir(parents=True)
+        for name, body in (("ansible-galaxy", "exit 0"), ("ansible-playbook", 'for arg in "$@"; do case "$arg" in @*) cp "${arg#@}" "$CAPTURE";; esac; done')):
+            (venv / name).write_text(f"#!/bin/sh\n{body}\n")
+            (venv / name).chmod(0o755)
+
+    def variables(self, **settings: str) -> dict[str, Any]:
+        (self.work / ".env.bootstrap").write_text("".join(f"{key}={value}\n" for key, value in settings.items()))
+        capture = self.work / "vars.json"
+        result = subprocess.run(["bash", str(self.work / "bootstrap.sh")], capture_output=True, text=True, check=False, env={**os.environ, "CAPTURE": str(capture)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        loaded: dict[str, Any] = json.loads(capture.read_text())
+        return loaded
+
+    @unittest.skipIf(shutil.which("jq") is None, "jq is not installed")
+    def test_empty_versions_leave_the_role_s_pinned_defaults(self) -> None:
+        variables = self.variables(K3S_TOKEN="t", K3S_VERSION="", TAILSCALE_VERSION="")
+        self.assertNotIn("github_runner_cluster_k3s_version", variables)
+        self.assertNotIn("github_runner_cluster_tailscale_version", variables)
+
+    @unittest.skipIf(shutil.which("jq") is None, "jq is not installed")
+    def test_set_versions_are_passed_through(self) -> None:
+        variables = self.variables(K3S_TOKEN="t", K3S_VERSION="v1.35.0-k3s1", TAILSCALE_VERSION="v1.90.0")
+        self.assertEqual(variables["github_runner_cluster_k3s_version"], "v1.35.0-k3s1")
+        self.assertEqual(variables["github_runner_cluster_tailscale_version"], "v1.90.0")
+
+
 if __name__ == "__main__":
     unittest.main()
