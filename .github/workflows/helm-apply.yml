@@ -47,9 +47,19 @@ jobs:
           "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core kubernetes pyyaml
           echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
           # The newest kubernetes.core in the default path, and exactly the lowest one galaxy.yml accepts in a path of its own.
-          floor="$("${RUNNER_TEMP}/venv/bin/python" -c 'import re, yaml; spec = yaml.safe_load(open("galaxy.yml"))["dependencies"]["kubernetes.core"]; print(re.fullmatch(r">=\s*(\d+\.\d+\.\d+)", spec.strip()).group(1))')"
+          floor="$("${RUNNER_TEMP}/venv/bin/python" - <<'PY'
+          import re, sys
+          import yaml
+          spec = str(yaml.safe_load(open("galaxy.yml"))["dependencies"]["kubernetes.core"]).strip()
+          match = re.fullmatch(r">=\s*(\d+\.\d+\.\d+)", spec)
+          if match is None:
+              sys.exit(f"galaxy.yml's kubernetes.core requirement {spec!r} is not a plain >= lower bound, so the floor version cannot be read from it")
+          print(match.group(1))
+          PY
+          )"
           "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install "kubernetes.core>=${floor}"
-          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install "kubernetes.core==${floor}" -p "${RUNNER_TEMP}/kubernetes-core-floor"
+          # --force: otherwise ansible-galaxy counts the newest already in the default path as satisfying ==floor when the two are the same version, and installs nothing into the floor path.
+          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install --force "kubernetes.core==${floor}" -p "${RUNNER_TEMP}/kubernetes-core-floor"
 
       - name: Download Helm 3 and Helm 4
         run: |
