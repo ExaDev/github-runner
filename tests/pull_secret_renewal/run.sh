@@ -93,8 +93,10 @@ ANSIBLE_COLLECTIONS_PATH="$repo_root/playbooks/collections${ANSIBLE_COLLECTIONS_
   -e renewal_namespace="$namespace" -e github_runner_arc_image_pull_secret_renewer_image="$image" -e renewal_org_image=registry.example.com/example-org/runner:1.0 \
   -e renewal_output="$work/renewal.yaml" >/dev/null
 kubectl apply -f "$work/renewal.yaml" >/dev/null
-# The test points the Job at the stand-in; everything else is as the role renders it.
-kubectl -n "$namespace" patch cronjob "$renewer" --type=json -p "[{\"op\": \"add\", \"path\": \"/spec/jobTemplate/spec/template/spec/containers/0/env/-\", \"value\": {\"name\": \"GITHUB_API_URL\", \"value\": \"http://stub-github.${namespace}.svc:8080\"}}]" >/dev/null
+# The test points the Job at the stand-in and suspends the CronJob, so that only the Jobs it creates from it run: the role's schedule would otherwise start one of its own whenever the test crosses a scheduled time, minting a token between the test's own steps. Everything else is as the role renders it.
+kubectl -n "$namespace" patch cronjob "$renewer" --type=json -p "[{\"op\": \"add\", \"path\": \"/spec/jobTemplate/spec/template/spec/containers/0/env/-\", \"value\": {\"name\": \"GITHUB_API_URL\", \"value\": \"http://stub-github.${namespace}.svc:8080\"}}, {\"op\": \"add\", \"path\": \"/spec/suspend\", \"value\": true}]" >/dev/null
+# A Job the schedule started between the apply and the patch would still run with the unpatched template.
+kubectl -n "$namespace" delete jobs --all --wait=true >/dev/null
 
 log "Checking the ServiceAccount's permissions"
 as="system:serviceaccount:${namespace}:${renewer}"
