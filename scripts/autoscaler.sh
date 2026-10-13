@@ -312,9 +312,15 @@ done
 # Only the nodes runner pods may be placed on, when the role restricts them by label: a node they cannot use says nothing about where the next one lands, and one whose kubelet is unreachable reports no metrics, which would otherwise fail safe on every poll it is down.
 TOP_NODES_ARGS=(top nodes --no-headers)
 [ -n "$NODE_SELECTOR" ] && TOP_NODES_ARGS+=(-l "$NODE_SELECTOR")
-TOP_NODES_OUTPUT="$(kubectl "${TOP_NODES_ARGS[@]}" 2>/dev/null)" \
-  || fail_safe "kubectl top nodes failed (metrics-server unreachable?)"
-[ -n "$TOP_NODES_OUTPUT" ] || fail_safe "kubectl top nodes returned no nodes${NODE_SELECTOR:+ matching ${NODE_SELECTOR}}"
+# kubectl's own error is kept for the message: it exits non-zero with "metrics not available yet" both when metrics-server is unreachable and when no node it lists has metrics, which is what a selector matching no node, or matching only nodes whose kubelets are down, comes to.
+TOP_NODES_ERR_FILE="$(mktemp)" || fail_safe "could not create a file for kubectl top nodes' errors"
+top_nodes_status=0
+TOP_NODES_OUTPUT="$(kubectl "${TOP_NODES_ARGS[@]}" 2>"$TOP_NODES_ERR_FILE")" || top_nodes_status=$?
+TOP_NODES_ERR="$(tr '\n' ' ' < "$TOP_NODES_ERR_FILE")"
+rm -f "$TOP_NODES_ERR_FILE"
+[ "$top_nodes_status" -eq 0 ] \
+  || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} failed (${TOP_NODES_ERR% }): metrics-server is unreachable, or no node${NODE_SELECTOR:+ matching the selector} reports metrics"
+[ -n "$TOP_NODES_OUTPUT" ] || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} returned no nodes"
 mem_available_pct=100
 while read -r _name _cpu _cpu_pct _mem mem_pct; do
   mem_pct="${mem_pct%\%}"

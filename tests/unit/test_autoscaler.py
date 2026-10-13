@@ -60,11 +60,14 @@ FAKE_KUBECTL = textwrap.dedent(
         sys.stdout.write(json.dumps({"status": runner}))
         sys.exit(0)
     if args[:2] == ["top", "nodes"]:
-        # -l takes one key=value selector, as the autoscaler passes it; a node is listed when it carries that label.
+        # -l takes one key=value selector, as the autoscaler passes it; a node is listed when it carries that label. Like the real kubectl, a node without metrics is printed as <unknown> beside ones with them, and when no listed node has metrics at all (none matches, or every match is down) it prints nothing and fails.
         selector = args[args.index("-l") + 1] if "-l" in args else None
-        for node in state["nodes"]:
-            if selector is None or selector in node["labels"]:
-                sys.stdout.write("%s 100m 5%% 1000Mi %s\\n" % (node["name"], node["mem"]))
+        listed = [node for node in state["nodes"] if selector is None or selector in node["labels"]]
+        if not any(node["mem"] != "<unknown>" for node in listed):
+            sys.stderr.write("error: metrics not available yet\\n")
+            sys.exit(1)
+        for node in listed:
+            sys.stdout.write("%s 100m 5%% 1000Mi %s\\n" % (node["name"], node["mem"]))
         sys.exit(0)
     if args[:2] == ["get", "events"]:
         namespace = args[args.index("-n") + 1]
@@ -243,10 +246,10 @@ class AutoscalerTest(unittest.TestCase):
         self.assertIn("mem_available=80% pressure=false", result.stdout)
         self.assertNotIn("would patch", result.stdout)
 
-    def test_a_selector_matching_no_node_fails_safe_naming_it(self) -> None:
+    def test_a_selector_matching_no_node_fails_safe_with_kubectls_error(self) -> None:
         result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=[{"name": "c", "labels": [], "mem": "20%"}], node_selector=self.ELIGIBLE)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"kubectl top nodes returned no nodes matching {self.ELIGIBLE}", result.stderr)
+        self.assertIn(f"FAIL-SAFE: kubectl top nodes -l {self.ELIGIBLE} failed (error: metrics not available yet)", result.stderr)
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
 
