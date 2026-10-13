@@ -1,0 +1,5 @@
+---
+# Paths that are not Ansible content and that ansible-lint's YAML loader cannot read.
+exclude_paths:
+  # A Compose file, which empties the node service's ports with Compose's !reset tag.
+  - roles/github_runner_cluster/files/docker-compose.host-network.yml
