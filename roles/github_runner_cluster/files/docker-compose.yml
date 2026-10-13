@@ -15,7 +15,8 @@ services:
     build:
       context: ./k3s
       args:
-        K3S_VERSION: "${K3S_VERSION:-latest}"
+        K3S_VERSION: "${K3S_VERSION:?K3S_VERSION must be set in .env - the rancher/k3s image tag every node builds from}"
+        TAILSCALE_VERSION: "${TAILSCALE_VERSION:?TAILSCALE_VERSION must be set in .env - the tailscale/tailscale image tag every node takes its binaries from}"
     # k3s's own --vpn-auth integration (documented, if experimental) runs Tailscale INSIDE the node's container rather than depending on the host's own Tailscale client: each node's k3s process joins the mesh as its own device, flannel uses its native "tailscale" backend (not VXLAN) for pod traffic, and k3s takes the resulting mesh IP as its node IP. This replaced an earlier, considerably hackier approach (--node-external-ip + --flannel-external-ip layered on the HOST's own Tailscale, tunnelled through Docker's UDP port-publishing) that needed two nested tunnels for the same traffic and was correspondingly fragile.
     #
     # k3s/node-entrypoint.sh starts tailscaled, joins the mesh (Tailscale's own control plane, or the Headscale server K3S_VPN_AUTH_CONTROL_SERVER_URL names), then execs k3s; its comments explain each k3s flag (--node-ip, --cluster-init or --server, --tls-san, --resolv-conf) and the live failures behind them. Bind-mounted from this project directory below rather than built into the image: a host that already has the image built would otherwise keep running an old copy, since Compose only builds a missing image.
@@ -64,7 +65,8 @@ services:
     build:
       context: ./k3s
       args:
-        K3S_VERSION: "${K3S_VERSION:-latest}"
+        K3S_VERSION: "${K3S_VERSION:?K3S_VERSION must be set in .env - the rancher/k3s image tag every node builds from}"
+        TAILSCALE_VERSION: "${TAILSCALE_VERSION:?TAILSCALE_VERSION must be set in .env - the tailscale/tailscale image tag every node takes its binaries from}"
     # The same k3s/node-entrypoint.sh as the k3s service; see that service's comment. K3S_URL points at a server's own mesh name, not the host machine's own Tailscale identity.
     entrypoint: ["/bin/sh", "/usr/local/bin/github-runner-node", "agent"]
     hostname: ${K3S_AGENT_NODE_NAME:-k3s-agent}

@@ -1,0 +1,27 @@
+---
+# Renders the cluster role's env.j2 and env-agent.j2 with the role's defaults and placeholder values for the settings this test does not look at, writing them to env_output and env_agent_output, for tests/unit/test_cluster_versions.py. Role variables are passed as extra variables, which outrank the defaults loaded here.
+- name: Render the node .env templates
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_cluster/defaults/main.yml
+  vars:
+    github_runner_cluster_k3s_token: example-token
+    github_runner_cluster_effective_tls_sans: [node1.example.internal]
+    github_runner_cluster_mesh_join_key: example-key
+    github_runner_cluster_mesh_control_server_url: ""
+    github_runner_cluster_effective_server_url: ""
+    github_runner_cluster_effective_node_name: node1
+  tasks:
+    - name: Render env.j2
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_cluster/templates/env.j2') }}"
+        dest: "{{ env_output }}"
+        mode: "0600"
+
+    - name: Render env-agent.j2
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_cluster/templates/env-agent.j2') }}"
+        dest: "{{ env_agent_output }}"
+        mode: "0600"

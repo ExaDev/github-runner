@@ -1,0 +1,21 @@
+---
+# Checks the image versions every node is built from (github_runner_cluster_k3s_version, github_runner_cluster_tailscale_version) before the role changes anything on the host: each must be a pinned tag, and every host of the cluster group must name the same k3s minor version.
+
+- name: Fail if the node's image versions are not pinned
+  vars:
+    github_runner_cluster_version_errors: >-
+      {{ github_runner_cluster_k3s_version | exadev.github_runner.cluster_version_errors(github_runner_cluster_tailscale_version) }}
+  ansible.builtin.fail:
+    msg: "{{ github_runner_cluster_version_errors | join(' ') }}"
+  when: github_runner_cluster_version_errors | length > 0
+
+- name: Fail if the cluster's hosts name different k3s minor versions
+  # Every host is compared through hostvars, its own included, and a host that sets nothing counts as the role's tested version, so the result is the same on whichever host runs it, and under --limit to the host that is out of step. Before any node starts: a node built from another minor joins the running cluster's etcd and control plane outside the one-minor-at-a-time upgrade path. Upgrading means changing the version for the whole group and rebuilding nodes one by one (see the role README).
+  vars:
+    github_runner_cluster_version_skew: >-
+      {{ groups[github_runner_cluster_group] | exadev.github_runner.cluster_k3s_minor_skew(hostvars, github_runner_cluster_k3s_tested_version) }}
+  ansible.builtin.fail:
+    msg: >-
+      The hosts of {{ github_runner_cluster_group }} do not all name the same k3s minor version
+      ({{ github_runner_cluster_version_skew | join(', ') }}). Set github_runner_cluster_k3s_version once for the whole group.
+  when: github_runner_cluster_version_skew | length > 0

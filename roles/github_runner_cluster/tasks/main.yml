@@ -34,6 +34,9 @@
 - name: Decide this host's part in the cluster
   ansible.builtin.include_tasks: topology.yml
 
+- name: Check the versions the node's image is built from
+  ansible.builtin.include_tasks: versions.yml
+
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-
