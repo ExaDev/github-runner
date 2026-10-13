@@ -488,6 +488,9 @@
                     value: "{{ github_runner_arc_autoscaler_raise_confirm_polls | string }}"
                   - name: AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT
                     value: "{{ github_runner_arc_autoscaler_mem_available_pressure_pct | string }}"
+                  # The node eligibility label, so the autoscaler reads memory pressure only from the nodes runner pods may be placed on; empty reads every node.
+                  - name: AUTOSCALER_NODE_SELECTOR
+                    value: "{{ (github_runner_arc_node_label_key ~ '=' ~ github_runner_arc_node_label_value | string) if github_runner_arc_node_label_key | length > 0 else '' }}"
                   - name: AUTOSCALER_STATE_NAMESPACE
                     value: "{{ github_runner_arc_platform_namespace }}"
                   # The pooled scale sets it manages, one namespace/release token per profile (see plugins/filter/arc.py's own target field), space-separated: the script splits on whitespace.
