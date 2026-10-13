@@ -112,8 +112,13 @@ jobs:
           tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
           tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
       - name: Unit-test the cluster role's server selection
-        # Ubuntu's ansible package, installed above, puts ansible-core on the system Python the filter plugin imports from.
-        run: python3 -m unittest discover -s tests/unit -v
+        # Ubuntu's ansible package, installed above, puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record.
+        run: |
+          set -euo pipefail
+          export PATH="/usr/bin:${PATH}" ANSIBLE_PLAYBOOK=/usr/bin/ansible-playbook
+          ansible-playbook --version | head -n 1
+          python3 -c 'import ansible.release; print("ansible-core", ansible.release.__version__)'
+          python3 -m unittest discover -s tests/unit -v
 
   ansible-lint:
     name: ansible-lint
