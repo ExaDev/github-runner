@@ -1,0 +1,14 @@
+---
+# Runs the cluster role's tasks/host_network.yml on its own, for tests/unit/test_host_network_role.py, against stand-in docker and kubectl commands the test puts first on PATH, on the hosts of an inventory the test writes (all on a local connection, so a task delegated to another server runs here too). Takes the role variables the task file reads as play vars below and extra variables.
+- name: Run the host network checks
+  hosts: all
+  connection: local
+  gather_facts: false
+  vars:
+    github_runner_cluster_docker_cli_environment: {}
+    github_runner_cluster_container_name: github-runner-k3s
+    github_runner_cluster_network_probe_image: "busybox:1.37"
+    github_runner_cluster_cluster_read_timeout: 30
+  tasks:
+    - name: Include the role's host network checks
+      ansible.builtin.include_tasks: ../../roles/github_runner_cluster/tasks/host_network.yml

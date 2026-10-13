@@ -40,12 +40,9 @@
 - name: Check the k3s version against what this node and the cluster run now
   ansible.builtin.include_tasks: running_version.yml
 
-- name: Fail if the node's network mode is not one the role knows
-  ansible.builtin.fail:
-    msg: >-
-      github_runner_cluster_network_mode is '{{ github_runner_cluster_network_mode }}'; it must be bridge (Compose's own
-      network, the default) or host (the Docker host's network). See the role's defaults for what each does.
-  when: github_runner_cluster_network_mode not in ['bridge', 'host']
+- name: Check the node's network mode, the host network's preconditions, and that moving the node between networks is safe now
+  # Before anything changes on the host, and so before the mesh step, which starts the bootstrap server's Compose project itself with the headscale_in_cluster provider.
+  ansible.builtin.include_tasks: host_network.yml
 
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
