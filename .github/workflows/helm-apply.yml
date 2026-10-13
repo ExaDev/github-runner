@@ -2,7 +2,7 @@ name: Helm apply
 
 # Runs the ARC role's Helm version read and scale-set helm task in a kind cluster with Helm 4 and Helm 3 (tests/helm_apply/run.sh): a release whose maxRunners kubectl has patched, as the autoscaler does, is upgraded to a different value, a release first installed client-side moves to server-side apply, and Helm 3 is passed neither server-side option.
 #
-# GitHub-hosted ubuntu-latest has Docker, kind and kubectl already; both Helm releases are downloaded and checked against their published checksums, so the test does not depend on the image's own Helm. Each phase also runs with the oldest kubernetes.core galaxy.yml accepts, as well as the newest.
+# GitHub-hosted ubuntu-latest has Docker, kind and kubectl already. Both Helm releases are downloaded and checked against SHA-256 digests pinned here, taken from Helm's GitHub release notes and matching get.helm.sh's .sha256sum files, so the test depends neither on the image's own Helm nor on the download host vouching for its own archive. Each phase also runs with the oldest kubernetes.core galaxy.yml accepts, as well as the newest.
 
 on:
   pull_request:
@@ -30,7 +30,9 @@ jobs:
     timeout-minutes: 30
     env:
       HELM3_VERSION: v3.18.6
+      HELM3_SHA256: 3f43c0aa57243852dd542493a0f54f1396c0bc8ec7296bbb2c01e802010819ce
       HELM4_VERSION: v4.3.0
+      HELM4_SHA256: 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
     steps:
       - uses: actions/checkout@v7
 
@@ -52,10 +54,12 @@ jobs:
       - name: Download Helm 3 and Helm 4
         run: |
           set -euo pipefail
-          for version in "$HELM3_VERSION" "$HELM4_VERSION"; do
+          for pair in "${HELM3_VERSION}:${HELM3_SHA256}" "${HELM4_VERSION}:${HELM4_SHA256}"; do
+            version="${pair%%:*}"
             archive="helm-${version}-linux-amd64.tar.gz"
             curl -fsSLo "${RUNNER_TEMP}/${archive}" "https://get.helm.sh/${archive}"
-            echo "$(curl -fsSL "https://get.helm.sh/${archive}.sha256sum" | awk '{print $1}')  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
+            # sha256sum -c exits non-zero on a mismatch, which fails the step under set -e.
+            echo "${pair#*:}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
             mkdir -p "${RUNNER_TEMP}/${version}"
             tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/${version}"
           done
