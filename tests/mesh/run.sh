@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
+# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
 # With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
 #
@@ -422,6 +422,38 @@ scenario_host_network() {
   run_role
   after=$(started_at)
   [ "$before" = "$after" ] || fail "rerunning the role restarted a node container: ${before} -> ${after}"
+  move_between_networks
+}
+
+# After node $1's container was recreated, the API can still show its echo pod at an address its new sandbox no longer has; replacing the pod makes assert_cluster's rollout wait for the node's kubelet and probe the pod's real address.
+replace_echo_pod() {
+  kubectl_on 1 delete pod -l app=grtest-echo --field-selector "spec.nodeName=$(node_name "$1")" --timeout=300s || fail "the echo pod on $(node_name "$1") was not replaced"
+}
+
+# Moves running nodes between the host and the bridge network through the role, so its guard reads a real cluster: two nodes in one run must be refused before anything changes, and one node must move to the bridge network and back keeping its mesh address and etcd membership.
+move_between_networks() {
+  local output before mesh_address
+  log "Moving two nodes to the bridge network in one run must be refused before anything changes"
+  before=$(started_at)
+  if output=$(ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" --limit "$(node_name 2),$(node_name 3)" -e github_runner_cluster_network_mode=bridge 2>&1); then
+    echo "$output"
+    fail "the role moved two nodes between networks in one run"
+  fi
+  echo "$output" | grep -q "to another network at once" || { echo "$output"; fail "the role failed for another reason than moving two nodes at once"; }
+  [ "$(started_at)" = "$before" ] || fail "a refused move restarted a node container"
+  mesh_address=$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)
+  log "Moving $(node_name 3) to the bridge network through the role's guard"
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" --limit "$(node_name 3)" -e github_runner_cluster_network_mode=bridge || fail "the role refused or failed to move a node of a healthy cluster to the bridge network"
+  [ "$(docker_on 3 inspect --format '{{.HostConfig.NetworkMode}}' "$(container 3)")" != host ] || fail "$(container 3) is still on the host network"
+  replace_echo_pod 3
+  assert_cluster
+  [ "$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)" = "$mesh_address" ] || fail "$(node_name 3) changed its mesh address when it moved to the bridge network"
+  log "Moving $(node_name 3) back to the host network"
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" --limit "$(node_name 3)" || fail "the role refused or failed to move a node back to the host network"
+  replace_echo_pod 3
+  assert_cluster
+  assert_direct_paths
+  [ "$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)" = "$mesh_address" ] || fail "$(node_name 3) changed its mesh address when it moved back to the host network"
 }
 
 # One node and only the settings the role reads before its first check fails, for the scenarios that expect it to stop before touching the host.
