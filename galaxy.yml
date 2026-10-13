@@ -17,7 +17,7 @@ tags:
   - kubernetes
   - k3s
 dependencies:
-  kubernetes.core: ">=5.0.0"
+  kubernetes.core: ">=6.5.0"
   community.docker: ">=4.0.0"
   community.general: ">=9.0.0"
 repository: https://github.com/ExaDev/github-runner
