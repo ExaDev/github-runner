@@ -1,3 +1,11 @@
+## [1.26.3](https://github.com/ExaDev/github-runner/compare/v1.26.2...v1.26.3) (2026-10-13)
+
+
+### Bug Fixes
+
+* **autoscaler:** keep kubectl's error when reading node metrics fails ([96b0fb6](https://github.com/ExaDev/github-runner/commit/96b0fb6016159d3c106a431cd75b1a324b831aad))
+* **autoscaler:** read memory pressure only from the nodes runner pods may use ([583aa42](https://github.com/ExaDev/github-runner/commit/583aa420d91b8730ace4eb221ea3c505ef8b0312))
+
 ## [1.26.2](https://github.com/ExaDev/github-runner/compare/v1.26.1...v1.26.2) (2026-10-09)
 
 
