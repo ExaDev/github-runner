@@ -37,6 +37,9 @@
 - name: Check the versions the node's image is built from
   ansible.builtin.include_tasks: versions.yml
 
+- name: Check the k3s version against what this node and the cluster run now
+  ansible.builtin.include_tasks: running_version.yml
+
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-

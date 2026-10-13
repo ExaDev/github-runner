@@ -1,0 +1,107 @@
+---
+# Compares the k3s version this host's image is to be built from with what already runs: this node's own container, and every node of the cluster as the servers report it. k3s upgrades one minor at a time and never downgrades, so the role refuses what would break k3s's upgrade path or Kubernetes' version skew policy: this node built older than it runs (by patch release and k3s build too), any node more than one minor below the version, a server built an older minor than any other node, or an agent built a newer minor than any server, the last only when the run builds the agent's image (plugins/filter/cluster_versions.py's cluster_k3s_version_change_blockers lists the rules). With github_runner_cluster_allow_k3s_version_jump true nothing here runs. Every task only reads, and runs under --check too; a failure changes nothing on the host.
+
+- name: Fail if the cluster read timeout is not a positive whole number of seconds
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_cluster_read_timeout is '{{ github_runner_cluster_cluster_read_timeout }}'; it must be a positive
+      whole number of seconds (kubectl reads 0 as no timeout at all, which would let one server hold up every host's run).
+  when: (github_runner_cluster_cluster_read_timeout | string) is not match('^[1-9][0-9]*\\Z')
+
+- name: Read the k3s version this node's running container reports
+  # docker ps rather than docker inspect, so that a container that does not exist (a first run) reads as not running while a daemon that cannot be reached fails the run instead of skipping the check.
+  ansible.builtin.shell: |
+    set -eu
+    state=$(docker ps --all --filter "name=^/${container}\$" --format '{{ '{{' }}.State{{ '}}' }}')
+    if [ "$state" = running ]; then
+      docker exec "$container" k3s --version
+    fi
+  environment: "{{ github_runner_cluster_docker_cli_environment | combine({'container': github_runner_cluster_running_container}) }}"
+  vars:
+    github_runner_cluster_running_container: >-
+      {{ github_runner_cluster_container_name if github_runner_cluster_effective_node_role == 'server' else 'github-runner-k3s-agent' }}
+  register: github_runner_cluster_running_own
+  changed_when: false
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+  when: not github_runner_cluster_allow_k3s_version_jump | bool
+
+- name: Read whether this agent's image is already built
+  # Compose builds the node's image only when it is missing, and only then does the agent's kubelet take the pinned version; while the image exists, changing the pin builds nothing. The image is the one Compose names for the k3s-agent service of this project.
+  ansible.builtin.command:
+    argv: [docker, image, ls, --quiet, "{{ github_runner_cluster_compose_project }}-k3s-agent"]
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
+  register: github_runner_cluster_running_agent_image
+  changed_when: false
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+  when:
+    - not github_runner_cluster_allow_k3s_version_jump | bool
+    - github_runner_cluster_effective_node_role == 'agent'
+
+- name: Read every node's k3s version through each server of the inventory
+  # Through every server of the group, this one first, each on its own host with its own pinned Docker context, since any one of them may be stopped or being rebuilt while the others run. The image's kubectl inside a server's container reads that server's kubeconfig, so the host needs none; it is run as kubectl, since `k3s kubectl` in the rancher/k3s image answers "unknown command". Each read prints "stopped" when the server's container does not run, or "running" and one "<node> <kubeletVersion>" line per node. Each read is bounded by github_runner_cluster_cluster_read_timeout as a whole (the task's own timeout, so a hung Docker daemon or docker exec cannot hold up the run) and as the API call's --request-timeout. A read that fails (a daemon or host that cannot be reached, a read that runs out of time) is recorded rather than failing here, so the filter can say which servers could not be read. Each node line also carries its control-plane label, so the filter can tell servers from agents.
+  ansible.builtin.shell: |
+    set -eu
+    state=$(docker ps --all --filter "name=^/${container}\$" --format '{{ '{{' }}.State{{ '}}' }}')
+    if [ "$state" != running ]; then
+      echo stopped
+      exit 0
+    fi
+    echo running
+    docker exec "$container" kubectl get nodes --request-timeout="${timeout}s" \
+      -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.nodeInfo.kubeletVersion}{" "}{.metadata.labels.node-role\.kubernetes\.io/control-plane}{"\n"}{end}'
+  environment: >-
+    {{ ({'DOCKER_CONTEXT': github_runner_cluster_running_read_context} if github_runner_cluster_running_read_context | length > 0 else {})
+       | combine({'container': github_runner_cluster_running_read_container, 'timeout': github_runner_cluster_cluster_read_timeout | string}) }}
+  delegate_to: "{{ item }}"
+  loop: "{{ github_runner_cluster_running_servers }}"
+  vars:
+    github_runner_cluster_running_servers: >-
+      {{ ([inventory_hostname] if github_runner_cluster_effective_node_role == 'server' else [])
+         + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
+            | map(attribute='key') | reject('equalto', inventory_hostname) | list) }}
+    github_runner_cluster_running_read_container: >-
+      {{ github_runner_cluster_container_name if item == inventory_hostname
+         else hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s') }}
+    github_runner_cluster_running_read_context: >-
+      {{ (github_runner_cluster_docker_context if item == inventory_hostname
+          else hostvars[item].github_runner_cluster_docker_context | default('')) | trim }}
+  register: github_runner_cluster_running_reads
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+  when: not github_runner_cluster_allow_k3s_version_jump | bool
+
+- name: Say what the version check could not compare
+  # Only when no server answered and none failed: every server of the inventory was read as stopped, or there is none. Which of those it is, and whether the cluster lives outside the inventory, comes from the topology: a group with no bootstrap host joins a cluster that one of its hosts did not bootstrap.
+  vars:
+    github_runner_cluster_running_joins_outside: >-
+      {{ github_runner_cluster_topology.hosts | dict2items | selectattr('value.bootstrap') | list | length == 0 }}
+  ansible.builtin.debug:
+    msg: >-
+      {% if github_runner_cluster_running_reads.results | default([]) | length == 0 %}No server of {{ github_runner_cluster_group }} is in the inventory, so the cluster this node joins cannot be read; only this node's own container was compared.{% elif github_runner_cluster_running_joins_outside | bool %}{{ github_runner_cluster_group }} joins a cluster whose other servers are outside the inventory, and none of its own servers runs its container, so the cluster could not be read; only this node's own container was compared.{% else %}No server of {{ github_runner_cluster_group }} runs its container, so there is no cluster to compare with yet (a first bootstrap, or a cluster whose servers are all stopped); only this node's own container was compared.{% endif %}
+  when:
+    - not github_runner_cluster_allow_k3s_version_jump | bool
+    - github_runner_cluster_running_reads.results | default([]) | rejectattr('stdout', 'defined') | list | length == 0
+    - github_runner_cluster_running_reads.results | default([]) | map(attribute='stdout') | map('trim') | reject('equalto', 'stopped') | list | length == 0
+
+- name: Refuse a k3s version outside the upgrade path from what runs now
+  vars:
+    github_runner_cluster_version_change_blockers: >-
+      {{ github_runner_cluster_k3s_version | exadev.github_runner.cluster_k3s_version_change_blockers(
+           github_runner_cluster_effective_node_name, github_runner_cluster_running_own.stdout,
+           github_runner_cluster_running_reads.results | default([]), github_runner_cluster_effective_node_role,
+           github_runner_cluster_running_agent_image.stdout | default('') | trim | length == 0) }}
+  ansible.builtin.fail:
+    msg: >-
+      Not building {{ github_runner_cluster_effective_node_name }} from k3s {{ github_runner_cluster_k3s_version }}:
+      {{ github_runner_cluster_version_change_blockers | join(' ') }}
+      Set github_runner_cluster_k3s_version to the minor the cluster runs, or one minor above it to upgrade (see the role
+      README's Versions section). To build it anyway, for a deliberate downgrade, a cluster being replaced or one that cannot
+      be read, run once with -e github_runner_cluster_allow_k3s_version_jump=true. Nothing was changed.
+  when:
+    - not github_runner_cluster_allow_k3s_version_jump | bool
+    - github_runner_cluster_version_change_blockers | length > 0
