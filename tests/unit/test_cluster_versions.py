@@ -603,6 +603,15 @@ class RoleTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Server other runs v1.36.0+k3s1, a newer minor than", result.stdout)
 
+    def test_a_compose_file_path_with_a_colon_is_refused(self) -> None:
+        for extra in ('{"github_runner_cluster_compose_files": ["extra:1.yml"]}', '{"github_runner_cluster_dir": "/srv/node:1"}'):
+            with self.subTest(extra=extra):
+                result = self.run_checks({"node1": {"github_runner_cluster_dir": "/srv/node1"}}, "-e", extra, check_tasks="compose_files")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cannot hold a path with a colon in it", result.stdout)
+        result = self.run_checks({"node1": {"github_runner_cluster_dir": "/srv/node1"}}, "-e", '{"github_runner_cluster_compose_files": ["/srv/extra.yml"]}', check_tasks="compose_files")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def render_env(self, *extra: str) -> tuple[list[str], list[str]]:
         env, agent = self.work / "env", self.work / "env-agent"
         args = [ANSIBLE_PLAYBOOK, str(ROOT / "tests" / "cluster_versions" / "render_env.yml"), "-e", f"env_output={env}", "-e", f"env_agent_output={agent}", "-e", "github_runner_cluster_dir=/srv/github-runner", *extra]
@@ -614,6 +623,29 @@ class RoleTest(unittest.TestCase):
         for lines in self.render_env("-e", "github_runner_cluster_tailscale_version=v1.90.0"):
             self.assertIn(f"K3S_VERSION={TESTED}", lines)
             self.assertIn("TAILSCALE_VERSION=v1.90.0", lines)
+
+    def test_the_env_files_name_the_compose_files_and_project(self) -> None:
+        for lines in self.render_env("-e", '{"github_runner_cluster_compose_files": ["compose.extra.yml", "/elsewhere/absolute.yml"], "github_runner_cluster_compose_project": "example"}'):
+            self.assertIn("COMPOSE_FILE=/srv/github-runner/docker-compose.yml:/srv/github-runner/compose.extra.yml:/elsewhere/absolute.yml", lines)
+            self.assertIn("COMPOSE_PROJECT_NAME=example", lines)
+
+    @unittest.skipUnless(has_compose(), "docker compose is not installed")
+    def test_a_compose_command_run_by_hand_uses_the_role_s_files_and_project(self) -> None:
+        project = self.work / "project"
+        project.mkdir()
+        server_env, _ = self.render_env("-e", json.dumps({"github_runner_cluster_compose_files": ["compose.extra.yml"], "github_runner_cluster_compose_project": "example", "github_runner_cluster_dir": str(project)}))
+        shutil.copy(COMPOSE, project / "docker-compose.yml")
+        (project / "compose.extra.yml").write_text("services:\n  k3s:\n    labels:\n      example.extra: applied\n")
+        (project / ".env").write_text("\n".join(server_env) + "\n")
+        clean = {key: value for key, value in os.environ.items() if not key.startswith(("DOCKER_", "COMPOSE_", "K3S_", "TAILSCALE_"))}
+        for cwd, args in ((project, []), (self.work, ["--project-directory", str(project)])):
+            with self.subTest(cwd=str(cwd)):
+                result = subprocess.run(["docker", "compose", *args, "--profile", "server", "config", "--format", "json"], capture_output=True, text=True, check=False, cwd=cwd, env=clean)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = json.loads(result.stdout)
+                self.assertEqual(config["name"], "example")
+                self.assertEqual(config["services"]["k3s"]["labels"], {"example.extra": "applied"})
+
 
 if __name__ == "__main__":
     unittest.main()
