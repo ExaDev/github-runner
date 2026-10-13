@@ -48,6 +48,9 @@
       such as github_runner_secrets_onepassword first.
   when: github_runner_cluster_k3s_token | default('') | length == 0
 
+- name: Check the Compose files the node's .env names
+  ansible.builtin.include_tasks: compose_files.yml
+
 - name: Create this host's Compose project directory
   ansible.builtin.file:
     path: "{{ github_runner_cluster_dir }}/{{ item }}"
