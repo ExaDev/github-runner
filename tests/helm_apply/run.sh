@@ -27,7 +27,7 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/grtest-helm-apply.XXXXXX")"
 export KUBECONFIG="$work/kubeconfig"
 kubernetes_core_floor="${KUBERNETES_CORE_FLOOR:?KUBERNETES_CORE_FLOOR must name a collections directory holding the lowest kubernetes.core galaxy.yml accepts}"
 default_collections="${ANSIBLE_COLLECTIONS_PATH:-$HOME/.ansible/collections:/usr/share/ansible/collections}"
-# Python's own site-packages may hold another kubernetes.core (the full ansible package ships one), which would shadow the version each phase means to test.
+# Without this, a phase whose collections path holds no kubernetes.core would fall back to one in Python's own site-packages (the full ansible package ships one) and test that version instead of failing; a kubernetes.core in a configured path already wins over site-packages.
 export ANSIBLE_LOCALHOST_WARNING=false ANSIBLE_INVENTORY_UNPARSED_WARNING=false ANSIBLE_COLLECTIONS_SCAN_SYS_PATH=false
 
 log() { echo "==> $*"; }

@@ -1158,7 +1158,7 @@ def arc_upgrade_blocker(deployed_chart: str, desired_version: str, running_runne
 def arc_helm_server_side(version: str) -> bool:
     """Report whether the Helm client applies releases with server-side apply, which decides whether the role forces field conflicts.
 
-    Helm 4 upgrades a release with server-side apply when it was installed that way (its default), and fails on any field another field manager has since set to a different value, such as a scale set's maxRunners after the autoscaler has patched it. Helm 3 has no server-side apply, and the helm module rejects its server_side and force_conflicts options there.
+    Helm 4 upgrades a release with server-side apply when it was installed that way (its default), and fails on any field another field manager has since set to a different value, such as a scale set's maxRunners after the autoscaler has patched it. Helm 3 has no server-side apply; below Helm 4 the helm module refuses server_side in any form and force_conflicts when it is true, so the role passes neither there.
 
     Args:
         version: the client version as `helm version --short` prints it, for example v4.3.0+gbec5b06 or v3.16.2+g13654a5.
