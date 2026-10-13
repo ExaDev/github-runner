@@ -1,0 +1,14 @@
+---
+# Writes the cluster role's derived Compose file list (github_runner_cluster_compose_file_list, from the role's defaults) to compose_files_output as JSON, for tests/unit/test_cluster_network.py. Role variables are passed as extra variables, which outrank the defaults loaded here.
+- name: Write the cluster role's Compose file list
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_cluster/defaults/main.yml
+  tasks:
+    - name: Write the list
+      ansible.builtin.copy:
+        content: "{{ github_runner_cluster_compose_file_list | to_json }}"
+        dest: "{{ compose_files_output }}"
+        mode: "0644"
