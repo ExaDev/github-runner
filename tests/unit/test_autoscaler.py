@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -58,6 +59,16 @@ FAKE_KUBECTL = textwrap.dedent(
         if runner is None:
             sys.exit(1)
         sys.stdout.write(json.dumps({"status": runner}))
+        sys.exit(0)
+    if args[:2] == ["get", "nodes"]:
+        # `-o name`, optionally narrowed by the same key=value selector the autoscaler passes to `top nodes`.
+        selector = args[args.index("-l") + 1] if "-l" in args else None
+        for node in state["nodes"]:
+            if selector is None or selector in node["labels"]:
+                sys.stdout.write("node/%s\\n" % node["name"])
+        sys.exit(0)
+    if args[:3] == ["get", "configmap", state["pressure_configmap"]] and "json" in args:
+        sys.stdout.write(json.dumps({"data": state["pressure"]}))
         sys.exit(0)
     if args[:2] == ["top", "nodes"]:
         # -l takes one key=value selector, as the autoscaler passes it; a node is listed when it carries that label. Like the real kubectl, a node without metrics is printed as <unknown> beside ones with them, and when no listed node has metrics at all (none matches, or every match is down) it prints nothing and fails.
@@ -134,6 +145,8 @@ class AutoscalerTest(unittest.TestCase):
         job_memory_patch_fails: bool = False,
         events: dict[str, list[str]] | None = None,
         job_peak: str = "",
+        pressure: dict[str, str] | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         state = self.dir / "state.json"
         state.write_text(
@@ -153,6 +166,8 @@ class AutoscalerTest(unittest.TestCase):
                     "job_peak": job_peak,
                     "events": events or {},
                     "job_memory_patch_fails": job_memory_patch_fails,
+                    "pressure_configmap": "node-pressure",
+                    "pressure": pressure or {},
                 }
             )
         )
@@ -174,6 +189,9 @@ class AutoscalerTest(unittest.TestCase):
         }
         if node_selector is not None:
             env["AUTOSCALER_NODE_SELECTOR"] = node_selector
+        if pressure is not None:
+            env["AUTOSCALER_NODE_PRESSURE_CONFIGMAP"] = "node-pressure"
+        env.update(extra_env or {})
         return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
 
     def test_an_unschedulable_runner_pod_lowers_every_target_to_its_running_count(self) -> None:
@@ -263,6 +281,70 @@ class AutoscalerTest(unittest.TestCase):
 
     def recorded(self) -> dict[str, dict[str, object]]:
         return json.loads(self.job_memory_out.read_text())
+
+    # Two nodes runner pods may use, each with a pressure report from its reporter, written as the reporter writes it.
+    NODES = ({"name": "a", "labels": [ELIGIBLE], "mem": "20%"}, {"name": "b", "labels": [ELIGIBLE], "mem": "30%"})
+
+    @staticmethod
+    def report(io_full: float, age_seconds: int = 0, cpu_some: float = 1.0) -> str:
+        return json.dumps({"at": int(time.time()) - age_seconds, "io_some_avg10": io_full + 1, "io_full_avg10": io_full, "cpu_some_avg10": cpu_some})
+
+    def pressure_poll(self, pressure: dict[str, str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        pods = {"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}
+        return self.poll(pods, ceiling=12, nodes=list(self.NODES), node_selector=self.ELIGIBLE, pressure=pressure, **kwargs)  # type: ignore[arg-type]
+
+    def test_io_pressure_on_one_node_lowers_the_pool_by_one_and_names_the_node(self) -> None:
+        result = self.pressure_poll({"a": self.report(19.4), "b": self.report(0.1)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("node_pressure=true", result.stdout)
+        self.assertIn("lower: node pressure (a io stall 19.4% >= 10%)", result.stdout)
+        # Six pooled runners, two of them running on each target: one fewer, and not the floor.
+        self.assertIn("would patch ns-a/release-ns-a's maxRunners to 2", result.stdout)
+        self.assertNotIn("FAIL-SAFE", result.stderr)
+
+    def test_a_node_pressure_step_never_goes_below_the_running_count(self) -> None:
+        result = self.pressure_poll({"a": self.report(40.0), "b": self.report(0.0)}, max_runners={"ns-a": RUNNING, "ns-b": RUNNING})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_healthy_nodes_with_fresh_reports_change_nothing(self) -> None:
+        result = self.pressure_poll({"a": self.report(0.2), "b": self.report(0.0)}, max_runners={"ns-a": 12, "ns-b": 0})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("node_pressure=false unmeasured_nodes=0", result.stdout)
+        self.assertNotIn("node pressure", result.stdout)
+
+    def test_a_node_with_no_report_or_a_stale_one_holds_the_pool_and_does_not_lower_it(self) -> None:
+        for pressure in ({"a": self.report(0.0)}, {"a": self.report(0.0), "b": self.report(0.0, age_seconds=1000)}):
+            result = self.pressure_poll(pressure)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("unmeasured_nodes=1", result.stdout)
+            self.assertIn("node_pressure=false", result.stdout)
+            self.assertNotIn("would patch", result.stdout)
+
+    def test_a_stale_report_of_high_pressure_is_not_pressure(self) -> None:
+        result = self.pressure_poll({"a": self.report(0.0), "b": self.report(60.0, age_seconds=1000)})
+        self.assertIn("node_pressure=false unmeasured_nodes=1", result.stdout)
+
+    def test_the_cpu_signal_is_off_unless_a_threshold_is_given(self) -> None:
+        busy = {"a": self.report(0.0, cpu_some=90.0), "b": self.report(0.0)}
+        self.assertIn("node_pressure=false", self.pressure_poll(busy).stdout)
+        asked = self.pressure_poll(busy, extra_env={"AUTOSCALER_CPU_PRESSURE_PCT": "80"})
+        self.assertIn("lower: node pressure (a cpu stall 90.0% >= 80%)", asked.stdout)
+
+    def test_the_io_threshold_can_be_moved(self) -> None:
+        reports = {"a": self.report(19.4), "b": self.report(0.0)}
+        self.assertNotIn("node_pressure=true", self.pressure_poll(reports, extra_env={"AUTOSCALER_IO_PRESSURE_PCT": "25"}).stdout)
+
+    def test_without_the_pressure_configmap_nothing_about_node_pressure_is_read(self) -> None:
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=12, nodes=list(self.NODES), node_selector=self.ELIGIBLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("node_pressure=false unmeasured_nodes=0", result.stdout)
+
+    def test_a_node_outside_the_selector_with_pressure_is_not_pressure(self) -> None:
+        nodes = [*self.NODES, {"name": "x", "labels": [], "mem": "20%"}]
+        pods = {"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}
+        result = self.poll(pods, ceiling=12, nodes=nodes, node_selector=self.ELIGIBLE, pressure={"a": self.report(0.0), "b": self.report(0.0), "x": self.report(80.0)}, max_runners={"ns-a": 12, "ns-b": 0})
+        self.assertIn("node_pressure=false unmeasured_nodes=0", result.stdout)
 
     def test_a_jobs_highest_observed_memory_is_kept_across_polls(self) -> None:
         runners = {"runner-1": JOB_A}

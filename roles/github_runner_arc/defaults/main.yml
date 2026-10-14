@@ -147,6 +147,12 @@ github_runner_arc_autoscaler_dry_run: true
 github_runner_arc_autoscaler_poll_seconds: 45
 github_runner_arc_autoscaler_raise_confirm_polls: 2
 github_runner_arc_autoscaler_mem_available_pressure_pct: 15
+# Per-node pressure for the autoscaler, from each node's own /proc/pressure (scripts/psi-reporter.sh, a DaemonSet on the nodes runner pods may use, publishing to one ConfigMap). The kubelet's summary API is not used: on a cgroup v1 node it reports every pressure field as 0. With it on, a node whose I/O "full" stall is at or over the first figure lowers the pooled maxRunners by one a poll, and one whose cpu "some" stall is at or over the second does the same when it is above 0. A node with no recent report keeps the pool from being raised. The cpu figure is off by default: a busy node's cpu "some" is normally high and there is no calibration yet for where it starts to cost jobs.
+github_runner_arc_autoscaler_node_pressure_enabled: false
+github_runner_arc_autoscaler_io_pressure_pct: 10
+github_runner_arc_autoscaler_cpu_pressure_pct: 0
+github_runner_arc_node_pressure_configmap: "autoscaler-node-pressure"
+github_runner_arc_psi_reporter_seconds: 15
 
 # Node recovery (see tasks/install_node_recovery.yml and scripts/node-recovery.sh). When a node's kubelet stops reporting, the control plane marks the node's pods for deletion but only the kubelet can confirm it, so they stay Terminating, and an ARC listener on that node is never replaced. The watcher gives such a node the node.kubernetes.io/out-of-service=nodeshutdown:NoExecute taint once its Ready condition has been Unknown for github_runner_arc_node_recovery_after_seconds, which makes the control plane evict its pods and force-delete the terminating ones, and removes the taint when the node reports Ready again. false removes the watcher and any taint it left.
 github_runner_arc_node_recovery_enabled: true
