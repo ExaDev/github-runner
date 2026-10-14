@@ -398,12 +398,14 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
     if errors:
         return {"errors": errors, "nodes": eligible, "skipped_nodes": skipped, "theoretical": None, "max_runners": None}
     theoretical = sum(node["runners"] for node in eligible)
+    # The safety margin covers how far a node's cpu and memory estimate can be off, other workloads on it growing included. A pod capacity is not an estimate: it is a hard limit, so the runners a node holds because of it are counted in full, and only the rest are scaled by the margin.
+    pod_bound = sum(node["runners"] for node in eligible if node["by_pods"] is not None and node["by_pods"] < min(node["by_cpu"], node["by_memory"]))
     return {
         "errors": [],
         "nodes": eligible,
         "skipped_nodes": skipped,
         "theoretical": theoretical,
-        "max_runners": _floor(Decimal(theoretical) * Decimal(str(checked["safety_margin"]))),
+        "max_runners": pod_bound + _floor(Decimal(theoretical - pod_bound) * Decimal(str(checked["safety_margin"]))),
     }
 
 
