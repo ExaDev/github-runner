@@ -23,6 +23,8 @@ _spec.loader.exec_module(arc)
 
 TOOL_CACHE = "/opt/hostedtoolcache"
 SYSROOT = "/opt/sysroot"
+NODE_CACHE = "/node-cache"
+NODE_CACHE_HOST = "/var/lib/example/node-cache/arc-runners/example-runners"
 HOOKS_DIR = "/etc/github-runner/hooks"
 CONFIGMAP = "github-runner-job-started"
 NODE_IMAGE = "ghcr.io/example/toolcache-node:22.11.0"
@@ -32,6 +34,10 @@ CATALOGUE: dict[str, Any] = {
     "mpi": {"sysroot_image": "ghcr.io/example/sysroot-openmpi:5.0.11", "env": {"OPAL_PREFIX": SYSROOT}},
     "libpq": {"sysroot_image": "ghcr.io/example/sysroot-libpq@sha256:" + "1" * 64},
     "git-identity": {"job_started_hook": "git config --global user.name example\n"},
+    "pnpm-store": {
+        "node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"pnpm_config_store_dir": "pnpm"}},
+        "env": {"pnpm_config_enable_global_virtual_store": "true"},
+    },
     "proxy": {"job_started_hook": "echo HTTPS_PROXY=http://proxy.example:3128 >> \"$GITHUB_ENV\"\n"},
 }
 # The role's default values template's runner container, as it renders for a profile with no values_file.
@@ -47,7 +53,7 @@ def expanded(profile: dict[str, Any]) -> dict[str, Any]:
 
 def pod(values: dict[str, Any], names: list[str]) -> dict[str, Any]:
     """Add names' capabilities from CATALOGUE to values with the role's default settings."""
-    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, SYSROOT, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
     return result
 
 
@@ -131,6 +137,28 @@ class CatalogueTest(unittest.TestCase):
         # The same value twice agrees, and capabilities that are defined but not in the same profile never conflict.
         self.assertEqual(self.errors(catalogue, ["a", "c"]), [])
         self.assertEqual(self.errors(catalogue, ["b"]), [])
+
+    def test_bad_node_cache_entries_are_errors(self) -> None:
+        init = "docker.io/library/busybox:1.37.0"
+        cases = {
+            "a node_cache that is not a mapping": ({"store": {"node_cache": init}}, "must be a mapping with init_image and dirs"),
+            "an unpinned init image": ({"store": {"node_cache": {"init_image": "docker.io/library/busybox:latest", "dirs": {"STORE": "pnpm"}}}}, "must be pinned"),
+            "no init image": ({"store": {"node_cache": {"dirs": {"STORE": "pnpm"}}}}, "init_image"),
+            "no dirs": ({"store": {"node_cache": {"init_image": init}}}, "non-empty mapping"),
+            "an empty dirs": ({"store": {"node_cache": {"init_image": init, "dirs": {}}}}, "non-empty mapping"),
+            "an unknown key": ({"store": {"node_cache": {"init_image": init, "dirs": {"STORE": "pnpm"}, "size": 1}}}, "unknown key 'size'"),
+            "a variable name that is not one": ({"store": {"node_cache": {"init_image": init, "dirs": {"my-store": "pnpm"}}}}, "not an environment variable name"),
+            "a runner variable": ({"store": {"node_cache": {"init_image": init, "dirs": {"RUNNER_TOOL_CACHE": "pnpm"}}}}, "may not set RUNNER_TOOL_CACHE"),
+            "a subdirectory that leaves the cache": ({"store": {"node_cache": {"init_image": init, "dirs": {"STORE": "../x"}}}}, "must be one directory name"),
+            "a subdirectory with a slash": ({"store": {"node_cache": {"init_image": init, "dirs": {"STORE": "a/b"}}}}, "must be one directory name"),
+            "one subdirectory for two variables": ({"store": {"node_cache": {"init_image": init, "dirs": {"A": "pnpm", "B": "pnpm"}}}}, "more than one variable"),
+            "a node cache and a tool image": ({"store": {"image": NODE_IMAGE, "node_cache": {"init_image": init, "dirs": {"A": "pnpm"}}}}, "exactly one of image"),
+            "env on a tool image": ({"node": {"image": NODE_IMAGE, "env": {"A": "b"}}}, "only for a system-library capability"),
+        }
+        for case, (catalogue, message) in cases.items():
+            with self.subTest(case):
+                errors = self.errors(catalogue)
+                self.assertTrue(any(message in error for error in errors), errors)
 
     def test_a_digest_pins_an_image(self) -> None:
         self.assertEqual(self.errors({"node": {"image": "ghcr.io/example/node@sha256:" + "a" * 64}}), [])
@@ -274,7 +302,7 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertTrue(result["hooks"]["sysroot-env"].endswith("CMAKE_PREFIX_PATH+=/opt/sysroot\nOPAL_PREFIX=/opt/sysroot\n"))
 
     def test_the_sysroot_follows_its_configured_path(self) -> None:
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], {"mpi": {"sysroot_image": "ghcr.io/example/m:1"}}, TOOL_CACHE, "/srv/libs/", 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], {"mpi": {"sysroot_image": "ghcr.io/example/m:1"}}, TOOL_CACHE, "/srv/libs/", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["values"]["template"]["spec"]["initContainers"][0]["command"][-1], "/srv/libs/")
         self.assertEqual(result["hooks"]["sysroot-env"].splitlines()[:2], ["PATH+=/srv/libs/bin", "LD_LIBRARY_PATH+=/srv/libs/lib"])
@@ -290,17 +318,75 @@ class CapabilityPodTest(unittest.TestCase):
         }
         for case, (path, message) in cases.items():
             with self.subTest(case):
-                result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], CATALOGUE, TOOL_CACHE, path, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+                result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], CATALOGUE, TOOL_CACHE, path, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
                 self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
                 self.assertIs(result["values"], DEFAULT_VALUES)
 
     def test_the_sysroot_path_is_not_checked_for_a_profile_without_a_system_library(self) -> None:
-        self.assertEqual(arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, "relative", 1001, 1001, HOOKS_DIR, CONFIGMAP)["errors"], [])
+        self.assertEqual(arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, "relative", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)["errors"], [])
 
     def test_a_volume_already_named_sysroot_is_an_error(self) -> None:
         values = {"template": {"spec": {"volumes": [{"name": "sysroot", "emptyDir": {}}], "containers": [{"name": "runner"}]}}}
         result = pod(values, ["libpq"])
         self.assertIn("the values already define a volume named sysroot, which capabilities add", result["errors"])
+
+    def test_a_node_cache_capability_mounts_one_node_directory_and_prepares_its_subdirectories_as_the_runner_user(self) -> None:
+        result = pod(DEFAULT_VALUES, ["pnpm-store"])
+        self.assertEqual(result["errors"], [])
+        spec = result["values"]["template"]["spec"]
+        self.assertEqual(spec["volumes"], [{"name": "node-cache", "hostPath": {"path": NODE_CACHE_HOST, "type": "DirectoryOrCreate"}}])
+        [init] = spec["initContainers"]
+        self.assertEqual(init["name"], "capability-pnpm-store")
+        self.assertEqual(init["image"], "docker.io/library/busybox:1.37.0")
+        self.assertEqual(init["command"][-2:], ["1001:1001", "/node-cache/pnpm"])
+        self.assertEqual(init["securityContext"]["runAsUser"], 0)
+        self.assertEqual(init["securityContext"]["capabilities"], {"drop": ["ALL"], "add": ["CHOWN"]})
+        self.assertEqual(init["volumeMounts"], [{"name": "node-cache", "mountPath": NODE_CACHE}])
+        container = runner(result["values"])
+        self.assertEqual(container["volumeMounts"], [{"name": "node-cache", "mountPath": NODE_CACHE}])
+        self.assertEqual({variable["name"]: variable["value"] for variable in container["env"]}, {"pnpm_config_store_dir": "/node-cache/pnpm", "pnpm_config_enable_global_virtual_store": "true"})
+        self.assertEqual(result["hooks"], {})
+
+    def test_a_node_cache_capability_shares_one_volume_with_every_capability_of_the_profile(self) -> None:
+        catalogue = {**CATALOGUE, "yarn-cache": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"YARN_CACHE_FOLDER": "yarn"}}}}
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store", "yarn-cache", "node"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        self.assertEqual(result["errors"], [])
+        spec = result["values"]["template"]["spec"]
+        self.assertEqual([volume["name"] for volume in spec["volumes"]], ["tool-cache", "node-cache"])
+        self.assertEqual([container["name"] for container in spec["initContainers"]], ["capability-pnpm-store", "capability-yarn-cache", "capability-node"])
+        self.assertEqual({variable["name"] for variable in runner(result["values"])["env"]}, {"RUNNER_TOOL_CACHE", "pnpm_config_store_dir", "pnpm_config_enable_global_virtual_store", "YARN_CACHE_FOLDER"})
+
+    def test_a_profile_without_a_node_cache_capability_gets_no_node_volume_and_its_path_is_not_checked(self) -> None:
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, SYSROOT, "relative", "also/relative", 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        self.assertEqual(result["errors"], [])
+        self.assertNotIn("node-cache", [volume["name"] for volume in result["values"]["template"]["spec"]["volumes"]])
+
+    def test_node_cache_paths_that_cannot_carry_a_cache_are_errors(self) -> None:
+        cases = {
+            "a relative mount path": ("relative", NODE_CACHE_HOST, "absolute directory other than /"),
+            "the root as mount path": ("/", NODE_CACHE_HOST, "absolute directory other than /"),
+            "the tool cache's path": (TOOL_CACHE, NODE_CACHE_HOST, "overlaps the tool cache path"),
+            "inside the sysroot": (f"{SYSROOT}/cache", NODE_CACHE_HOST, "overlaps the sysroot path"),
+            "a relative host path": (NODE_CACHE, "var/lib/cache", "host path must be an absolute directory"),
+            "the root as host path": (NODE_CACHE, "/", "host path must be an absolute directory"),
+        }
+        for case, (mount, host, message) in cases.items():
+            with self.subTest(case):
+                result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store"], CATALOGUE, TOOL_CACHE, SYSROOT, mount, host, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+                self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
+
+    def test_two_node_cache_capabilities_setting_one_variable_differently_is_an_error(self) -> None:
+        catalogue = {
+            "a": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"STORE": "one"}}},
+            "b": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"STORE": "two"}}},
+        }
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["a", "b"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        self.assertEqual(result["errors"], ["node-cache capabilities a and b set STORE to different values"])
+
+    def test_a_volume_already_named_node_cache_is_an_error(self) -> None:
+        values = {"template": {"spec": {"containers": [{"name": "runner"}], "volumes": [{"name": "node-cache", "emptyDir": {}}]}}}
+        result = pod(values, ["pnpm-store"])
+        self.assertEqual(result["errors"], ["the values already define a volume named node-cache, which capabilities add"])
 
     def test_dind_mode_keeps_the_capabilities_beside_the_charts_own_containers(self) -> None:
         # In dind mode the chart builds the runner and dind containers itself but keeps the values' init containers, volumes (other than work) and the runner's env and mounts, so the capabilities are added the same way.
@@ -343,6 +429,14 @@ class RenderedValuesTest(unittest.TestCase):
         self.assertIn({"name": "sysroot", "mountPath": SYSROOT}, runner(values)["volumeMounts"])
         self.assertEqual(set(rendered["job_started"]), {"job-started.sh", "sysroot-env"})
         self.assertIn("LD_LIBRARY_PATH+=/opt/sysroot/lib\n", rendered["job_started"]["sysroot-env"])
+
+    def test_the_role_renders_a_node_cache_capability_into_a_per_profile_node_directory(self) -> None:
+        rendered = self.render({"max_runners": 1, "capabilities": ["pnpm-store"]})
+        profile = expanded({"max_runners": 1})
+        [volume] = rendered["values"]["template"]["spec"]["volumes"]
+        self.assertEqual(volume["hostPath"], {"path": f"/var/lib/github-runner/node-cache/{profile['namespace']}/{profile['release']}", "type": "DirectoryOrCreate"})
+        self.assertEqual(runner(rendered["values"])["volumeMounts"], [{"name": "node-cache", "mountPath": "/node-cache"}])
+        self.assertEqual(rendered["job_started"], {})
 
     def test_a_profile_without_capabilities_renders_as_before(self) -> None:
         rendered = self.render({"max_runners": 3, "container_mode": "dind"})

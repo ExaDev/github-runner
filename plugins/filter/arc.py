@@ -75,10 +75,12 @@ _TOLERATION_KEYS = frozenset({"key", "operator", "value", "effect", "tolerationS
 # The highest weight a preferred node affinity term may carry (1-100 in the Kubernetes API), so keeping runner pods on the fixed nodes outweighs any other preference the scheduler scores.
 _PREFER_FIXED_NODES_WEIGHT = 100
 
-# A capability's keys (see arc_capability_errors): a tool-cache capability names an image, and optionally a path put on PATH at job start; a system-library capability names a sysroot_image, and optionally env, extra variables its libraries need; a hook capability carries a job-started script.
-_CAPABILITY_KEYS = frozenset({"image", "path", "sysroot_image", "env", "job_started_hook"})
+# A capability's keys (see arc_capability_errors): a tool-cache capability names an image, and optionally a path put on PATH at job start; a system-library capability names a sysroot_image, and optionally env, extra variables its libraries need; a hook capability carries a job-started script; a node-cache capability names a node_cache mapping, {init_image, dirs, env?}, and may also set env.
+_CAPABILITY_KEYS = frozenset({"image", "path", "sysroot_image", "env", "job_started_hook", "node_cache"})
 # The keys of which a capability sets exactly one, each naming its kind.
-_CAPABILITY_KINDS = ("image", "sysroot_image", "job_started_hook")
+_CAPABILITY_KINDS = ("image", "sysroot_image", "job_started_hook", "node_cache")
+# The keys of a node-cache capability's node_cache mapping.
+_NODE_CACHE_KEYS = frozenset({"init_image", "dirs"})
 # Each tool-cache or system-library capability becomes an init container named with this prefix, and a container name is a DNS label, so a capability name is at most what is left of one.
 _CAPABILITY_CONTAINER_PREFIX = "capability-"
 _CAPABILITY_NAME_MAX_LENGTH = _DNS_LABEL_MAX_LENGTH - len(_CAPABILITY_CONTAINER_PREFIX)
@@ -94,6 +96,8 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TOOL_CACHE_VOLUME = "tool-cache"
 _SYSROOT_VOLUME = "sysroot"
 _HOOKS_VOLUME = "job-started-hooks"
+# The node-local volume every node-cache capability of a profile shares: a hostPath directory of the node, one per profile, mounted once so that a hard link between two of its directories stays on one mount.
+_NODE_CACHE_VOLUME = "node-cache"
 # The runner's own variables the capabilities set on the runner container: where it and the setup actions look for cached tools, and the hook it runs before a job's first step.
 _TOOL_CACHE_ENV = "RUNNER_TOOL_CACHE"
 _JOB_STARTED_HOOK_ENV = "ACTIONS_RUNNER_HOOK_JOB_STARTED"
@@ -704,7 +708,10 @@ def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
     sysroot_image = capability.get("sysroot_image")
     hook = capability.get("job_started_hook")
     if sum(capability.get(kind) is not None for kind in _CAPABILITY_KINDS) != 1:
-        errors.append(f"{where} must set exactly one of image (a tool-cache capability), sysroot_image (a system-library capability) and job_started_hook (a hook capability)")
+        errors.append(f"{where} must set exactly one of image (a tool-cache capability), sysroot_image (a system-library capability), job_started_hook (a hook capability) and node_cache (a node-cache capability)")
+    node_cache = capability.get("node_cache")
+    if node_cache is not None:
+        errors.extend(_node_cache_errors(f"{where}.node_cache", node_cache))
     if image is not None:
         errors.extend(_pinned_image_errors(f"{where}.image", image))
     if sysroot_image is not None:
@@ -720,9 +727,31 @@ def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
             errors.append(f"{where}.path must be <tool>/<version>, optionally followed by /<subdirectory>, each part letters, digits and '._+-' (got {path!r})")
     env = capability.get("env")
     if env is not None:
-        if sysroot_image is None:
-            errors.append(f"{where}.env is only for a system-library capability, one with a sysroot_image")
+        if sysroot_image is None and node_cache is None:
+            errors.append(f"{where}.env is only for a system-library capability (one with a sysroot_image) or a node-cache capability (one with a node_cache)")
         errors.extend(_env_errors(f"{where}.env", env))
+    return errors
+
+
+def _node_cache_errors(where: str, node_cache: Any) -> list[str]:
+    """Return what is wrong with a node-cache capability's node_cache mapping: an init_image pinned to a version tag or digest, and dirs, a non-empty mapping of environment variable name to the subdirectory of the node cache that variable names, each subdirectory one path component and no two variables sharing one."""
+    if not isinstance(node_cache, Mapping):
+        return [f"{where} must be a mapping with init_image and dirs"]
+    errors = [f"{where} has an unknown key '{key}'" for key in sorted(set(node_cache) - _NODE_CACHE_KEYS)]
+    errors.extend(_pinned_image_errors(f"{where}.init_image", node_cache.get("init_image")))
+    dirs = node_cache.get("dirs")
+    if not isinstance(dirs, Mapping) or not dirs:
+        errors.append(f"{where}.dirs must be a non-empty mapping of environment variable name to a subdirectory of the node cache")
+        return errors
+    for name, subdirectory in dirs.items():
+        if not isinstance(name, str) or not _ENV_NAME.match(name):
+            errors.append(f"{where}.dirs has a key that is not an environment variable name ({name!r})")
+        elif name in _RESERVED_ENV:
+            errors.append(f"{where}.dirs may not set {name}, which the capabilities set themselves")
+        if not isinstance(subdirectory, str) or not _PATH_COMPONENT.match(subdirectory):
+            errors.append(f"{where}.dirs.{name} must be one directory name, letters, digits and '._+-' (got {subdirectory!r})")
+    subdirectories = [value for value in dirs.values() if isinstance(value, str)]
+    errors.extend(f"{where}.dirs names the subdirectory {value} for more than one variable" for value in sorted({value for value in subdirectories if subdirectories.count(value) > 1}))
     return errors
 
 
@@ -768,17 +797,22 @@ def _runner_container(spec: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _sysroot_path_errors(sysroot_path: str, others: Mapping[str, str]) -> list[str]:
-    """Return what is wrong with the sysroot's mount path: it must be an absolute path that can sit in a colon-separated search path, apart from the other directories the capabilities mount."""
-    if not isinstance(sysroot_path, str) or not sysroot_path.startswith("/") or sysroot_path == "/" or any(character in sysroot_path for character in ":\n\r"):
-        return [f"the sysroot path must be an absolute directory with no ':' or line break, since it is joined into search paths such as LD_LIBRARY_PATH (got {sysroot_path!r})"]
-    root = sysroot_path.rstrip("/")
+def _overlap_errors(subject: str, path: str, others: Mapping[str, str]) -> list[str]:
+    """Return a message for each of the other mounted directories that path equals, contains or sits inside."""
+    root = path.rstrip("/")
     errors: list[str] = []
     for what, other in others.items():
         other_root = str(other).rstrip("/")
         if root == other_root or root.startswith(f"{other_root}/") or other_root.startswith(f"{root}/"):
-            errors.append(f"the sysroot path {sysroot_path} overlaps the {what} {other}; each needs a directory of its own")
+            errors.append(f"the {subject} {path} overlaps the {what} {other}; each needs a directory of its own")
     return errors
+
+
+def _sysroot_path_errors(sysroot_path: str, others: Mapping[str, str]) -> list[str]:
+    """Return what is wrong with the sysroot's mount path: it must be an absolute path that can sit in a colon-separated search path, apart from the other directories the capabilities mount."""
+    if not isinstance(sysroot_path, str) or not sysroot_path.startswith("/") or sysroot_path == "/" or any(character in sysroot_path for character in ":\n\r"):
+        return [f"the sysroot path must be an absolute directory with no ':' or line break, since it is joined into search paths such as LD_LIBRARY_PATH (got {sysroot_path!r})"]
+    return _overlap_errors("sysroot path", sysroot_path, others)
 
 
 def _sysroot_env(sysroot_path: str, capabilities: Sequence[tuple[str, Mapping[str, Any]]]) -> str:
@@ -806,7 +840,47 @@ def _copy_init_container(name: str, image: str, payload: str, volume: str, mount
     }
 
 
-def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, sysroot_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str) -> dict[str, Any]:
+def _node_cache_path_errors(node_cache_path: str, node_cache_host_path: str, others: Mapping[str, str]) -> list[str]:
+    """Return what is wrong with the node cache's paths: the mount path must be an absolute directory apart from the other directories the capabilities mount, and the host path an absolute directory."""
+    errors: list[str] = []
+    if not isinstance(node_cache_path, str) or not node_cache_path.startswith("/") or node_cache_path == "/":
+        errors.append(f"the node cache path must be an absolute directory other than / (got {node_cache_path!r})")
+    else:
+        errors.extend(_overlap_errors("node cache path", node_cache_path, others))
+    if not isinstance(node_cache_host_path, str) or not node_cache_host_path.startswith("/") or node_cache_host_path == "/":
+        errors.append(f"the node cache's host path must be an absolute directory other than / (got {node_cache_host_path!r})")
+    return errors
+
+
+def _node_cache_env(node_cache_path: str, capabilities: Sequence[tuple[str, Mapping[str, Any]]], errors: list[str]) -> list[dict[str, str]]:
+    """Return the runner container's variables for a profile's node-cache capabilities: each dirs variable naming its subdirectory of the node cache, and each env variable as given. A variable that two capabilities set to different values is recorded in errors."""
+    root = node_cache_path.rstrip("/")
+    values: dict[str, tuple[str, str]] = {}
+    for name, capability in capabilities:
+        entries = {variable: f"{root}/{subdirectory}" for variable, subdirectory in capability["node_cache"]["dirs"].items()}
+        entries.update(capability.get("env") or {})
+        for variable, value in entries.items():
+            if variable in values and values[variable][1] != value:
+                errors.append(f"node-cache capabilities {values[variable][0]} and {name} set {variable} to different values")
+            values.setdefault(variable, (name, value))
+    return [{"name": variable, "value": value} for variable, (_, value) in values.items()]
+
+
+def _node_cache_init_container(name: str, capability: Mapping[str, Any], node_cache_path: str, runner_user: int, runner_group: int) -> dict[str, Any]:
+    """Return the init container that creates a node-cache capability's subdirectories, owned by the runner's user. It runs as root, since the node's directory belongs to root until a pod claims it, and keeps only the one capability that needs: chown."""
+    root = node_cache_path.rstrip("/")
+    directories = [f"{root}/{subdirectory}" for subdirectory in capability["node_cache"]["dirs"].values()]
+    return {
+        "name": f"{_CAPABILITY_CONTAINER_PREFIX}{name}",
+        "image": capability["node_cache"]["init_image"],
+        # The image contract: a POSIX sh, mkdir and chown. chown is not recursive: what a pod creates under a directory is already the runner user's.
+        "command": ["/bin/sh", "-c", 'owner=$1; shift; for directory in "$@"; do mkdir -p "$directory" && chown "$owner" "$directory"; done', "prepare-node-cache", f"{int(runner_user)}:{int(runner_group)}", *directories],
+        "securityContext": {"runAsUser": 0, "runAsNonRoot": False, "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]}},
+        "volumeMounts": [{"name": _NODE_CACHE_VOLUME, "mountPath": node_cache_path}],
+    }
+
+
+def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, sysroot_path: str, node_cache_path: str, node_cache_host_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str) -> dict[str, Any]:
     """Add a profile's capabilities to its scale set's Helm values.
 
     Each tool-cache capability becomes an init container, running its image as the runner's user, that copies the image's /toolcache payload into an emptyDir mounted on the runner container at tool_cache_path, which RUNNER_TOOL_CACHE names; the files then belong to the runner user, so a setup action can still add a version beside them. Each system-library capability likewise becomes an init container that copies the image's /sysroot payload into an emptyDir mounted at sysroot_path; several share it, later ones overwriting a file an earlier one also wrote. Hook capabilities, the path of any tool-cache capability that sets one, and the sysroot's environment (its search paths and the capabilities' env) go into a ConfigMap mounted at hooks_dir, whose dispatcher ACTIONS_RUNNER_HOOK_JOB_STARTED names. Everything is appended after what the values already hold, so a values file's own init containers, volumes, environment and mounts are kept. Lists are replaced wholesale when Helm merges values, which is why this edits the merged values rather than adding an overlay.
@@ -831,8 +905,11 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     tool_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("image") is not None]
     sysroot_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("sysroot_image") is not None]
     hook_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("job_started_hook") is not None]
+    node_cache_capabilities = [(name, catalogue[name]) for name in names if catalogue[name].get("node_cache") is not None]
     if sysroot_capabilities:
         errors.extend(_sysroot_path_errors(sysroot_path, {"tool cache path": tool_cache_path, "job-started hooks directory": hooks_dir}))
+    if node_cache_capabilities:
+        errors.extend(_node_cache_path_errors(node_cache_path, node_cache_host_path, {"tool cache path": tool_cache_path, "sysroot path": sysroot_path, "job-started hooks directory": hooks_dir}))
     tool_paths = [capability["path"] for _, capability in tool_capabilities if capability.get("path") is not None]
     hooks: dict[str, str] = {}
     if tool_paths:
@@ -853,6 +930,10 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     if sysroot_capabilities:
         volumes.append({"name": _SYSROOT_VOLUME, "emptyDir": {}})
         mounts.append({"name": _SYSROOT_VOLUME, "mountPath": sysroot_path})
+    if node_cache_capabilities:
+        volumes.append({"name": _NODE_CACHE_VOLUME, "hostPath": {"path": node_cache_host_path, "type": "DirectoryOrCreate"}})
+        mounts.append({"name": _NODE_CACHE_VOLUME, "mountPath": node_cache_path})
+        env.extend(_node_cache_env(node_cache_path, node_cache_capabilities, errors))
     if hooks or scripts:
         items = [{"key": _HOOK_DISPATCHER, "path": _HOOK_DISPATCHER}] + [{"key": key, "path": key} for key in hooks] + [{"key": key, "path": f"{_HOOK_SCRIPTS_DIR}/{key}"} for key in scripts]
         volumes.append({"name": _HOOKS_VOLUME, "configMap": {"name": hooks_configmap, "defaultMode": _HOOK_FILE_MODE, "items": items}})
@@ -873,6 +954,8 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
         _copy_init_container(name, catalogue[name]["image"], _TOOL_IMAGE_PAYLOAD, _TOOL_CACHE_VOLUME, tool_cache_path, runner_user, runner_group)
         if catalogue[name].get("image") is not None
         else _copy_init_container(name, catalogue[name]["sysroot_image"], _SYSROOT_IMAGE_PAYLOAD, _SYSROOT_VOLUME, sysroot_path, runner_user, runner_group)
+        if catalogue[name].get("sysroot_image") is not None
+        else _node_cache_init_container(name, catalogue[name], node_cache_path, runner_user, runner_group)
         for name in names
         if catalogue[name].get("job_started_hook") is None
     ]

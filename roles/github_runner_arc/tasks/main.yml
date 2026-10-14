@@ -84,6 +84,9 @@
       ansible.builtin.include_tasks: install_controller.yml
       when: github_runner_arc_orgs | length > 0
 
+    - name: Install the node cache pruner, or remove it when no profile has a node cache
+      ansible.builtin.include_tasks: install_node_cache_pruner.yml
+
     # Before the scale sets, so the cache is serving when their pods first pull; on a host with no scale sets there is nothing for it to serve.
     - name: Install the registry cache, or remove it when turned off
       ansible.builtin.include_tasks: install_registry_cache.yml

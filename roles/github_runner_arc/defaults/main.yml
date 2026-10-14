@@ -19,6 +19,18 @@ github_runner_arc_tool_cache_path: "/opt/hostedtoolcache"
 # Where the sysroot is mounted on the runner container when a profile has a system-library capability: the prefix the capabilities' payloads are copied into and their search paths point at. A capability whose env names the prefix (OPAL_PREFIX, for example) should take it from this variable.
 github_runner_arc_sysroot_path: "/opt/sysroot"
 
+# Where the node cache is mounted on the runner container when a profile has a node-cache capability: one directory of the node, shared by the profile's runner pods on that node, that holds each capability's subdirectories (a package manager's content-addressed store, say). It is one mount, which is what keeps a hard link between two of its directories possible, since Linux refuses one across mount points even of the same filesystem.
+github_runner_arc_node_cache_path: "/node-cache"
+
+# Where on the node the cache lives, as the directory every profile's own directory (<namespace>/<release>) sits under, so profiles never share a cache, and each is a hostPath volume created when a pod first needs it. Its lifetime is the node's: it survives pods, and is emptied by the pruner below when it outgrows its limit.
+github_runner_arc_node_cache_host_path: "/var/lib/github-runner/node-cache"
+
+# The most gibibytes one profile's cache may hold on a node before the pruner empties it. The pruner (scripts/node-cache-pruner.sh, a DaemonSet on the nodes runner pods may use) only ever empties a cache when no runner pod of the profile is running on the node, since a package manager's store is in use by every job that linked from it. 0 installs no pruner and leaves the cache to grow.
+github_runner_arc_node_cache_size_limit_gib: 20
+
+# Seconds between the pruner's checks of each cache's size.
+github_runner_arc_node_cache_prune_seconds: 300
+
 # The runner container's user and group ids, which the capabilities' init containers run as so the copied tools and libraries belong to the runner user and a setup action can add another version beside them. The defaults are those of the runner user in ARC's actions-runner image; an image with a different runner user sets them to its own.
 github_runner_arc_runner_uid: 1001
 github_runner_arc_runner_gid: 1001
