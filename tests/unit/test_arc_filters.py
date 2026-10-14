@@ -360,6 +360,21 @@ class MeasuredMaxRunnersTest(unittest.TestCase):
         # Three slots, one held by the kube-system pod; the runner pod is left out, so running jobs never lower the ceiling.
         self.assertEqual(result["nodes"][0]["by_pods"], 2)
 
+    def test_the_safety_margin_is_not_applied_to_runners_a_pod_capacity_bounds(self) -> None:
+        sizing = {**MEASURED, "safety_margin": 0.5}
+        capped = node("capped", "16", "64Gi")
+        capped["status"]["allocatable"]["pods"] = "2"
+        result = arc.arc_measured_max_runners(sizing, [capped, node("free", "4", "8Gi")], [])
+        # capped holds 2 because of its pod capacity, counted in full; free holds 4 by cpu and memory, halved by the margin.
+        self.assertEqual((result["theoretical"], result["max_runners"]), (6, 2 + 2))
+
+    def test_a_pod_capacity_above_what_cpu_and_memory_hold_leaves_the_margin_applied(self) -> None:
+        sizing = {**MEASURED, "safety_margin": 0.5}
+        roomy = node("roomy", "4", "8Gi")
+        roomy["status"]["allocatable"]["pods"] = "110"
+        result = arc.arc_measured_max_runners(sizing, [roomy], [])
+        self.assertEqual((result["theoretical"], result["max_runners"]), (4, 2))
+
     def test_a_node_with_no_pod_slots_left_contributes_nothing(self) -> None:
         full = node("full", "16", "64Gi")
         full["status"]["allocatable"]["pods"] = "1"
