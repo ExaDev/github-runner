@@ -1,127 +1,79 @@
 ---
-# The node cache pruner (scripts/node-cache-pruner.sh): a DaemonSet that empties a profile's node cache when it outgrows github_runner_arc_node_cache_size_limit_gib and no runner pod of the profile runs on the node. Wanted when the limit is above zero and some profile carries a node-cache capability.
+# The node cache pruner (scripts/node-cache-pruner.sh, manifests in templates/node-cache-pruner.yaml.j2): a DaemonSet that keeps each profile's node cache under github_runner_arc_node_cache_size_limit_gib, drains a node whose cache passes the hard limit while pods keep it busy, and removes the directories of profiles that no longer have a cache. See decide_node_cache_pruner.yml for when it runs.
 
-- name: "Node cache: decide whether the pruner is wanted"
-  ansible.builtin.set_fact:
-    github_runner_arc_node_cache_pruner_wanted: >-
-      {{
-        github_runner_arc_node_cache_size_limit_gib | int > 0
-        and (github_runner_arc_fleet.profiles | map(attribute='capabilities') | flatten | map('extract', github_runner_arc_capabilities)
-             | selectattr('node_cache', 'defined') | list | length) > 0
-      }}
-
-- name: "Node cache: remove the pruner when it is not wanted"
-  when: not github_runner_arc_node_cache_pruner_wanted
-  kubernetes.core.k8s:
-    state: absent
-    api_version: "{{ item.api_version }}"
-    kind: "{{ item.kind }}"
+- name: "Node cache: look for a pruner already installed"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: DaemonSet
     name: node-cache-pruner
-    namespace: "{{ item.namespaced | default(true) | ternary(github_runner_arc_platform_namespace, omit) }}"
-  loop:
-    - api_version: apps/v1
-      kind: DaemonSet
-    - api_version: rbac.authorization.k8s.io/v1
-      kind: ClusterRoleBinding
-      namespaced: false
-    - api_version: rbac.authorization.k8s.io/v1
-      kind: ClusterRole
-      namespaced: false
-    - api_version: v1
-      kind: ServiceAccount
+    namespace: "{{ github_runner_arc_platform_namespace }}"
+  register: github_runner_arc_node_cache_pruner_state
+
+- name: "Node cache: decide what the pruner needs"
+  ansible.builtin.include_tasks: decide_node_cache_pruner.yml
+  vars:
+    github_runner_arc_node_cache_existing_pruners: "{{ github_runner_arc_node_cache_pruner_state.resources }}"
+
+- name: "Node cache: the pruner needs the nodes runner pods may use to be labelled"
+  ansible.builtin.assert:
+    that: github_runner_arc_node_label_key | length > 0
+    fail_msg: The node cache pruner runs on the nodes runner pods may use, so github_runner_arc_node_label_key must be set; without it the pruner would run on every node of the cluster.
+    quiet: true
+  when: github_runner_arc_node_cache_pruner_wanted | bool
 
 - name: "Node cache: install the pruner"
-  when: github_runner_arc_node_cache_pruner_wanted
+  when: github_runner_arc_node_cache_pruner_wanted | bool
   block:
-    - name: "Node cache: the namespace the pruner runs in"
+    - name: "Node cache: choose the pull Secret its DaemonSet uses"
+      ansible.builtin.include_tasks: choose_platform_pull_secrets.yml
+
+    - name: "Node cache: the namespaces its RBAC lives in"
       kubernetes.core.k8s:
         definition:
           apiVersion: v1
           kind: Namespace
           metadata:
-            name: "{{ github_runner_arc_platform_namespace }}"
+            name: "{{ item }}"
+      loop: "{{ ([github_runner_arc_platform_namespace] + (github_runner_arc_node_cache_profiles | map(attribute='namespace') | list)) | unique }}"
 
-    - name: "Node cache: pruner service account and RBAC - it lists the pods on its node before it empties a cache"
+    - name: "Node cache: the pruner's manifests"
+      ansible.builtin.set_fact:
+        github_runner_arc_node_cache_pruner_resources: "{{ lookup('ansible.builtin.template', 'node-cache-pruner.yaml.j2') | from_yaml_all | list }}"
+
+    - name: "Node cache: install/upgrade the pruner"
       kubernetes.core.k8s:
         definition: "{{ item }}"
-      loop:
-        - apiVersion: v1
-          kind: ServiceAccount
-          metadata:
-            name: node-cache-pruner
-            namespace: "{{ github_runner_arc_platform_namespace }}"
-        - apiVersion: rbac.authorization.k8s.io/v1
-          kind: ClusterRole
-          metadata:
-            name: node-cache-pruner
-          rules:
-            - apiGroups: [""]
-              resources: ["pods"]
-              verbs: ["list"]
-        - apiVersion: rbac.authorization.k8s.io/v1
-          kind: ClusterRoleBinding
-          metadata:
-            name: node-cache-pruner
-          subjects:
-            - kind: ServiceAccount
-              name: node-cache-pruner
-              namespace: "{{ github_runner_arc_platform_namespace }}"
-          roleRef:
-            kind: ClusterRole
-            name: node-cache-pruner
-            apiGroup: rbac.authorization.k8s.io
+      loop: "{{ github_runner_arc_node_cache_pruner_resources }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
 
-    # The autoscaler's own image carries the script. It runs on every node runner pods may use, taints included, as root, since the files it removes belong to the runner's user.
-    - name: "Node cache: install/upgrade the pruner DaemonSet"
-      kubernetes.core.k8s:
-        definition:
-          apiVersion: apps/v1
-          kind: DaemonSet
-          metadata:
-            name: node-cache-pruner
-            namespace: "{{ github_runner_arc_platform_namespace }}"
-          spec:
-            selector:
-              matchLabels:
-                app: node-cache-pruner
-            template:
-              metadata:
-                labels:
-                  app: node-cache-pruner
-              spec:
-                serviceAccountName: node-cache-pruner
-                priorityClassName: "{{ github_runner_arc_platform_priority_class_name }}"
-                imagePullSecrets: "{{ github_runner_arc_platform_image_pull_secrets }}"
-                nodeSelector: "{{ {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {} }}"
-                tolerations:
-                  - operator: Exists
-                containers:
-                  - name: node-cache-pruner
-                    image: "{{ github_runner_arc_autoscaler_image }}"
-                    command: ["/app/scripts/node-cache-pruner.sh"]
-                    env:
-                      - name: NODE_NAME
-                        valueFrom:
-                          fieldRef:
-                            fieldPath: spec.nodeName
-                      - name: LIMIT_GIB
-                        value: "{{ github_runner_arc_node_cache_size_limit_gib | string }}"
-                      - name: CHECK_SECONDS
-                        value: "{{ github_runner_arc_node_cache_prune_seconds | string }}"
-                    volumeMounts:
-                      - name: node-cache
-                        mountPath: /host-node-cache
-                    resources:
-                      requests:
-                        cpu: "10m"
-                        memory: "16Mi"
-                        ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_request }}"
-                      limits:
-                        cpu: "200m"
-                        memory: "64Mi"
-                        ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_limit }}"
-                volumes:
-                  - name: node-cache
-                    hostPath:
-                      path: "{{ github_runner_arc_node_cache_host_path }}"
-                      type: DirectoryOrCreate
+# The pruner's access to the pods of a profile without a node cache goes, whether the pruner stays for the others or is removed altogether.
+- name: "Node cache: remove the pruner's access to the pods of profiles without a node cache"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: "{{ item.0 }}"
+    namespace: "{{ item.1.namespace }}"
+    name: "node-cache-pruner-{{ item.1.release }}"
+  loop: "{{ ['RoleBinding', 'Role'] | product(github_runner_arc_fleet.profiles | rejectattr('target', 'in', github_runner_arc_node_cache_kept_targets) | list) | list }}"
+  loop_control:
+    label: "{{ item.0 }}/node-cache-pruner-{{ item.1.release }} in {{ item.1.namespace }}"
+  vars:
+    github_runner_arc_node_cache_kept_targets: "{{ (github_runner_arc_node_cache_profiles | map(attribute='target') | list) if github_runner_arc_node_cache_pruner_wanted | bool else [] }}"
+
+# The DaemonSet goes before the account and permissions it runs with.
+- name: "Node cache: remove the pruner when it is not wanted"
+  when: not (github_runner_arc_node_cache_pruner_wanted | bool)
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api_version }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.namespace | default(omit) }}"
+    name: "{{ item.name }}"
+  loop:
+    - {api_version: apps/v1, kind: DaemonSet, namespace: "{{ github_runner_arc_platform_namespace }}", name: node-cache-pruner}
+    - {api_version: rbac.authorization.k8s.io/v1, kind: ClusterRoleBinding, name: "node-cache-pruner-{{ github_runner_arc_platform_namespace }}-nodes"}
+    - {api_version: rbac.authorization.k8s.io/v1, kind: ClusterRole, name: "node-cache-pruner-{{ github_runner_arc_platform_namespace }}-nodes"}
+    - {api_version: v1, kind: ServiceAccount, namespace: "{{ github_runner_arc_platform_namespace }}", name: node-cache-pruner}
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"

@@ -1,0 +1,15 @@
+# Runs the github_runner_arc role's decide_node_cache_pruner.yml over a scripted fleet and capability catalogue, and writes what it decided, for tests/unit/test_node_cache_pruner_role.py.
+- name: Decide what the node cache pruner needs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+  tasks:
+    - name: Decide
+      ansible.builtin.include_tasks: ../../roles/github_runner_arc/tasks/decide_node_cache_pruner.yml
+    - name: Write the decision
+      ansible.builtin.copy:
+        content: "{{ {'wanted': github_runner_arc_node_cache_pruner_wanted, 'targets': github_runner_arc_node_cache_profiles | map(attribute='target') | list} | to_json }}"
+        dest: "{{ decide_output }}"
+        mode: "0644"

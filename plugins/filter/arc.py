@@ -738,7 +738,11 @@ def _node_cache_errors(where: str, node_cache: Any) -> list[str]:
     if not isinstance(node_cache, Mapping):
         return [f"{where} must be a mapping with init_image and dirs"]
     errors = [f"{where} has an unknown key '{key}'" for key in sorted(set(node_cache) - _NODE_CACHE_KEYS)]
-    errors.extend(_pinned_image_errors(f"{where}.init_image", node_cache.get("init_image")))
+    init_image = node_cache.get("init_image")
+    errors.extend(_pinned_image_errors(f"{where}.init_image", init_image))
+    # It runs as root beside a hostPath volume, so a tag a registry can move is not enough: the digest names the bytes.
+    if isinstance(init_image, str) and init_image and "@sha256:" not in init_image:
+        errors.append(f"{where}.init_image must be pinned by digest (name@sha256:<64 hex digits>), since it runs as root with a hostPath volume (got {init_image!r})")
     dirs = node_cache.get("dirs")
     if not isinstance(dirs, Mapping) or not dirs:
         errors.append(f"{where}.dirs must be a non-empty mapping of environment variable name to a subdirectory of the node cache")
@@ -840,16 +844,46 @@ def _copy_init_container(name: str, image: str, payload: str, volume: str, mount
     }
 
 
+# Directories of the node that a node cache's host path may not be, or sit inside: the kernel's and the system's own, and the runtimes' state. The cache root is created and emptied as root, so it must be a directory of its own.
+_NODE_CACHE_DENIED_HOST_PATHS = ("/etc", "/proc", "/sys", "/dev", "/boot", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/home", "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker")
+# The fewest path components a host path has: a dedicated subdirectory of a directory such as /var/lib, never a top-level directory or /var/lib itself.
+_NODE_CACHE_HOST_PATH_MIN_COMPONENTS = 3
+
+
+def _node_cache_host_path_errors(host_path: Any) -> list[str]:
+    """Return what is wrong with the node cache's host path: an absolute path with no colon or line break, of at least a dedicated subdirectory's depth, that is not a system directory or inside one."""
+    if not isinstance(host_path, str) or not host_path.startswith("/") or any(character in host_path for character in ":\n\r"):
+        return [f"the node cache's host path must be an absolute directory with no ':' or line break (got {host_path!r})"]
+    components = [component for component in host_path.split("/") if component]
+    if len(components) < _NODE_CACHE_HOST_PATH_MIN_COMPONENTS or ".." in components or "." in components:
+        return [f"the node cache's host path must be a dedicated directory at least {_NODE_CACHE_HOST_PATH_MIN_COMPONENTS} levels deep with no '.' or '..' (such as /var/lib/github-runner/node-cache), since it is created and emptied as root (got {host_path!r})"]
+    normalised = "/" + "/".join(components)
+    inside = [denied for denied in _NODE_CACHE_DENIED_HOST_PATHS if normalised == denied or normalised.startswith(f"{denied}/")]
+    return [f"the node cache's host path {host_path} is inside {inside[0]}, which the node itself uses"] if inside else []
+
+
 def _node_cache_path_errors(node_cache_path: str, node_cache_host_path: str, others: Mapping[str, str]) -> list[str]:
-    """Return what is wrong with the node cache's paths: the mount path must be an absolute directory apart from the other directories the capabilities mount, and the host path an absolute directory."""
+    """Return what is wrong with the node cache's paths: the mount path must be an absolute directory with no colon or line break, apart from the other directories the capabilities mount, and the host path a dedicated directory of the node."""
     errors: list[str] = []
-    if not isinstance(node_cache_path, str) or not node_cache_path.startswith("/") or node_cache_path == "/":
-        errors.append(f"the node cache path must be an absolute directory other than / (got {node_cache_path!r})")
+    if not isinstance(node_cache_path, str) or not node_cache_path.startswith("/") or node_cache_path == "/" or any(character in node_cache_path for character in ":\n\r"):
+        errors.append(f"the node cache path must be an absolute directory other than / with no ':' or line break (got {node_cache_path!r})")
     else:
         errors.extend(_overlap_errors("node cache path", node_cache_path, others))
-    if not isinstance(node_cache_host_path, str) or not node_cache_host_path.startswith("/") or node_cache_host_path == "/":
-        errors.append(f"the node cache's host path must be an absolute directory other than / (got {node_cache_host_path!r})")
+    errors.extend(_node_cache_host_path_errors(node_cache_host_path))
     return errors
+
+
+def arc_node_cache_profiles(profiles: Sequence[Mapping[str, Any]], catalogue: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Return the profiles that carry a node-cache capability, each as its namespace, release and target (<namespace>/<release>, which is also the name of its directory under the node cache root), in the order given.
+
+    Args:
+        profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors.
+    """
+    return [
+        {"namespace": profile["namespace"], "release": profile["release"], "target": profile["target"]}
+        for profile in profiles
+        if any(isinstance(catalogue.get(name), Mapping) and catalogue[name].get("node_cache") is not None for name in profile["capabilities"])
+    ]
 
 
 def _node_cache_env(node_cache_path: str, capabilities: Sequence[tuple[str, Mapping[str, Any]]], errors: list[str]) -> list[dict[str, str]]:
@@ -869,7 +903,8 @@ def _node_cache_env(node_cache_path: str, capabilities: Sequence[tuple[str, Mapp
 def _node_cache_init_container(name: str, capability: Mapping[str, Any], node_cache_path: str, runner_user: int, runner_group: int) -> dict[str, Any]:
     """Return the init container that creates a node-cache capability's subdirectories, owned by the runner's user. It runs as root, since the node's directory belongs to root until a pod claims it, and keeps only the one capability that needs: chown."""
     root = node_cache_path.rstrip("/")
-    directories = [f"{root}/{subdirectory}" for subdirectory in capability["node_cache"]["dirs"].values()]
+    # The mount root is the profile's own directory, created by the kubelet as root. Owning it lets a job recreate a subdirectory the pruner has set aside, instead of failing on a directory it cannot write to.
+    directories = [root] + [f"{root}/{subdirectory}" for subdirectory in capability["node_cache"]["dirs"].values()]
     return {
         "name": f"{_CAPABILITY_CONTAINER_PREFIX}{name}",
         "image": capability["node_cache"]["init_image"],
@@ -1315,6 +1350,7 @@ class FilterModule:
             "arc_runner_placement": arc_runner_placement,
             "arc_capability_errors": arc_capability_errors,
             "arc_capability_pod": arc_capability_pod,
+            "arc_node_cache_profiles": arc_node_cache_profiles,
             "arc_registry_cache": arc_registry_cache,
             "arc_registry_cache_pod": arc_registry_cache_pod,
             "arc_registry_cache_configmap": arc_registry_cache_configmap,

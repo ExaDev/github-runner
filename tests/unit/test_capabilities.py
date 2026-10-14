@@ -28,6 +28,7 @@ NODE_CACHE_HOST = "/var/lib/example/node-cache/arc-runners/example-runners"
 HOOKS_DIR = "/etc/github-runner/hooks"
 CONFIGMAP = "github-runner-job-started"
 NODE_IMAGE = "ghcr.io/example/toolcache-node:22.11.0"
+BUSYBOX = "docker.io/library/busybox:1.37.0@sha256:" + "2" * 64
 CATALOGUE: dict[str, Any] = {
     "node": {"image": NODE_IMAGE},
     "terraform": {"image": "ghcr.io/example/toolcache-terraform@sha256:" + "0" * 64, "path": "terraform/1.9.8"},
@@ -35,7 +36,7 @@ CATALOGUE: dict[str, Any] = {
     "libpq": {"sysroot_image": "ghcr.io/example/sysroot-libpq@sha256:" + "1" * 64},
     "git-identity": {"job_started_hook": "git config --global user.name example\n"},
     "pnpm-store": {
-        "node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"pnpm_config_store_dir": "pnpm"}},
+        "node_cache": {"init_image": BUSYBOX, "dirs": {"pnpm_config_store_dir": "pnpm"}},
         "env": {"pnpm_config_enable_global_virtual_store": "true"},
     },
     "proxy": {"job_started_hook": "echo HTTPS_PROXY=http://proxy.example:3128 >> \"$GITHUB_ENV\"\n"},
@@ -139,10 +140,11 @@ class CatalogueTest(unittest.TestCase):
         self.assertEqual(self.errors(catalogue, ["b"]), [])
 
     def test_bad_node_cache_entries_are_errors(self) -> None:
-        init = "docker.io/library/busybox:1.37.0"
+        init = BUSYBOX
         cases = {
             "a node_cache that is not a mapping": ({"store": {"node_cache": init}}, "must be a mapping with init_image and dirs"),
-            "an unpinned init image": ({"store": {"node_cache": {"init_image": "docker.io/library/busybox:latest", "dirs": {"STORE": "pnpm"}}}}, "must be pinned"),
+            "a floating init image": ({"store": {"node_cache": {"init_image": "docker.io/library/busybox:latest", "dirs": {"STORE": "pnpm"}}}}, "must be pinned"),
+            "an init image pinned by a tag alone": ({"store": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"STORE": "pnpm"}}}}, "must be pinned by digest"),
             "no init image": ({"store": {"node_cache": {"dirs": {"STORE": "pnpm"}}}}, "init_image"),
             "no dirs": ({"store": {"node_cache": {"init_image": init}}}, "non-empty mapping"),
             "an empty dirs": ({"store": {"node_cache": {"init_image": init, "dirs": {}}}}, "non-empty mapping"),
@@ -337,8 +339,8 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertEqual(spec["volumes"], [{"name": "node-cache", "hostPath": {"path": NODE_CACHE_HOST, "type": "DirectoryOrCreate"}}])
         [init] = spec["initContainers"]
         self.assertEqual(init["name"], "capability-pnpm-store")
-        self.assertEqual(init["image"], "docker.io/library/busybox:1.37.0")
-        self.assertEqual(init["command"][-2:], ["1001:1001", "/node-cache/pnpm"])
+        self.assertEqual(init["image"], BUSYBOX)
+        self.assertEqual(init["command"][-3:], ["1001:1001", "/node-cache", "/node-cache/pnpm"])
         self.assertEqual(init["securityContext"]["runAsUser"], 0)
         self.assertEqual(init["securityContext"]["capabilities"], {"drop": ["ALL"], "add": ["CHOWN"]})
         self.assertEqual(init["volumeMounts"], [{"name": "node-cache", "mountPath": NODE_CACHE}])
@@ -347,8 +349,26 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertEqual({variable["name"]: variable["value"] for variable in container["env"]}, {"pnpm_config_store_dir": "/node-cache/pnpm", "pnpm_config_enable_global_virtual_store": "true"})
         self.assertEqual(result["hooks"], {})
 
+    def test_the_init_container_command_makes_and_gives_away_every_directory_it_names(self) -> None:
+        init = pod(DEFAULT_VALUES, ["pnpm-store"])["values"]["template"]["spec"]["initContainers"][0]
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "chown").write_text('#!/bin/sh\necho "$@" >> "$CHOWN_LOG"\n')
+            (bin_dir / "chown").chmod(0o755)
+            # The container mounts the cache at /node-cache; here it is a directory of the test, so the command's paths are rewritten onto it.
+            command = [argument.replace("/node-cache", str(root / "cache")) for argument in init["command"]]
+            log = root / "chown.log"
+            subprocess.run(command, check=True, env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CHOWN_LOG": str(log)}, capture_output=True)
+            self.assertTrue((root / "cache" / "pnpm").is_dir())
+            self.assertEqual(sorted(log.read_text().splitlines()), sorted([f"1001:1001 {root / 'cache'}", f"1001:1001 {root / 'cache' / 'pnpm'}"]))
+            # Running it again over what exists changes nothing and does not fail.
+            subprocess.run(command, check=True, env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CHOWN_LOG": str(log)}, capture_output=True)
+            self.assertTrue((root / "cache" / "pnpm").is_dir())
+
     def test_a_node_cache_capability_shares_one_volume_with_every_capability_of_the_profile(self) -> None:
-        catalogue = {**CATALOGUE, "yarn-cache": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"YARN_CACHE_FOLDER": "yarn"}}}}
+        catalogue = {**CATALOGUE, "yarn-cache": {"node_cache": {"init_image": BUSYBOX, "dirs": {"YARN_CACHE_FOLDER": "yarn"}}}}
         result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store", "yarn-cache", "node"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
         self.assertEqual(result["errors"], [])
         spec = result["values"]["template"]["spec"]
@@ -367,8 +387,15 @@ class CapabilityPodTest(unittest.TestCase):
             "the root as mount path": ("/", NODE_CACHE_HOST, "absolute directory other than /"),
             "the tool cache's path": (TOOL_CACHE, NODE_CACHE_HOST, "overlaps the tool cache path"),
             "inside the sysroot": (f"{SYSROOT}/cache", NODE_CACHE_HOST, "overlaps the sysroot path"),
+            "a colon in the mount path": ("/node:cache", NODE_CACHE_HOST, "no ':' or line break"),
             "a relative host path": (NODE_CACHE, "var/lib/cache", "host path must be an absolute directory"),
-            "the root as host path": (NODE_CACHE, "/", "host path must be an absolute directory"),
+            "the root as host path": (NODE_CACHE, "/", "levels deep"),
+            "a top-level host directory": (NODE_CACHE, "/cache", "levels deep"),
+            "a host path with a parent reference": (NODE_CACHE, "/var/lib/../etc/cache", "levels deep"),
+            "a colon in the host path": (NODE_CACHE, "/var/lib/a:b/cache", "no ':' or line break"),
+            "the kubelet's own directory": (NODE_CACHE, "/var/lib/kubelet/cache", "inside /var/lib/kubelet"),
+            "a system directory": (NODE_CACHE, "/etc/github-runner/cache", "inside /etc"),
+            "a home directory": (NODE_CACHE, "/home/runner/cache", "inside /home"),
         }
         for case, (mount, host, message) in cases.items():
             with self.subTest(case):
@@ -377,8 +404,8 @@ class CapabilityPodTest(unittest.TestCase):
 
     def test_two_node_cache_capabilities_setting_one_variable_differently_is_an_error(self) -> None:
         catalogue = {
-            "a": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"STORE": "one"}}},
-            "b": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"STORE": "two"}}},
+            "a": {"node_cache": {"init_image": BUSYBOX, "dirs": {"STORE": "one"}}},
+            "b": {"node_cache": {"init_image": BUSYBOX, "dirs": {"STORE": "two"}}},
         }
         result = arc.arc_capability_pod(DEFAULT_VALUES, ["a", "b"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
         self.assertEqual(result["errors"], ["node-cache capabilities a and b set STORE to different values"])
