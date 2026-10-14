@@ -26,7 +26,8 @@
                 github_runner_arc_measure_pods.resources,
                 ({github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {})
                 | combine(github_runner_arc_measure.node_selector),
-                github_runner_arc_fleet.profiles | map(attribute='namespace') | list)})
+                github_runner_arc_fleet.profiles | map(attribute='namespace') | list,
+                github_runner_arc_measure.tolerations)})
       }}
 
 - name: Fail when the runner ceiling cannot be measured for {{ github_runner_arc_measure.label }}
