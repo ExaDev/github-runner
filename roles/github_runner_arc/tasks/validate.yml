@@ -36,8 +36,10 @@
          else ['github_runner_arc_node_cache_size_limit_gib must be a whole number of gibibytes, 0 for no pruner (a negative value would otherwise read as no pruner)'])
         + ([] if github_runner_arc_node_cache_prune_seconds | string is match('^[1-9][0-9]*$')
            else ['github_runner_arc_node_cache_prune_seconds must be a whole number of seconds, at least 1'])
-        + ([] if github_runner_arc_node_cache_drain_factor | string is match('^[1-9][0-9]*$')
-           else ['github_runner_arc_node_cache_drain_factor must be a whole number, at least 1'])
+        + ([] if github_runner_arc_node_cache_hard_limit_factor | string is match('^[1-9][0-9]*$')
+           else ['github_runner_arc_node_cache_hard_limit_factor must be a whole number, at least 1'])
+        + (github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_host_path_errors)
+        + (github_runner_arc_node_cache_path | exadev.github_runner.arc_node_cache_path_errors)
       }}
   when: github_runner_arc_node_cache_problems | length > 0
 

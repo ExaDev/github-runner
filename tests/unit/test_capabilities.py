@@ -145,6 +145,8 @@ class CatalogueTest(unittest.TestCase):
             "a node_cache that is not a mapping": ({"store": {"node_cache": init}}, "must be a mapping with init_image and dirs"),
             "a floating init image": ({"store": {"node_cache": {"init_image": "docker.io/library/busybox:latest", "dirs": {"STORE": "pnpm"}}}}, "must be pinned"),
             "an init image pinned by a tag alone": ({"store": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0", "dirs": {"STORE": "pnpm"}}}}, "must be pinned by digest"),
+            "an init image with a short digest": ({"store": {"node_cache": {"init_image": "docker.io/library/busybox:1.37.0@sha256:abc", "dirs": {"STORE": "pnpm"}}}}, "must be pinned by digest"),
+            "an init image with a digest and more after it": ({"store": {"node_cache": {"init_image": BUSYBOX + "x", "dirs": {"STORE": "pnpm"}}}}, "must be pinned by digest"),
             "no init image": ({"store": {"node_cache": {"dirs": {"STORE": "pnpm"}}}}, "init_image"),
             "no dirs": ({"store": {"node_cache": {"init_image": init}}}, "non-empty mapping"),
             "an empty dirs": ({"store": {"node_cache": {"init_image": init, "dirs": {}}}}, "non-empty mapping"),
