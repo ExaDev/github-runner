@@ -850,16 +850,38 @@ _NODE_CACHE_DENIED_HOST_PATHS = ("/etc", "/proc", "/sys", "/dev", "/boot", "/run
 _NODE_CACHE_HOST_PATH_MIN_COMPONENTS = 3
 
 
+# What the final component of the host path must end with: the root is a directory the role creates and empties as root, so it carries a name that says so, which rules out pointing it at a system or runtime directory by accident.
+_NODE_CACHE_HOST_PATH_SUFFIX = "node-cache"
+
+
+def _canonical_path(path: str) -> str:
+    """Return an absolute path without repeated or trailing slashes."""
+    return "/" + "/".join(component for component in path.split("/") if component)
+
+
 def _node_cache_host_path_errors(host_path: Any) -> list[str]:
-    """Return what is wrong with the node cache's host path: an absolute path with no colon or line break, of at least a dedicated subdirectory's depth, that is not a system directory or inside one."""
+    """Return what is wrong with the node cache's host path: an absolute path with no colon or line break, already in canonical form (no repeated or trailing slash, so every string built from it agrees), at least a dedicated subdirectory's depth with no '.' or '..', whose last component ends with node-cache, and which is not a system directory or inside one. A symbolic link at or above the path is not detected: it defeats this validation."""
     if not isinstance(host_path, str) or not host_path.startswith("/") or any(character in host_path for character in ":\n\r"):
         return [f"the node cache's host path must be an absolute directory with no ':' or line break (got {host_path!r})"]
-    components = [component for component in host_path.split("/") if component]
+    if host_path != _canonical_path(host_path):
+        return [f"the node cache's host path must not contain '//' or end with '/', since the pods' volume paths and the pruner's comparison are built from it (got {host_path!r}, which is {_canonical_path(host_path)!r} written plainly)"]
+    components = host_path.split("/")[1:]
     if len(components) < _NODE_CACHE_HOST_PATH_MIN_COMPONENTS or ".." in components or "." in components:
-        return [f"the node cache's host path must be a dedicated directory at least {_NODE_CACHE_HOST_PATH_MIN_COMPONENTS} levels deep with no '.' or '..' (such as /var/lib/github-runner/node-cache), since it is created and emptied as root (got {host_path!r})"]
-    normalised = "/" + "/".join(components)
-    inside = [denied for denied in _NODE_CACHE_DENIED_HOST_PATHS if normalised == denied or normalised.startswith(f"{denied}/")]
+        return [f"the node cache's host path must be a dedicated directory at least {_NODE_CACHE_HOST_PATH_MIN_COMPONENTS} levels deep with no '.' or '..' (such as /var/lib/github-runner/node-cache) (got {host_path!r})"]
+    if not components[-1].endswith(_NODE_CACHE_HOST_PATH_SUFFIX):
+        return [f"the node cache's host path must end in a directory whose name ends with {_NODE_CACHE_HOST_PATH_SUFFIX}, since the role creates and empties it as root (got {host_path!r})"]
+    inside = [denied for denied in _NODE_CACHE_DENIED_HOST_PATHS if host_path == denied or host_path.startswith(f"{denied}/")]
     return [f"the node cache's host path {host_path} is inside {inside[0]}, which the node itself uses"] if inside else []
+
+
+def arc_node_cache_root(host_path: str) -> str:
+    """Return github_runner_arc_node_cache_host_path as the one string every path of the cache is built from: with repeated and trailing slashes removed, which a validated value already is."""
+    return _canonical_path(host_path)
+
+
+def arc_node_cache_dir(host_path: str, namespace: str, release: str) -> str:
+    """Return the node directory of one profile's cache, <root>/<namespace>/<release>, which is the hostPath of the profile's pods and, under the pruner's mount of the root, the directory the pruner compares the pods' volumes with."""
+    return f"{_canonical_path(host_path)}/{namespace}/{release}"
 
 
 def arc_node_cache_host_path_errors(host_path: Any) -> list[str]:
@@ -875,11 +897,13 @@ def arc_node_cache_path_errors(node_cache_path: Any) -> list[str]:
 
 
 def _node_cache_path_errors(node_cache_path: str, node_cache_host_path: str, others: Mapping[str, str]) -> list[str]:
-    """Return what is wrong with the node cache's paths: the mount path must be an absolute directory with no colon or line break, apart from the other directories the capabilities mount, and the host path a dedicated directory of the node."""
+    """Return what is wrong with the node cache's paths: the mount path must be an absolute directory with no colon or line break, apart from the other directories the capabilities mount, and the pod's host directory a canonical absolute path."""
     errors = arc_node_cache_path_errors(node_cache_path)
     if not errors:
         errors.extend(_overlap_errors("node cache path", node_cache_path, others))
-    errors.extend(_node_cache_host_path_errors(node_cache_host_path))
+    # The root every profile's directory sits under is checked as a whole (arc_node_cache_host_path_errors); what the pod gets is that root joined with the profile's namespace and release, so only its form is checked here.
+    if not isinstance(node_cache_host_path, str) or not node_cache_host_path.startswith("/") or node_cache_host_path != _canonical_path(node_cache_host_path) or any(character in node_cache_host_path for character in ":\n\r"):
+        errors.append(f"the node cache's host directory must be an absolute path without ':', repeated '/' or a trailing '/' (got {node_cache_host_path!r})")
     return errors
 
 
@@ -1362,6 +1386,8 @@ class FilterModule:
             "arc_capability_pod": arc_capability_pod,
             "arc_node_cache_profiles": arc_node_cache_profiles,
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
+            "arc_node_cache_root": arc_node_cache_root,
+            "arc_node_cache_dir": arc_node_cache_dir,
             "arc_node_cache_path_errors": arc_node_cache_path_errors,
             "arc_registry_cache": arc_registry_cache,
             "arc_registry_cache_pod": arc_registry_cache_pod,

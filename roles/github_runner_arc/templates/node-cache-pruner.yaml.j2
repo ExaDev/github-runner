@@ -74,7 +74,7 @@ spec:
             - name: HARD_LIMIT_FACTOR
               value: {{ github_runner_arc_node_cache_hard_limit_factor | string | to_json }}
             - name: HOST_CACHE_ROOT
-              value: {{ github_runner_arc_node_cache_host_path | to_json }}
+              value: {{ github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_root | to_json }}
             - name: CHECK_SECONDS
               value: {{ github_runner_arc_node_cache_prune_seconds | string | to_json }}
             - name: WANTED_CACHES
@@ -108,7 +108,7 @@ spec:
       volumes:
         - name: node-cache
           hostPath:
-            path: {{ github_runner_arc_node_cache_host_path | to_json }}
+            path: {{ github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_root | to_json }}
             type: DirectoryOrCreate
         - name: tmp
           emptyDir: {}

@@ -41,7 +41,7 @@ argument_specs:
       github_runner_arc_node_cache_host_path:
         type: str
         default: /var/lib/github-runner/node-cache
-        description: The directory on each node under which every profile's node cache lives, in a directory of its own named <namespace>/<release>. It must be a dedicated directory at least three levels deep, with no colon, that is not a system directory or inside one.
+        description: The directory on each node under which every profile's node cache lives, in a directory of its own named <namespace>/<release>. It must be an absolute path with no colon, no repeated slash and no trailing slash, at least three levels deep, whose last component ends with node-cache, and not a system directory or inside one. A symbolic link at or above it defeats the validation.
       github_runner_arc_node_cache_size_limit_gib:
         type: int
         default: 20
