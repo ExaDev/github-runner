@@ -265,8 +265,35 @@ def _pod_requests(pod: Mapping[str, Any]) -> tuple[Decimal, Decimal]:
     return totals[0], totals[1]
 
 
-def _node_eligibility(node: Mapping[str, Any], node_selector: Mapping[str, Any]) -> tuple[str, str]:
-    """Return why runner pods can never be placed on node (empty when they can), and any passing condition that keeps them off it for now."""
+def _tolerations(value: Any, where: str, errors: list[str]) -> list[dict[str, Any]]:
+    """Return a list of Kubernetes tolerations as plain dicts, or record why value is not one and return an empty list."""
+    tolerations = value or []
+    if not isinstance(tolerations, Sequence) or isinstance(tolerations, (str, bytes)) or not all(isinstance(toleration, Mapping) for toleration in tolerations):
+        errors.append(f"{where} must be a list of Kubernetes tolerations")
+        return []
+    for index, toleration in enumerate(tolerations):
+        errors.extend(f"{where}[{index}] has an unknown key '{key}'" for key in sorted(set(toleration) - _TOLERATION_KEYS))
+    return [dict(toleration) for toleration in tolerations]
+
+
+def _tolerates(tolerations: Sequence[Mapping[str, Any]], taint: Mapping[str, Any]) -> bool:
+    """Whether one of tolerations matches taint, by the rules of core/v1 Toleration: an empty key with operator Exists matches every taint; otherwise the keys are equal, an empty effect matches any effect, and operator Equal (the default) also needs equal values while Exists ignores them."""
+    for toleration in tolerations:
+        key = toleration.get("key", "")
+        operator = toleration.get("operator") or "Equal"
+        if key == "" and operator == "Exists":
+            return True
+        if key != taint.get("key"):
+            continue
+        if toleration.get("effect") and toleration["effect"] != taint.get("effect"):
+            continue
+        if operator == "Exists" or toleration.get("value", "") == taint.get("value", ""):
+            return True
+    return False
+
+
+def _node_eligibility(node: Mapping[str, Any], node_selector: Mapping[str, Any], tolerations: Sequence[Mapping[str, Any]] = ()) -> tuple[str, str]:
+    """Return why runner pods can never be placed on node (empty when they can), and any passing condition that keeps them off it for now. A taint that one of tolerations matches does not keep them off."""
     labels = (node.get("metadata") or {}).get("labels") or {}
     for key, value in node_selector.items():
         if labels.get(key) != str(value):
@@ -274,7 +301,7 @@ def _node_eligibility(node: Mapping[str, Any], node_selector: Mapping[str, Any])
     spec = node.get("spec") or {}
     conditions = ["is cordoned"] if spec.get("unschedulable") else []
     for taint in spec.get("taints") or []:
-        if taint.get("effect") not in _REPELLING_TAINT_EFFECTS:
+        if taint.get("effect") not in _REPELLING_TAINT_EFFECTS or _tolerates(tolerations, taint):
             continue
         description = f"has the taint {taint.get('key')}:{taint.get('effect')}"
         if not str(taint.get("key", "")).startswith(_CONDITION_TAINT_PREFIX):
@@ -283,7 +310,7 @@ def _node_eligibility(node: Mapping[str, Any], node_selector: Mapping[str, Any])
     return "", ", ".join(conditions)
 
 
-def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]], pods: Sequence[Mapping[str, Any]], node_selector: Mapping[str, Any] | None = None, excluded_namespaces: Sequence[str] = ()) -> dict[str, Any]:
+def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]], pods: Sequence[Mapping[str, Any]], node_selector: Mapping[str, Any] | None = None, excluded_namespaces: Sequence[str] = (), tolerations: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     """Derive how many runner pods fit on the eligible nodes as they are now.
 
     A node is eligible when it carries every label in node_selector and has no NoSchedule or NoExecute taint other than the ones Kubernetes adds for a passing condition (not ready, unreachable, cordoned and the like): the ceiling lasts until the next run, so a node that is only briefly unavailable still counts. For each one, its allocatable CPU and memory, less what the pods already on it request and less the sizing's reserve, is divided by one runner pod's requests; the tighter bound is how many fit there. The sum over the nodes, scaled down by the safety margin, is the result. Pods in excluded_namespaces are not counted, so the runner pods themselves never lower the ceiling they are sized by, and pods that have finished are not counted, as the scheduler does not count them.
@@ -294,6 +321,7 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
         pods: Pod objects from every namespace.
         node_selector: labels an eligible node must carry.
         excluded_namespaces: namespaces whose pods are left out of each node's requests.
+        tolerations: the runner pods' tolerations; a node whose only repelling taints they match is eligible, as it is for the pods.
 
     Returns:
         A dict with ``errors`` (messages, empty when it could be worked out), ``nodes`` (per eligible node: name, allocatable_cpu, allocatable_memory_gib, requested_cpu, requested_memory_gib, by_cpu, by_memory, runners, and condition, naming any passing condition it was counted despite), ``skipped_nodes`` (name and reason for each node that is not eligible), ``theoretical`` and ``max_runners``, which is None when there are errors.
@@ -328,7 +356,7 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
     skipped: list[dict[str, str]] = []
     for node in sorted(nodes, key=lambda item: (item.get("metadata") or {}).get("name", "")):
         name = (node.get("metadata") or {}).get("name", "")
-        reason, condition = _node_eligibility(node, selector)
+        reason, condition = _node_eligibility(node, selector, tolerations)
         if reason:
             skipped.append({"name": name, "reason": reason})
             continue
@@ -445,12 +473,7 @@ def _burst(profile: Mapping[str, Any], where: str, errors: list[str]) -> dict[st
     if not isinstance(label_values, Sequence) or isinstance(label_values, (str, bytes)) or not all(isinstance(value, str) and value for value in label_values):
         errors.append(f"{where}.burst.node_label_values must be a list of non-empty strings (empty or unset accepts any value)")
         label_values = []
-    tolerations = burst.get("tolerations") or []
-    if not isinstance(tolerations, Sequence) or isinstance(tolerations, (str, bytes)) or not all(isinstance(toleration, Mapping) for toleration in tolerations):
-        errors.append(f"{where}.burst.tolerations must be a list of Kubernetes tolerations")
-        tolerations = []
-    for toleration_index, toleration in enumerate(tolerations):
-        errors.extend(f"{where}.burst.tolerations[{toleration_index}] has an unknown key '{key}'" for key in sorted(set(toleration) - _TOLERATION_KEYS))
+    tolerations = _tolerations(burst.get("tolerations"), f"{where}.burst.tolerations", errors)
     max_runners = _decimal(burst.get("max_runners"))
     if max_runners is None or max_runners < 0 or max_runners != max_runners.to_integral_value():
         errors.append(f"{where}.burst.max_runners must be a whole number of at least 0 (got {burst.get('max_runners')!r})")
@@ -478,18 +501,22 @@ def arc_runner_placement(profile: Mapping[str, Any], eligibility: Mapping[str, A
     """
     selector = {key: str(value) for key, value in eligibility.items()}
     burst = profile["burst"]
+    own_tolerations = profile["tolerations"]
     if burst is None:
-        return {"nodeSelector": {**selector, **profile["node_selector"]}}
+        placement: dict[str, Any] = {"nodeSelector": {**selector, **profile["node_selector"]}}
+        if own_tolerations:
+            placement["tolerations"] = own_tolerations
+        return placement
     burst_node = {"key": burst["node_label_key"], "operator": "In", "values": burst["node_label_values"]} if burst["node_label_values"] else {"key": burst["node_label_key"], "operator": "Exists"}
     # An exclusive profile runs on burst nodes only, whatever the eligibility label, so there is no fixed node to prefer.
     if burst["exclusive"]:
-        return {"nodeSelector": dict(profile["node_selector"]), "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [burst_node]}]}}}, "tolerations": burst["tolerations"]}
+        return {"nodeSelector": dict(profile["node_selector"]), "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [burst_node]}]}}}, "tolerations": own_tolerations + burst["tolerations"]}
     node_affinity: dict[str, Any] = {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": _PREFER_FIXED_NODES_WEIGHT, "preference": {"matchExpressions": [{"key": burst["node_label_key"], "operator": "DoesNotExist"}]}}]}
     # With no eligibility label every untainted node is already allowed, and the tolerations alone add the burst nodes.
     if selector:
         eligible_node = [{"key": key, "operator": "In", "values": [value]} for key, value in selector.items()]
         node_affinity["requiredDuringSchedulingIgnoredDuringExecution"] = {"nodeSelectorTerms": [{"matchExpressions": eligible_node}, {"matchExpressions": [burst_node]}]}
-    return {"nodeSelector": dict(profile["node_selector"]), "affinity": {"nodeAffinity": node_affinity}, "tolerations": burst["tolerations"]}
+    return {"nodeSelector": dict(profile["node_selector"]), "affinity": {"nodeAffinity": node_affinity}, "tolerations": own_tolerations + burst["tolerations"]}
 
 
 def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
@@ -545,6 +572,7 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
         "node_selector": dict(node_selector),
         "autoscale": autoscale,
         "sizing": sizing_result,
+        "tolerations": _tolerations(profile.get("tolerations"), f"{where}.tolerations", errors),
         "burst": burst,
         "burst_runners": burst_runners,
         "max_runners": max_runners,

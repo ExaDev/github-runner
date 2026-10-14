@@ -343,6 +343,29 @@ class MeasuredMaxRunnersTest(unittest.TestCase):
         bad = arc.arc_measured_max_runners(MEASURED, [node("a", cpu="lots")], [])
         self.assertEqual(bad["errors"], ["node a: not a Kubernetes quantity: 'lots'"])
 
+    def test_a_node_whose_taint_the_profile_tolerates_counts_and_one_it_does_not_still_does_not(self) -> None:
+        nodes = [
+            node("home", labels={"ci": "true"}, taints=[{"key": "example.com/ci-runner-only", "value": "true", "effect": "NoSchedule"}]),
+            node("other", labels={"ci": "true"}, taints=[{"key": "example.com/dedicated", "effect": "NoSchedule"}]),
+            node("plain", labels={"ci": "true"}),
+        ]
+        tolerations = [{"key": "example.com/ci-runner-only", "operator": "Exists", "effect": "NoSchedule"}]
+        without = arc.arc_measured_max_runners(MEASURED, nodes, [], {"ci": "true"})
+        self.assertEqual([entry["name"] for entry in without["nodes"]], ["plain"])
+        result = arc.arc_measured_max_runners(MEASURED, nodes, [], {"ci": "true"}, (), tolerations)
+        self.assertEqual([entry["name"] for entry in result["nodes"]], ["home", "plain"])
+        self.assertEqual([entry["name"] for entry in result["skipped_nodes"]], ["other"])
+
+    def test_a_toleration_matches_a_taint_by_the_rules_of_a_kubernetes_toleration(self) -> None:
+        taint = {"key": "k", "value": "v", "effect": "NoSchedule"}
+        self.assertTrue(arc._tolerates([{"key": "k", "operator": "Exists"}], taint))
+        self.assertTrue(arc._tolerates([{"key": "k", "value": "v"}], taint))
+        self.assertTrue(arc._tolerates([{"operator": "Exists"}], taint))
+        self.assertTrue(arc._tolerates([{"key": "k", "operator": "Exists", "effect": "NoSchedule"}], taint))
+        self.assertFalse(arc._tolerates([{"key": "k", "value": "other"}], taint))
+        self.assertFalse(arc._tolerates([{"key": "k", "operator": "Exists", "effect": "NoExecute"}], taint))
+        self.assertFalse(arc._tolerates([{"key": "other", "operator": "Exists"}], taint))
+        self.assertFalse(arc._tolerates([], taint))
 
 BURST = {"node_label_key": "example.com/ci-burst", "tolerations": [{"key": "example.com/ci-burst", "operator": "Exists", "effect": "NoSchedule"}], "max_runners": 6}
 
@@ -440,6 +463,18 @@ class RunnerPlacementTest(unittest.TestCase):
         self.assertEqual(placement["nodeSelector"], {})
         self.assertNotIn("requiredDuringSchedulingIgnoredDuringExecution", placement["affinity"]["nodeAffinity"])
         self.assertEqual(placement["tolerations"], BURST["tolerations"])
+
+
+    def test_a_profile_s_own_tolerations_reach_the_runner_pods_with_or_without_burst(self) -> None:
+        own = [{"key": "example.com/ci-runner-only", "operator": "Exists", "effect": "NoSchedule"}]
+        self.assertEqual(self.placement({"tolerations": own}, self.ELIGIBLE)["tolerations"], own)
+        self.assertEqual(self.placement({"tolerations": own, "burst": BURST}, self.ELIGIBLE)["tolerations"], own + BURST["tolerations"])
+        self.assertNotIn("tolerations", self.placement({}, self.ELIGIBLE))
+
+    def test_a_malformed_toleration_is_reported_with_its_place(self) -> None:
+        result = arc.arc_profiles([org(profiles=[{"sizing": SIZING, "tolerations": [{"key": "k", "colour": "red"}]}])])
+        self.assertEqual(result["errors"], ["Example scale_set_profiles[0].tolerations[0] has an unknown key 'colour'"])
+        self.assertIn("scale_set_profiles[0].tolerations must be a list of Kubernetes tolerations", arc.arc_profiles([org(profiles=[{"sizing": SIZING, "tolerations": "nope"}])])["errors"][0])
 
 
 class ImageRefTest(unittest.TestCase):
