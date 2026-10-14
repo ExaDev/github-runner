@@ -1,0 +1,10 @@
+# Runs the ARC role's node cache pruner install tasks (tasks/install_node_cache_pruner.yml) exactly as main.yml includes them, for tests/unit/test_node_cache_pruner_role.py to read the outcome of. Takes the fleet, the capability catalogue and the role's settings as extra variables.
+- name: Install the node cache pruner, or remove it
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Include the role's own install tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_arc
+        tasks_from: install_node_cache_pruner

@@ -5,9 +5,11 @@
 #
 # A cache over the limit while a runner pod mounts it cannot be emptied, so a node that is never idle would keep growing. The pruner does not change the node to force that. A cache over the hard limit (LIMIT times HARD_LIMIT_FACTOR) is reported on every round with the stable prefix NODE_CACHE_OVER_HARD_LIMIT, for whatever collects the pruner's logs to alert on; kubelet's disk-pressure eviction still protects the node itself. Draining the node, or lowering its runner count, lets the next round empty the cache.
 #
-# A profile directory that is not in WANTED_CACHES belongs to a capability that has been removed from a profile, and is emptied and deleted the same way.
+# What remains is a check-then-act window: a pod can be bound, and its init container can mount the directory, between the last list and the rename that follows it. The window is the time between two commands, a runner pod needs seconds to start its job, and a pod that did start meets an empty cache it can refill (the cache's root is owned by the runner's user), not a cache being unlinked.
 #
-# Every step of one profile's check may fail without stopping the others: a failed or partial size reading skips that profile for the round, and a failed pod list means no pruning, since an unknown set of pods may be using the cache.
+# A profile directory that is not in WANTED_CACHES belongs to a capability that has been removed from a profile that is still in the fleet, and is emptied and removed the same way. The directory of a profile removed from the fleet entirely cannot be pruned: no Role lets the pruner list pods in a namespace the role no longer manages, so the list is refused and the directory is reported on every round with the prefix NODE_CACHE_UNPRUNABLE. It is the operator's to delete (when the namespace is gone there are no pods, so it is safe to).
+#
+# Every step of one profile's check may fail without stopping the others: a failed or partial size reading skips that profile for the round, and a failed pod list (NODE_CACHE_UNPRUNABLE) means no pruning, since an unknown set of pods may be using the cache.
 #
 # Which pods count: those in the profile's namespace on this node, not finished (Succeeded or Failed), that have a hostPath volume at exactly the profile's directory on the host (HOST_CACHE_ROOT/<namespace>/<release>). Another profile's pods, finished pods and pods that do not mount the cache are ignored.
 #
@@ -59,15 +61,16 @@ is_wanted() {
   return 1
 }
 
-# Moves a profile's cache out of the directory its pods mount, one rename per entry, and deletes it. Before every rename the pods are listed again, and a pod that mounts the cache ends the moving, leaving what has not moved in place. Returns 1 when there was something to move and none of it could be.
+# Moves a profile's cache out of the directory its pods mount, one rename per entry, and deletes it. The pods are listed again directly before every rename, and a pod that mounts the cache ends the moving, leaving what has not moved in place. Sets SET_ASIDE to "all" when every entry moved (or there was none), "some" when only a part did, and "none" when something was to be moved and nothing was.
 set_aside_and_delete() {
   local directory=$1 namespace=$2 release=$3 aside entry pods moved=0 entries
+  SET_ASIDE=none
   mkdir -p "$TRASH_DIR" && aside="$(mktemp -d "${TRASH_DIR}/set-aside.XXXXXX")" || return 1
   shopt -s dotglob nullglob
   entries=("$directory"/*)
   for entry in "${entries[@]}"; do
     if ! pods="$(pods_using "$namespace" "$release")"; then
-      log "node cache ${namespace}/${release}: the runner pods could not be listed part way through; the rest is left in place"
+      log "NODE_CACHE_UNPRUNABLE ${namespace}/${release}: the runner pods could not be listed part way through; the rest is left in place"
       break
     fi
     if [ -n "$pods" ]; then
@@ -82,9 +85,20 @@ set_aside_and_delete() {
     fi
   done
   shopt -u dotglob nullglob
+  if [ "$moved" -eq "${#entries[@]}" ]; then SET_ASIDE=all; elif [ "$moved" -gt 0 ]; then SET_ASIDE=some; fi
   # What was moved is out of every pod's reach, so deleting it cannot disturb a job. A deletion that fails is left for the next round, which clears the trash first.
   rm -rf "$aside" || log "node cache ${namespace}/${release}: the set-aside copy could not be deleted; the next round retries"
-  [ "$moved" -gt 0 ] || [ "${#entries[@]}" -eq 0 ]
+}
+
+# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first.
+remove_retired_directory() {
+  local directory=$1 namespace=$2 release=$3 pods
+  if ! pods="$(pods_using "$namespace" "$release")" || [ -n "$pods" ]; then
+    log "node cache ${namespace}/${release}: emptied, but a runner pod may mount the directory now, so it is kept"
+    return 0
+  fi
+  rmdir "$directory" 2>/dev/null
+  rmdir "$(dirname "$directory")" 2>/dev/null
 }
 
 # One profile directory: <namespace>/<release> under the cache root.
@@ -102,28 +116,32 @@ check_profile() {
     return 0
   fi
   if ! pods="$(pods_using "$namespace" "$release")"; then
-    log "node cache ${label}: the runner pods on this node could not be listed; not pruned"
+    log "NODE_CACHE_UNPRUNABLE ${label}: the runner pods on this node could not be listed; not pruned"
     return 0
   fi
   if [ -n "$pods" ]; then
-    if [ "$retired" = false ] && [ "$size" -gt "$HARD_LIMIT_KIB" ]; then
+    if [ "$retired" = true ]; then
+      log "node cache ${label} is no longer wanted and holds ${size} KiB, but a runner pod mounts it on this node: left alone"
+    elif [ "$size" -gt "$HARD_LIMIT_KIB" ]; then
       log "NODE_CACHE_OVER_HARD_LIMIT ${label} size_kib=${size} hard_limit_kib=${HARD_LIMIT_KIB} node=${NODE_NAME}: a runner pod keeps it busy, so it cannot be emptied"
     else
       log "node cache ${label} holds ${size} KiB, over the limit of ${LIMIT_KIB} KiB, but a runner pod is running on this node: left alone"
     fi
     return 0
   fi
-  if set_aside_and_delete "$directory" "$namespace" "$release"; then
-    if [ "$retired" = true ]; then
-      rmdir "$directory" 2>/dev/null
-      rmdir "$(dirname "$directory")" 2>/dev/null
-      log "node cache ${label} is no longer wanted and held ${size} KiB: removed"
-    else
-      log "node cache ${label} held ${size} KiB, over the limit of ${LIMIT_KIB} KiB: emptied"
-    fi
-  else
-    log "node cache ${label}: nothing could be set aside; left as it is"
-  fi
+  set_aside_and_delete "$directory" "$namespace" "$release"
+  case "$SET_ASIDE" in
+    all)
+      if [ "$retired" = true ]; then
+        remove_retired_directory "$directory" "$namespace" "$release"
+        log "node cache ${label} is no longer wanted and held ${size} KiB: set aside and deleted"
+      else
+        log "node cache ${label} held ${size} KiB, over the limit of ${LIMIT_KIB} KiB: emptied"
+      fi
+      ;;
+    some) log "node cache ${label} held ${size} KiB: part of it was set aside and deleted, the rest is left in place" ;;
+    *) log "node cache ${label}: nothing could be set aside; left as it is" ;;
+  esac
 }
 
 check() {

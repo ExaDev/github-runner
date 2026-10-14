@@ -18,6 +18,8 @@ ROLE = ROOT / "roles" / "github_runner_arc"
 RENDER = ROOT / "tests" / "node_cache_pruner" / "render.yml"
 DECIDE = ROOT / "tests" / "node_cache_pruner" / "decide.yml"
 KEPT = ROOT / "tests" / "node_cache_pruner" / "kept.yml"
+INSTALL = ROOT / "tests" / "node_cache_pruner" / "install.yml"
+CAPABILITIES_RENDER = ROOT / "tests" / "capabilities" / "render.yml"
 
 _SPEC = importlib.util.spec_from_file_location("arc_filters", ROOT / "plugins" / "filter" / "arc.py")
 assert _SPEC is not None and _SPEC.loader is not None
@@ -129,42 +131,107 @@ class DecisionTest(unittest.TestCase):
         self.assertEqual(decide(["arc-a/main"], github_runner_arc_node_cache_size_limit_gib=0)["wanted"], False)
 
 
+# A stand-in for the kubernetes.core modules the install tasks call: it appends the module name and its arguments to the file named by STUB_LOG, reports no change and finds no resources, so the tasks' control flow runs and what they ask the cluster for can be read.
+STUB_MODULE = """from ansible.module_utils.basic import AnsibleModule
+import json, os
+
+ARGUMENTS = ("api_version", "apply", "definition", "kind", "name", "namespace", "state", "wait")
+
+
+def main():
+    module = AnsibleModule(argument_spec={key: {"type": "raw"} for key in ARGUMENTS}, supports_check_mode=True)
+    with open(os.environ["STUB_LOG"], "a") as log:
+        log.write(json.dumps({"module": MODULE, **module.params}) + "\\n")
+    module.exit_json(changed=False, resources=[])
+
+
+main()
+"""
+
+# What the role's own defaults leave to the includer.
+INSTALL_VARIABLES = {
+    "github_runner_arc_capabilities": CATALOGUE,
+    "github_runner_arc_node_label_key": "example/ci",
+    "github_runner_arc_node_label_value": "true",
+    "github_runner_arc_pull_secret_in_use": False,
+    "github_runner_arc_manage_image_pull_secret": False,
+    "github_runner_arc_image_pull_secret_source": "none",
+    "github_runner_arc_image_pull_secret_name": "pull",
+}
+
+
+def install(fleet_targets: list[str], with_cache: list[str] | None = None, **role_vars: Any) -> list[dict[str, Any]]:
+    """Run the role's pruner install tasks against the stand-in kubernetes.core, and return the module calls it recorded. Each fleet profile carries the pnpm-store capability when its target is in with_cache (all of them when it is None)."""
+    profiles = [{"namespace": t.split("/")[0], "release": t.split("/")[1], "target": t, "capabilities": ["pnpm-store"] if with_cache is None or t in with_cache else ["node"]} for t in fleet_targets]
+    with tempfile.TemporaryDirectory() as work:
+        modules = Path(work) / "stubs" / "ansible_collections" / "kubernetes" / "core" / "plugins" / "modules"
+        modules.mkdir(parents=True)
+        for module in ("k8s", "k8s_info"):
+            (modules / f"{module}.py").write_text(STUB_MODULE.replace("MODULE,", repr(module) + ","))
+        log = Path(work) / "calls.jsonl"
+        extra = Path(work) / "extra.json"
+        extra.write_text(json.dumps({**INSTALL_VARIABLES, "github_runner_arc_fleet": {"profiles": profiles}, **role_vars}))
+        env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": os.pathsep.join([str(Path(work) / "stubs"), str(ROOT / "playbooks" / "collections")]), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false", "ANSIBLE_HOME": str(Path(work) / "home"), "STUB_LOG": str(log)}
+        completed = subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(INSTALL), "-e", f"@{extra}"], env=env, cwd=work, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def removals(calls: list[dict[str, Any]]) -> list[tuple[str, str | None, str]]:
+    """The (kind, namespace, name) of every resource the calls ask to have removed."""
+    return [(call["kind"], call.get("namespace"), call["name"]) for call in calls if call.get("state") == "absent"]
+
+
+def applied(calls: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """The (kind, name) of every resource the calls ask to have present, in order."""
+    return [(call["definition"]["kind"], call["definition"]["metadata"]["name"]) for call in calls if call.get("definition")]
+
+
 class InstallTasksTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.tasks = yaml.safe_load((ROLE / "tasks" / "install_node_cache_pruner.yml").read_text())
+    """The role's install tasks, run against a stand-in for kubernetes.core."""
 
-    def task(self, prefix: str) -> dict[str, Any]:
-        [task] = [task for task in self.tasks if task["name"].startswith(prefix)]
-        return task
+    FLEET = ["arc-a/main", "arc-b/builders", "arc-c/plain"]
 
-    def test_a_wanted_pruner_needs_the_node_label_key(self) -> None:
-        assertion = self.task("Node cache: the pruner needs the nodes")
-        self.assertEqual(assertion["when"], "github_runner_arc_node_cache_pruner_wanted | bool")
-        self.assertEqual(assertion["ansible.builtin.assert"]["that"], "github_runner_arc_node_label_key | length > 0")
+    def test_the_cluster_wide_pod_access_an_earlier_release_granted_is_removed_whether_or_not_the_pruner_is_wanted(self) -> None:
+        stale = [("ClusterRoleBinding", None, "node-cache-pruner"), ("ClusterRole", None, "node-cache-pruner")]
+        for wanted in (True, False):
+            with self.subTest(wanted=wanted):
+                calls = install(self.FLEET, with_cache=None if wanted else [])
+                self.assertEqual([removal for removal in removals(calls) if removal[1] is None], stale)
 
-    def test_the_pull_secret_is_chosen_here_not_inherited_from_the_platform_install(self) -> None:
-        block = self.task("Node cache: install the pruner")["block"]
-        self.assertIn("choose_platform_pull_secrets.yml", [task.get("ansible.builtin.include_tasks") for task in block])
+    def test_the_stale_access_is_removed_before_anything_is_installed(self) -> None:
+        calls = install(self.FLEET)
+        self.assertEqual((calls[0]["state"], calls[0]["kind"]), ("absent", "ClusterRoleBinding"))
+
+    def test_a_wanted_pruner_installs_the_account_a_role_and_binding_per_fleet_profile_and_the_daemonset_last(self) -> None:
+        calls = install(self.FLEET, with_cache=["arc-a/main"])
+        installed = [item for item in applied(calls) if item[0] != "Namespace"]
+        self.assertEqual(installed[0], ("ServiceAccount", "node-cache-pruner"))
+        self.assertEqual(installed[-1], ("DaemonSet", "node-cache-pruner"))
+        self.assertEqual(sorted(name for kind, name in installed if kind == "Role"), ["node-cache-pruner-builders", "node-cache-pruner-main", "node-cache-pruner-plain"])
+        self.assertEqual(sorted(name for kind, name in installed if kind == "RoleBinding"), ["node-cache-pruner-builders", "node-cache-pruner-main", "node-cache-pruner-plain"])
+        self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [])
 
     def test_the_namespaces_of_every_fleet_profile_are_created_for_the_roles(self) -> None:
-        block = self.task("Node cache: install the pruner")["block"]
-        [namespaces] = [task for task in block if task["name"].startswith("Node cache: the namespaces")]
-        self.assertIn("github_runner_arc_fleet.profiles", namespaces["loop"])
+        namespaces = {call["definition"]["metadata"]["name"] for call in install(self.FLEET) if (call.get("definition") or {}).get("kind") == "Namespace"}
+        self.assertEqual(namespaces, {"github-runner-platform", "arc-a", "arc-b", "arc-c"})
 
-    def test_not_wanted_removes_the_daemonset_and_account_then_every_fleet_profiles_access(self) -> None:
-        removal = self.task("Node cache: remove the pruner when it is not wanted")
-        self.assertEqual(removal["when"], "not (github_runner_arc_node_cache_pruner_wanted | bool)")
-        first, second = removal["block"]
-        self.assertEqual([item["kind"] for item in first["loop"]], ["DaemonSet", "ServiceAccount"])
-        self.assertEqual(first["kubernetes.core.k8s"]["state"], "absent")
-        self.assertEqual(second["kubernetes.core.k8s"]["state"], "absent")
-        self.assertIn("github_runner_arc_fleet.profiles", second["loop"])
-        # Bindings go before the Roles they bind.
-        self.assertTrue(second["loop"].startswith("{{ ['RoleBinding', 'Role']"), second["loop"])
+    def test_a_wanted_pruner_without_the_node_label_key_fails_rather_than_running_everywhere(self) -> None:
+        with self.assertRaises(AssertionError) as caught:
+            install(self.FLEET, github_runner_arc_node_label_key="")
+        self.assertIn("github_runner_arc_node_label_key must be set", str(caught.exception))
 
-    def test_there_is_no_lookup_of_a_pruner_already_installed_so_the_pruner_follows_the_fleet(self) -> None:
-        self.assertEqual([task["name"] for task in self.tasks if "k8s_info" in str(task)], [])
+    def test_not_wanted_removes_the_daemonset_and_account_then_every_fleet_profiles_bindings_and_roles(self) -> None:
+        calls = install(self.FLEET, with_cache=[])
+        namespaced = [removal for removal in removals(calls) if removal[1] is not None]
+        self.assertEqual(namespaced[:2], [("DaemonSet", "github-runner-platform", "node-cache-pruner"), ("ServiceAccount", "github-runner-platform", "node-cache-pruner")])
+        self.assertEqual(namespaced[2:], [("RoleBinding", "arc-a", "node-cache-pruner-main"), ("RoleBinding", "arc-b", "node-cache-pruner-builders"), ("RoleBinding", "arc-c", "node-cache-pruner-plain"), ("Role", "arc-a", "node-cache-pruner-main"), ("Role", "arc-b", "node-cache-pruner-builders"), ("Role", "arc-c", "node-cache-pruner-plain")])
+        self.assertEqual(applied(calls), [])
+
+    def test_a_size_limit_of_zero_removes_it_like_no_cache_at_all(self) -> None:
+        calls = install(self.FLEET, github_runner_arc_node_cache_size_limit_gib=0)
+        self.assertEqual(applied(calls), [])
+        self.assertIn(("DaemonSet", "github-runner-platform", "node-cache-pruner"), removals(calls))
 
     def test_the_platform_install_and_the_pruner_share_the_pull_secret_choice(self) -> None:
         platform = (ROLE / "tasks" / "install_platform.yml").read_text()
@@ -194,12 +261,15 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(self.problems(), [])
 
     def test_the_host_path_root_is_checked_whether_or_not_any_profile_has_a_node_cache(self) -> None:
-        for path in ("/var/lib", "/var", "/opt", "/srv", "/mnt", "/data", "/data/cache", "/etc/ci/cache", "/var/lib/kubelet/cache", "/tmp/ci/cache", "relative/path/here"):
+        bad = ("/var/lib", "/var", "/opt", "/srv", "/mnt", "/data", "/data/cache", "/etc/ci/node-cache", "/var/lib/kubelet/node-cache", "/tmp/ci/node-cache", "relative/path/node-cache",
+               "/var/lib/etcd", "/var/lib/dpkg", "/var/lib/apt", "/var/lib/systemd", "/var/lib/cni", "/var/lib/kubernetes", "/var/lib/k0s", "/var/lib/calico", "/var/lib/containers", "/var/lib/snapd", "/srv/a/b", "/mnt/a/b",
+               "/node-cache", "/opt/node-cache", "/var/lib/github-runner/node-cache/", "/var/lib/github-runner/node-cache//", "/var/lib//github-runner/node-cache", "/var/lib/github-runner/node-cachex", "/var/lib/github-runner/../etc/node-cache", "//var/lib/github-runner/node-cache")
+        for path in bad:
             with self.subTest(path):
                 self.assertNotEqual(self.problems(github_runner_arc_node_cache_host_path=path), [], path)
 
     def test_a_dedicated_directory_of_a_data_area_is_valid(self) -> None:
-        for path in ("/var/lib/github-runner/node-cache", "/opt/ci/node-cache", "/srv/runners/cache", "/mnt/disk/ci/cache"):
+        for path in ("/var/lib/github-runner/node-cache", "/opt/ci/node-cache", "/srv/runners/ci-node-cache", "/mnt/disk/node-cache"):
             with self.subTest(path):
                 self.assertEqual(self.problems(github_runner_arc_node_cache_host_path=path), [], path)
 
@@ -213,6 +283,30 @@ class ValidationTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertNotEqual(self.problems(**{name: value}), [], name)
         self.assertEqual(self.problems(github_runner_arc_node_cache_size_limit_gib=0), [])
+
+
+class PathConsistencyTest(unittest.TestCase):
+    """The pods' volume path and the pruner's idea of it, both built from github_runner_arc_node_cache_host_path, whatever way it is written."""
+
+    def pod_host_path(self, base: str) -> tuple[str, dict[str, Any]]:
+        profile = arc.arc_profiles([{"name": "Example", "image": "ghcr.io/example/runner:1", "scale_set_profiles": [{"max_runners": 1, "capabilities": ["pnpm-store"]}]}], require_app_id=False)["profiles"][0]
+        with tempfile.TemporaryDirectory() as work:
+            output = Path(work) / "rendered.json"
+            completed = ansible(CAPABILITIES_RENDER, profile=profile, github_runner_arc_capabilities=CATALOGUE, github_runner_arc_node_cache_host_path=base, render_output=str(output))
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+            [volume] = [volume for volume in json.loads(output.read_text())["values"]["template"]["spec"]["volumes"] if volume["name"] == "node-cache"]
+            path: str = volume["hostPath"]["path"]
+            return path, profile
+
+    def test_the_pods_directory_is_the_pruners_root_joined_with_the_namespace_and_release_however_the_base_is_written(self) -> None:
+        for base in ("/var/lib/x/node-cache", "/var/lib/x/node-cache/", "/var/lib//x///node-cache//"):
+            with self.subTest(base):
+                path, profile = self.pod_host_path(base)
+                [daemonset] = [document for document in render(github_runner_arc_node_cache_host_path=base) if document["kind"] == "DaemonSet"]
+                env = {item["name"]: item.get("value") for item in daemonset["spec"]["template"]["spec"]["containers"][0]["env"]}
+                self.assertEqual(path, f"{env['HOST_CACHE_ROOT']}/{profile['namespace']}/{profile['release']}")
+                self.assertEqual(path, f"/var/lib/x/node-cache/{profile['namespace']}/{profile['release']}")
+                self.assertEqual(daemonset["spec"]["template"]["spec"]["volumes"][0]["hostPath"]["path"], "/var/lib/x/node-cache")
 
 
 class ProfilesFilterTest(unittest.TestCase):

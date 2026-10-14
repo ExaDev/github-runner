@@ -390,14 +390,10 @@ class CapabilityPodTest(unittest.TestCase):
             "the tool cache's path": (TOOL_CACHE, NODE_CACHE_HOST, "overlaps the tool cache path"),
             "inside the sysroot": (f"{SYSROOT}/cache", NODE_CACHE_HOST, "overlaps the sysroot path"),
             "a colon in the mount path": ("/node:cache", NODE_CACHE_HOST, "no ':' or line break"),
-            "a relative host path": (NODE_CACHE, "var/lib/cache", "host path must be an absolute directory"),
-            "the root as host path": (NODE_CACHE, "/", "levels deep"),
-            "a top-level host directory": (NODE_CACHE, "/cache", "levels deep"),
-            "a host path with a parent reference": (NODE_CACHE, "/var/lib/../etc/cache", "levels deep"),
-            "a colon in the host path": (NODE_CACHE, "/var/lib/a:b/cache", "no ':' or line break"),
-            "the kubelet's own directory": (NODE_CACHE, "/var/lib/kubelet/cache", "inside /var/lib/kubelet"),
-            "a system directory": (NODE_CACHE, "/etc/github-runner/cache", "inside /etc"),
-            "a home directory": (NODE_CACHE, "/home/runner/cache", "inside /home"),
+            "a relative host directory": (NODE_CACHE, "var/lib/cache", "host directory must be an absolute path"),
+            "a trailing slash on the host directory": (NODE_CACHE, NODE_CACHE_HOST + "/", "repeated '/' or a trailing '/'"),
+            "a doubled slash in the host directory": (NODE_CACHE, "/var/lib//example/node-cache/arc/r", "repeated '/' or a trailing '/'"),
+            "a colon in the host directory": (NODE_CACHE, "/var/lib/a:b/node-cache/arc/r", "without ':'"),
         }
         for case, (mount, host, message) in cases.items():
             with self.subTest(case):
