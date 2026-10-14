@@ -1,0 +1,13 @@
+# Renders one template file (kept_template) with the role's defaults and the variables given, and writes the result, so tests/unit/test_node_cache_pruner_role.py can evaluate an expression taken from a task.
+- name: Render an expression
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+  tasks:
+    - name: Write the rendering
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', kept_template) }}"
+        dest: "{{ kept_output }}"
+        mode: "0644"

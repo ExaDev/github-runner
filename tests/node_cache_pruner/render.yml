@@ -1,0 +1,16 @@
+# Renders the github_runner_arc role's node cache pruner manifests (templates/node-cache-pruner.yaml.j2) with the role's defaults and constants, for tests/unit/test_node_cache_pruner_role.py.
+- name: Render the node cache pruner manifests
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+    - ../../roles/github_runner_arc/vars/main.yml
+  vars:
+    github_runner_arc_platform_image_pull_secrets: []
+  tasks:
+    - name: Write the manifests
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_arc/templates/node-cache-pruner.yaml.j2') }}"
+        dest: "{{ pruner_output }}"
+        mode: "0644"

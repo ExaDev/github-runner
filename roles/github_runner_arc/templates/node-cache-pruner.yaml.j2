@@ -1,0 +1,141 @@
+{# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each namespace whose profile has a node cache (so the pruner can list the pods it must not prune under, and nothing wider), a ClusterRole and ClusterRoleBinding that let it cordon the nodes it runs on and no others, and the DaemonSet. `github_runner_arc_node_cache_profiles` is arc_node_cache_profiles' answer, and `github_runner_arc_labelled_nodes` the nodes the role labels as eligible. #}
+{% set name = 'node-cache-pruner' %}
+{% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
+{% set platform = github_runner_arc_platform_namespace %}
+{% set nodes_role = name ~ '-' ~ platform ~ '-nodes' %}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ platform | to_json }}
+  labels: {{ labels | to_json }}
+{% for profile in github_runner_arc_node_cache_profiles %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ (name ~ '-' ~ profile.release) | to_json }}
+  namespace: {{ profile.namespace | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  # list, to see whether a runner pod of this profile runs on the pruner's node. Nothing else.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ (name ~ '-' ~ profile.release) | to_json }}
+  namespace: {{ profile.namespace | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ platform | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ (name ~ '-' ~ profile.release) | to_json }}
+{% endfor %}
+{% if github_runner_arc_labelled_nodes | length > 0 %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ nodes_role | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  # get, to read the annotation that says the pruner cordoned a node, and patch, to cordon and uncordon it and set that annotation, on the labelled nodes only: an empty resourceNames would mean every node, which is why the rule is left out when the role labels none.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    resourceNames: {{ github_runner_arc_labelled_nodes | to_json }}
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ nodes_role | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ platform | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ nodes_role | to_json }}
+{% endif %}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ platform | to_json }}
+  labels: {{ labels | to_json }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ name | to_json }}
+  template:
+    metadata:
+      labels:
+        app: {{ name | to_json }}
+    spec:
+      serviceAccountName: {{ name | to_json }}
+      priorityClassName: {{ github_runner_arc_platform_priority_class_name | to_json }}
+      imagePullSecrets: {{ github_runner_arc_platform_image_pull_secrets | to_json }}
+      # Only the nodes runner pods may use, and every taint they carry tolerated, so the pruner reaches each cache wherever the pods go.
+      nodeSelector: {{ {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} | to_json }}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: {{ name | to_json }}
+          image: {{ github_runner_arc_autoscaler_image | to_json }}
+          command: ["/app/scripts/node-cache-pruner.sh"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: LIMIT_GIB
+              value: {{ github_runner_arc_node_cache_size_limit_gib | string | to_json }}
+            - name: DRAIN_FACTOR
+              value: {{ github_runner_arc_node_cache_drain_factor | string | to_json }}
+            - name: CHECK_SECONDS
+              value: {{ github_runner_arc_node_cache_prune_seconds | string | to_json }}
+            - name: WANTED_CACHES
+              value: {{ (github_runner_arc_node_cache_profiles | map(attribute='target') | list | join(' ')) | to_json }}
+            # kubectl writes its cache under HOME, and the root filesystem is read-only.
+            - name: HOME
+              value: /tmp
+          # Root, because the files it removes belong to the runner's user, and DAC_OVERRIDE for the same reason; nothing else.
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["DAC_OVERRIDE"]
+          volumeMounts:
+            - name: node-cache
+              mountPath: /host-node-cache
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+              ephemeral-storage: {{ github_runner_arc_platform_ephemeral_storage_request | to_json }}
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+              ephemeral-storage: {{ github_runner_arc_platform_ephemeral_storage_limit | to_json }}
+      volumes:
+        - name: node-cache
+          hostPath:
+            path: {{ github_runner_arc_node_cache_host_path | to_json }}
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
