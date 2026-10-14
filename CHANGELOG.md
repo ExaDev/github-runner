@@ -1,3 +1,10 @@
+# [1.30.0](https://github.com/ExaDev/github-runner/compare/v1.29.0...v1.30.0) (2026-10-14)
+
+
+### Features
+
+* **arc:** bound each node's measured runners by its pod capacity ([ccf41b4](https://github.com/ExaDev/github-runner/commit/ccf41b40110cdf0352d08a3b065805a2bfba17f2))
+
 # [1.29.0](https://github.com/ExaDev/github-runner/compare/v1.28.0...v1.29.0) (2026-10-14)
 
 
