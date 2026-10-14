@@ -1,3 +1,10 @@
+# [1.29.0](https://github.com/ExaDev/github-runner/compare/v1.28.0...v1.29.0) (2026-10-14)
+
+
+### Features
+
+* **autoscaler:** lower maxRunners while a node's own I/O or cpu pressure is high ([2f872ba](https://github.com/ExaDev/github-runner/commit/2f872baf2d058d16faf62052a5457ea432e64f56)), closes [#82](https://github.com/ExaDev/github-runner/issues/82)
+
 # [1.28.0](https://github.com/ExaDev/github-runner/compare/v1.27.0...v1.28.0) (2026-10-14)
 
 
