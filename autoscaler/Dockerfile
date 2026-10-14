@@ -14,7 +14,8 @@ RUN apk add --no-cache bash curl jq kubectl
 COPY autoscaler/loop.sh /app/loop.sh
 COPY scripts/autoscaler.sh /app/scripts/autoscaler.sh
 COPY scripts/psi-reporter.sh /app/scripts/psi-reporter.sh
-RUN chmod +x /app/loop.sh /app/scripts/autoscaler.sh /app/scripts/psi-reporter.sh
+COPY scripts/node-cache-pruner.sh /app/scripts/node-cache-pruner.sh
+RUN chmod +x /app/loop.sh /app/scripts/autoscaler.sh /app/scripts/psi-reporter.sh /app/scripts/node-cache-pruner.sh
 
 WORKDIR /app
 ENTRYPOINT ["/app/loop.sh"]
