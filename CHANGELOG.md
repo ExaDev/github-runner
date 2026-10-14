@@ -1,3 +1,10 @@
+## [1.30.1](https://github.com/ExaDev/github-runner/compare/v1.30.0...v1.30.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **arc:** leave the runners a pod capacity bounds out of the safety margin ([ce759b1](https://github.com/ExaDev/github-runner/commit/ce759b178eaa92df6f018d642d045129fcd0cf6b))
+
 # [1.30.0](https://github.com/ExaDev/github-runner/compare/v1.29.0...v1.30.0) (2026-10-14)
 
 
