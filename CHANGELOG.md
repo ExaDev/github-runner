@@ -1,3 +1,10 @@
+# [1.28.0](https://github.com/ExaDev/github-runner/compare/v1.27.0...v1.28.0) (2026-10-14)
+
+
+### Features
+
+* **arc:** run the controller and listeners under the platform priority class when asked ([c90738f](https://github.com/ExaDev/github-runner/commit/c90738f295e9958fc6edd117bf84de731878f95b)), closes [#84](https://github.com/ExaDev/github-runner/issues/84)
+
 # [1.27.0](https://github.com/ExaDev/github-runner/compare/v1.26.4...v1.27.0) (2026-10-14)
 
 
