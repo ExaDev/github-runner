@@ -343,6 +343,29 @@ class MeasuredMaxRunnersTest(unittest.TestCase):
         bad = arc.arc_measured_max_runners(MEASURED, [node("a", cpu="lots")], [])
         self.assertEqual(bad["errors"], ["node a: not a Kubernetes quantity: 'lots'"])
 
+    def test_a_nodes_pod_capacity_bounds_its_runners_below_what_cpu_and_memory_would_hold(self) -> None:
+        capped = node("capped", "16", "64Gi")
+        capped["status"]["allocatable"]["pods"] = "2"
+        result = arc.arc_measured_max_runners(MEASURED, [capped, node("free", "4", "8Gi")], [])
+        by_name = {entry["name"]: entry for entry in result["nodes"]}
+        self.assertEqual((by_name["capped"]["by_cpu"], by_name["capped"]["by_pods"], by_name["capped"]["runners"]), (16, 2, 2))
+        self.assertIsNone(by_name["free"]["by_pods"])
+        self.assertEqual(by_name["free"]["runners"], 4)
+
+    def test_pods_that_are_not_runners_use_up_a_nodes_pod_capacity(self) -> None:
+        capped = node("capped", "16", "64Gi")
+        capped["status"]["allocatable"]["pods"] = "3"
+        pods = [pod("capped", "10m", "10Mi", namespace="kube-system"), pod("capped", "1", "1Gi", namespace="arc-runners")]
+        result = arc.arc_measured_max_runners(MEASURED, [capped], pods, None, ["arc-runners"])
+        # Three slots, one held by the kube-system pod; the runner pod is left out, so running jobs never lower the ceiling.
+        self.assertEqual(result["nodes"][0]["by_pods"], 2)
+
+    def test_a_node_with_no_pod_slots_left_contributes_nothing(self) -> None:
+        full = node("full", "16", "64Gi")
+        full["status"]["allocatable"]["pods"] = "1"
+        result = arc.arc_measured_max_runners(MEASURED, [full, node("other", "2", "4Gi")], [pod("full", "10m", "10Mi", namespace="kube-system")])
+        self.assertEqual([entry["runners"] for entry in result["nodes"]], [0, 2])
+
     def test_a_node_whose_taint_the_profile_tolerates_counts_and_one_it_does_not_still_does_not(self) -> None:
         nodes = [
             node("home", labels={"ci": "true"}, taints=[{"key": "example.com/ci-runner-only", "value": "true", "effect": "NoSchedule"}]),

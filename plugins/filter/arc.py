@@ -324,7 +324,7 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
         tolerations: the runner pods' tolerations; a node whose only repelling taints they match is eligible, as it is for the pods.
 
     Returns:
-        A dict with ``errors`` (messages, empty when it could be worked out), ``nodes`` (per eligible node: name, allocatable_cpu, allocatable_memory_gib, requested_cpu, requested_memory_gib, by_cpu, by_memory, runners, and condition, naming any passing condition it was counted despite), ``skipped_nodes`` (name and reason for each node that is not eligible), ``theoretical`` and ``max_runners``, which is None when there are errors.
+        A dict with ``errors`` (messages, empty when it could be worked out), ``nodes`` (per eligible node: name, allocatable_cpu, allocatable_memory_gib, requested_cpu, requested_memory_gib, by_cpu, by_memory, by_pods (None when the node reports no pod capacity), runners, and condition, naming any passing condition it was counted despite), ``skipped_nodes`` (name and reason for each node that is not eligible), ``theoretical`` and ``max_runners``, which is None when there are errors.
     """
     checked = arc_max_runners(sizing)
     errors = list(checked["errors"])
@@ -339,6 +339,8 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
     reserve_cpu = Decimal(str(checked["reserve_cpu"]))
     reserve_memory = Decimal(str(checked["reserve_memory_gib"])) * _GIB
     requested: dict[str, list[Decimal]] = {}
+    # Pods other than runner pods on each node, which hold slots of the node's pod capacity the runners cannot have.
+    other_pods: dict[str, int] = {}
     for pod in pods:
         metadata = pod.get("metadata") or {}
         node_name = (pod.get("spec") or {}).get("nodeName")
@@ -352,6 +354,7 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
         totals = requested.setdefault(node_name, [Decimal(0), Decimal(0)])
         totals[0] += cpu
         totals[1] += memory
+        other_pods[node_name] = other_pods.get(node_name, 0) + 1
     eligible: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for node in sorted(nodes, key=lambda item: (item.get("metadata") or {}).get("name", "")):
@@ -370,6 +373,14 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
         used_cpu, used_memory = requested.get(name, [Decimal(0), Decimal(0)])
         by_cpu = max(0, _floor((allocatable_cpu - used_cpu - reserve_cpu) / pod_cpu))
         by_memory = max(0, _floor((allocatable_memory - used_memory - reserve_memory) / pod_memory))
+        # A node's pod capacity (the kubelet's max-pods) can be set below what its cpu and memory would hold, to keep a node whose disk is the limit from running more jobs than it can serve. Kubernetes always reports it, so a node without it is a test fixture or an unusual one, and is not limited by it.
+        by_pods = None
+        if "pods" in allocatable:
+            try:
+                by_pods = max(0, int(arc_quantity(allocatable["pods"])) - other_pods.get(name, 0))
+            except ValueError as error:
+                errors.append(f"node {name}: {error}")
+                continue
         eligible.append({
             "name": name,
             "allocatable_cpu": float(allocatable_cpu),
@@ -378,7 +389,8 @@ def arc_measured_max_runners(sizing: Mapping[str, Any], nodes: Sequence[Mapping[
             "requested_memory_gib": float(used_memory / _GIB),
             "by_cpu": by_cpu,
             "by_memory": by_memory,
-            "runners": min(by_cpu, by_memory),
+            "by_pods": by_pods,
+            "runners": min(by_cpu, by_memory) if by_pods is None else min(by_cpu, by_memory, by_pods),
             "condition": condition,
         })
     if not eligible and not errors:
