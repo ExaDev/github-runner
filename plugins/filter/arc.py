@@ -741,7 +741,7 @@ def _node_cache_errors(where: str, node_cache: Any) -> list[str]:
     init_image = node_cache.get("init_image")
     errors.extend(_pinned_image_errors(f"{where}.init_image", init_image))
     # It runs as root beside a hostPath volume, so a tag a registry can move is not enough: the digest names the bytes.
-    if isinstance(init_image, str) and init_image and "@sha256:" not in init_image:
+    if isinstance(init_image, str) and init_image and not re.search(r"@sha256:[0-9a-f]{64}$", init_image):
         errors.append(f"{where}.init_image must be pinned by digest (name@sha256:<64 hex digits>), since it runs as root with a hostPath volume (got {init_image!r})")
     dirs = node_cache.get("dirs")
     if not isinstance(dirs, Mapping) or not dirs:
@@ -845,7 +845,7 @@ def _copy_init_container(name: str, image: str, payload: str, volume: str, mount
 
 
 # Directories of the node that a node cache's host path may not be, or sit inside: the kernel's and the system's own, and the runtimes' state. The cache root is created and emptied as root, so it must be a directory of its own.
-_NODE_CACHE_DENIED_HOST_PATHS = ("/etc", "/proc", "/sys", "/dev", "/boot", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/home", "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker")
+_NODE_CACHE_DENIED_HOST_PATHS = ("/etc", "/proc", "/sys", "/dev", "/boot", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/home", "/tmp", "/var/tmp", "/var/run", "/var/log", "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker")
 # The fewest path components a host path has: a dedicated subdirectory of a directory such as /var/lib, never a top-level directory or /var/lib itself.
 _NODE_CACHE_HOST_PATH_MIN_COMPONENTS = 3
 
@@ -862,12 +862,22 @@ def _node_cache_host_path_errors(host_path: Any) -> list[str]:
     return [f"the node cache's host path {host_path} is inside {inside[0]}, which the node itself uses"] if inside else []
 
 
+def arc_node_cache_host_path_errors(host_path: Any) -> list[str]:
+    """Return what is wrong with github_runner_arc_node_cache_host_path, the root every profile's cache directory sits under (the pruner mounts it read-write as root), whether or not any profile has a node cache: empty when it is a dedicated directory of a node."""
+    return _node_cache_host_path_errors(host_path)
+
+
+def arc_node_cache_path_errors(node_cache_path: Any) -> list[str]:
+    """Return what is wrong with github_runner_arc_node_cache_path, where the cache is mounted on the runner container: empty when it is an absolute directory other than / with no colon or line break."""
+    if not isinstance(node_cache_path, str) or not node_cache_path.startswith("/") or node_cache_path == "/" or any(character in node_cache_path for character in ":\n\r"):
+        return [f"the node cache path must be an absolute directory other than / with no ':' or line break (got {node_cache_path!r})"]
+    return []
+
+
 def _node_cache_path_errors(node_cache_path: str, node_cache_host_path: str, others: Mapping[str, str]) -> list[str]:
     """Return what is wrong with the node cache's paths: the mount path must be an absolute directory with no colon or line break, apart from the other directories the capabilities mount, and the host path a dedicated directory of the node."""
-    errors: list[str] = []
-    if not isinstance(node_cache_path, str) or not node_cache_path.startswith("/") or node_cache_path == "/" or any(character in node_cache_path for character in ":\n\r"):
-        errors.append(f"the node cache path must be an absolute directory other than / with no ':' or line break (got {node_cache_path!r})")
-    else:
+    errors = arc_node_cache_path_errors(node_cache_path)
+    if not errors:
         errors.extend(_overlap_errors("node cache path", node_cache_path, others))
     errors.extend(_node_cache_host_path_errors(node_cache_host_path))
     return errors
@@ -1351,6 +1361,8 @@ class FilterModule:
             "arc_capability_errors": arc_capability_errors,
             "arc_capability_pod": arc_capability_pod,
             "arc_node_cache_profiles": arc_node_cache_profiles,
+            "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
+            "arc_node_cache_path_errors": arc_node_cache_path_errors,
             "arc_registry_cache": arc_registry_cache,
             "arc_registry_cache_pod": arc_registry_cache_pod,
             "arc_registry_cache_configmap": arc_registry_cache_configmap,

@@ -1,15 +1,14 @@
-{# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each namespace whose profile has a node cache (so the pruner can list the pods it must not prune under, and nothing wider), a ClusterRole and ClusterRoleBinding that let it cordon the nodes it runs on and no others, and the DaemonSet. `github_runner_arc_node_cache_profiles` is arc_node_cache_profiles' answer, and `github_runner_arc_labelled_nodes` the nodes the role labels as eligible. #}
+{# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each fleet profile's namespace (so the pruner can list the pods it must not prune under, including those of a profile whose cache capability was removed while its directory remains, and nothing wider), and the DaemonSet. `github_runner_arc_fleet` is the fleet's expanded profiles and `github_runner_arc_node_cache_profiles` those with a node cache. #}
 {% set name = 'node-cache-pruner' %}
 {% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
 {% set platform = github_runner_arc_platform_namespace %}
-{% set nodes_role = name ~ '-' ~ platform ~ '-nodes' %}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ name | to_json }}
   namespace: {{ platform | to_json }}
   labels: {{ labels | to_json }}
-{% for profile in github_runner_arc_node_cache_profiles %}
+{% for profile in github_runner_arc_fleet.profiles %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -38,34 +37,6 @@ roleRef:
   kind: Role
   name: {{ (name ~ '-' ~ profile.release) | to_json }}
 {% endfor %}
-{% if github_runner_arc_labelled_nodes | length > 0 %}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ nodes_role | to_json }}
-  labels: {{ labels | to_json }}
-rules:
-  # get, to read the annotation that says the pruner cordoned a node, and patch, to cordon and uncordon it and set that annotation, on the labelled nodes only: an empty resourceNames would mean every node, which is why the rule is left out when the role labels none.
-  - apiGroups: [""]
-    resources: ["nodes"]
-    resourceNames: {{ github_runner_arc_labelled_nodes | to_json }}
-    verbs: ["get", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ nodes_role | to_json }}
-  labels: {{ labels | to_json }}
-subjects:
-  - kind: ServiceAccount
-    name: {{ name | to_json }}
-    namespace: {{ platform | to_json }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ nodes_role | to_json }}
-{% endif %}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -100,8 +71,10 @@ spec:
                   fieldPath: spec.nodeName
             - name: LIMIT_GIB
               value: {{ github_runner_arc_node_cache_size_limit_gib | string | to_json }}
-            - name: DRAIN_FACTOR
-              value: {{ github_runner_arc_node_cache_drain_factor | string | to_json }}
+            - name: HARD_LIMIT_FACTOR
+              value: {{ github_runner_arc_node_cache_hard_limit_factor | string | to_json }}
+            - name: HOST_CACHE_ROOT
+              value: {{ github_runner_arc_node_cache_host_path | to_json }}
             - name: CHECK_SECONDS
               value: {{ github_runner_arc_node_cache_prune_seconds | string | to_json }}
             - name: WANTED_CACHES
@@ -109,7 +82,7 @@ spec:
             # kubectl writes its cache under HOME, and the root filesystem is read-only.
             - name: HOME
               value: /tmp
-          # Root, because the files it removes belong to the runner's user, and DAC_OVERRIDE for the same reason; nothing else.
+          # Root, because the files it removes belong to the runner's user: DAC_OVERRIDE to delete in directories it does not own, and FOWNER to delete from a directory with the sticky bit that a job made; nothing else.
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
@@ -117,7 +90,7 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-              add: ["DAC_OVERRIDE"]
+              add: ["DAC_OVERRIDE", "FOWNER"]
           volumeMounts:
             - name: node-cache
               mountPath: /host-node-cache

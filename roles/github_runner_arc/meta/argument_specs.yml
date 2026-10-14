@@ -45,11 +45,11 @@ argument_specs:
       github_runner_arc_node_cache_size_limit_gib:
         type: int
         default: 20
-        description: The most gibibytes one profile's node cache may hold on a node before the pruner empties it, which it does only while no runner pod of the profile runs on the node. The limit is per profile, so a node's worst case is the sum over the profiles with a cache on it, times the drain factor. 0 installs no pruner; a negative value is an error.
-      github_runner_arc_node_cache_drain_factor:
+        description: The most gibibytes one profile's node cache may hold on a node before the pruner empties it, which it does only while no runner pod of the profile runs on the node. The limit is per profile, so a node's worst case is the sum over the profiles with a cache on it, times the hard limit factor. 0 installs no pruner; a negative value is an error.
+      github_runner_arc_node_cache_hard_limit_factor:
         type: int
         default: 2
-        description: The hard limit as a multiple of the size limit, at least 1. A cache over it makes the pruner cordon the node, so the running pods finish and the cache can be emptied, and uncordon it afterwards. The pruner cordons only the nodes in github_runner_arc_labelled_nodes.
+        description: The hard limit as a multiple of the size limit, at least 1. A cache over it that a runner pod keeps busy is reported on every round by a log line starting NODE_CACHE_OVER_HARD_LIMIT; the pruner changes nothing about the node.
       github_runner_arc_node_cache_prune_seconds:
         type: int
         default: 300
