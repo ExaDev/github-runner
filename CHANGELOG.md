@@ -1,3 +1,10 @@
+# [1.27.0](https://github.com/ExaDev/github-runner/compare/v1.26.4...v1.27.0) (2026-10-14)
+
+
+### Features
+
+* **arc:** let a profile name tolerations, and count the nodes they let its pods use ([1bacb38](https://github.com/ExaDev/github-runner/commit/1bacb38c62dcf2dfacacb94c699a8ddad03e8fbe))
+
 ## [1.26.4](https://github.com/ExaDev/github-runner/compare/v1.26.3...v1.26.4) (2026-10-13)
 
 
