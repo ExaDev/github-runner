@@ -10,6 +10,7 @@
 # - AUTOSCALER_RAISE_CONFIRM_POLLS: consecutive polls of confirmed headroom before raising
 # - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT: MemAvailable-of-MemTotal percentage treated as real pressure, evaluated as the worst case across the nodes runner pods may use (see the kubectl top nodes block below) - no swap-pressure equivalent, see that block's own comment for why
 # - AUTOSCALER_NODE_SELECTOR: a label selector (key=value) naming the nodes runner pods may be placed on, the role's node eligibility label; empty means every node. Only those nodes' memory is read, so a node that runs no runner pod, and whose metrics go missing when it drops out, never lowers the pool
+# - AUTOSCALER_NODE_PRESSURE_CONFIGMAP: the ConfigMap the psi-reporter DaemonSet (scripts/psi-reporter.sh) keeps each node's own pressure stall figures in, in AUTOSCALER_STATE_NAMESPACE. Empty means no node-pressure signal, as before. With it set, a node over AUTOSCALER_IO_PRESSURE_PCT (the "full" avg10 of /proc/pressure/io, default 10) or over AUTOSCALER_CPU_PRESSURE_PCT (the "some" avg10 of /proc/pressure/cpu, default 0, which turns the cpu signal off) lowers the pooled total by one each poll, never below the running count, and a node with no report newer than three polls is not a reason to raise.
 # - AUTOSCALER_TARGETS: the AutoscalingRunnerSets to pool, as whitespace-separated namespace/release tokens (one per scale-set profile with autoscale: true; see plugins/filter/arc.py's own target field, which is exactly this namespace/release form)
 # - AUTOSCALER_STATE_NAMESPACE, AUTOSCALER_STATUS_CONFIGMAP: the ConfigMap this pod's own status/raise-confirm-count state lives in (shared with scripts/heartbeat.sh, which reads status.json back out to republish in the heartbeat gist)
 set -euo pipefail
@@ -23,6 +24,14 @@ FLOOR="${AUTOSCALER_FLOOR:?AUTOSCALER_FLOOR must be set}"
 RAISE_CONFIRM_POLLS="${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}"
 MEM_AVAILABLE_PRESSURE_PCT="${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}"
 NODE_SELECTOR="${AUTOSCALER_NODE_SELECTOR:-}"
+NODE_PRESSURE_CONFIGMAP="${AUTOSCALER_NODE_PRESSURE_CONFIGMAP:-}"
+# Linux's own reading of "full" stall for I/O: the share of the last ten seconds in which every task on the node was waiting on I/O. A node doing its work shows well under a percent; the ones that made jobs miss their timeouts showed 20 to 50. Ten is where a disk is the limit, not a moment.
+IO_PRESSURE_PCT="${AUTOSCALER_IO_PRESSURE_PCT:-10}"
+# Off by default: a busy node's "some" for cpu is normally high, and there is no figure here yet for where it starts to cost jobs.
+CPU_PRESSURE_PCT="${AUTOSCALER_CPU_PRESSURE_PCT:-0}"
+# A report older than this many polls counts as no report, since a reporter that has stopped says nothing about the node.
+NODE_PRESSURE_MAX_AGE_POLLS=3
+POLL_SECONDS="${AUTOSCALER_POLL_SECONDS:-45}"
 STATE_NAMESPACE="${AUTOSCALER_STATE_NAMESPACE:-github-runner-platform}"
 CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 # Where each job's observed peak memory is kept, in the same ConfigMap. A ConfigMap holds at most 1 MiB and an entry is under 512 bytes, so capping the entries at 2048 stays at half the limit; entries unseen for 30 days are dropped, since a job that has not run for that long no longer informs sizing.
@@ -334,18 +343,53 @@ if [ "$mem_available_pct" -lt "$MEM_AVAILABLE_PRESSURE_PCT" ]; then
   pressure=true
 fi
 
+# Per-node pressure from the reporters, when there are any. The eligible nodes are read from the cluster and each one's entry from the shared ConfigMap, so a node whose reporter is missing or stopped is seen as unmeasured instead of being left out.
+node_pressure=false
+node_pressure_reason=""
+unmeasured_nodes=0
+if [ -n "$NODE_PRESSURE_CONFIGMAP" ]; then
+  NODES_ARGS=(get nodes -o name)
+  [ -n "$NODE_SELECTOR" ] && NODES_ARGS+=(-l "$NODE_SELECTOR")
+  ELIGIBLE_NODES="$(kubectl "${NODES_ARGS[@]}" 2>/dev/null)" || fail_safe "could not list the nodes runner pods may use"
+  PRESSURE_DATA="$(kubectl get configmap "$NODE_PRESSURE_CONFIGMAP" -n "$STATE_NAMESPACE" -o json 2>/dev/null | jq -c '.data // {}')" \
+    || fail_safe "could not read the node pressure ConfigMap ${NODE_PRESSURE_CONFIGMAP}"
+  now="$(date +%s)"
+  max_age=$(( NODE_PRESSURE_MAX_AGE_POLLS * POLL_SECONDS ))
+  while read -r node_ref; do
+    [ -n "$node_ref" ] || continue
+    node="${node_ref#node/}"
+    entry="$(jq -r --arg n "$node" '.[$n] // empty' <<< "$PRESSURE_DATA")"
+    reported_at="$(jq -r '.at // empty' <<< "${entry:-null}" 2>/dev/null || true)"
+    case "$reported_at" in ''|*[!0-9]*) unmeasured_nodes=$(( unmeasured_nodes + 1 )); continue ;; esac
+    if [ $(( now - reported_at )) -gt "$max_age" ]; then
+      unmeasured_nodes=$(( unmeasured_nodes + 1 ))
+      continue
+    fi
+    io_full="$(jq -r '.io_full_avg10 // 0' <<< "$entry")"
+    cpu_some="$(jq -r '.cpu_some_avg10 // 0' <<< "$entry")"
+    # Percentages come as decimals ("19.41"); the comparison is awk's, not bash's integers.
+    if awk -v v="$io_full" -v t="$IO_PRESSURE_PCT" 'BEGIN { exit !(v >= t) }'; then
+      node_pressure=true
+      node_pressure_reason="${node} io stall ${io_full}% >= ${IO_PRESSURE_PCT}%"
+    elif [ "$CPU_PRESSURE_PCT" != "0" ] && awk -v v="$cpu_some" -v t="$CPU_PRESSURE_PCT" 'BEGIN { exit !(v >= t) }'; then
+      node_pressure=true
+      node_pressure_reason="${node} cpu stall ${cpu_some}% >= ${CPU_PRESSURE_PCT}%"
+    fi
+  done <<< "$ELIGIBLE_NODES"
+fi
+
 # ---- Algorithm ---------------------------------------------------------
 
 USABLE_BUDGET_MIB=$(( USABLE_BUDGET_GI * 1024 ))
 HEADROOM_MIB=$(( USABLE_BUDGET_MIB - USAGE_MIB ))
 
-echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} unschedulable=${UNSCHEDULABLE_TOTAL} targets=${TARGETS[*]}"
+echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} node_pressure=${node_pressure} unmeasured_nodes=${unmeasured_nodes} unschedulable=${UNSCHEDULABLE_TOTAL} targets=${TARGETS[*]}"
 
 # The ceiling is a hard cap on the pooled total, so a total above it (each profile's own static maxRunners can sum to more, and every Helm upgrade restores those) is lowered to it even when nothing else is wrong.
 over_ceiling=false
 [ "$MAX_TOTAL" -gt "$MAX_CEILING" ] && over_ceiling=true
 
-if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] || [ "$over_ceiling" = "true" ]; then
+if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] || [ "$over_ceiling" = "true" ] || [ "$node_pressure" = "true" ]; then
   # Lower immediately, no delay or averaging — lowering never disrupts in-flight jobs (ARC only gates new claims), so there is no cost to being trigger-happy in this direction. Can drop below FLOOR (even to 0, spread across targets by lower_to) if pressure is severe enough.
   configmap_set "raise-confirm-count" "0"
   configmap_set "$REBALANCE_CONFIRM_KEY" "0"
@@ -354,12 +398,17 @@ if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDU
   if [ "$pressure" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$UNSCHEDULABLE_TOTAL" -eq 0 ]; then
     target_total=$MAX_CEILING
   fi
+  # Only a node's own pressure: the pool has the memory, so it steps down by one a poll, not to the floor, and stops at the running count.
+  if [ "$node_pressure" = "true" ] && [ "$pressure" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$UNSCHEDULABLE_TOTAL" -eq 0 ] && [ "$over_ceiling" != "true" ]; then
+    target_total=$(( MAX_TOTAL - 1 ))
+  fi
   [ "$pressure" = "true" ] && target_total=1
   [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] && target_total=0 # clamped to R_TOTAL below: stop asking for runners no node can host, never orphan a running job
   [ "$target_total" -lt "$R_TOTAL" ] && target_total=$R_TOTAL
   if [ "$target_total" -lt "$MAX_TOTAL" ]; then
     reason="lower: headroom=${HEADROOM_MIB}MiB < Wh=${WH_MIB}MiB"
     [ "$over_ceiling" = "true" ] && reason="lower: pooled maxRunners ${MAX_TOTAL} is above the ceiling ${MAX_CEILING}"
+    [ "$node_pressure" = "true" ] && reason="lower: node pressure (${node_pressure_reason})"
     [ "$pressure" = "true" ] && reason="lower: host pressure (mem_available=${mem_available_pct}%)"
     [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] && reason="lower: ${UNSCHEDULABLE_TOTAL} runner pod(s) unschedulable, so the budgeted capacity is not all schedulable"
     lower_to "$target_total"
@@ -367,7 +416,7 @@ if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDU
   else
     write_status "$MAX_TOTAL" "steady: already at or below the safe target" "$HEADROOM_MIB"
   fi
-elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ]; then
+elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ] && [ "$unmeasured_nodes" -eq 0 ]; then
   configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   confirm_count="$(configmap_get 'raise-confirm-count')"
   [ -n "$confirm_count" ] || confirm_count=0
@@ -380,6 +429,11 @@ elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ]; t
   else
     write_status "$MAX_TOTAL" "watching: headroom confirmed for ${confirm_count}/${RAISE_CONFIRM_POLLS} polls" "$HEADROOM_MIB"
   fi
+elif [ "$unmeasured_nodes" -gt 0 ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ]; then
+  # Headroom would raise the pool, but a node has no fresh pressure report, so whether it can take more is not known. Holding is the safe reading, and it is not lowering, since nothing says there is pressure.
+  configmap_set "raise-confirm-count" "0"
+  configmap_set "$REBALANCE_CONFIRM_KEY" "0"
+  write_status "$MAX_TOTAL" "steady: ${unmeasured_nodes} node(s) have no fresh pressure report, so the pool is not raised" "$HEADROOM_MIB"
 else
   # Here the pool is healthy and holds as many runners as it may (below the ceiling with enough headroom is the raise branch above; pressure, an unschedulable pod and a total over the ceiling are the lower branch). Slots are fixed per target, so a target that has used all of its own while another sits idle would queue for capacity the pool has. Move one slot at a time, and only once the same imbalance has been seen for as many polls as a raise needs, so a burst that ends within a poll or two moves nothing.
   configmap_set "raise-confirm-count" "0"

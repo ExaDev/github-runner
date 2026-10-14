@@ -498,6 +498,13 @@
                     value: "{{ github_runner_arc_fleet.autoscaled | map(attribute='target') | join(' ') }}"
                   - name: AUTOSCALER_STATUS_CONFIGMAP
                     value: autoscaler-status
+                  # Empty leaves node pressure out; with it set the autoscaler reads each node's reporter entry from this ConfigMap (tasks/install_psi_reporter.yml).
+                  - name: AUTOSCALER_NODE_PRESSURE_CONFIGMAP
+                    value: "{{ github_runner_arc_node_pressure_configmap if github_runner_arc_autoscaler_node_pressure_enabled | bool else '' }}"
+                  - name: AUTOSCALER_IO_PRESSURE_PCT
+                    value: "{{ github_runner_arc_autoscaler_io_pressure_pct | string }}"
+                  - name: AUTOSCALER_CPU_PRESSURE_PCT
+                    value: "{{ github_runner_arc_autoscaler_cpu_pressure_pct | string }}"
                 resources:
                   requests:
                     cpu: "50m"
@@ -507,3 +514,7 @@
                     cpu: "200m"
                     memory: "64Mi"
                     ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_limit }}"
+
+# The per-node pressure reporters the autoscaler reads, or their removal when turned off.
+- name: "Platform: install the node pressure reporter, or remove it when turned off"
+  ansible.builtin.include_tasks: install_psi_reporter.yml

@@ -1,0 +1,175 @@
+---
+# The per-node pressure reporter (scripts/psi-reporter.sh) and what the autoscaler needs to read it, installed when github_runner_arc_autoscaler_node_pressure_enabled is on and a profile is autoscaled, removed otherwise. One DaemonSet pod on each node runner pods may use, with the host's /proc/pressure mounted read-only; each patches its own node's key of one shared ConfigMap. Like the autoscaler's own state ConfigMap, that one is pre-created empty, so no ServiceAccount here is granted `create`, only get/patch scoped by resourceNames.
+
+- name: "Platform: decide whether the node pressure reporter is wanted"
+  ansible.builtin.set_fact:
+    github_runner_arc_psi_reporter_wanted: "{{ github_runner_arc_autoscaler_node_pressure_enabled | bool and github_runner_arc_fleet.autoscaled | length > 0 }}"
+
+- name: "Platform: remove the node pressure reporter and its state when it is not wanted"
+  when: not github_runner_arc_psi_reporter_wanted
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api_version }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ github_runner_arc_platform_namespace }}"
+  loop:
+    - api_version: apps/v1
+      kind: DaemonSet
+      name: psi-reporter
+    - api_version: v1
+      kind: ConfigMap
+      name: "{{ github_runner_arc_node_pressure_configmap }}"
+    - api_version: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      name: psi-reporter
+    - api_version: rbac.authorization.k8s.io/v1
+      kind: Role
+      name: psi-reporter
+    - api_version: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      name: github-runner-autoscaler-node-pressure-reader
+    - api_version: rbac.authorization.k8s.io/v1
+      kind: Role
+      name: github-runner-autoscaler-node-pressure-reader
+    - api_version: v1
+      kind: ServiceAccount
+      name: psi-reporter
+
+- name: "Platform: install the node pressure reporter"
+  when: github_runner_arc_psi_reporter_wanted
+  block:
+    - name: "Platform: node pressure reporter service account"
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: psi-reporter
+            namespace: "{{ github_runner_arc_platform_namespace }}"
+
+    - name: "Platform: node pressure RBAC - the reporters patch the shared ConfigMap, the autoscaler reads it"
+      kubernetes.core.k8s:
+        definition: "{{ item }}"
+      loop:
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: psi-reporter
+            namespace: "{{ github_runner_arc_platform_namespace }}"
+          rules:
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames: ["{{ github_runner_arc_node_pressure_configmap }}"]
+              verbs: ["get", "patch"]
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: psi-reporter
+            namespace: "{{ github_runner_arc_platform_namespace }}"
+          subjects:
+            - kind: ServiceAccount
+              name: psi-reporter
+              namespace: "{{ github_runner_arc_platform_namespace }}"
+          roleRef:
+            kind: Role
+            name: psi-reporter
+            apiGroup: rbac.authorization.k8s.io
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: Role
+          metadata:
+            name: github-runner-autoscaler-node-pressure-reader
+            namespace: "{{ github_runner_arc_platform_namespace }}"
+          rules:
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames: ["{{ github_runner_arc_node_pressure_configmap }}"]
+              verbs: ["get"]
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: github-runner-autoscaler-node-pressure-reader
+            namespace: "{{ github_runner_arc_platform_namespace }}"
+          subjects:
+            - kind: ServiceAccount
+              name: autoscaler
+              namespace: "{{ github_runner_arc_platform_namespace }}"
+          roleRef:
+            kind: Role
+            name: github-runner-autoscaler-node-pressure-reader
+            apiGroup: rbac.authorization.k8s.io
+
+    - name: "Platform: check whether the node pressure ConfigMap exists"
+      kubernetes.core.k8s_info:
+        kind: ConfigMap
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+        name: "{{ github_runner_arc_node_pressure_configmap }}"
+      register: github_runner_arc_node_pressure_configmap_state
+
+    - name: "Platform: pre-create the node pressure ConfigMap"
+      when: github_runner_arc_node_pressure_configmap_state.resources | length == 0
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "{{ github_runner_arc_node_pressure_configmap }}"
+            namespace: "{{ github_runner_arc_platform_namespace }}"
+          data: {}
+
+    # The autoscaler's own image carries the script, so there is no image of its own to build. It runs on every node runner pods may use, taints included: a node that carries a taint to keep other workloads off is exactly one whose pressure matters, so it tolerates everything.
+    - name: "Platform: install/upgrade the node pressure reporter DaemonSet"
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: psi-reporter
+            namespace: "{{ github_runner_arc_platform_namespace }}"
+          spec:
+            selector:
+              matchLabels:
+                app: psi-reporter
+            template:
+              metadata:
+                labels:
+                  app: psi-reporter
+              spec:
+                serviceAccountName: psi-reporter
+                priorityClassName: "{{ github_runner_arc_platform_priority_class_name }}"
+                imagePullSecrets: "{{ github_runner_arc_platform_image_pull_secrets }}"
+                nodeSelector: "{{ {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {} }}"
+                tolerations:
+                  - operator: Exists
+                containers:
+                  - name: psi-reporter
+                    image: "{{ github_runner_arc_autoscaler_image }}"
+                    command: ["/app/scripts/psi-reporter.sh"]
+                    env:
+                      - name: NODE_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: spec.nodeName
+                      - name: NAMESPACE
+                        value: "{{ github_runner_arc_platform_namespace }}"
+                      - name: NODE_PRESSURE_CONFIGMAP
+                        value: "{{ github_runner_arc_node_pressure_configmap }}"
+                      - name: REPORT_SECONDS
+                        value: "{{ github_runner_arc_psi_reporter_seconds | string }}"
+                    volumeMounts:
+                      - name: pressure
+                        mountPath: /host-pressure
+                        readOnly: true
+                    resources:
+                      requests:
+                        cpu: "10m"
+                        memory: "16Mi"
+                        ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_request }}"
+                      limits:
+                        cpu: "50m"
+                        memory: "32Mi"
+                        ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_limit }}"
+                volumes:
+                  - name: pressure
+                    hostPath:
+                      path: /proc/pressure

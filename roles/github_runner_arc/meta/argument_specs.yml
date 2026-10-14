@@ -288,6 +288,26 @@ argument_specs:
         type: int
         default: 15
         description: Available memory percentage below which the autoscaler treats a node as under pressure.
+      github_runner_arc_autoscaler_node_pressure_enabled:
+        type: bool
+        default: false
+        description: Installs a per-node reporter of /proc/pressure (a DaemonSet on the nodes runner pods may use) and has the autoscaler lower maxRunners by one a poll while a node's pressure is over the thresholds below, and hold off raising it while a node has no recent report. Needs an autoscaled profile.
+      github_runner_arc_autoscaler_io_pressure_pct:
+        type: int
+        default: 10
+        description: The "full" avg10 of a node's /proc/pressure/io, in percent, at or over which the autoscaler treats the node as under pressure. Used with github_runner_arc_autoscaler_node_pressure_enabled.
+      github_runner_arc_autoscaler_cpu_pressure_pct:
+        type: int
+        default: 0
+        description: The "some" avg10 of a node's /proc/pressure/cpu, in percent, at or over which the autoscaler treats the node as under pressure; 0 leaves the cpu signal off. Used with github_runner_arc_autoscaler_node_pressure_enabled.
+      github_runner_arc_node_pressure_configmap:
+        type: str
+        default: autoscaler-node-pressure
+        description: The ConfigMap in the platform namespace that each node's reporter patches its own key of.
+      github_runner_arc_psi_reporter_seconds:
+        type: int
+        default: 15
+        description: Seconds between each reporter's reports. The autoscaler treats a report older than three of its polls as no report.
       github_runner_arc_node_recovery_enabled:
         type: bool
         default: true
