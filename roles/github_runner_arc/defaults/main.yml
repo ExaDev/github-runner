@@ -90,6 +90,9 @@ github_runner_arc_listener_metrics_endpoint: "/metrics"
 github_runner_arc_listener_probes_enabled: false
 github_runner_arc_listener_probe_port: 8080
 
+# Runs the controller and every listener under the platform's PriorityClass (github_runner_arc_platform_priority_class_name), which the role creates whether or not the platform is installed. A listener is one pod per scale set that ARC cannot replicate, and while it waits to be scheduled no new jobs are assigned, so one that was rescheduled on a full node waits behind runner pods at the default priority. With the class it can take a node's room from a runner pod, whose job ARC retries. An upgrade also reschedules every controller replica together. Off by default, as it changes what a full node evicts.
+github_runner_arc_control_pods_priority_enabled: false
+
 # Node eligibility by label. When the key is set, the controller, every listener and every runner pod get a nodeSelector for key=value, the autoscaler reads memory pressure only from nodes carrying it, and the role labels each node named in github_runner_arc_labelled_nodes with it (nodes labelled some other way need not be listed). A label rather than a taint keeps the cluster's other workloads unaffected. A profile's own node_selector is merged over this.
 github_runner_arc_node_label_key: ""
 github_runner_arc_node_label_value: "true"

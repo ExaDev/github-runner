@@ -1,0 +1,16 @@
+---
+# Renders the github_runner_arc role's controller values (templates/controller-values.yaml.j2) with the role's defaults and constants, for tests/unit/test_scale_set_overlay.py. Run with -e overlay_output=<path>, plus any role variable to override.
+- name: Render the controller values
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_arc/defaults/main.yml
+    - ../../roles/github_runner_arc/vars/main.yml
+  tasks:
+    - name: Write the values
+      ansible.builtin.copy:
+        # With every option at its default the template renders to nothing, which copy rejects as no content, so an empty mapping stands for it.
+        content: "{{ (lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_arc/templates/controller-values.yaml.j2') | trim) or '{}' }}"
+        dest: "{{ overlay_output }}"
+        mode: "0644"

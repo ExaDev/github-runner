@@ -166,6 +166,10 @@ argument_specs:
         type: int
         default: 8080
         description: Port the listener probes poll.
+      github_runner_arc_control_pods_priority_enabled:
+        type: bool
+        default: false
+        description: Runs the controller and every listener under the platform's PriorityClass (github_runner_arc_platform_priority_class_name), so a rescheduled listener can take a full node's room from a runner pod instead of waiting behind it.
       github_runner_arc_node_label_key:
         type: str
         default: ""

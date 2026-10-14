@@ -16,6 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugins" / "filter" / "arc.py"
 RENDER = ROOT / "tests" / "scale_set_overlay" / "render.yml"
+RENDER_CONTROLLER = ROOT / "tests" / "scale_set_overlay" / "render_controller.yml"
 _spec = importlib.util.spec_from_file_location("arc_filters", PLUGIN)
 assert _spec is not None and _spec.loader is not None
 arc = importlib.util.module_from_spec(_spec)
@@ -47,12 +48,39 @@ def render(profile: dict[str, Any], **role_vars: Any) -> dict[str, Any]:
         return rendered
 
 
+def render_controller(**role_vars: Any) -> dict[str, Any]:
+    """Render the controller values with ansible-playbook and return them parsed, an empty dict when nothing is set."""
+    with tempfile.TemporaryDirectory() as work:
+        output = Path(work) / "controller.yaml"
+        extra = Path(work) / "extra.json"
+        extra.write_text(json.dumps({"overlay_output": str(output), **role_vars}))
+        env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false"}
+        subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(RENDER_CONTROLLER), "-e", f"@{extra}"], check=True, env=env, cwd=work, capture_output=True, text=True)
+        rendered: dict[str, Any] | None = yaml.safe_load(output.read_text())
+        return rendered or {}
+
+
+class ControllerTest(unittest.TestCase):
+    def test_the_controller_runs_under_the_platform_priority_class_only_when_asked(self) -> None:
+        self.assertEqual(render_controller(github_runner_arc_control_pods_priority_enabled=True)["priorityClassName"], "github-runner-platform")
+        self.assertEqual(render_controller(github_runner_arc_control_pods_priority_enabled=True, github_runner_arc_platform_priority_class_name="ci-control")["priorityClassName"], "ci-control")
+        self.assertNotIn("priorityClassName", render_controller())
+
+
 class OverlayTest(unittest.TestCase):
     def test_without_burst_the_runner_pods_keep_the_eligibility_node_selector(self) -> None:
         overlay = render(expanded({"sizing": SIZING, "node_selector": {"kubernetes.io/arch": "amd64"}}), github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true")
         self.assertEqual(overlay["template"]["spec"], {"nodeSelector": {ELIGIBLE: "true", "kubernetes.io/arch": "amd64"}})
         self.assertEqual(overlay["maxRunners"], 24)
         self.assertEqual(overlay["listenerTemplate"]["spec"]["nodeSelector"], {ELIGIBLE: "true"})
+
+    def test_the_listener_runs_under_the_platform_priority_class_only_when_asked(self) -> None:
+        profile = expanded({"sizing": SIZING})
+        asked = render(profile, github_runner_arc_control_pods_priority_enabled=True)
+        self.assertEqual(asked["listenerTemplate"]["spec"]["priorityClassName"], "github-runner-platform")
+        self.assertEqual(render(profile, github_runner_arc_control_pods_priority_enabled=True, github_runner_arc_platform_priority_class_name="ci-control")["listenerTemplate"]["spec"]["priorityClassName"], "ci-control")
+        self.assertNotIn("listenerTemplate", render(profile))
+        self.assertNotIn("priorityClassName", render(profile, github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true")["listenerTemplate"]["spec"])
 
     def test_burst_places_the_runner_pods_by_affinity_and_adds_the_burst_runners(self) -> None:
         overlay = render(expanded({"sizing": SIZING, "burst": BURST}), github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true")
