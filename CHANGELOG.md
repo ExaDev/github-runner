@@ -1,3 +1,10 @@
+# [1.31.0](https://github.com/ExaDev/github-runner/compare/v1.30.1...v1.31.0) (2026-10-14)
+
+
+### Features
+
+* **arc:** add a node-cache capability that shares a node directory between a profile's pods ([39c55dc](https://github.com/ExaDev/github-runner/commit/39c55dc0e095d0d0d64c1d6f7918ff12434f402e))
+
 ## [1.30.1](https://github.com/ExaDev/github-runner/compare/v1.30.0...v1.30.1) (2026-10-14)
 
 
