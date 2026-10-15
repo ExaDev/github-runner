@@ -40,6 +40,15 @@ class ImageContentsTest(unittest.TestCase):
                 self.assertIn(f"/app/scripts/{script}", chmod.group(1).split())
 
 
+    def test_the_image_installs_bash_on_an_alpine_whose_bash_is_new_enough_for_the_scripts(self) -> None:
+        # The scripts are written to run on any bash (an empty array expansion is guarded), but the image is Alpine 3.20, whose bash package is 5.2.26 (https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz), and a base image older than the releases that carry bash 4.4 or later would be a regression.
+        dockerfile = DOCKERFILE.read_text()
+        base = re.search(r"^FROM alpine:(\d+)\.(\d+)", dockerfile, flags=re.MULTILINE)
+        assert base is not None
+        self.assertGreaterEqual((int(base.group(1)), int(base.group(2))), (3, 6))
+        self.assertRegex(dockerfile, r"apk add --no-cache[^\n]*\bbash\b")
+
+
 class ReleaseTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

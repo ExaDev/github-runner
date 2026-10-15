@@ -88,15 +88,15 @@ FAKE_DU = textwrap.dedent(
     """
 )
 
-# rmdir that fails while FAKE_RMDIR_FAIL is set, which is how a directory that something has written to since it was emptied looks to the pruner, and otherwise is the real one.
+# rmdir that fails as scripted by FAKE_RMDIR_FAIL, and otherwise is the real one. "notempty" is a directory something wrote to after the pruner emptied it: the stub writes a file into it and then fails as rmdir does on a directory with something in it. Any other value is a failure for another reason, leaving the directory empty, with that text as rmdir's message.
 FAKE_RMDIR = textwrap.dedent(
     """\
     #!/bin/sh
-    if [ -n "$FAKE_RMDIR_FAIL" ]; then
-      echo "rmdir: failed to remove: Directory not empty" >&2
-      exit 1
-    fi
-    exec "$REAL_RMDIR" "$@"
+    case "$FAKE_RMDIR_FAIL" in
+      "") exec "$REAL_RMDIR" "$@";;
+      notempty) touch "$1/written-late"; echo "rmdir: failed to remove '$1': Directory not empty" >&2; exit 1;;
+      *) echo "rmdir: failed to remove '$1': $FAKE_RMDIR_FAIL" >&2; exit 1;;
+    esac
     """
 )
 
@@ -427,12 +427,41 @@ class PrunerTest(unittest.TestCase):
                 self.assertEqual(run.output.count("arc-gone/old"), 1, run.output)
 
     def test_an_unwanted_directory_something_was_written_to_after_it_was_emptied_is_kept_and_says_why(self) -> None:
-        run = self.run_pruner({"arc-gone/old": UNDER_KIB}, wanted=[], FAKE_RMDIR_FAIL="1")
-        self.assertTrue((run.root / "arc-gone" / "old").is_dir())
+        run = self.run_pruner({"arc-gone/old": UNDER_KIB}, wanted=[], FAKE_RMDIR_FAIL="notempty")
+        self.assertTrue((run.root / "arc-gone" / "old" / "written-late").exists())
         self.assertEqual(run.output.count("arc-gone/old"), 1, run.output)
         self.assertIn("deleted, but its directory is kept because it is not empty", run.output)
         self.assertNotIn("directory removed", run.output)
         self.assertNotIn("may mount it now", run.output)
+        self.assertNotIn("could not be removed", run.output)
+
+    def test_an_unwanted_directory_that_rmdir_cannot_remove_for_another_reason_reports_rmdirs_error(self) -> None:
+        run = self.run_pruner({"arc-gone/old": UNDER_KIB}, wanted=[], FAKE_RMDIR_FAIL="Device or resource busy")
+        self.assertTrue((run.root / "arc-gone" / "old").is_dir())
+        self.assertEqual(list((run.root / "arc-gone" / "old").iterdir()), [])
+        self.assertEqual(len(run.output.splitlines()), 1, run.output)
+        self.assertRegex(run.output, r"deleted, but its directory could not be removed: rmdir: failed to remove '[^']+': Device or resource busy")
+        self.assertNotIn("not empty", run.output)
+
+    def test_an_unwanted_directory_with_nothing_in_it_is_removed_by_a_pruner_running_on_bash_3(self) -> None:
+        # An empty array is an unbound variable under set -u before bash 4.4; macOS ships bash 3.2, so where an old bash is present the empty-entries case runs on it.
+        for candidate in ("/bin/bash", "/usr/bin/bash"):
+            if not Path(candidate).exists():
+                continue
+            version = subprocess.run([candidate, "-c", "echo ${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"], capture_output=True, text=True, check=False).stdout.split()
+            if len(version) == 2 and (int(version[0]), int(version[1])) < (4, 4):
+                root, bin_dir, state = self.setup_work()
+                (root / "arc-gone" / "old").mkdir(parents=True)
+                completed = subprocess.run([candidate, str(SCRIPT)], env=self.environment(root, bin_dir, state, None, [], {}), capture_output=True, text=True, check=False)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertFalse((root / "arc-gone").exists())
+                return
+        self.skipTest("no bash older than 4.4 here")
+
+    def test_the_entries_are_expanded_in_a_way_that_is_safe_for_an_empty_array_on_any_bash(self) -> None:
+        text = SCRIPT.read_text()
+        self.assertIn('${entries[@]+"${entries[@]}"}', text)
+        self.assertNotIn('in "${entries[@]}"', text)
 
     def test_a_pod_being_deleted_but_still_running_counts_as_using_the_cache(self) -> None:
         run = self.run_pruner({"arc-a/main": OVER_KIB}, pods=[pod("arc-a/main", deleting=True)], wanted=["arc-a/main"])

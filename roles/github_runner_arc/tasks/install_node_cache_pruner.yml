@@ -1,16 +1,26 @@
 ---
 # The node cache pruner (scripts/node-cache-pruner.sh, manifests in templates/node-cache-pruner.yaml.j2): a DaemonSet that keeps each profile's node cache under github_runner_arc_node_cache_size_limit_gib and clears the directories of profiles that no longer have a cache. See decide_node_cache_pruner.yml for when it runs.
 
-# Release 1.31.0 installed the pruner with a cluster-wide grant to list pods, under this name; nothing of it is wanted any more, so it is removed on every run, whether or not the pruner is, binding before role. This cleanup is kept only for fleets that may still be upgrading from 1.31.0, and goes once none can be (tracked in ExaDev/github-runner#92, with the test that asserts it).
-- name: "Node cache: remove the cluster-wide pod access an earlier release granted"
-  kubernetes.core.k8s:
-    state: absent
+# Release 1.31.0 installed the pruner with a cluster-wide grant to list pods, under the name node-cache-pruner and with no labels; nothing of it is wanted any more. It is looked up first and removed only if what the cluster holds is exactly what 1.31.0 created (see arc_node_cache_legacy_access), so a fleet that never ran 1.31.0 deletes nothing and needs no right to, and another software's object of the same name is left alone. Binding before role. This cleanup is kept only for fleets that may still be upgrading from 1.31.0, and goes once none can be (tracked in ExaDev/github-runner#92, with the tests that assert it).
+- name: "Node cache: look for the cluster-wide pod access an earlier release granted"
+  kubernetes.core.k8s_info:
     api_version: rbac.authorization.k8s.io/v1
     kind: "{{ item }}"
     name: node-cache-pruner
   loop:
     - ClusterRoleBinding
     - ClusterRole
+  register: github_runner_arc_node_cache_legacy_access
+
+- name: "Node cache: remove the cluster-wide pod access an earlier release granted"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+  loop: "{{ github_runner_arc_node_cache_legacy_access.results | map(attribute='resources') | flatten | exadev.github_runner.arc_node_cache_legacy_access(github_runner_arc_platform_namespace) }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.name }}"
 
 - name: "Node cache: decide what the pruner needs"
   ansible.builtin.include_tasks: decide_node_cache_pruner.yml
