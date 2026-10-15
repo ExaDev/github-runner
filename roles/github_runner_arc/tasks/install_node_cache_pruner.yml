@@ -1,7 +1,7 @@
 ---
 # The node cache pruner (scripts/node-cache-pruner.sh, manifests in templates/node-cache-pruner.yaml.j2): a DaemonSet that keeps each profile's node cache under github_runner_arc_node_cache_size_limit_gib and clears the directories of profiles that no longer have a cache. See decide_node_cache_pruner.yml for when it runs.
 
-# Release 1.31.0 installed the pruner with a cluster-wide grant to list pods, under the name node-cache-pruner and with no labels; nothing of it is wanted any more. It is looked up first and removed only if what the cluster holds is exactly what 1.31.0 created (see arc_node_cache_legacy_access), so a fleet that never ran 1.31.0 deletes nothing and needs no right to, and another software's object of the same name is left alone. Binding before role. This cleanup is kept only for fleets that may still be upgrading from 1.31.0, and goes once none can be (tracked in ExaDev/github-runner#92, with the tests that assert it).
+# Release 1.31.0 installed the pruner with a cluster-wide grant to list pods, under the name node-cache-pruner and with no labels; nothing of it is wanted any more. It is looked up first and removed only if what the cluster holds is what 1.31.0 created (see arc_node_cache_legacy_access), so another software's object of the same name is left alone, and a role whose binding is not ours is left with it and reported. The lookup needs the Ansible credential to be allowed to get ClusterRoles and ClusterRoleBindings (cluster-scoped, read-only), also on a fleet that never ran 1.31.0; it deletes, and so needs delete on them, only when it finds the 1.31.0 objects. Binding before role. This cleanup is kept only for fleets that may still be upgrading from 1.31.0, and goes once none can be (tracked in ExaDev/github-runner#92, with the tests that assert it).
 - name: "Node cache: look for the cluster-wide pod access an earlier release granted"
   kubernetes.core.k8s_info:
     api_version: rbac.authorization.k8s.io/v1
@@ -10,7 +10,11 @@
   loop:
     - ClusterRoleBinding
     - ClusterRole
-  register: github_runner_arc_node_cache_legacy_access
+  register: github_runner_arc_node_cache_legacy_lookup
+
+- name: "Node cache: decide what to do with the cluster-wide pod access an earlier release granted"
+  ansible.builtin.set_fact:
+    github_runner_arc_node_cache_legacy_access: "{{ github_runner_arc_node_cache_legacy_lookup.results | map(attribute='resources') | flatten | exadev.github_runner.arc_node_cache_legacy_access(github_runner_arc_platform_namespace) }}"
 
 - name: "Node cache: remove the cluster-wide pod access an earlier release granted"
   kubernetes.core.k8s:
@@ -18,9 +22,14 @@
     api_version: rbac.authorization.k8s.io/v1
     kind: "{{ item.kind }}"
     name: "{{ item.name }}"
-  loop: "{{ github_runner_arc_node_cache_legacy_access.results | map(attribute='resources') | flatten | exadev.github_runner.arc_node_cache_legacy_access(github_runner_arc_platform_namespace) }}"
+  loop: "{{ github_runner_arc_node_cache_legacy_access.remove }}"
   loop_control:
     label: "{{ item.kind }}/{{ item.name }}"
+
+- name: "Node cache: report the cluster-wide pod access left in place"
+  ansible.builtin.debug:
+    msg: "{{ github_runner_arc_node_cache_legacy_access.left | join(' ') }}"
+  when: github_runner_arc_node_cache_legacy_access.left | length > 0
 
 - name: "Node cache: decide what the pruner needs"
   ansible.builtin.include_tasks: decide_node_cache_pruner.yml

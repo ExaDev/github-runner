@@ -943,29 +943,43 @@ def arc_bounded_integer_errors(value: Any, name: str, maximum: int, pattern: str
     return []
 
 
-def arc_node_cache_legacy_access(found: Sequence[Mapping[str, Any]], platform_namespace: str) -> list[dict[str, str]]:
-    """Return the ClusterRoleBinding and ClusterRole named node-cache-pruner that release 1.31.0 created, as kind and name in the order found (the tasks look the binding up first, so it is removed before the role it binds), and nothing that merely shares the name.
+def arc_node_cache_legacy_access(found: Sequence[Mapping[str, Any]], platform_namespace: str) -> dict[str, list[Any]]:
+    """Return what to remove of the ClusterRoleBinding and ClusterRole named node-cache-pruner that release 1.31.0 created, and what to report instead, and nothing that merely shares the name.
 
-    Release 1.31.0 put no labels on them, so what identifies them is their content, which was exactly this: a ClusterRole whose only rule lists pods, and a ClusterRoleBinding that binds that ClusterRole to the node-cache-pruner ServiceAccount of the platform namespace and to nothing else. An object with that name and any other content belongs to someone else and is left alone.
+    Release 1.31.0 put no labels on them, so what identifies them is their content, which was exactly this: a ClusterRole, not aggregated, whose only rule lists pods, and a ClusterRoleBinding that binds that ClusterRole to the node-cache-pruner ServiceAccount of the platform namespace and to nothing else. An object with that name and any other content belongs to someone else and is left alone.
+
+    The two go together. The binding is removed when it is ours, and the role when it is ours and the binding is gone or ours. A ClusterRole that is ours while a binding of that name exists that is not (the platform namespace changed since 1.31.0, or another subject was added) is left with it: removing the role would leave that binding to grant cluster-wide pod listing again if a ClusterRole of the name ever reappeared. That case is reported in ``left``, once, with a stable message.
 
     Args:
-        found: the ClusterRoles and ClusterRoleBindings called node-cache-pruner, as the cluster returned them. platform_namespace: the namespace the pruner's ServiceAccount is in.
+        found: the ClusterRoles and ClusterRoleBindings called node-cache-pruner, as the cluster returned them, the binding first. platform_namespace: the namespace the pruner's ServiceAccount is in.
+
+    Returns:
+        ``remove``, the kind and name of each object to delete in the order found (the binding before the role it binds), and ``left``, messages that start with NODE_CACHE_LEGACY_ACCESS_LEFT for whatever is deliberately left in place.
     """
     own_rules = [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}]
     own_subject = {"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": platform_namespace}
-    ours: list[dict[str, str]] = []
-    for resource in found:
-        name = resource.get("metadata", {}).get("name")
-        if name != "node-cache-pruner":
-            continue
-        if resource.get("kind") == "ClusterRole" and resource.get("rules") == own_rules:
-            ours.append({"kind": "ClusterRole", "name": name})
-        elif resource.get("kind") == "ClusterRoleBinding":
-            subjects = resource.get("subjects") or []
-            role_ref = resource.get("roleRef") or {}
-            if len(subjects) == 1 and all(subjects[0].get(key) == value for key, value in own_subject.items()) and role_ref.get("kind") == "ClusterRole" and role_ref.get("name") == "node-cache-pruner":
-                ours.append({"kind": "ClusterRoleBinding", "name": name})
-    return ours
+    named = [resource for resource in found if resource.get("metadata", {}).get("name") == "node-cache-pruner"]
+    roles = [resource for resource in named if resource.get("kind") == "ClusterRole"]
+    bindings = [resource for resource in named if resource.get("kind") == "ClusterRoleBinding"]
+    role_is_ours = any(role.get("rules") == own_rules and not role.get("aggregationRule") for role in roles)
+
+    def binding_is_ours(binding: Mapping[str, Any]) -> bool:
+        subjects = binding.get("subjects") or []
+        role_ref = binding.get("roleRef") or {}
+        return len(subjects) == 1 and all(subjects[0].get(key) == value for key, value in own_subject.items()) and role_ref.get("kind") == "ClusterRole" and role_ref.get("name") == "node-cache-pruner"
+
+    ours = [binding for binding in bindings if binding_is_ours(binding)]
+    foreign = [binding for binding in bindings if not binding_is_ours(binding)]
+    remove: list[dict[str, str]] = [{"kind": "ClusterRoleBinding", "name": "node-cache-pruner"}] if ours else []
+    left: list[str] = []
+    if role_is_ours and foreign:
+        left.append(
+            "NODE_CACHE_LEGACY_ACCESS_LEFT ClusterRole/node-cache-pruner was created by release 1.31.0, but ClusterRoleBinding/node-cache-pruner binds a ClusterRole of that name to something else "
+            f"(subjects {foreign[0].get('subjects') or []}); both are left in place. Delete them by hand if they are not wanted."
+        )
+    elif role_is_ours:
+        remove.append({"kind": "ClusterRole", "name": "node-cache-pruner"})
+    return {"remove": remove, "left": left}
 
 
 def arc_label_selectors(labels: Mapping[str, str]) -> list[str]:

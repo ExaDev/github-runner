@@ -4,9 +4,12 @@
 # kubectl (read/patch the AutoscalingRunnerSet, kubectl top pod/nodes), jq,
 # and bash. Same shape as heartbeat/Dockerfile: Alpine keeps it arch-agnostic
 # and small. Build context is the repo root so it can COPY
-# scripts/autoscaler.sh; built and pushed multi-arch the same manual way as
-# the main runner image (see the README's Build/test section) so the image
-# is pullable from whichever node the scheduler places this pod on.
+# the scripts the role runs from it (autoscaler.sh, psi-reporter.sh,
+# node-cache-pruner.sh); built and pushed multi-arch by the release workflow
+# (.github/workflows/release.yml, build-images), tagged with the version the
+# role's defaults are stamped with, so the image is pullable from whichever
+# node the scheduler places a pod on and always carries the scripts of the
+# collection version that runs it.
 FROM alpine:3.20
 
 RUN apk add --no-cache bash curl jq kubectl

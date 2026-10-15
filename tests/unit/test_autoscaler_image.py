@@ -40,13 +40,18 @@ class ImageContentsTest(unittest.TestCase):
                 self.assertIn(f"/app/scripts/{script}", chmod.group(1).split())
 
 
-    def test_the_image_installs_bash_on_an_alpine_whose_bash_is_new_enough_for_the_scripts(self) -> None:
-        # The scripts are written to run on any bash (an empty array expansion is guarded), but the image is Alpine 3.20, whose bash package is 5.2.26 (https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz), and a base image older than the releases that carry bash 4.4 or later would be a regression.
+    def test_the_image_installs_bash_on_an_alpine_whose_bash_is_at_least_4_4(self) -> None:
+        # The scripts are written to run on any bash (an empty array expansion is guarded), and still ask for bash 4.4 or later of the image. Alpine's bash package by release, from its package index (https://dl-cdn.alpinelinux.org/alpine/v3.6/main/x86_64/APKINDEX.tar.gz, v3.7 and v3.20 likewise): 3.6 has 4.3.48, 3.7 has 4.4.19, and the image's 3.20 has 5.2.26. So 3.7 is the first Alpine release that qualifies.
         dockerfile = DOCKERFILE.read_text()
         base = re.search(r"^FROM alpine:(\d+)\.(\d+)", dockerfile, flags=re.MULTILINE)
         assert base is not None
-        self.assertGreaterEqual((int(base.group(1)), int(base.group(2))), (3, 6))
+        self.assertGreaterEqual((int(base.group(1)), int(base.group(2))), (3, 7))
         self.assertRegex(dockerfile, r"apk add --no-cache[^\n]*\bbash\b")
+
+    def test_the_dockerfiles_header_says_the_release_workflow_builds_the_image(self) -> None:
+        header = DOCKERFILE.read_text().split("FROM ")[0]
+        self.assertIn("release workflow", header)
+        self.assertNotIn("manual way", header)
 
 
 class ReleaseTest(unittest.TestCase):
