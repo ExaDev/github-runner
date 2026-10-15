@@ -1016,16 +1016,16 @@ def _node_cache_env(node_cache_path: str, capabilities: Sequence[tuple[str, Mapp
 
 
 def _node_cache_init_container(name: str, capability: Mapping[str, Any], node_cache_path: str, runner_user: int, runner_group: int) -> dict[str, Any]:
-    """Return the init container that creates a node-cache capability's subdirectories, owned by the runner's user. It runs as root, since the node's directory belongs to root until a pod claims it. Its capabilities are the three a root process needs once it has handed a directory to the runner user: CHOWN to hand it over, and DAC_OVERRIDE and FOWNER because root without them is an ordinary user of a directory it no longer owns, and cannot create the next subdirectory in it."""
+    """Return the init container that creates a node-cache capability's subdirectories, owned by the runner's user. It runs as root, since the node's directory belongs to root until a pod claims it. Its capabilities are CHOWN, to hand a directory to the runner user, and DAC_OVERRIDE, because root without it is an ordinary user of a directory it has handed over, or finds already owned by the runner user from an earlier pod or the pruner's emptying, and cannot create the next subdirectory in it."""
     root = node_cache_path.rstrip("/")
-    # The mount root is the profile's own directory, created by the kubelet as root. Owning it lets a job recreate a subdirectory the pruner has set aside, instead of failing on a directory it cannot write to.
+    # The mount root is the profile's own directory, created by the kubelet as root. The runner user owns it so that a job can recreate a subdirectory the pruner has set aside; this container recreates the capability's own subdirectories at the start of every pod.
     directories = [root] + [f"{root}/{subdirectory}" for subdirectory in capability["node_cache"]["dirs"].values()]
     return {
         "name": f"{_CAPABILITY_CONTAINER_PREFIX}{name}",
         "image": capability["node_cache"]["init_image"],
         # The image contract: a POSIX sh, mkdir and chown. chown is not recursive: what a pod creates under a directory is already the runner user's.
         "command": ["/bin/sh", "-c", 'owner=$1; shift; for directory in "$@"; do mkdir -p "$directory" && chown "$owner" "$directory"; done', "prepare-node-cache", f"{int(runner_user)}:{int(runner_group)}", *directories],
-        "securityContext": {"runAsUser": 0, "runAsNonRoot": False, "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE", "FOWNER"]}},
+        "securityContext": {"runAsUser": 0, "runAsNonRoot": False, "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE"]}},
         "volumeMounts": [{"name": _NODE_CACHE_VOLUME, "mountPath": node_cache_path}],
     }
 
