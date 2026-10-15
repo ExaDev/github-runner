@@ -845,10 +845,12 @@ def _copy_init_container(name: str, image: str, payload: str, volume: str, mount
 
 
 # Directories of the node that a node cache's host path may not be, or sit inside: the kernel's and the system's own, and the runtimes' state. The cache root is created and emptied as root, so it must be a directory of its own.
+# The node directories the cache root may not be, or sit inside. The system's own, then the state roots of the Kubernetes components and storage systems a node may run, each as its project documents it: the kubelet root (https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/), etcd under kubeadm (https://kubernetes.io/docs/reference/config-api/kubeadm-config.v1beta4/), k3s (https://docs.k3s.io/cli/server), containerd (https://github.com/containerd/containerd/blob/main/docs/ops.md), CRI-O's /var/lib/containers (https://github.com/cri-o/cri-o/blob/main/docs/crio.conf.5.md), Calico (https://github.com/projectcalico/calico, its manifests mount /var/lib/calico), Longhorn's default data path (https://github.com/longhorn/longhorn, chart values), Rook's dataDirHostPath (https://github.com/rook/rook, deploy/examples/cluster.yaml), Rancher's local-path-provisioner (https://github.com/rancher/local-path-provisioner), the local static provisioner's discovery directory (https://github.com/kubernetes-sigs/sig-storage-local-static-provisioner) and Headscale's data directory (https://github.com/juanfont/headscale, config-example.yaml). The name rule on the last component is the main protection; this list is defence in depth.
 _NODE_CACHE_DENIED_HOST_PATHS = (
     "/etc", "/proc", "/sys", "/dev", "/boot", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/home", "/tmp", "/var/tmp", "/var/run", "/var/log", "/var/cache", "/var/spool",
     "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker", "/var/lib/etcd", "/var/lib/dpkg", "/var/lib/apt", "/var/lib/systemd", "/var/lib/cni", "/var/lib/kubernetes",
     "/var/lib/k0s", "/var/lib/calico", "/var/lib/containers", "/var/lib/snapd", "/var/lib/k3s", "/var/lib/microk8s", "/var/lib/postgresql", "/var/lib/mysql",
+    "/var/lib/longhorn", "/var/lib/rook", "/var/lib/headscale", "/opt/local-path-provisioner", "/mnt/disks",
 )
 # The fewest path components a host path has: a dedicated subdirectory of a directory such as /var/lib, never a top-level directory or /var/lib itself.
 _NODE_CACHE_HOST_PATH_MIN_COMPONENTS = 3
@@ -925,18 +927,23 @@ def arc_node_cache_profiles(profiles: Sequence[Mapping[str, Any]], catalogue: Ma
     ]
 
 
-def arc_node_cache_stale_access(found: Sequence[Mapping[str, Any]], profiles: Sequence[Mapping[str, Any]], keep_current: bool) -> list[dict[str, str]]:
-    """Return the Roles and RoleBindings of the node cache pruner that should not exist, as kind, namespace and name, bindings before the roles they bind.
+def arc_label_selectors(labels: Mapping[str, str]) -> list[str]:
+    """Return a label mapping as the list of key=value selectors that matches exactly the objects carrying all of them."""
+    return [f"{key}={value}" for key, value in labels.items()]
+
+
+def arc_node_cache_access_to_remove(found: Sequence[Mapping[str, Any]], labels: Mapping[str, str], pruner_wanted: bool) -> list[dict[str, str]]:
+    """Return the Roles and RoleBindings of the node cache pruner to remove, as kind, namespace and name, bindings before the roles they bind.
+
+    While the pruner is wanted nothing is removed: a profile that has left the fleet keeps its read-only grant to list pods, so the pruner can still check, and so clear, the directory it left. When the pruner is not wanted every object found goes. Only an object carrying every one of labels is the role's own, so another software's object that shares one label is never removed.
 
     Args:
-        found: the pruner's Roles and RoleBindings in every namespace, as the cluster returned them. profiles: the fleet's expanded profiles. keep_current: whether the pruner is installed, in which case each fleet profile keeps its own Role and RoleBinding (named node-cache-pruner-<release>, in the profile's namespace) and the rest, which belong to profiles that have left the fleet, are stale; otherwise all are.
+        found: Roles and RoleBindings as the cluster returned them. labels: the labels the role puts on every object it creates for the pruner. pruner_wanted: whether the pruner is installed.
     """
-    kept = {(profile["namespace"], f"node-cache-pruner-{profile['release']}") for profile in profiles} if keep_current else set()
-    stale = [
-        {"kind": resource["kind"], "namespace": resource["metadata"]["namespace"], "name": resource["metadata"]["name"]}
-        for resource in found
-        if (resource["metadata"]["namespace"], resource["metadata"]["name"]) not in kept
-    ]
+    if pruner_wanted:
+        return []
+    ours = [resource for resource in found if all((resource["metadata"].get("labels") or {}).get(key) == value for key, value in labels.items())]
+    stale = [{"kind": resource["kind"], "namespace": resource["metadata"]["namespace"], "name": resource["metadata"]["name"]} for resource in ours]
     return sorted(stale, key=lambda item: (item["kind"] != "RoleBinding", item["namespace"], item["name"]))
 
 
@@ -1407,7 +1414,8 @@ class FilterModule:
             "arc_node_cache_profiles": arc_node_cache_profiles,
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
             "arc_node_cache_root": arc_node_cache_root,
-            "arc_node_cache_stale_access": arc_node_cache_stale_access,
+            "arc_node_cache_access_to_remove": arc_node_cache_access_to_remove,
+            "arc_label_selectors": arc_label_selectors,
             "arc_node_cache_dir": arc_node_cache_dir,
             "arc_node_cache_path_errors": arc_node_cache_path_errors,
             "arc_registry_cache": arc_registry_cache,

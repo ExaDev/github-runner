@@ -89,10 +89,10 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": "github-runner-platform"}])
             self.assertEqual(binding["roleRef"]["name"], binding["metadata"]["name"])
 
-    def test_the_roles_and_bindings_carry_the_label_the_install_finds_them_by(self) -> None:
+    def test_the_roles_and_bindings_carry_every_label_the_install_finds_them_by(self) -> None:
         for kind in ("Role", "RoleBinding"):
             for document in self.by_kind[kind]:
-                self.assertEqual(document["metadata"]["labels"]["app.kubernetes.io/name"], "node-cache-pruner")
+                self.assertEqual({key: document["metadata"]["labels"].get(key) for key in OWN_LABELS}, OWN_LABELS)
 
     def test_nothing_is_granted_cluster_wide(self) -> None:
         self.assertEqual(sorted(set(self.by_kind)), ["DaemonSet", "Role", "RoleBinding", "ServiceAccount"])
@@ -166,9 +166,12 @@ INSTALL_VARIABLES = {
 }
 
 
-def access(kind: str, namespace: str, release: str) -> dict[str, Any]:
-    """A Role or RoleBinding of the pruner as the cluster returns it."""
-    return {"kind": kind, "metadata": {"namespace": namespace, "name": f"node-cache-pruner-{release}"}}
+OWN_LABELS = {"app.kubernetes.io/name": "node-cache-pruner", "app.kubernetes.io/part-of": "github-runner", "app.kubernetes.io/managed-by": "exadev.github_runner"}
+
+
+def access(kind: str, namespace: str, release: str, labels: dict[str, str] | None = None) -> dict[str, Any]:
+    """A Role or RoleBinding of the pruner as the cluster returns it, with the role's own labels unless others are given."""
+    return {"kind": kind, "metadata": {"namespace": namespace, "name": f"node-cache-pruner-{release}", "labels": OWN_LABELS if labels is None else labels}}
 
 
 def install(fleet_targets: list[str], with_cache: list[str] | None = None, existing: list[dict[str, Any]] | None = None, **role_vars: Any) -> list[dict[str, Any]]:
@@ -240,21 +243,27 @@ class InstallTasksTest(unittest.TestCase):
         self.assertEqual(namespaced[2:], [(kind, namespace, f"node-cache-pruner-{release}") for kind in ("RoleBinding", "Role") for namespace, release in (("arc-a", "main"), ("arc-c", "plain"), ("arc-gone", "old"))])
         self.assertEqual(applied(calls), [])
 
-    def test_a_wanted_pruner_removes_the_access_of_a_profile_that_has_left_the_fleet_and_keeps_the_fleets(self) -> None:
+    def test_a_wanted_pruner_keeps_the_access_of_a_profile_that_has_left_the_fleet_so_its_directory_can_still_be_checked(self) -> None:
         existing = [access(kind, namespace, release) for kind in ("Role", "RoleBinding") for namespace, release in (("arc-a", "main"), ("arc-gone", "old"))]
         calls = install(self.FLEET, existing=existing)
-        self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [("RoleBinding", "arc-gone", "node-cache-pruner-old"), ("Role", "arc-gone", "node-cache-pruner-old")])
+        self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [])
 
-    def test_a_wanted_pruner_with_nothing_stale_removes_no_access(self) -> None:
-        existing = [access(kind, "arc-a", "main") for kind in ("Role", "RoleBinding")]
-        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=existing)) if removal[1] is not None], [])
+    def test_only_objects_carrying_every_one_of_the_roles_labels_are_removed_with_the_pruner(self) -> None:
+        foreign = [
+            access("Role", "other", "app", labels={"app.kubernetes.io/name": "node-cache-pruner"}),
+            access("RoleBinding", "other", "app", labels={"app.kubernetes.io/name": "node-cache-pruner", "app.kubernetes.io/part-of": "github-runner"}),
+            access("Role", "other", "bare", labels={}),
+        ]
+        existing = [access("Role", "arc-a", "main"), access("RoleBinding", "arc-a", "main"), *foreign]
+        calls = install(self.FLEET, with_cache=[], existing=existing)
+        self.assertEqual([removal for removal in removals(calls) if removal[1] == "arc-a" or removal[1] == "other"], [("RoleBinding", "arc-a", "node-cache-pruner-main"), ("Role", "arc-a", "node-cache-pruner-main")])
 
-    def test_the_pruners_access_is_looked_up_by_its_label_in_every_namespace(self) -> None:
+    def test_the_pruners_access_is_looked_up_by_all_of_its_labels_in_every_namespace(self) -> None:
         calls = install(self.FLEET)
         lookups = [call for call in calls if call["module"] == "k8s_info"]
         self.assertEqual([call["kind"] for call in lookups], ["Role", "RoleBinding"])
         self.assertTrue(all(call["namespace"] is None for call in lookups))
-        self.assertTrue(all(call["label_selectors"] == ["app.kubernetes.io/name=node-cache-pruner"] for call in lookups))
+        self.assertTrue(all(sorted(call["label_selectors"]) == sorted(f"{key}={value}" for key, value in OWN_LABELS.items()) for call in lookups))
 
     def test_a_size_limit_of_zero_removes_it_like_no_cache_at_all(self) -> None:
         calls = install(self.FLEET, github_runner_arc_node_cache_size_limit_gib=0)
@@ -325,7 +334,7 @@ class HostPathRootTest(unittest.TestCase):
                 self.assertEqual(arc.arc_node_cache_host_path_errors(f"/var/lib/github-runner/{name}"), [], name)
 
     def test_node_directories_are_refused_as_prefixes_however_deep_the_cache_sits(self) -> None:
-        for directory in ("/var/lib/etcd", "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker", "/var/lib/dpkg", "/var/lib/apt", "/var/lib/systemd", "/var/lib/cni", "/var/lib/kubernetes", "/var/lib/k0s", "/var/lib/calico", "/var/lib/containers", "/var/lib/snapd", "/etc", "/usr/local", "/tmp", "/var/log"):
+        for directory in ("/var/lib/etcd", "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker", "/var/lib/dpkg", "/var/lib/apt", "/var/lib/systemd", "/var/lib/cni", "/var/lib/kubernetes", "/var/lib/k0s", "/var/lib/calico", "/var/lib/containers", "/var/lib/snapd", "/var/lib/longhorn", "/var/lib/rook", "/var/lib/headscale", "/opt/local-path-provisioner", "/mnt/disks", "/etc", "/usr/local", "/tmp", "/var/log"):
             for suffix in ("/node-cache", "/deep/er/node-cache"):
                 with self.subTest(directory + suffix):
                     self.assertNotEqual(arc.arc_node_cache_host_path_errors(directory + suffix), [], directory + suffix)

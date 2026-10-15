@@ -1,6 +1,6 @@
 {# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each fleet profile's namespace (so the pruner can list the pods it must not prune under, including those of a profile whose cache capability was removed while its directory remains, and nothing wider), and the DaemonSet. `github_runner_arc_fleet` is the fleet's expanded profiles and `github_runner_arc_node_cache_profiles` those with a node cache. #}
 {% set name = 'node-cache-pruner' %}
-{% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
+{% set labels = github_runner_arc_node_cache_pruner_labels %}
 {% set platform = github_runner_arc_platform_namespace %}
 apiVersion: v1
 kind: ServiceAccount

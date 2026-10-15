@@ -63,25 +63,24 @@
   loop_control:
     label: "{{ item.kind }}/node-cache-pruner"
 
-# The pruner's Roles and RoleBindings are found by their label in every namespace, so those of a profile that has left the fleet are removed too: while the pruner is installed each fleet profile keeps its own, so it can list the pods of a profile whose capability was removed before it clears that directory, and when it is not installed none remain. Bindings go before the roles they bind.
+# The pruner's Roles and RoleBindings are found by the labels the role puts on them (all of them, so another software's objects are left alone) in every namespace. They are removed only when the pruner is: while it runs, each profile that has left the fleet keeps its read-only grant to list pods until the directory it left is gone, so the pruner can still check and clear it. Bindings go before the roles they bind.
 - name: "Node cache: find the pruner's Roles and RoleBindings"
   kubernetes.core.k8s_info:
     api_version: rbac.authorization.k8s.io/v1
     kind: "{{ item }}"
-    label_selectors:
-      - app.kubernetes.io/name=node-cache-pruner
+    label_selectors: "{{ github_runner_arc_node_cache_pruner_labels | exadev.github_runner.arc_label_selectors }}"
   loop:
     - Role
     - RoleBinding
   register: github_runner_arc_node_cache_pruner_access
 
-- name: "Node cache: remove the pruner's access that is no longer wanted"
+- name: "Node cache: remove the pruner's access when the pruner is not wanted"
   kubernetes.core.k8s:
     state: absent
     api_version: rbac.authorization.k8s.io/v1
     kind: "{{ item.kind }}"
     namespace: "{{ item.namespace }}"
     name: "{{ item.name }}"
-  loop: "{{ github_runner_arc_node_cache_pruner_access.results | map(attribute='resources') | flatten | exadev.github_runner.arc_node_cache_stale_access(github_runner_arc_fleet.profiles, github_runner_arc_node_cache_pruner_wanted | bool) }}"
+  loop: "{{ github_runner_arc_node_cache_pruner_access.results | map(attribute='resources') | flatten | exadev.github_runner.arc_node_cache_access_to_remove(github_runner_arc_node_cache_pruner_labels, github_runner_arc_node_cache_pruner_wanted | bool) }}"
   loop_control:
     label: "{{ item.kind }}/{{ item.name }} in {{ item.namespace }}"

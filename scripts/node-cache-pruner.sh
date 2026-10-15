@@ -7,9 +7,9 @@
 #
 # What remains is a check-then-act window: a pod can be bound, and its init container can mount the directory, between the last list and the rename that follows it. The window is the time between two commands, a runner pod needs seconds to start its job, and a pod that did start meets an empty cache it can refill (the cache's root is owned by the runner's user), not a cache being unlinked.
 #
-# A profile directory that is not in WANTED_CACHES belongs to a capability that has been removed from a profile still in the fleet, or to a profile that has left it, and is emptied and removed the same way while the pruner can list the pods of its namespace. The role removes the Role and RoleBinding of a profile that has left the fleet on its next run; from then on the list is refused as Forbidden, and the directory is reported on every round with the prefix NODE_CACHE_UNPRUNABLE and left alone. It is the operator's to delete (when the namespace is gone there are no pods, so it is safe to). Between the profile leaving the fleet and that run, the pruner prunes it as any unwanted directory.
+# A profile directory that is not in WANTED_CACHES belongs to a capability that has been removed from a profile still in the fleet, or to a profile that has left it, and is emptied and removed the same way. While the pruner is installed the role keeps the read-only grant to list pods of every profile it has installed, including one that has since left the fleet, so such a directory can always be checked; the grant is removed only with the pruner. A list that is refused all the same (the namespace was deleted together with its Role) is reported on every round as NODE_CACHE_UNPRUNABLE and the directory is left for the operator to delete (with the namespace gone there are no pods, so it is safe to).
 #
-# Every step of one profile's check may fail without stopping the others: a failed or partial size reading skips that profile for the round, and a failed pod list means no pruning, since an unknown set of pods may be using the cache: NODE_CACHE_UNPRUNABLE when the list was refused as Forbidden (no Role in that namespace, which does not pass), NODE_CACHE_LIST_FAILED for any other failure (the API server was unreachable, the answer was not a pod list), which the next round retries.
+# Every step of one profile's check may fail without stopping the others: a failed or partial size reading skips that profile for the round, and a failed pod list means no pruning, since an unknown set of pods may be using the cache: NODE_CACHE_UNPRUNABLE when the server refused the list as Forbidden (there is no Role for the pruner in that namespace), NODE_CACHE_LIST_FAILED for any other failure (the API server was unreachable, the answer was not a pod list), which the next round retries.
 #
 # Which pods count: those in the profile's namespace on this node, not finished (Succeeded or Failed), that have a hostPath volume at exactly the profile's directory on the host (HOST_CACHE_ROOT/<namespace>/<release>). Another profile's pods, finished pods and pods that do not mount the cache are ignored.
 #
@@ -55,9 +55,9 @@ pods_using() {
     | jq -r --arg path "${HOST_CACHE_ROOT%/}/${namespace}/${release}" '.items[] | select(any(.spec.volumes[]?; .hostPath.path == $path)) | .metadata.name' 2>>"$LIST_ERRORS"
 }
 
-# The log prefix for a list that failed: NODE_CACHE_UNPRUNABLE when the pruner is not allowed to list the namespace's pods, NODE_CACHE_LIST_FAILED when it was something else.
+# The log prefix for a list that failed: NODE_CACHE_UNPRUNABLE when kubectl reports the server's refusal in its own form, "Error from server (Forbidden)", as the first thing on a line, NODE_CACHE_LIST_FAILED for anything else (a wrapped or quoted mention of forbidden in some other error does not count).
 list_failure_prefix() {
-  if grep -qi 'forbidden' "$LIST_ERRORS" 2>/dev/null; then echo NODE_CACHE_UNPRUNABLE; else echo NODE_CACHE_LIST_FAILED; fi
+  if grep -q '^Error from server (Forbidden)' "$LIST_ERRORS" 2>/dev/null; then echo NODE_CACHE_UNPRUNABLE; else echo NODE_CACHE_LIST_FAILED; fi
 }
 
 is_wanted() {
@@ -71,14 +71,14 @@ is_wanted() {
 
 # Moves a profile's cache out of the directory its pods mount, one rename per entry, and deletes it. The pods are listed again directly before every rename, and a pod that mounts the cache ends the moving, leaving what has not moved in place. Sets SET_ASIDE to "all" when every entry moved (or there was none), "some" when only a part did, and "none" when something was to be moved and nothing was.
 set_aside_and_delete() {
-  local directory=$1 namespace=$2 release=$3 aside entry pods moved=0 entries
+  local directory=$1 namespace=$2 release=$3 size=$4 aside entry pods moved=0 entries
   SET_ASIDE=none
   mkdir -p "$TRASH_DIR" && aside="$(mktemp -d "${TRASH_DIR}/set-aside.XXXXXX")" || return 1
   shopt -s dotglob nullglob
   entries=("$directory"/*)
   for entry in "${entries[@]}"; do
     if ! pods="$(pods_using "$namespace" "$release")"; then
-      log "$(list_failure_prefix) ${namespace}/${release}: the runner pods could not be listed part way through; the rest is left in place"
+      log "$(list_failure_prefix) ${namespace}/${release} size_kib=${size}: the runner pods could not be listed part way through; the rest is left in place"
       break
     fi
     if [ -n "$pods" ]; then
@@ -124,7 +124,10 @@ check_profile() {
     return 0
   fi
   if ! pods="$(pods_using "$namespace" "$release")"; then
-    log "$(list_failure_prefix) ${label}: the runner pods on this node could not be listed; not pruned"
+    log "$(list_failure_prefix) ${label} size_kib=${size}: the runner pods on this node could not be listed; not pruned"
+    if [ "$retired" = false ] && [ "$size" -gt "$HARD_LIMIT_KIB" ]; then
+      log "NODE_CACHE_OVER_HARD_LIMIT ${label} size_kib=${size} hard_limit_kib=${HARD_LIMIT_KIB} node=${NODE_NAME}: whether a runner pod keeps it busy is unknown, since the pods could not be listed"
+    fi
     return 0
   fi
   if [ -n "$pods" ]; then
@@ -137,7 +140,7 @@ check_profile() {
     fi
     return 0
   fi
-  set_aside_and_delete "$directory" "$namespace" "$release"
+  set_aside_and_delete "$directory" "$namespace" "$release" "$size"
   case "$SET_ASIDE" in
     all)
       if [ "$retired" = true ]; then

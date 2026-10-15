@@ -29,7 +29,7 @@ FAKE_KUBECTL = textwrap.dedent(
     namespace = args[args.index("-n") + 1]
     listed = lambda name: [item for item in os.environ.get(name, "").split(",") if item]
     if namespace in listed("FAKE_FAIL_PODS"):
-        sys.stderr.write("the server is unavailable\\n")
+        sys.stderr.write(os.environ.get("FAKE_ERROR_TEXT", "the server is unavailable") + "\\n")
         sys.exit(1)
     after = os.path.join(state, "calls-" + namespace)
     seen = int(open(after).read()) if os.path.exists(after) else 0
@@ -208,7 +208,7 @@ class PrunerTest(unittest.TestCase):
         # A profile removed from the fleet has no Role, so the pods cannot be listed; the other profiles are unaffected.
         run = self.run_pruner({"arc-gone/old": OVER_KIB, "arc-a/main": OVER_KIB}, wanted=["arc-a/main"], FAKE_FORBIDDEN="arc-gone")
         self.assertTrue((run.profile("arc-gone/old") / "pnpm" / "blob").exists())
-        self.assertIn("NODE_CACHE_UNPRUNABLE arc-gone/old: the runner pods on this node could not be listed", run.output)
+        self.assertRegex(run.output, r"NODE_CACHE_UNPRUNABLE arc-gone/old size_kib=\d+: the runner pods on this node could not be listed")
         self.assertNotIn("NODE_CACHE_LIST_FAILED", run.output)
         self.assertEqual(list(run.profile("arc-a/main").iterdir()), [])
 
@@ -264,27 +264,49 @@ class PrunerTest(unittest.TestCase):
         run = self.run_pruner({"arc-a/main": OVER_KIB, "arc-b/main": OVER_KIB}, wanted=["arc-a/main", "arc-b/main"], FAKE_FAIL_PODS="arc-a")
         self.assertTrue((run.profile("arc-a/main") / "pnpm" / "blob").exists())
         self.assertEqual(list(run.profile("arc-b/main").iterdir()), [])
-        self.assertIn("NODE_CACHE_LIST_FAILED arc-a/main: the runner pods on this node could not be listed", run.output)
+        self.assertRegex(run.output, r"NODE_CACHE_LIST_FAILED arc-a/main size_kib=\d+: the runner pods on this node could not be listed")
         self.assertNotIn("NODE_CACHE_UNPRUNABLE", run.output)
 
     def test_an_answer_that_is_not_a_pod_list_means_no_pruning_and_is_not_called_unprunable(self) -> None:
         run = self.run_pruner({"arc-a/main": OVER_KIB}, wanted=["arc-a/main"], FAKE_BAD_JSON="arc-a")
         self.assertTrue((run.profile("arc-a/main") / "pnpm" / "blob").exists())
-        self.assertIn("NODE_CACHE_LIST_FAILED arc-a/main", run.output)
+        self.assertIn("NODE_CACHE_LIST_FAILED arc-a/main size_kib=", run.output)
         self.assertNotIn("NODE_CACHE_UNPRUNABLE", run.output)
 
     def test_one_profiles_forbidden_list_does_not_colour_the_next_profiles_transient_failure(self) -> None:
         run = self.run_pruner({"arc-a/main": OVER_KIB, "arc-b/main": OVER_KIB}, wanted=["arc-a/main", "arc-b/main"], FAKE_FORBIDDEN="arc-a", FAKE_FAIL_PODS="arc-b")
-        self.assertIn("NODE_CACHE_UNPRUNABLE arc-a/main", run.output)
-        self.assertIn("NODE_CACHE_LIST_FAILED arc-b/main", run.output)
+        self.assertIn("NODE_CACHE_UNPRUNABLE arc-a/main size_kib=", run.output)
+        self.assertIn("NODE_CACHE_LIST_FAILED arc-b/main size_kib=", run.output)
         self.assertNotIn("NODE_CACHE_UNPRUNABLE arc-b/main", run.output)
+
+    def test_a_failed_list_for_a_cache_over_the_hard_limit_still_reports_that_it_is_over_it(self) -> None:
+        for variable, prefix in (("FAKE_FAIL_PODS", "NODE_CACHE_LIST_FAILED"), ("FAKE_FORBIDDEN", "NODE_CACHE_UNPRUNABLE")):
+            with self.subTest(variable):
+                run = self.run_pruner({"arc-a/main": OVER_HARD_KIB}, wanted=["arc-a/main"], **{variable: "arc-a"})
+                self.assertIn(f"{prefix} arc-a/main size_kib=", run.output)
+                self.assertRegex(run.output, r"NODE_CACHE_OVER_HARD_LIMIT arc-a/main size_kib=\d+ hard_limit_kib=\d+ node=node-a: whether a runner pod keeps it busy is unknown")
+
+    def test_a_failed_list_for_a_cache_under_the_hard_limit_does_not_claim_it_is_over_it(self) -> None:
+        run = self.run_pruner({"arc-a/main": OVER_KIB}, wanted=["arc-a/main"], FAKE_FAIL_PODS="arc-a")
+        self.assertNotIn("NODE_CACHE_OVER_HARD_LIMIT", run.output)
+
+    def test_an_error_that_merely_mentions_forbidden_is_a_failed_list_not_a_refusal(self) -> None:
+        for message in ("Unable to connect to the server: proxy says forbidden", "error: the user Forbidden-Admin could not be found", "Error from server (Forbidden-ish): x"):
+            with self.subTest(message):
+                run = self.run_pruner({"arc-a/main": OVER_KIB}, wanted=["arc-a/main"], FAKE_ERROR_TEXT=message, FAKE_FAIL_PODS="arc-a")
+                self.assertIn("NODE_CACHE_LIST_FAILED arc-a/main", run.output)
+                self.assertNotIn("NODE_CACHE_UNPRUNABLE", run.output)
+
+    def test_kubectls_own_refusal_form_is_a_refusal_even_with_more_text_after_it(self) -> None:
+        run = self.run_pruner({"arc-a/main": OVER_KIB}, wanted=["arc-a/main"], FAKE_ERROR_TEXT="Error from server (Forbidden): pods is forbidden: User \"system:serviceaccount:ns:node-cache-pruner\" cannot list resource", FAKE_FAIL_PODS="arc-a")
+        self.assertIn("NODE_CACHE_UNPRUNABLE arc-a/main", run.output)
 
     def test_a_list_that_fails_part_way_through_the_moving_is_named_by_why_it_failed(self) -> None:
         # The first list (before the entries move) succeeds; the next ones are refused.
         for variable, prefix, other in (("FAKE_FAIL_AFTER", "NODE_CACHE_LIST_FAILED", "NODE_CACHE_UNPRUNABLE"), ("FAKE_FORBID_AFTER", "NODE_CACHE_UNPRUNABLE", "NODE_CACHE_LIST_FAILED")):
             with self.subTest(variable):
                 run = self.run_pruner({"arc-a/main": ["a-store", "b-store"]}, wanted=["arc-a/main"], **{variable: "1"})
-                self.assertIn(f"{prefix} arc-a/main: the runner pods could not be listed part way through", run.output)
+                self.assertRegex(run.output, rf"{prefix} arc-a/main size_kib=\d+: the runner pods could not be listed part way through")
                 self.assertNotIn(other, run.output)
                 self.assertTrue((run.profile("arc-a/main") / "a-store" / "blob").exists())
 
