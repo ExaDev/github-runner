@@ -398,6 +398,18 @@ class PrunerTest(unittest.TestCase):
         run = self.run_pruner({"arc-gone/old1": UNDER_KIB, "arc-gone/old2": UNDER_KIB, "arc-a/main": UNDER_KIB}, wanted=["arc-a/main"])
         self.assertFalse((run.root / "arc-gone").exists())
 
+    def test_a_failed_list_before_an_unwanted_directory_is_removed_names_why_and_does_not_blame_a_pod(self) -> None:
+        # Calls: the check, one before each of the two entries (.hidden, pnpm), then the one before the directory is removed, which fails.
+        for variable, prefix, other in (("FAKE_FAIL_AFTER", "NODE_CACHE_LIST_FAILED", "NODE_CACHE_UNPRUNABLE"), ("FAKE_FORBID_AFTER", "NODE_CACHE_UNPRUNABLE", "NODE_CACHE_LIST_FAILED")):
+            with self.subTest(variable):
+                run = self.run_pruner({"arc-gone/old": UNDER_KIB}, wanted=[], **{variable: "3"})
+                self.assertTrue((run.root / "arc-gone" / "old").is_dir())
+                self.assertEqual(list((run.root / "arc-gone" / "old").iterdir()), [])
+                self.assertRegex(run.output, rf"{prefix} arc-gone/old size_kib=\d+: deleted, but the runner pods could not be listed, so its directory is kept")
+                self.assertNotIn(other, run.output)
+                self.assertNotIn("may mount it now", run.output)
+                self.assertEqual(run.output.count("arc-gone/old"), 1, run.output)
+
     def test_a_directory_that_is_no_longer_wanted_is_kept_while_a_pod_mounts_it(self) -> None:
         run = self.run_pruner({"arc-gone/old": UNDER_KIB}, pods=[pod("arc-gone/old")], wanted=[])
         self.assertTrue((run.profile("arc-gone/old") / "pnpm" / "blob").exists())
@@ -405,6 +417,63 @@ class PrunerTest(unittest.TestCase):
     def test_without_a_wanted_list_no_directory_is_removed_for_being_unwanted(self) -> None:
         run = self.run_pruner({"arc-a/main": UNDER_KIB})
         self.assertTrue((run.profile("arc-a/main") / "pnpm" / "blob").exists())
+
+
+class StartupTest(unittest.TestCase):
+    """The settings the pruner checks before it does anything."""
+
+    def start(self, **overrides: str) -> subprocess.CompletedProcess[str]:
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work, True)
+        root = work / "root"
+        (root / "arc-a" / "main" / "pnpm").mkdir(parents=True)
+        (root / "arc-a" / "main" / "pnpm" / "blob").write_bytes(b"x" * OVER_KIB * 1024)
+        bin_dir = work / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "kubectl").write_text("#!/bin/sh\necho called >> \"$FAKE_CALLS\"\nexit 1\n")
+        (bin_dir / "kubectl").chmod(0o755)
+        self.calls = work / "calls"
+        self.root = root
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "NODE_NAME": "node-a", "HOST_CACHE_ROOT": HOST_ROOT, "CACHE_ROOT": str(root), "LIMIT_KIB": str(LIMIT_KIB), "PRUNE_ONCE": "true", "FAKE_CALLS": str(self.calls), "WANTED_CACHES": "arc-a/main"}
+        for name in overrides:
+            env.pop(name, None)
+        env.update({name: value for name, value in overrides.items() if value is not None})
+        return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
+
+    def assert_refused(self, completed: subprocess.CompletedProcess[str], name: str) -> None:
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn(f"node-cache-pruner: {name} must be a positive integer", completed.stderr)
+        self.assertFalse(self.calls.exists(), "kubectl was called")
+        self.assertTrue((self.root / "arc-a" / "main" / "pnpm" / "blob").exists(), "the cache was touched")
+
+    def test_a_limit_that_is_not_a_positive_integer_is_refused_before_anything_is_done(self) -> None:
+        for value in ("0", "-1", "", "abc", "1.5", "01", " 5", "5 "):
+            with self.subTest(f"LIMIT_KIB={value!r}"):
+                self.assert_refused(self.start(LIMIT_KIB=value), "LIMIT_KIB")
+            with self.subTest(f"LIMIT_GIB={value!r}"):
+                completed = self.start(LIMIT_KIB=None, LIMIT_GIB=value)  # type: ignore[arg-type]
+                self.assert_refused(completed, "LIMIT_GIB")
+
+    def test_a_missing_limit_is_refused(self) -> None:
+        completed = self.start(LIMIT_KIB=None)  # type: ignore[arg-type]
+        self.assert_refused(completed, "LIMIT_GIB")
+
+    def test_a_hard_limit_factor_that_is_not_a_positive_integer_is_refused(self) -> None:
+        for value in ("0", "-2", "", "two", "1.5"):
+            with self.subTest(value):
+                self.assert_refused(self.start(HARD_LIMIT_FACTOR=value), "HARD_LIMIT_FACTOR")
+
+    def test_a_check_interval_that_is_not_a_positive_integer_is_refused(self) -> None:
+        for value in ("0", "-5", "", "soon"):
+            with self.subTest(value):
+                self.assert_refused(self.start(CHECK_SECONDS=value), "CHECK_SECONDS")
+
+    def test_valid_settings_start_normally_and_a_gibibyte_limit_is_converted(self) -> None:
+        completed = self.start(LIMIT_KIB=None, LIMIT_GIB="1", HARD_LIMIT_FACTOR="3", CHECK_SECONDS="60")  # type: ignore[arg-type]
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        # 100 KiB is far under 1 GiB, so the cache is left alone and no pod is listed.
+        self.assertTrue((self.root / "arc-a" / "main" / "pnpm" / "blob").exists())
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":

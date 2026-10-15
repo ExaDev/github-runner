@@ -935,7 +935,7 @@ def arc_label_selectors(labels: Mapping[str, str]) -> list[str]:
 def arc_node_cache_access_to_remove(found: Sequence[Mapping[str, Any]], labels: Mapping[str, str], pruner_wanted: bool) -> list[dict[str, str]]:
     """Return the Roles and RoleBindings of the node cache pruner to remove, as kind, namespace and name, bindings before the roles they bind.
 
-    While the pruner is wanted nothing is removed: a profile that has left the fleet keeps its read-only grant to list pods, so the pruner can still check, and so clear, the directory it left. When the pruner is not wanted every object found goes. Only an object carrying every one of labels is the role's own, so another software's object that shares one label is never removed.
+    While the pruner is wanted nothing is removed: a profile that has left the fleet keeps its grant, which only lists pods in that profile's own namespace, for as long as the pruner is installed, so staying is harmless and the pruner can still check, and so clear, a directory the profile left. When the pruner is not wanted every object found goes. Only an object carrying every one of labels is the role's own, so another software's object that shares one label is never removed.
 
     Args:
         found: Roles and RoleBindings as the cluster returned them. labels: the labels the role puts on every object it creates for the pruner. pruner_wanted: whether the pruner is installed.
