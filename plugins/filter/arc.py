@@ -75,7 +75,7 @@ _TOLERATION_KEYS = frozenset({"key", "operator", "value", "effect", "tolerationS
 # The highest weight a preferred node affinity term may carry (1-100 in the Kubernetes API), so keeping runner pods on the fixed nodes outweighs any other preference the scheduler scores.
 _PREFER_FIXED_NODES_WEIGHT = 100
 
-# A capability's keys (see arc_capability_errors): a tool-cache capability names an image, and optionally a path put on PATH at job start; a system-library capability names a sysroot_image, and optionally env, extra variables its libraries need; a hook capability carries a job-started script; a node-cache capability names a node_cache mapping, {init_image, dirs, env?}, and may also set env.
+# A capability's keys (see arc_capability_errors): a tool-cache capability names an image, and optionally a path put on PATH at job start; a system-library capability names a sysroot_image, and optionally env, extra variables its libraries need; a hook capability carries a job-started script; a node-cache capability names a node_cache mapping, {init_image, dirs}, and may also set env.
 _CAPABILITY_KEYS = frozenset({"image", "path", "sysroot_image", "env", "job_started_hook", "node_cache"})
 # The keys of which a capability sets exactly one, each naming its kind.
 _CAPABILITY_KINDS = ("image", "sysroot_image", "job_started_hook", "node_cache")
@@ -734,7 +734,7 @@ def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
 
 
 def _node_cache_errors(where: str, node_cache: Any) -> list[str]:
-    """Return what is wrong with a node-cache capability's node_cache mapping: an init_image pinned to a version tag or digest, and dirs, a non-empty mapping of environment variable name to the subdirectory of the node cache that variable names, each subdirectory one path component and no two variables sharing one."""
+    """Return what is wrong with a node-cache capability's node_cache mapping: an init_image pinned by digest (name@sha256:<64 hex digits>), and dirs, a non-empty mapping of environment variable name to the subdirectory of the node cache that variable names, each subdirectory one path component and no two variables sharing one."""
     if not isinstance(node_cache, Mapping):
         return [f"{where} must be a mapping with init_image and dirs"]
     errors = [f"{where} has an unknown key '{key}'" for key in sorted(set(node_cache) - _NODE_CACHE_KEYS)]
@@ -845,13 +845,17 @@ def _copy_init_container(name: str, image: str, payload: str, volume: str, mount
 
 
 # Directories of the node that a node cache's host path may not be, or sit inside: the kernel's and the system's own, and the runtimes' state. The cache root is created and emptied as root, so it must be a directory of its own.
-_NODE_CACHE_DENIED_HOST_PATHS = ("/etc", "/proc", "/sys", "/dev", "/boot", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/home", "/tmp", "/var/tmp", "/var/run", "/var/log", "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker")
+_NODE_CACHE_DENIED_HOST_PATHS = (
+    "/etc", "/proc", "/sys", "/dev", "/boot", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root", "/home", "/tmp", "/var/tmp", "/var/run", "/var/log", "/var/cache", "/var/spool",
+    "/var/lib/kubelet", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker", "/var/lib/etcd", "/var/lib/dpkg", "/var/lib/apt", "/var/lib/systemd", "/var/lib/cni", "/var/lib/kubernetes",
+    "/var/lib/k0s", "/var/lib/calico", "/var/lib/containers", "/var/lib/snapd", "/var/lib/k3s", "/var/lib/microk8s", "/var/lib/postgresql", "/var/lib/mysql",
+)
 # The fewest path components a host path has: a dedicated subdirectory of a directory such as /var/lib, never a top-level directory or /var/lib itself.
 _NODE_CACHE_HOST_PATH_MIN_COMPONENTS = 3
 
 
-# What the final component of the host path must end with: the root is a directory the role creates and empties as root, so it carries a name that says so, which rules out pointing it at a system or runtime directory by accident.
-_NODE_CACHE_HOST_PATH_SUFFIX = "node-cache"
+# What the final component of the host path must be: node-cache itself, or a lower-case name ending in -node-cache. The root is a directory the role creates and empties as root, so it carries a name that says so, which rules out pointing it at a system or runtime directory by accident.
+_NODE_CACHE_HOST_PATH_NAME = re.compile(r"^(?:node-cache|[a-z0-9][a-z0-9-]*-node-cache)$")
 
 
 def _canonical_path(path: str) -> str:
@@ -868,9 +872,10 @@ def _node_cache_host_path_errors(host_path: Any) -> list[str]:
     components = host_path.split("/")[1:]
     if len(components) < _NODE_CACHE_HOST_PATH_MIN_COMPONENTS or ".." in components or "." in components:
         return [f"the node cache's host path must be a dedicated directory at least {_NODE_CACHE_HOST_PATH_MIN_COMPONENTS} levels deep with no '.' or '..' (such as /var/lib/github-runner/node-cache) (got {host_path!r})"]
-    if not components[-1].endswith(_NODE_CACHE_HOST_PATH_SUFFIX):
-        return [f"the node cache's host path must end in a directory whose name ends with {_NODE_CACHE_HOST_PATH_SUFFIX}, since the role creates and empties it as root (got {host_path!r})"]
-    inside = [denied for denied in _NODE_CACHE_DENIED_HOST_PATHS if host_path == denied or host_path.startswith(f"{denied}/")]
+    if not _NODE_CACHE_HOST_PATH_NAME.match(components[-1]):
+        return [f"the node cache's host path must end in a directory named node-cache, or a lower-case name ending in -node-cache (got {host_path!r}), since the role creates and empties it as root"]
+    lowered = host_path.lower()
+    inside = [denied for denied in _NODE_CACHE_DENIED_HOST_PATHS if lowered == denied or lowered.startswith(f"{denied}/")]
     return [f"the node cache's host path {host_path} is inside {inside[0]}, which the node itself uses"] if inside else []
 
 
@@ -918,6 +923,21 @@ def arc_node_cache_profiles(profiles: Sequence[Mapping[str, Any]], catalogue: Ma
         for profile in profiles
         if any(isinstance(catalogue.get(name), Mapping) and catalogue[name].get("node_cache") is not None for name in profile["capabilities"])
     ]
+
+
+def arc_node_cache_stale_access(found: Sequence[Mapping[str, Any]], profiles: Sequence[Mapping[str, Any]], keep_current: bool) -> list[dict[str, str]]:
+    """Return the Roles and RoleBindings of the node cache pruner that should not exist, as kind, namespace and name, bindings before the roles they bind.
+
+    Args:
+        found: the pruner's Roles and RoleBindings in every namespace, as the cluster returned them. profiles: the fleet's expanded profiles. keep_current: whether the pruner is installed, in which case each fleet profile keeps its own Role and RoleBinding (named node-cache-pruner-<release>, in the profile's namespace) and the rest, which belong to profiles that have left the fleet, are stale; otherwise all are.
+    """
+    kept = {(profile["namespace"], f"node-cache-pruner-{profile['release']}") for profile in profiles} if keep_current else set()
+    stale = [
+        {"kind": resource["kind"], "namespace": resource["metadata"]["namespace"], "name": resource["metadata"]["name"]}
+        for resource in found
+        if (resource["metadata"]["namespace"], resource["metadata"]["name"]) not in kept
+    ]
+    return sorted(stale, key=lambda item: (item["kind"] != "RoleBinding", item["namespace"], item["name"]))
 
 
 def _node_cache_env(node_cache_path: str, capabilities: Sequence[tuple[str, Mapping[str, Any]]], errors: list[str]) -> list[dict[str, str]]:
@@ -1387,6 +1407,7 @@ class FilterModule:
             "arc_node_cache_profiles": arc_node_cache_profiles,
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
             "arc_node_cache_root": arc_node_cache_root,
+            "arc_node_cache_stale_access": arc_node_cache_stale_access,
             "arc_node_cache_dir": arc_node_cache_dir,
             "arc_node_cache_path_errors": arc_node_cache_path_errors,
             "arc_registry_cache": arc_registry_cache,

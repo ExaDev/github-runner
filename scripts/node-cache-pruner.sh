@@ -7,9 +7,9 @@
 #
 # What remains is a check-then-act window: a pod can be bound, and its init container can mount the directory, between the last list and the rename that follows it. The window is the time between two commands, a runner pod needs seconds to start its job, and a pod that did start meets an empty cache it can refill (the cache's root is owned by the runner's user), not a cache being unlinked.
 #
-# A profile directory that is not in WANTED_CACHES belongs to a capability that has been removed from a profile that is still in the fleet, and is emptied and removed the same way. The directory of a profile removed from the fleet entirely cannot be pruned: no Role lets the pruner list pods in a namespace the role no longer manages, so the list is refused and the directory is reported on every round with the prefix NODE_CACHE_UNPRUNABLE. It is the operator's to delete (when the namespace is gone there are no pods, so it is safe to).
+# A profile directory that is not in WANTED_CACHES belongs to a capability that has been removed from a profile still in the fleet, or to a profile that has left it, and is emptied and removed the same way while the pruner can list the pods of its namespace. The role removes the Role and RoleBinding of a profile that has left the fleet on its next run; from then on the list is refused as Forbidden, and the directory is reported on every round with the prefix NODE_CACHE_UNPRUNABLE and left alone. It is the operator's to delete (when the namespace is gone there are no pods, so it is safe to). Between the profile leaving the fleet and that run, the pruner prunes it as any unwanted directory.
 #
-# Every step of one profile's check may fail without stopping the others: a failed or partial size reading skips that profile for the round, and a failed pod list (NODE_CACHE_UNPRUNABLE) means no pruning, since an unknown set of pods may be using the cache.
+# Every step of one profile's check may fail without stopping the others: a failed or partial size reading skips that profile for the round, and a failed pod list means no pruning, since an unknown set of pods may be using the cache: NODE_CACHE_UNPRUNABLE when the list was refused as Forbidden (no Role in that namespace, which does not pass), NODE_CACHE_LIST_FAILED for any other failure (the API server was unreachable, the answer was not a pod list), which the next round retries.
 #
 # Which pods count: those in the profile's namespace on this node, not finished (Succeeded or Failed), that have a hostPath volume at exactly the profile's directory on the host (HOST_CACHE_ROOT/<namespace>/<release>). Another profile's pods, finished pods and pods that do not mount the cache are ignored.
 #
@@ -34,6 +34,8 @@ HARD_LIMIT_FACTOR="${HARD_LIMIT_FACTOR:-2}"
 LIMIT_KIB="${LIMIT_KIB:-$(( ${LIMIT_GIB:?LIMIT_GIB or LIMIT_KIB is required} * 1024 * 1024 ))}"
 HARD_LIMIT_KIB=$((LIMIT_KIB * HARD_LIMIT_FACTOR))
 TRASH_DIR="${CACHE_ROOT}/.trash"
+LIST_ERRORS="$(mktemp)"
+trap 'rm -f "$LIST_ERRORS"' EXIT
 
 log() { echo "$*"; }
 
@@ -45,11 +47,17 @@ size_kib() {
   echo "$size"
 }
 
-# The names of the pods that mount a profile's cache and run on this node, one per line, or a failure when they cannot be listed.
+# The names of the pods that mount a profile's cache and run on this node, one per line, or a failure when they cannot be listed, in which case the errors are in LIST_ERRORS.
 pods_using() {
   local namespace=$1 release=$2
-  kubectl get pods -n "$namespace" --field-selector "spec.nodeName=${NODE_NAME},status.phase!=Succeeded,status.phase!=Failed" -o json \
-    | jq -r --arg path "${HOST_CACHE_ROOT%/}/${namespace}/${release}" '.items[] | select(any(.spec.volumes[]?; .hostPath.path == $path)) | .metadata.name'
+  : > "$LIST_ERRORS"
+  kubectl get pods -n "$namespace" --field-selector "spec.nodeName=${NODE_NAME},status.phase!=Succeeded,status.phase!=Failed" -o json 2>>"$LIST_ERRORS" \
+    | jq -r --arg path "${HOST_CACHE_ROOT%/}/${namespace}/${release}" '.items[] | select(any(.spec.volumes[]?; .hostPath.path == $path)) | .metadata.name' 2>>"$LIST_ERRORS"
+}
+
+# The log prefix for a list that failed: NODE_CACHE_UNPRUNABLE when the pruner is not allowed to list the namespace's pods, NODE_CACHE_LIST_FAILED when it was something else.
+list_failure_prefix() {
+  if grep -qi 'forbidden' "$LIST_ERRORS" 2>/dev/null; then echo NODE_CACHE_UNPRUNABLE; else echo NODE_CACHE_LIST_FAILED; fi
 }
 
 is_wanted() {
@@ -70,7 +78,7 @@ set_aside_and_delete() {
   entries=("$directory"/*)
   for entry in "${entries[@]}"; do
     if ! pods="$(pods_using "$namespace" "$release")"; then
-      log "NODE_CACHE_UNPRUNABLE ${namespace}/${release}: the runner pods could not be listed part way through; the rest is left in place"
+      log "$(list_failure_prefix) ${namespace}/${release}: the runner pods could not be listed part way through; the rest is left in place"
       break
     fi
     if [ -n "$pods" ]; then
@@ -90,15 +98,15 @@ set_aside_and_delete() {
   rm -rf "$aside" || log "node cache ${namespace}/${release}: the set-aside copy could not be deleted; the next round retries"
 }
 
-# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first.
+# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first. Returns 1 when the directory was kept.
 remove_retired_directory() {
   local directory=$1 namespace=$2 release=$3 pods
   if ! pods="$(pods_using "$namespace" "$release")" || [ -n "$pods" ]; then
-    log "node cache ${namespace}/${release}: emptied, but a runner pod may mount the directory now, so it is kept"
-    return 0
+    return 1
   fi
   rmdir "$directory" 2>/dev/null
   rmdir "$(dirname "$directory")" 2>/dev/null
+  return 0
 }
 
 # One profile directory: <namespace>/<release> under the cache root.
@@ -116,7 +124,7 @@ check_profile() {
     return 0
   fi
   if ! pods="$(pods_using "$namespace" "$release")"; then
-    log "NODE_CACHE_UNPRUNABLE ${label}: the runner pods on this node could not be listed; not pruned"
+    log "$(list_failure_prefix) ${label}: the runner pods on this node could not be listed; not pruned"
     return 0
   fi
   if [ -n "$pods" ]; then
@@ -133,8 +141,11 @@ check_profile() {
   case "$SET_ASIDE" in
     all)
       if [ "$retired" = true ]; then
-        remove_retired_directory "$directory" "$namespace" "$release"
-        log "node cache ${label} is no longer wanted and held ${size} KiB: set aside and deleted"
+        if remove_retired_directory "$directory" "$namespace" "$release"; then
+          log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, and its directory removed"
+        else
+          log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory is kept because a runner pod may mount it now"
+        fi
       else
         log "node cache ${label} held ${size} KiB, over the limit of ${LIMIT_KIB} KiB: emptied"
       fi
