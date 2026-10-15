@@ -221,12 +221,12 @@ def applied(calls: list[dict[str, Any]]) -> list[tuple[str, str]]:
 class InstallTasksTest(unittest.TestCase):
     """The role's install tasks, run against a stand-in for kubernetes.core."""
 
-    FLEET = ["arc-a/main", "arc-b/builders", "arc-c/plain"]
+    FLEET = ("arc-a/main", "arc-b/builders", "arc-c/plain")
 
     def test_a_fleet_that_never_ran_1_31_0_deletes_nothing_cluster_wide_and_only_looks(self) -> None:
         for wanted in (True, False):
             with self.subTest(wanted=wanted):
-                calls = install(self.FLEET, with_cache=None if wanted else [])
+                calls = install(list(self.FLEET), with_cache=None if wanted else [])
                 self.assertEqual([removal for removal in removals(calls) if removal[1] is None], [])
                 lookups = [(call["kind"], call["name"]) for call in calls if call["module"] == "k8s_info" and call["kind"].startswith("Cluster")]
                 self.assertEqual(lookups, [("ClusterRoleBinding", "node-cache-pruner"), ("ClusterRole", "node-cache-pruner")])
@@ -234,11 +234,11 @@ class InstallTasksTest(unittest.TestCase):
     def test_the_cluster_wide_pod_access_1_31_0_created_is_removed_whether_or_not_the_pruner_is_wanted_binding_first(self) -> None:
         for wanted in (True, False):
             with self.subTest(wanted=wanted):
-                calls = install(self.FLEET, with_cache=None if wanted else [], existing=[legacy_role(), legacy_binding()])
+                calls = install(list(self.FLEET), with_cache=None if wanted else [], existing=[legacy_role(), legacy_binding()])
                 self.assertEqual([removal for removal in removals(calls) if removal[1] is None], [("ClusterRoleBinding", None, "node-cache-pruner"), ("ClusterRole", None, "node-cache-pruner")])
 
     def test_the_old_access_is_removed_before_anything_is_installed(self) -> None:
-        calls = install(self.FLEET, existing=[legacy_role(), legacy_binding()])
+        calls = install(list(self.FLEET), existing=[legacy_role(), legacy_binding()])
         first_install = next(index for index, call in enumerate(calls) if call.get("definition"))
         removed = [index for index, call in enumerate(calls) if call.get("state") == "absent" and call["kind"].startswith("Cluster")]
         self.assertEqual(len(removed), 2)
@@ -249,11 +249,11 @@ class InstallTasksTest(unittest.TestCase):
             legacy_role(rules=[{"apiGroups": [""], "resources": ["pods", "secrets"], "verbs": ["get", "list"]}]),
             legacy_binding(subjects=[{"kind": "ServiceAccount", "name": "someone-else", "namespace": "other"}]),
         ]
-        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=elsewhere)) if removal[1] is None], [])
+        self.assertEqual([removal for removal in removals(install(list(self.FLEET), existing=elsewhere)) if removal[1] is None], [])
 
     def test_only_the_object_that_matches_is_deleted_when_one_of_the_two_is_someone_elses(self) -> None:
         mixed = [legacy_role(rules=[{"apiGroups": [""], "resources": ["nodes"], "verbs": ["patch"]}]), legacy_binding()]
-        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=mixed)) if removal[1] is None], [("ClusterRoleBinding", None, "node-cache-pruner")])
+        self.assertEqual([removal for removal in removals(install(list(self.FLEET), existing=mixed)) if removal[1] is None], [("ClusterRoleBinding", None, "node-cache-pruner")])
 
     def test_a_binding_for_another_namespaces_account_or_more_subjects_is_not_ours(self) -> None:
         for subjects in (
@@ -262,7 +262,7 @@ class InstallTasksTest(unittest.TestCase):
             [],
         ):
             with self.subTest(subjects):
-                self.assertEqual([removal for removal in removals(install(self.FLEET, existing=[legacy_binding(subjects=subjects)])) if removal[1] is None], [])
+                self.assertEqual([removal for removal in removals(install(list(self.FLEET), existing=[legacy_binding(subjects=subjects)])) if removal[1] is None], [])
 
     def test_a_role_that_is_ours_is_left_with_a_binding_that_is_not_and_the_leftover_is_reported_once(self) -> None:
         for subjects in (
@@ -271,7 +271,7 @@ class InstallTasksTest(unittest.TestCase):
             [{"kind": "User", "name": "mallory"}],
         ):
             with self.subTest(subjects):
-                calls, output = install_with_output(self.FLEET, existing=[legacy_role(), legacy_binding(subjects=subjects)])
+                calls, output = install_with_output(list(self.FLEET), existing=[legacy_role(), legacy_binding(subjects=subjects)])
                 self.assertEqual([removal for removal in removals(calls) if removal[1] is None], [])
                 self.assertEqual(output.count("NODE_CACHE_LEGACY_ACCESS_LEFT"), 1, output)
                 self.assertIn("ClusterRole/node-cache-pruner", output)
@@ -280,26 +280,26 @@ class InstallTasksTest(unittest.TestCase):
     def test_nothing_is_reported_when_the_old_access_is_ours_or_absent(self) -> None:
         for existing in ([], [legacy_role(), legacy_binding()], [legacy_role()]):
             with self.subTest(len(existing)):
-                self.assertNotIn("NODE_CACHE_LEGACY_ACCESS_LEFT", install_with_output(self.FLEET, existing=existing)[1])
+                self.assertNotIn("NODE_CACHE_LEGACY_ACCESS_LEFT", install_with_output(list(self.FLEET), existing=existing)[1])
 
     def test_a_role_that_is_ours_is_removed_when_no_binding_of_the_name_exists(self) -> None:
-        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=[legacy_role()])) if removal[1] is None], [("ClusterRole", None, "node-cache-pruner")])
+        self.assertEqual([removal for removal in removals(install(list(self.FLEET), existing=[legacy_role()])) if removal[1] is None], [("ClusterRole", None, "node-cache-pruner")])
 
     def test_a_role_with_an_aggregation_rule_is_not_ours_even_with_the_same_rules(self) -> None:
         aggregated = legacy_role()
         aggregated["aggregationRule"] = {"clusterRoleSelectors": [{"matchLabels": {"rbac.example/aggregate-to-pods": "true"}}]}
         for existing in ([aggregated], [aggregated, legacy_binding()]):
             with self.subTest(len(existing)):
-                removed = [removal for removal in removals(install(self.FLEET, existing=existing)) if removal[1] is None]
+                removed = [removal for removal in removals(install(list(self.FLEET), existing=existing)) if removal[1] is None]
                 self.assertNotIn(("ClusterRole", None, "node-cache-pruner"), removed)
 
     def test_an_object_of_another_name_is_never_removed_even_with_the_old_content(self) -> None:
         other = legacy_role()
         other["metadata"]["name"] = "something-else"
-        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=[other])) if removal[1] is None], [])
+        self.assertEqual([removal for removal in removals(install(list(self.FLEET), existing=[other])) if removal[1] is None], [])
 
     def test_a_wanted_pruner_installs_the_account_a_role_and_binding_per_fleet_profile_and_the_daemonset_last(self) -> None:
-        calls = install(self.FLEET, with_cache=["arc-a/main"])
+        calls = install(list(self.FLEET), with_cache=["arc-a/main"])
         installed = [item for item in applied(calls) if item[0] != "Namespace"]
         self.assertEqual(installed[0], ("ServiceAccount", "node-cache-pruner"))
         self.assertEqual(installed[-1], ("DaemonSet", "node-cache-pruner"))
@@ -308,17 +308,17 @@ class InstallTasksTest(unittest.TestCase):
         self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [])
 
     def test_the_namespaces_of_every_fleet_profile_are_created_for_the_roles(self) -> None:
-        namespaces = {call["definition"]["metadata"]["name"] for call in install(self.FLEET) if (call.get("definition") or {}).get("kind") == "Namespace"}
+        namespaces = {call["definition"]["metadata"]["name"] for call in install(list(self.FLEET)) if (call.get("definition") or {}).get("kind") == "Namespace"}
         self.assertEqual(namespaces, {"github-runner-platform", "arc-a", "arc-b", "arc-c"})
 
     def test_a_wanted_pruner_without_the_node_label_key_fails_rather_than_running_everywhere(self) -> None:
         with self.assertRaises(AssertionError) as caught:
-            install(self.FLEET, github_runner_arc_node_label_key="")
+            install(list(self.FLEET), github_runner_arc_node_label_key="")
         self.assertIn("github_runner_arc_node_label_key must be set", str(caught.exception))
 
     def test_not_wanted_removes_the_daemonset_and_account_then_every_binding_and_role_the_cluster_has(self) -> None:
         existing = [access(kind, namespace, release) for kind in ("Role", "RoleBinding") for namespace, release in (("arc-a", "main"), ("arc-c", "plain"), ("arc-gone", "old"))]
-        calls = install(self.FLEET, with_cache=[], existing=existing)
+        calls = install(list(self.FLEET), with_cache=[], existing=existing)
         namespaced = [removal for removal in removals(calls) if removal[1] is not None]
         self.assertEqual(namespaced[:2], [("DaemonSet", "github-runner-platform", "node-cache-pruner"), ("ServiceAccount", "github-runner-platform", "node-cache-pruner")])
         self.assertEqual(namespaced[2:], [(kind, namespace, f"node-cache-pruner-{release}") for kind in ("RoleBinding", "Role") for namespace, release in (("arc-a", "main"), ("arc-c", "plain"), ("arc-gone", "old"))])
@@ -326,7 +326,7 @@ class InstallTasksTest(unittest.TestCase):
 
     def test_a_wanted_pruner_keeps_the_access_of_a_profile_that_has_left_the_fleet_so_its_directory_can_still_be_checked(self) -> None:
         existing = [access(kind, namespace, release) for kind in ("Role", "RoleBinding") for namespace, release in (("arc-a", "main"), ("arc-gone", "old"))]
-        calls = install(self.FLEET, existing=existing)
+        calls = install(list(self.FLEET), existing=existing)
         self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [])
 
     def test_only_objects_carrying_every_one_of_the_roles_labels_are_removed_with_the_pruner(self) -> None:
@@ -336,18 +336,18 @@ class InstallTasksTest(unittest.TestCase):
             access("Role", "other", "bare", labels={}),
         ]
         existing = [access("Role", "arc-a", "main"), access("RoleBinding", "arc-a", "main"), *foreign]
-        calls = install(self.FLEET, with_cache=[], existing=existing)
+        calls = install(list(self.FLEET), with_cache=[], existing=existing)
         self.assertEqual([removal for removal in removals(calls) if removal[1] == "arc-a" or removal[1] == "other"], [("RoleBinding", "arc-a", "node-cache-pruner-main"), ("Role", "arc-a", "node-cache-pruner-main")])
 
     def test_the_pruners_access_is_looked_up_by_all_of_its_labels_in_every_namespace(self) -> None:
-        calls = install(self.FLEET)
+        calls = install(list(self.FLEET))
         lookups = [call for call in calls if call["module"] == "k8s_info" and not call["kind"].startswith("Cluster")]
         self.assertEqual([call["kind"] for call in lookups], ["Role", "RoleBinding"])
         self.assertTrue(all(call["namespace"] is None for call in lookups))
         self.assertTrue(all(sorted(call["label_selectors"]) == sorted(f"{key}={value}" for key, value in OWN_LABELS.items()) for call in lookups))
 
     def test_a_size_limit_of_zero_removes_it_like_no_cache_at_all(self) -> None:
-        calls = install(self.FLEET, github_runner_arc_node_cache_size_limit_gib=0)
+        calls = install(list(self.FLEET), github_runner_arc_node_cache_size_limit_gib=0)
         self.assertEqual(applied(calls), [])
         self.assertIn(("DaemonSet", "github-runner-platform", "node-cache-pruner"), removals(calls))
 
@@ -375,13 +375,12 @@ class ValidationTest(unittest.TestCase):
     def test_the_task_expression_gives_the_same_answer_under_ansible(self) -> None:
         cases = ({}, {"github_runner_arc_node_cache_host_path": "/var/lib"}, {"github_runner_arc_node_cache_hard_limit_factor": "08"}, {"github_runner_arc_node_cache_size_limit_gib": 1073741825})
         for role_vars in cases:
-            with self.subTest(role_vars):
-                with tempfile.TemporaryDirectory() as work:
-                    template, output = Path(work) / "problems.j2", Path(work) / "problems.json"
-                    template.write_text("{{ (" + self.expression.strip().removeprefix("{{").removesuffix("}}") + ") | to_json }}")
-                    completed = ansible(KEPT, kept_template=str(template), kept_output=str(output), **role_vars)
-                    self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-                    self.assertEqual(json.loads(output.read_text()), self.problems(**role_vars))
+            with self.subTest(role_vars), tempfile.TemporaryDirectory() as work:
+                template, output = Path(work) / "problems.j2", Path(work) / "problems.json"
+                template.write_text("{{ (" + self.expression.strip().removeprefix("{{").removesuffix("}}") + ") | to_json }}")
+                completed = ansible(KEPT, kept_template=str(template), kept_output=str(output), **role_vars)
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                self.assertEqual(json.loads(output.read_text()), self.problems(**role_vars))
 
     def test_the_defaults_are_valid(self) -> None:
         self.assertEqual(self.problems(), [])
@@ -457,7 +456,7 @@ class NumericSettingsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work:
             root = Path(work) / "root"
             root.mkdir()
-            env = {**os.environ, "NODE_NAME": "n", "HOST_CACHE_ROOT": "/var/lib/x/node-cache", "CACHE_ROOT": str(root), "PRUNE_ONCE": "true", "LIMIT_GIB": "1", "WANTED_CACHES": "", **{variable: value}}
+            env = {**os.environ, "NODE_NAME": "n", "HOST_CACHE_ROOT": "/var/lib/x/node-cache", "CACHE_ROOT": str(root), "PRUNE_ONCE": "true", "LIMIT_GIB": "1", "WANTED_CACHES": "", variable: value}
             completed = subprocess.run(["bash", str(PRUNER_SCRIPT)], env=env, capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
             return completed.returncode == 0
 

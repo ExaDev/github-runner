@@ -136,7 +136,7 @@ class Run:
 class PrunerTest(unittest.TestCase):
     def setup_work(self) -> tuple[Path, Path, Path]:
         work = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: subprocess.run(["chmod", "-R", "u+rwx", str(work)]) and shutil.rmtree(work, True))
+        self.addCleanup(lambda: subprocess.run(["chmod", "-R", "u+rwx", str(work)], check=False) and shutil.rmtree(work, True))
         root = work / "root"
         root.mkdir()
         bin_dir = work / "bin"

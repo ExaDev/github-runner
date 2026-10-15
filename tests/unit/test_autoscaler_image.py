@@ -39,7 +39,6 @@ class ImageContentsTest(unittest.TestCase):
                 assert chmod is not None
                 self.assertIn(f"/app/scripts/{script}", chmod.group(1).split())
 
-
     def test_the_image_installs_bash_on_an_alpine_whose_bash_is_at_least_4_4(self) -> None:
         # The scripts are written to run on any bash (an empty array expansion is guarded), and still ask for bash 4.4 or later of the image. Alpine's bash package by release, from its package index (https://dl-cdn.alpinelinux.org/alpine/v3.6/main/x86_64/APKINDEX.tar.gz, v3.7 and v3.20 likewise): 3.6 has 4.3.48, 3.7 has 4.4.19, and the image's 3.20 has 5.2.26. So 3.7 is the first Alpine release that qualifies.
         dockerfile = DOCKERFILE.read_text()
