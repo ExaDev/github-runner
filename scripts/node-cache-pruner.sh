@@ -17,9 +17,9 @@
 # - NODE_NAME: the node this pod runs on (the downward API's spec.nodeName). Required.
 # - HOST_CACHE_ROOT: the cache root as the node knows it, which is the path of the pods' hostPath volumes up to <namespace>/<release>. Required.
 # - CACHE_ROOT: where the node's cache root is mounted in this pod (default: /host-node-cache).
-# - LIMIT_GIB: the most gibibytes one profile's cache may hold, a positive integer. Required unless LIMIT_KIB is set.
+# - LIMIT_GIB: the most gibibytes one profile's cache may hold, a positive integer. Required unless LIMIT_KIB is set. This, LIMIT_KIB, HARD_LIMIT_FACTOR and CHECK_SECONDS are checked at start-up, and the pruner exits with status 2 and a message on stderr when one is not a positive integer.
 # - LIMIT_KIB: the limit in kibibytes, which takes the place of LIMIT_GIB, so a test need not write gibibytes.
-# - HARD_LIMIT_FACTOR: the hard limit as a multiple of the limit, an integer of at least 1 (default: 2).
+# - HARD_LIMIT_FACTOR: the hard limit as a multiple of the limit, an integer of at least 1 (default when unset: 2; set and empty is refused).
 # - WANTED_CACHES: the profiles that have a cache, as <namespace>/<release> separated by spaces. When it is set, any other directory under the cache root is removed. Unset leaves every directory alone.
 # - CHECK_SECONDS: seconds between checks (default: 300).
 # - PRUNE_ONCE: when "true", check once and exit, for tests.
@@ -28,10 +28,26 @@ set -uo pipefail
 : "${NODE_NAME:?NODE_NAME is required}"
 : "${HOST_CACHE_ROOT:?HOST_CACHE_ROOT is required}"
 CACHE_ROOT="${CACHE_ROOT:-/host-node-cache}"
-CHECK_SECONDS="${CHECK_SECONDS:-300}"
+CHECK_SECONDS="${CHECK_SECONDS-300}"
 PRUNE_ONCE="${PRUNE_ONCE:-false}"
-HARD_LIMIT_FACTOR="${HARD_LIMIT_FACTOR:-2}"
-LIMIT_KIB="${LIMIT_KIB:-$(( ${LIMIT_GIB:?LIMIT_GIB or LIMIT_KIB is required} * 1024 * 1024 ))}"
+HARD_LIMIT_FACTOR="${HARD_LIMIT_FACTOR-2}"
+
+# A setting that must be a positive integer: a limit of 0 would set aside every cache that holds anything on every round, and arithmetic on text or a negative number would fail or invert the comparisons.
+require_positive_integer() {
+  if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+    echo "node-cache-pruner: $1 must be a positive integer (got '$2')" >&2
+    exit 2
+  fi
+}
+
+if [ -n "${LIMIT_KIB+x}" ]; then
+  require_positive_integer LIMIT_KIB "$LIMIT_KIB"
+else
+  require_positive_integer LIMIT_GIB "${LIMIT_GIB-}"
+  LIMIT_KIB=$((LIMIT_GIB * 1024 * 1024))
+fi
+require_positive_integer HARD_LIMIT_FACTOR "$HARD_LIMIT_FACTOR"
+require_positive_integer CHECK_SECONDS "$CHECK_SECONDS"
 HARD_LIMIT_KIB=$((LIMIT_KIB * HARD_LIMIT_FACTOR))
 TRASH_DIR="${CACHE_ROOT}/.trash"
 LIST_ERRORS="$(mktemp)"
@@ -98,12 +114,11 @@ set_aside_and_delete() {
   rm -rf "$aside" || log "node cache ${namespace}/${release}: the set-aside copy could not be deleted; the next round retries"
 }
 
-# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first. Returns 1 when the directory was kept.
+# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first. Returns 0 when the directory was removed, 1 when a pod mounts it and it was kept, 2 when the pods could not be listed and it was kept.
 remove_retired_directory() {
   local directory=$1 namespace=$2 release=$3 pods
-  if ! pods="$(pods_using "$namespace" "$release")" || [ -n "$pods" ]; then
-    return 1
-  fi
+  pods="$(pods_using "$namespace" "$release")" || return 2
+  [ -z "$pods" ] || return 1
   rmdir "$directory" 2>/dev/null
   rmdir "$(dirname "$directory")" 2>/dev/null
   return 0
@@ -144,11 +159,12 @@ check_profile() {
   case "$SET_ASIDE" in
     all)
       if [ "$retired" = true ]; then
-        if remove_retired_directory "$directory" "$namespace" "$release"; then
-          log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, and its directory removed"
-        else
-          log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory is kept because a runner pod may mount it now"
-        fi
+        remove_retired_directory "$directory" "$namespace" "$release"
+        case $? in
+          0) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, and its directory removed" ;;
+          1) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory is kept because a runner pod may mount it now" ;;
+          *) log "$(list_failure_prefix) ${label} size_kib=${size}: deleted, but the runner pods could not be listed, so its directory is kept" ;;
+        esac
       else
         log "node cache ${label} held ${size} KiB, over the limit of ${LIMIT_KIB} KiB: emptied"
       fi

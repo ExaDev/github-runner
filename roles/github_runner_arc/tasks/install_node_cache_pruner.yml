@@ -63,7 +63,7 @@
   loop_control:
     label: "{{ item.kind }}/node-cache-pruner"
 
-# The pruner's Roles and RoleBindings are found by the labels the role puts on them (all of them, so another software's objects are left alone) in every namespace. They are removed only when the pruner is: while it runs, each profile that has left the fleet keeps its read-only grant to list pods until the directory it left is gone, so the pruner can still check and clear it. Bindings go before the roles they bind.
+# The pruner's Roles and RoleBindings are found by the labels the role puts on them (all of them, so another software's objects are left alone) in every namespace. They are removed only when the pruner is. While it is installed a profile that has left the fleet keeps its grant, which is read-only (it lists pods and nothing else) and confined to that profile's own namespace, so staying is harmless, and it lets the pruner still check, and so clear, a directory the profile left. Bindings go before the roles they bind.
 - name: "Node cache: find the pruner's Roles and RoleBindings"
   kubernetes.core.k8s_info:
     api_version: rbac.authorization.k8s.io/v1
