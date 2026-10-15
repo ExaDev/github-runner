@@ -116,7 +116,8 @@ set_aside_and_delete() {
   mkdir -p "$TRASH_DIR" && aside="$(mktemp -d "${TRASH_DIR}/set-aside.XXXXXX")" || return 1
   shopt -s dotglob nullglob
   entries=("$directory"/*)
-  for entry in "${entries[@]}"; do
+  # ${entries[@]+...} rather than "${entries[@]}": an empty array is an unbound variable under set -u on bash before 4.4 (the autoscaler image has bash 5.2, Alpine 3.20's package, but the script should not depend on it).
+  for entry in ${entries[@]+"${entries[@]}"}; do
     if ! pods="$(pods_using "$namespace" "$release")"; then
       log "$(list_failure_prefix) ${namespace}/${release} size_kib=${size}: the runner pods could not be listed part way through; the rest is left in place"
       break
@@ -138,12 +139,17 @@ set_aside_and_delete() {
   rm -rf "$aside" || log "node cache ${namespace}/${release}: the set-aside copy could not be deleted; the next round retries"
 }
 
-# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first. Returns 0 when the directory was removed, 1 when a pod mounts it and it was kept, 2 when the pods could not be listed and it was kept, 3 when it was kept because something has been written to it since the cache was set aside.
+# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first. Returns 0 when the directory was removed, 1 when a pod mounts it and it was kept, 2 when the pods could not be listed and it was kept, 3 when it was kept because something has been written to it since the cache was set aside, 4 when rmdir failed for another reason, whose text is then in REMOVE_ERROR.
 remove_retired_directory() {
   local directory=$1 namespace=$2 release=$3 pods
+  REMOVE_ERROR=""
   pods="$(pods_using "$namespace" "$release")" || return 2
   [ -z "$pods" ] || return 1
-  rmdir "$directory" 2>/dev/null || return 3
+  if ! REMOVE_ERROR="$(rmdir "$directory" 2>&1)"; then
+    # Only a listing tells a directory that has something in it from one rmdir could not remove for another reason (permissions, a mount point, a busy directory).
+    [ -n "$(ls -A "$directory" 2>/dev/null)" ] && return 3
+    return 4
+  fi
   rmdir "$(dirname "$directory")" 2>/dev/null
   return 0
 }
@@ -188,6 +194,7 @@ check_profile() {
           0) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, and its directory removed" ;;
           1) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory is kept because a runner pod may mount it now" ;;
           3) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory is kept because it is not empty (something was written to it after the cache was set aside)" ;;
+          4) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory could not be removed: ${REMOVE_ERROR}" ;;
           *) log "$(list_failure_prefix) ${label} size_kib=${size}: deleted, but the runner pods could not be listed, so its directory is kept" ;;
         esac
       else

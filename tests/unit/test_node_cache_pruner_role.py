@@ -175,6 +175,17 @@ def access(kind: str, namespace: str, release: str, labels: dict[str, str] | Non
     return {"kind": kind, "metadata": {"namespace": namespace, "name": f"node-cache-pruner-{release}", "labels": OWN_LABELS if labels is None else labels}}
 
 
+def legacy_role(rules: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The ClusterRole release 1.31.0 created: no labels, one rule that lists pods."""
+    return {"kind": "ClusterRole", "metadata": {"name": "node-cache-pruner"}, "rules": rules if rules is not None else [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}]}
+
+
+def legacy_binding(subjects: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The ClusterRoleBinding release 1.31.0 created: no labels, the pruner's account in the platform namespace bound to its ClusterRole."""
+    default = [{"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": "github-runner-platform"}]
+    return {"kind": "ClusterRoleBinding", "metadata": {"name": "node-cache-pruner"}, "subjects": default if subjects is None else subjects, "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "node-cache-pruner"}}
+
+
 def install(fleet_targets: list[str], with_cache: list[str] | None = None, existing: list[dict[str, Any]] | None = None, **role_vars: Any) -> list[dict[str, Any]]:
     """Run the role's pruner install tasks against the stand-in kubernetes.core, and return the module calls it recorded. Each fleet profile carries the pnpm-store capability when its target is in with_cache (all of them when it is None)."""
     profiles = [{"namespace": t.split("/")[0], "release": t.split("/")[1], "target": t, "capabilities": ["pnpm-store"] if with_cache is None or t in with_cache else ["node"]} for t in fleet_targets]
@@ -186,7 +197,7 @@ def install(fleet_targets: list[str], with_cache: list[str] | None = None, exist
         log = Path(work) / "calls.jsonl"
         extra = Path(work) / "extra.json"
         extra.write_text(json.dumps({**INSTALL_VARIABLES, "github_runner_arc_fleet": {"profiles": profiles}, **role_vars}))
-        env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": os.pathsep.join([str(Path(work) / "stubs"), str(ROOT / "playbooks" / "collections")]), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false", "ANSIBLE_HOME": str(Path(work) / "home"), "STUB_LOG": str(log), "STUB_INFO": json.dumps({kind: [item for item in existing or [] if item["kind"] == kind] for kind in ("Role", "RoleBinding")})}
+        env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": os.pathsep.join([str(Path(work) / "stubs"), str(ROOT / "playbooks" / "collections")]), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false", "ANSIBLE_HOME": str(Path(work) / "home"), "STUB_LOG": str(log), "STUB_INFO": json.dumps({kind: [item for item in existing or [] if item["kind"] == kind] for kind in ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding")})}
         completed = subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(INSTALL), "-e", f"@{extra}"], env=env, cwd=work, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
         assert completed.returncode == 0, completed.stdout + completed.stderr
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -207,16 +218,51 @@ class InstallTasksTest(unittest.TestCase):
 
     FLEET = ["arc-a/main", "arc-b/builders", "arc-c/plain"]
 
-    def test_the_cluster_wide_pod_access_an_earlier_release_granted_is_removed_whether_or_not_the_pruner_is_wanted(self) -> None:
-        stale = [("ClusterRoleBinding", None, "node-cache-pruner"), ("ClusterRole", None, "node-cache-pruner")]
+    def test_a_fleet_that_never_ran_1_31_0_deletes_nothing_cluster_wide_and_only_looks(self) -> None:
         for wanted in (True, False):
             with self.subTest(wanted=wanted):
                 calls = install(self.FLEET, with_cache=None if wanted else [])
-                self.assertEqual([removal for removal in removals(calls) if removal[1] is None], stale)
+                self.assertEqual([removal for removal in removals(calls) if removal[1] is None], [])
+                lookups = [(call["kind"], call["name"]) for call in calls if call["module"] == "k8s_info" and call["kind"].startswith("Cluster")]
+                self.assertEqual(lookups, [("ClusterRoleBinding", "node-cache-pruner"), ("ClusterRole", "node-cache-pruner")])
 
-    def test_the_stale_access_is_removed_before_anything_is_installed(self) -> None:
-        calls = install(self.FLEET)
-        self.assertEqual((calls[0]["state"], calls[0]["kind"]), ("absent", "ClusterRoleBinding"))
+    def test_the_cluster_wide_pod_access_1_31_0_created_is_removed_whether_or_not_the_pruner_is_wanted_binding_first(self) -> None:
+        for wanted in (True, False):
+            with self.subTest(wanted=wanted):
+                calls = install(self.FLEET, with_cache=None if wanted else [], existing=[legacy_role(), legacy_binding()])
+                self.assertEqual([removal for removal in removals(calls) if removal[1] is None], [("ClusterRoleBinding", None, "node-cache-pruner"), ("ClusterRole", None, "node-cache-pruner")])
+
+    def test_the_old_access_is_removed_before_anything_is_installed(self) -> None:
+        calls = install(self.FLEET, existing=[legacy_role(), legacy_binding()])
+        first_install = next(index for index, call in enumerate(calls) if call.get("definition"))
+        removed = [index for index, call in enumerate(calls) if call.get("state") == "absent" and call["kind"].startswith("Cluster")]
+        self.assertEqual(len(removed), 2)
+        self.assertLess(max(removed), first_install)
+
+    def test_a_cluster_role_or_binding_of_the_same_name_with_other_content_is_not_deleted(self) -> None:
+        elsewhere = [
+            legacy_role(rules=[{"apiGroups": [""], "resources": ["pods", "secrets"], "verbs": ["get", "list"]}]),
+            legacy_binding(subjects=[{"kind": "ServiceAccount", "name": "someone-else", "namespace": "other"}]),
+        ]
+        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=elsewhere)) if removal[1] is None], [])
+
+    def test_only_the_object_that_matches_is_deleted_when_one_of_the_two_is_someone_elses(self) -> None:
+        mixed = [legacy_role(rules=[{"apiGroups": [""], "resources": ["nodes"], "verbs": ["patch"]}]), legacy_binding()]
+        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=mixed)) if removal[1] is None], [("ClusterRoleBinding", None, "node-cache-pruner")])
+
+    def test_a_binding_for_another_namespaces_account_or_more_subjects_is_not_ours(self) -> None:
+        for subjects in (
+            [{"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": "not-the-platform"}],
+            [{"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": "github-runner-platform"}, {"kind": "User", "name": "mallory"}],
+            [],
+        ):
+            with self.subTest(subjects):
+                self.assertEqual([removal for removal in removals(install(self.FLEET, existing=[legacy_binding(subjects=subjects)])) if removal[1] is None], [])
+
+    def test_an_object_of_another_name_is_never_removed_even_with_the_old_content(self) -> None:
+        other = legacy_role()
+        other["metadata"]["name"] = "something-else"
+        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=[other])) if removal[1] is None], [])
 
     def test_a_wanted_pruner_installs_the_account_a_role_and_binding_per_fleet_profile_and_the_daemonset_last(self) -> None:
         calls = install(self.FLEET, with_cache=["arc-a/main"])
@@ -261,7 +307,7 @@ class InstallTasksTest(unittest.TestCase):
 
     def test_the_pruners_access_is_looked_up_by_all_of_its_labels_in_every_namespace(self) -> None:
         calls = install(self.FLEET)
-        lookups = [call for call in calls if call["module"] == "k8s_info"]
+        lookups = [call for call in calls if call["module"] == "k8s_info" and not call["kind"].startswith("Cluster")]
         self.assertEqual([call["kind"] for call in lookups], ["Role", "RoleBinding"])
         self.assertTrue(all(call["namespace"] is None for call in lookups))
         self.assertTrue(all(sorted(call["label_selectors"]) == sorted(f"{key}={value}" for key, value in OWN_LABELS.items()) for call in lookups))

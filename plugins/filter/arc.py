@@ -943,6 +943,31 @@ def arc_bounded_integer_errors(value: Any, name: str, maximum: int, pattern: str
     return []
 
 
+def arc_node_cache_legacy_access(found: Sequence[Mapping[str, Any]], platform_namespace: str) -> list[dict[str, str]]:
+    """Return the ClusterRoleBinding and ClusterRole named node-cache-pruner that release 1.31.0 created, as kind and name in the order found (the tasks look the binding up first, so it is removed before the role it binds), and nothing that merely shares the name.
+
+    Release 1.31.0 put no labels on them, so what identifies them is their content, which was exactly this: a ClusterRole whose only rule lists pods, and a ClusterRoleBinding that binds that ClusterRole to the node-cache-pruner ServiceAccount of the platform namespace and to nothing else. An object with that name and any other content belongs to someone else and is left alone.
+
+    Args:
+        found: the ClusterRoles and ClusterRoleBindings called node-cache-pruner, as the cluster returned them. platform_namespace: the namespace the pruner's ServiceAccount is in.
+    """
+    own_rules = [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}]
+    own_subject = {"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": platform_namespace}
+    ours: list[dict[str, str]] = []
+    for resource in found:
+        name = resource.get("metadata", {}).get("name")
+        if name != "node-cache-pruner":
+            continue
+        if resource.get("kind") == "ClusterRole" and resource.get("rules") == own_rules:
+            ours.append({"kind": "ClusterRole", "name": name})
+        elif resource.get("kind") == "ClusterRoleBinding":
+            subjects = resource.get("subjects") or []
+            role_ref = resource.get("roleRef") or {}
+            if len(subjects) == 1 and all(subjects[0].get(key) == value for key, value in own_subject.items()) and role_ref.get("kind") == "ClusterRole" and role_ref.get("name") == "node-cache-pruner":
+                ours.append({"kind": "ClusterRoleBinding", "name": name})
+    return ours
+
+
 def arc_label_selectors(labels: Mapping[str, str]) -> list[str]:
     """Return a label mapping as the list of key=value selectors that matches exactly the objects carrying all of them."""
     return [f"{key}={value}" for key, value in labels.items()]
@@ -1431,6 +1456,7 @@ class FilterModule:
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
             "arc_node_cache_root": arc_node_cache_root,
             "arc_node_cache_access_to_remove": arc_node_cache_access_to_remove,
+            "arc_node_cache_legacy_access": arc_node_cache_legacy_access,
             "arc_label_selectors": arc_label_selectors,
             "arc_bounded_integer_errors": arc_bounded_integer_errors,
             "arc_node_cache_dir": arc_node_cache_dir,
