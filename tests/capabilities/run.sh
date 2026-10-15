@@ -100,11 +100,15 @@ kubectl apply --dry-run=server -f "$work/autoscalingrunnerset.yaml" >/dev/null |
 kubectl -n "$namespace" apply -f "$work/configmap.yaml" >/dev/null
 # What the runner user must find in the node cache once the init container has run: the directory the profile names, writable, and the cache's root writable too, since a job recreates a subdirectory the pruner has set aside directly under it.
 cat >"$work/cache-step.sh" <<'EOF'
+set -euo pipefail
+echo "uid $(id -u); the store directory is $pnpm_config_store_dir"
 [ "$(id -u)" = 1001 ]
 [ "$pnpm_config_store_dir" = /node-cache/pnpm ]
+stat -c 'owner %u mode %a %n' /node-cache "$pnpm_config_store_dir"
 touch "$pnpm_config_store_dir/probe"
 [ "$(stat -c %u "$pnpm_config_store_dir/probe")" = 1001 ]
 mkdir /node-cache/recreated-by-a-job
+stat -c 'owner %u mode %a %n' /node-cache/recreated-by-a-job
 [ "$(stat -c %u /node-cache/recreated-by-a-job)" = 1001 ]
 echo "node cache writable by the runner user"
 EOF
