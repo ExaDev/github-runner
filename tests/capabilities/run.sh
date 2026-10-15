@@ -164,7 +164,7 @@ wait_for_pod() {
 cache_host_path="$(python3 -c 'import sys, yaml; spec = yaml.safe_load(open(sys.argv[1]))["spec"]["template"]["spec"]; print(next(volume["hostPath"]["path"] for volume in spec["volumes"] if volume["name"] == "node-cache"))' "$work/autoscalingrunnerset.yaml")"
 log "Starting a pod on a node cache already owned by the runner user, with no subdirectory"
 docker exec "${cluster}-control-plane" sh -c 'mkdir -p "$1" && chown 1001:1001 "$1"' sh "$cache_host_path"
-{ cat "$work/cache-step.sh"; echo CACHE-OK; } >"$work/seeded-step.sh"
+{ cat "$work/cache-step.sh"; echo "echo CACHE-OK"; } >"$work/seeded-step.sh"
 python3 "$work/make-pod.py" "$work/autoscalingrunnerset.yaml" "$work/seeded-step.sh" seeded "$work/seeded-pod.yaml"
 kubectl -n "$namespace" apply -f "$work/seeded-pod.yaml" >/dev/null
 wait_for_pod seeded
