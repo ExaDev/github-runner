@@ -149,7 +149,8 @@ until phase="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.phas
   [ "$(date +%s)" -lt "$deadline" ] || fail "the pod did not finish"
   sleep 5
 done
-kubectl -n "$namespace" logs runner -c runner
+# A pod that failed in an init container has no runner log to print; fail dumps every container's.
+kubectl -n "$namespace" logs runner -c runner || fail "the pod failed before the step ran"
 [ "$phase" = Succeeded ] || fail "the step failed"
 kubectl -n "$namespace" logs runner -c runner | grep -qx CAPABILITIES-OK || fail "the step did not reach its end"
 init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-node")].state.terminated.exitCode}')"
