@@ -186,8 +186,8 @@ def legacy_binding(subjects: list[dict[str, Any]] | None = None) -> dict[str, An
     return {"kind": "ClusterRoleBinding", "metadata": {"name": "node-cache-pruner"}, "subjects": default if subjects is None else subjects, "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "node-cache-pruner"}}
 
 
-def install(fleet_targets: list[str], with_cache: list[str] | None = None, existing: list[dict[str, Any]] | None = None, **role_vars: Any) -> list[dict[str, Any]]:
-    """Run the role's pruner install tasks against the stand-in kubernetes.core, and return the module calls it recorded. Each fleet profile carries the pnpm-store capability when its target is in with_cache (all of them when it is None)."""
+def install_with_output(fleet_targets: list[str], with_cache: list[str] | None = None, existing: list[dict[str, Any]] | None = None, **role_vars: Any) -> tuple[list[dict[str, Any]], str]:
+    """Run the role's pruner install tasks against the stand-in kubernetes.core, and return the module calls it recorded and the playbook's output. Each fleet profile carries the pnpm-store capability when its target is in with_cache (all of them when it is None)."""
     profiles = [{"namespace": t.split("/")[0], "release": t.split("/")[1], "target": t, "capabilities": ["pnpm-store"] if with_cache is None or t in with_cache else ["node"]} for t in fleet_targets]
     with tempfile.TemporaryDirectory() as work:
         modules = Path(work) / "stubs" / "ansible_collections" / "kubernetes" / "core" / "plugins" / "modules"
@@ -200,7 +200,12 @@ def install(fleet_targets: list[str], with_cache: list[str] | None = None, exist
         env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": os.pathsep.join([str(Path(work) / "stubs"), str(ROOT / "playbooks" / "collections")]), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false", "ANSIBLE_HOME": str(Path(work) / "home"), "STUB_LOG": str(log), "STUB_INFO": json.dumps({kind: [item for item in existing or [] if item["kind"] == kind] for kind in ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding")})}
         completed = subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(INSTALL), "-e", f"@{extra}"], env=env, cwd=work, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
         assert completed.returncode == 0, completed.stdout + completed.stderr
-        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return ([json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []), completed.stdout
+
+
+def install(fleet_targets: list[str], with_cache: list[str] | None = None, existing: list[dict[str, Any]] | None = None, **role_vars: Any) -> list[dict[str, Any]]:
+    """The module calls the pruner install tasks make, see install_with_output."""
+    return install_with_output(fleet_targets, with_cache, existing, **role_vars)[0]
 
 
 def removals(calls: list[dict[str, Any]]) -> list[tuple[str, str | None, str]]:
@@ -258,6 +263,35 @@ class InstallTasksTest(unittest.TestCase):
         ):
             with self.subTest(subjects):
                 self.assertEqual([removal for removal in removals(install(self.FLEET, existing=[legacy_binding(subjects=subjects)])) if removal[1] is None], [])
+
+    def test_a_role_that_is_ours_is_left_with_a_binding_that_is_not_and_the_leftover_is_reported_once(self) -> None:
+        for subjects in (
+            [{"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": "a-platform-namespace-since-changed"}],
+            [{"kind": "ServiceAccount", "name": "node-cache-pruner", "namespace": "github-runner-platform"}, {"kind": "User", "name": "mallory"}],
+            [{"kind": "User", "name": "mallory"}],
+        ):
+            with self.subTest(subjects):
+                calls, output = install_with_output(self.FLEET, existing=[legacy_role(), legacy_binding(subjects=subjects)])
+                self.assertEqual([removal for removal in removals(calls) if removal[1] is None], [])
+                self.assertEqual(output.count("NODE_CACHE_LEGACY_ACCESS_LEFT"), 1, output)
+                self.assertIn("ClusterRole/node-cache-pruner", output)
+                self.assertIn("ClusterRoleBinding/node-cache-pruner", output)
+
+    def test_nothing_is_reported_when_the_old_access_is_ours_or_absent(self) -> None:
+        for existing in ([], [legacy_role(), legacy_binding()], [legacy_role()]):
+            with self.subTest(len(existing)):
+                self.assertNotIn("NODE_CACHE_LEGACY_ACCESS_LEFT", install_with_output(self.FLEET, existing=existing)[1])
+
+    def test_a_role_that_is_ours_is_removed_when_no_binding_of_the_name_exists(self) -> None:
+        self.assertEqual([removal for removal in removals(install(self.FLEET, existing=[legacy_role()])) if removal[1] is None], [("ClusterRole", None, "node-cache-pruner")])
+
+    def test_a_role_with_an_aggregation_rule_is_not_ours_even_with_the_same_rules(self) -> None:
+        aggregated = legacy_role()
+        aggregated["aggregationRule"] = {"clusterRoleSelectors": [{"matchLabels": {"rbac.example/aggregate-to-pods": "true"}}]}
+        for existing in ([aggregated], [aggregated, legacy_binding()]):
+            with self.subTest(len(existing)):
+                removed = [removal for removal in removals(install(self.FLEET, existing=existing)) if removal[1] is None]
+                self.assertNotIn(("ClusterRole", None, "node-cache-pruner"), removed)
 
     def test_an_object_of_another_name_is_never_removed_even_with_the_old_content(self) -> None:
         other = legacy_role()

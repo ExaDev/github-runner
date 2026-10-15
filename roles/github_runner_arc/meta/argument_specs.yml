@@ -3,6 +3,8 @@
 argument_specs:
   main:
     short_description: Installs Actions Runner Controller, runner scale sets and the fleet-health platform into a Kubernetes cluster.
+    description:
+      - Release 1.31.0 installed the node cache pruner with a cluster-wide ClusterRole and ClusterRoleBinding named node-cache-pruner. Every run now looks for them, so the credential the role uses to reach the cluster must be allowed to get ClusterRoles and ClusterRoleBindings (cluster-scoped, read-only), also on a fleet that never ran 1.31.0, and to delete them only if it finds the 1.31.0 objects. A role whose binding is not the one 1.31.0 created is left with it and reported with a line starting NODE_CACHE_LEGACY_ACCESS_LEFT.
     options:
       github_runner_arc_orgs:
         type: list
