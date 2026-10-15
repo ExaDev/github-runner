@@ -155,10 +155,9 @@ github_runner_arc_capabilities:
 ```
 
 ```yaml
-# The workflow's install step, in a job on that profile.
-- run: pnpm install --frozen-lockfile
+# The workflow's install step, in a job on that profile. The variable is read in the shell: it is set on the pod, and the workflow's env context does not hold variables the runner process inherits.
+- run: pnpm_config_store_dir="$NODE_CACHE_PNPM_STORE_DIR" pnpm install --frozen-lockfile
   env:
-    pnpm_config_store_dir: ${{ env.NODE_CACHE_PNPM_STORE_DIR }}
     pnpm_config_enable_global_virtual_store: "true"
 ```
 
