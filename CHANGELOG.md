@@ -1,3 +1,11 @@
+## [1.31.2](https://github.com/ExaDev/github-runner/compare/v1.31.1...v1.31.2) (2026-10-15)
+
+
+### Bug Fixes
+
+* **arc:** drop FOWNER from the node-cache init container and document its capabilities ([e641d8f](https://github.com/ExaDev/github-runner/commit/e641d8ff2953ec8f419a3760d5d890a5011a9752))
+* **arc:** keep DAC_OVERRIDE and FOWNER on the node-cache init container ([320c3e5](https://github.com/ExaDev/github-runner/commit/320c3e532764b960c7cf4d171c3f1326ce31e494))
+
 ## [1.31.1](https://github.com/ExaDev/github-runner/compare/v1.31.0...v1.31.1) (2026-10-15)
 
 
