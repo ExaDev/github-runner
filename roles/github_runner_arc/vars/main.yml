@@ -43,3 +43,9 @@ github_runner_arc_registry_cache_buildx_config_dir: /etc/github-runner/buildx
 # Where a profile's job-started hook ConfigMap is mounted on the runner container, and its name in the profile's namespace. ACTIONS_RUNNER_HOOK_JOB_STARTED names job-started.sh in this directory, and the capability scripts it runs are in job-started.d beneath it.
 github_runner_arc_job_started_hooks_dir: /etc/github-runner/hooks
 github_runner_arc_job_started_configmap: github-runner-job-started
+
+# The labels the role puts on every Role and RoleBinding it creates for the node cache pruner (templates/node-cache-pruner.yaml.j2) and finds them by (tasks/install_node_cache_pruner.yml). An object is the role's own only if it carries all three, so another software's object sharing one of them is never touched.
+github_runner_arc_node_cache_pruner_labels:
+  app.kubernetes.io/name: node-cache-pruner
+  app.kubernetes.io/part-of: github-runner
+  app.kubernetes.io/managed-by: exadev.github_runner
