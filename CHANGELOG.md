@@ -1,3 +1,5 @@
+## [1.31.3](https://github.com/ExaDev/github-runner/compare/v1.31.2...v1.31.3) (2026-10-15)
+
 ## [1.31.2](https://github.com/ExaDev/github-runner/compare/v1.31.1...v1.31.2) (2026-10-15)
 
 
