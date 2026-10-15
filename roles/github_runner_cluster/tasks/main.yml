@@ -34,6 +34,12 @@
 - name: Decide this host's part in the cluster
   ansible.builtin.include_tasks: topology.yml
 
+- name: Check the versions the node's image is built from
+  ansible.builtin.include_tasks: versions.yml
+
+- name: Check the k3s version against what this node and the cluster run now
+  ansible.builtin.include_tasks: running_version.yml
+
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-
@@ -41,6 +47,9 @@
       Ansible reads (ansible-vault, a lookup), or run a secrets adapter
       such as github_runner_secrets_onepassword first.
   when: github_runner_cluster_k3s_token | default('') | length == 0
+
+- name: Check the Compose files the node's .env names
+  ansible.builtin.include_tasks: compose_files.yml
 
 - name: Create this host's Compose project directory
   ansible.builtin.file:

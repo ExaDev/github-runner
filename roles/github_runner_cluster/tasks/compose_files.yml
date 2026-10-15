@@ -1,0 +1,12 @@
+---
+# The node's .env lists its Compose files in COMPOSE_FILE as absolute paths separated by colons, for docker compose commands run by hand, so no path may contain a colon. Before the role changes anything on the host.
+
+- name: Fail if a Compose file path contains a colon
+  vars:
+    github_runner_cluster_compose_paths: "{{ github_runner_cluster_compose_file_list | map('regex_replace', '^(?!/)', github_runner_cluster_dir ~ '/') | list }}"
+  ansible.builtin.fail:
+    msg: >-
+      COMPOSE_FILE in the node's .env cannot hold a path with a colon in it, and these Compose files have one (from
+      github_runner_cluster_dir or github_runner_cluster_compose_files):
+      {{ github_runner_cluster_compose_paths | select('search', ':') | join(', ') }}. Nothing was changed.
+  when: github_runner_cluster_compose_paths | select('search', ':') | length > 0

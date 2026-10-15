@@ -55,7 +55,6 @@ jq -n \
     github_runner_cluster_node_name: $node_name,
     github_runner_cluster_server_url: (if $node_role == "agent" then env.K3S_AGENT_SERVER_URL else (env.K3S_JOIN_SERVER_URL // "") end),
     github_runner_cluster_tls_sans: ((env.K3S_TLS_SAN_LIST // "") | split(" ") | map(select(. != ""))),
-    github_runner_cluster_k3s_version: (env.K3S_VERSION // "" | if . == "" then "latest" else . end),
     github_runner_arc_heartbeat_gist_id: (env.HEARTBEAT_GIST_ID // ""),
     github_runner_arc_orgs: (
       if (env.RUNNER_APP_ID // "") == "" then []
@@ -81,6 +80,8 @@ jq -n \
     github_runner_arc_heartbeat_gh_token: (env.HEARTBEAT_GH_TOKEN // "")
   }
   + opt("github_runner_cluster_dir"; "GITHUB_RUNNER_CLUSTER_DIR")
+  + opt("github_runner_cluster_k3s_version"; "K3S_VERSION")
+  + opt("github_runner_cluster_tailscale_version"; "TAILSCALE_VERSION")
   + opt("github_runner_cluster_compose_project"; "GITHUB_RUNNER_COMPOSE_PROJECT")
   + opt("github_runner_arc_autoscaler_usable_budget_gi"; "AUTOSCALER_USABLE_BUDGET_GI")
   + opt("github_runner_arc_autoscaler_max_ceiling"; "AUTOSCALER_MAX_CEILING")
