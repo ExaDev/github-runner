@@ -25,8 +25,8 @@ log() { echo "==> $*"; }
 fail() {
   echo "FAIL: $*" >&2
   kubectl -n "$namespace" get pods -o wide >&2 || true
-  kubectl -n "$namespace" describe pod runner >&2 || true
-  kubectl -n "$namespace" logs runner --all-containers >&2 || true
+  kubectl -n "$namespace" describe pods >&2 || true
+  for pod in $(kubectl -n "$namespace" get pods -o name 2>/dev/null); do kubectl -n "$namespace" logs "$pod" --all-containers >&2 || true; done
   exit 1
 }
 cleanup() {
@@ -97,8 +97,17 @@ kubectl wait --for condition=established --timeout=60s crd/autoscalingrunnersets
 kubectl create namespace "$namespace" >/dev/null
 kubectl apply --dry-run=server -f "$work/autoscalingrunnerset.yaml" >/dev/null || fail "the API server rejected the rendered AutoscalingRunnerSet"
 
-log "Starting a pod from the chart's runner pod template"
 kubectl -n "$namespace" apply -f "$work/configmap.yaml" >/dev/null
+# What the runner user must find in the node cache once the init container has run: the directory the profile names, writable, and the cache's root writable too, since a job recreates a subdirectory the pruner has set aside directly under it.
+cat >"$work/cache-step.sh" <<'EOF'
+[ "$(id -u)" = 1001 ]
+[ "$pnpm_config_store_dir" = /node-cache/pnpm ]
+touch "$pnpm_config_store_dir/probe"
+[ "$(stat -c %u "$pnpm_config_store_dir/probe")" = 1001 ]
+mkdir /node-cache/recreated-by-a-job
+[ "$(stat -c %u /node-cache/recreated-by-a-job)" = 1001 ]
+echo "node cache writable by the runner user"
+EOF
 # The step: what the runner does at job start (it runs the hook named by ACTIONS_RUNNER_HOOK_JOB_STARTED with bash -e and fresh environment files, then applies them), then a job step that uses the tool and asks @actions/tool-cache for it as actions/setup-node does.
 cat >"$work/step.sh" <<EOF
 set -euo pipefail
@@ -117,18 +126,15 @@ echo "psql on PATH: \$(command -v psql) \$(psql --version)"
 [ "\${LD_LIBRARY_PATH%%:*}" = "${sysroot}/lib" ]
 [ "\$PGSYSCONFDIR" = "${sysroot}/etc" ]
 echo "system library ran from ${sysroot}"
-[ "\$(id -u)" = 1001 ]
-[ "\$pnpm_config_store_dir" = /node-cache/pnpm ]
-touch "\$pnpm_config_store_dir/probe"
-[ "\$(stat -c %u "\$pnpm_config_store_dir/probe")" = 1001 ]
-echo "node cache writable by the runner user"
+$(cat "$work/cache-step.sh")
 cd "\$(mktemp -d)"
 npm install --silent --no-audit --no-fund "${tool_cache_package}" >/dev/null
 node --input-type=module -e "import * as tc from '@actions/tool-cache'; const found = tc.find('node', '${node_version%%.*}', process.arch); if (!found) { console.error('not found in ' + process.env.RUNNER_TOOL_CACHE); process.exit(1); } console.log('tool-cache find: ' + found);"
 echo CAPABILITIES-OK
 EOF
-python3 - "$work/autoscalingrunnerset.yaml" "$work/step.sh" "$work/pod.yaml" <<'EOF'
+cat >"$work/make-pod.py" <<'EOF'
 import sys, yaml
+# Usage: make-pod.py AUTOSCALINGRUNNERSET STEP_SCRIPT POD_NAME OUTPUT
 template = yaml.safe_load(open(sys.argv[1]))["spec"]["template"]
 spec = template["spec"]
 # The chart's service account and pull Secret belong to a real release, which this test does not install.
@@ -139,19 +145,38 @@ spec["restartPolicy"] = "Never"
 spec["securityContext"] = {"runAsNonRoot": True, "runAsUser": 1001, "runAsGroup": 1001}
 runner = next(container for container in spec["containers"] if container["name"] == "runner")
 runner["command"] = ["bash", "-c", open(sys.argv[2]).read()]
-yaml.safe_dump({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "runner", "labels": template.get("metadata", {}).get("labels", {})}, "spec": spec}, open(sys.argv[3], "w"))
+yaml.safe_dump({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": sys.argv[3], "labels": template.get("metadata", {}).get("labels", {})}, "spec": spec}, open(sys.argv[4], "w"))
 EOF
-kubectl -n "$namespace" apply -f "$work/pod.yaml" >/dev/null
-
 # The runner image is large, so the first pull dominates; a pod that has not finished within the deadline is reported with its events.
-deadline=$(($(date +%s) + 900))
-until phase="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.phase}')" && [ "$phase" = Succeeded ] || [ "$phase" = Failed ]; do
-  [ "$(date +%s)" -lt "$deadline" ] || fail "the pod did not finish"
-  sleep 5
-done
-# A pod that failed in an init container has no runner log to print; fail dumps every container's.
-kubectl -n "$namespace" logs runner -c runner || fail "the pod failed before the step ran"
-[ "$phase" = Succeeded ] || fail "the step failed"
+wait_for_pod() {
+  local deadline phase
+  deadline=$(($(date +%s) + 900))
+  until phase="$(kubectl -n "$namespace" get pod "$1" -o jsonpath='{.status.phase}')" && [ "$phase" = Succeeded ] || [ "$phase" = Failed ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || fail "the pod $1 did not finish"
+    sleep 5
+  done
+  # A pod that failed in an init container has no runner log to print; fail dumps every container's.
+  kubectl -n "$namespace" logs "$1" -c runner || fail "the pod $1 failed before the step ran"
+  [ "$phase" = Succeeded ] || fail "the step of pod $1 failed"
+}
+
+# The state a node is really in: the directory already given to the runner user, with no subdirectory in it, which is what the pruner leaves after it empties the cache and what an earlier pod leaves behind. The init container must still create the subdirectory there, as root over a directory it no longer owns.
+cache_host_path="$(python3 -c 'import sys, yaml; spec = yaml.safe_load(open(sys.argv[1]))["spec"]["template"]["spec"]; print(next(volume["hostPath"]["path"] for volume in spec["volumes"] if volume["name"] == "node-cache"))' "$work/autoscalingrunnerset.yaml")"
+log "Starting a pod on a node cache already owned by the runner user, with no subdirectory"
+docker exec "${cluster}-control-plane" sh -c 'mkdir -p "$1" && chown 1001:1001 "$1"' sh "$cache_host_path"
+{ cat "$work/cache-step.sh"; echo CACHE-OK; } >"$work/seeded-step.sh"
+python3 "$work/make-pod.py" "$work/autoscalingrunnerset.yaml" "$work/seeded-step.sh" seeded "$work/seeded-pod.yaml"
+kubectl -n "$namespace" apply -f "$work/seeded-pod.yaml" >/dev/null
+wait_for_pod seeded
+kubectl -n "$namespace" logs seeded -c runner | grep -qx CACHE-OK || fail "the step of pod seeded did not reach its end"
+kubectl -n "$namespace" delete pod seeded --wait >/dev/null
+docker exec "${cluster}-control-plane" rm -rf "$cache_host_path"
+
+log "Starting a pod from the chart's runner pod template"
+python3 "$work/make-pod.py" "$work/autoscalingrunnerset.yaml" "$work/step.sh" runner "$work/pod.yaml"
+kubectl -n "$namespace" apply -f "$work/pod.yaml" >/dev/null
+wait_for_pod runner
+
 kubectl -n "$namespace" logs runner -c runner | grep -qx CAPABILITIES-OK || fail "the step did not reach its end"
 init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-node")].state.terminated.exitCode}')"
 [ "$init_state" = 0 ] || fail "the capability-node init container did not succeed (exit code '${init_state}')"
