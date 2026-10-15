@@ -549,7 +549,7 @@ class DocumentedExampleTest(unittest.TestCase):
         self.assertEqual(env["NODE_CACHE_PNPM_STORE_DIR"], "/node-cache/pnpm")
         self.assertEqual([name for name in env if name.lower().startswith(("pnpm_config_", "npm_config_"))], [])
         readme = (ROLE / "README.md").read_text()
-        self.assertIn("pnpm_config_store_dir: ${{ env.NODE_CACHE_PNPM_STORE_DIR }}", readme)
+        self.assertIn('pnpm_config_store_dir="$NODE_CACHE_PNPM_STORE_DIR" pnpm install', readme)
 
 
 class PathConsistencyTest(unittest.TestCase):
