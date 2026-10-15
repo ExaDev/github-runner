@@ -31,6 +31,14 @@ FAKE_KUBECTL = textwrap.dedent(
     if namespace in listed("FAKE_FAIL_PODS"):
         sys.stderr.write("the server is unavailable\\n")
         sys.exit(1)
+    after = os.path.join(state, "calls-" + namespace)
+    seen = int(open(after).read()) if os.path.exists(after) else 0
+    if os.environ.get("FAKE_FAIL_AFTER") and seen >= int(os.environ["FAKE_FAIL_AFTER"]):
+        sys.stderr.write("the server is unavailable\\n")
+        sys.exit(1)
+    if os.environ.get("FAKE_FORBID_AFTER") and seen >= int(os.environ["FAKE_FORBID_AFTER"]):
+        sys.stderr.write('Error from server (Forbidden): pods is forbidden\\n')
+        sys.exit(1)
     if namespace in listed("FAKE_FORBIDDEN"):
         sys.stderr.write('Error from server (Forbidden): pods is forbidden: User cannot list resource "pods" in the namespace\\n')
         sys.exit(1)
@@ -201,6 +209,7 @@ class PrunerTest(unittest.TestCase):
         run = self.run_pruner({"arc-gone/old": OVER_KIB, "arc-a/main": OVER_KIB}, wanted=["arc-a/main"], FAKE_FORBIDDEN="arc-gone")
         self.assertTrue((run.profile("arc-gone/old") / "pnpm" / "blob").exists())
         self.assertIn("NODE_CACHE_UNPRUNABLE arc-gone/old: the runner pods on this node could not be listed", run.output)
+        self.assertNotIn("NODE_CACHE_LIST_FAILED", run.output)
         self.assertEqual(list(run.profile("arc-a/main").iterdir()), [])
 
     def test_a_partly_set_aside_cache_is_reported_as_partly_emptied_not_emptied(self) -> None:
@@ -223,7 +232,9 @@ class PrunerTest(unittest.TestCase):
         run = self.run_pruner({"arc-gone/old": UNDER_KIB}, pods=[pod("arc-gone/old", from_call=3)], wanted=[])
         self.assertTrue((run.root / "arc-gone" / "old").is_dir())
         self.assertEqual(list((run.root / "arc-gone" / "old").iterdir()), [])
-        self.assertIn("a runner pod may mount the directory now, so it is kept", run.output)
+        self.assertEqual(run.output.count("arc-gone/old"), 1, run.output)
+        self.assertIn("deleted, but its directory is kept because a runner pod may mount it now", run.output)
+        self.assertNotIn("directory removed", run.output)
 
     def test_a_cache_under_the_limit_is_left_alone_and_no_pod_is_listed(self) -> None:
         run = self.run_pruner({"arc-a/main": UNDER_KIB}, wanted=["arc-a/main"])
@@ -253,11 +264,29 @@ class PrunerTest(unittest.TestCase):
         run = self.run_pruner({"arc-a/main": OVER_KIB, "arc-b/main": OVER_KIB}, wanted=["arc-a/main", "arc-b/main"], FAKE_FAIL_PODS="arc-a")
         self.assertTrue((run.profile("arc-a/main") / "pnpm" / "blob").exists())
         self.assertEqual(list(run.profile("arc-b/main").iterdir()), [])
-        self.assertIn("could not be listed", run.output)
+        self.assertIn("NODE_CACHE_LIST_FAILED arc-a/main: the runner pods on this node could not be listed", run.output)
+        self.assertNotIn("NODE_CACHE_UNPRUNABLE", run.output)
 
-    def test_an_answer_that_is_not_a_pod_list_means_no_pruning(self) -> None:
+    def test_an_answer_that_is_not_a_pod_list_means_no_pruning_and_is_not_called_unprunable(self) -> None:
         run = self.run_pruner({"arc-a/main": OVER_KIB}, wanted=["arc-a/main"], FAKE_BAD_JSON="arc-a")
         self.assertTrue((run.profile("arc-a/main") / "pnpm" / "blob").exists())
+        self.assertIn("NODE_CACHE_LIST_FAILED arc-a/main", run.output)
+        self.assertNotIn("NODE_CACHE_UNPRUNABLE", run.output)
+
+    def test_one_profiles_forbidden_list_does_not_colour_the_next_profiles_transient_failure(self) -> None:
+        run = self.run_pruner({"arc-a/main": OVER_KIB, "arc-b/main": OVER_KIB}, wanted=["arc-a/main", "arc-b/main"], FAKE_FORBIDDEN="arc-a", FAKE_FAIL_PODS="arc-b")
+        self.assertIn("NODE_CACHE_UNPRUNABLE arc-a/main", run.output)
+        self.assertIn("NODE_CACHE_LIST_FAILED arc-b/main", run.output)
+        self.assertNotIn("NODE_CACHE_UNPRUNABLE arc-b/main", run.output)
+
+    def test_a_list_that_fails_part_way_through_the_moving_is_named_by_why_it_failed(self) -> None:
+        # The first list (before the entries move) succeeds; the next ones are refused.
+        for variable, prefix, other in (("FAKE_FAIL_AFTER", "NODE_CACHE_LIST_FAILED", "NODE_CACHE_UNPRUNABLE"), ("FAKE_FORBID_AFTER", "NODE_CACHE_UNPRUNABLE", "NODE_CACHE_LIST_FAILED")):
+            with self.subTest(variable):
+                run = self.run_pruner({"arc-a/main": ["a-store", "b-store"]}, wanted=["arc-a/main"], **{variable: "1"})
+                self.assertIn(f"{prefix} arc-a/main: the runner pods could not be listed part way through", run.output)
+                self.assertNotIn(other, run.output)
+                self.assertTrue((run.profile("arc-a/main") / "a-store" / "blob").exists())
 
     def test_a_pod_that_appears_before_the_first_rename_leaves_the_whole_cache_in_place(self) -> None:
         run = self.run_pruner({"arc-a/main": ["a-store", "b-store"]}, pods=[pod("arc-a/main", from_call=1)], wanted=["arc-a/main"])
@@ -331,7 +360,10 @@ class PrunerTest(unittest.TestCase):
         run = self.run_pruner({"arc-a/main": UNDER_KIB, "arc-gone/old": UNDER_KIB}, wanted=["arc-a/main"])
         self.assertFalse((run.root / "arc-gone").exists())
         self.assertTrue((run.profile("arc-a/main") / "pnpm" / "blob").exists())
-        self.assertIn("no longer wanted", run.output)
+        self.assertEqual(run.output.count("arc-gone/old"), 1, run.output)
+        self.assertIn("arc-gone/old is no longer wanted and held", run.output)
+        self.assertIn("deleted, and its directory removed", run.output)
+        self.assertNotIn("kept", run.output)
 
     def test_an_unwanted_directory_with_nothing_in_it_is_removed(self) -> None:
         root, bin_dir, state = self.setup_work()
