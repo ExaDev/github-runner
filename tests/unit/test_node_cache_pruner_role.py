@@ -543,12 +543,13 @@ class DocumentedExampleTest(unittest.TestCase):
         result = arc.arc_capability_pod(values, ["pnpm-store"], catalogue, "/opt/hostedtoolcache", "/opt/sysroot", "/node-cache", "/var/lib/github-runner/node-cache/arc/main", 1001, 1001, "/etc/github-runner/hooks", "job-started")
         self.assertEqual(result["errors"], [])
 
-    def test_the_example_turns_the_global_virtual_store_on_because_the_text_says_symbolic_links_need_it(self) -> None:
-        readme = (ROLE / "README.md").read_text()
-        self.assertIn("global virtual store", readme)
+    def test_the_example_names_the_store_with_a_variable_pnpm_does_not_read(self) -> None:
+        # A pod-wide pnpm_config_store_dir reaches pnpm/action-setup's version switch, which corrupts a shared global virtual store (README, Capabilities), so the example names the directory for a workflow to pass to its install step.
         env = {item["name"]: item["value"] for item in arc.arc_capability_pod({"template": {"spec": {"containers": [{"name": "runner"}]}}}, ["pnpm-store"], self.example()["github_runner_arc_capabilities"], "/a", "/b", "/node-cache", "/var/lib/x/node-cache/a/b", 1001, 1001, "/h", "c")["values"]["template"]["spec"]["containers"][0]["env"]}
-        self.assertEqual(env["pnpm_config_enable_global_virtual_store"], "true")
-        self.assertEqual(env["pnpm_config_store_dir"], "/node-cache/pnpm")
+        self.assertEqual(env["NODE_CACHE_PNPM_STORE_DIR"], "/node-cache/pnpm")
+        self.assertEqual([name for name in env if name.lower().startswith(("pnpm_config_", "npm_config_"))], [])
+        readme = (ROLE / "README.md").read_text()
+        self.assertIn("pnpm_config_store_dir: ${{ env.NODE_CACHE_PNPM_STORE_DIR }}", readme)
 
 
 class PathConsistencyTest(unittest.TestCase):
