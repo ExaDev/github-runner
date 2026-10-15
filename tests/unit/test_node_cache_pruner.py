@@ -64,7 +64,10 @@ FAKE_KUBECTL = textwrap.dedent(
     items = []
     for pod in json.loads(os.environ.get("FAKE_PODS", "[]")):
         if pod["namespace"] == namespace and matches(pod) and count >= pod.get("from_call", 0):
-            items.append({"metadata": {"name": pod["name"]}, "spec": {"volumes": [{"name": "v%d" % index, "hostPath": {"path": path}} for index, path in enumerate(pod["volumes"])]}})
+            metadata = {"name": pod["name"]}
+            if pod.get("deleting"):
+                metadata["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+            items.append({"metadata": metadata, "spec": {"volumes": [{"name": "v%d" % index, "hostPath": {"path": path}} for index, path in enumerate(pod["volumes"])]}})
     print(json.dumps({"items": items}))
     """
 )
@@ -85,6 +88,18 @@ FAKE_DU = textwrap.dedent(
     """
 )
 
+# rmdir that fails while FAKE_RMDIR_FAIL is set, which is how a directory that something has written to since it was emptied looks to the pruner, and otherwise is the real one.
+FAKE_RMDIR = textwrap.dedent(
+    """\
+    #!/bin/sh
+    if [ -n "$FAKE_RMDIR_FAIL" ]; then
+      echo "rmdir: failed to remove: Directory not empty" >&2
+      exit 1
+    fi
+    exec "$REAL_RMDIR" "$@"
+    """
+)
+
 # The limit, in KiB, every case runs against, and the hard limit the script derives from it with HARD_LIMIT_FACTOR 2.
 LIMIT_KIB = 64
 OVER_KIB = 100
@@ -92,11 +107,11 @@ OVER_HARD_KIB = 200
 UNDER_KIB = 16
 
 
-def pod(profile: str, node: str = "node-a", phase: str = "Running", mounts: str | None = None, from_call: int = 0, name: str | None = None) -> dict[str, Any]:
+def pod(profile: str, node: str = "node-a", phase: str = "Running", mounts: str | None = None, from_call: int = 0, name: str | None = None, deleting: bool = False) -> dict[str, Any]:
     """A runner pod of the profile (<namespace>/<release>): on node, in phase, mounting the profile's directory unless mounts names another path (an empty string mounts none), appearing from the given list on."""
     namespace, release = profile.split("/")
     path = f"{HOST_ROOT}/{profile}" if mounts is None else mounts
-    return {"name": name or f"runner-{release}-{node}-{phase.lower()}", "namespace": namespace, "node": node, "phase": phase, "volumes": [path] if path else [], "from_call": from_call}
+    return {"name": name or f"runner-{release}-{node}-{phase.lower()}", "namespace": namespace, "node": node, "phase": phase, "volumes": [path] if path else [], "from_call": from_call, "deleting": deleting}
 
 
 class Run:
@@ -126,7 +141,7 @@ class PrunerTest(unittest.TestCase):
         root.mkdir()
         bin_dir = work / "bin"
         bin_dir.mkdir()
-        for name, content in (("kubectl", FAKE_KUBECTL), ("du", FAKE_DU)):
+        for name, content in (("kubectl", FAKE_KUBECTL), ("du", FAKE_DU), ("rmdir", FAKE_RMDIR)):
             (bin_dir / name).write_text(content)
             (bin_dir / name).chmod(0o755)
         state = work / "state"
@@ -139,6 +154,7 @@ class PrunerTest(unittest.TestCase):
             **os.environ,
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "REAL_DU": shutil.which("du") or "du",
+            "REAL_RMDIR": shutil.which("rmdir") or "rmdir",
             "NODE_NAME": "node-a",
             "HOST_CACHE_ROOT": HOST_ROOT,
             "CACHE_ROOT": str(root),
@@ -410,6 +426,19 @@ class PrunerTest(unittest.TestCase):
                 self.assertNotIn("may mount it now", run.output)
                 self.assertEqual(run.output.count("arc-gone/old"), 1, run.output)
 
+    def test_an_unwanted_directory_something_was_written_to_after_it_was_emptied_is_kept_and_says_why(self) -> None:
+        run = self.run_pruner({"arc-gone/old": UNDER_KIB}, wanted=[], FAKE_RMDIR_FAIL="1")
+        self.assertTrue((run.root / "arc-gone" / "old").is_dir())
+        self.assertEqual(run.output.count("arc-gone/old"), 1, run.output)
+        self.assertIn("deleted, but its directory is kept because it is not empty", run.output)
+        self.assertNotIn("directory removed", run.output)
+        self.assertNotIn("may mount it now", run.output)
+
+    def test_a_pod_being_deleted_but_still_running_counts_as_using_the_cache(self) -> None:
+        run = self.run_pruner({"arc-a/main": OVER_KIB}, pods=[pod("arc-a/main", deleting=True)], wanted=["arc-a/main"])
+        self.assertTrue((run.profile("arc-a/main") / "pnpm" / "blob").exists())
+        self.assertIn("left alone", run.output)
+
     def test_a_directory_that_is_no_longer_wanted_is_kept_while_a_pod_mounts_it(self) -> None:
         run = self.run_pruner({"arc-gone/old": UNDER_KIB}, pods=[pod("arc-gone/old")], wanted=[])
         self.assertTrue((run.profile("arc-gone/old") / "pnpm" / "blob").exists())
@@ -467,6 +496,37 @@ class StartupTest(unittest.TestCase):
         for value in ("0", "-5", "", "soon"):
             with self.subTest(value):
                 self.assert_refused(self.start(CHECK_SECONDS=value), "CHECK_SECONDS")
+
+    def test_a_missing_required_variable_ends_the_pruner_with_the_same_status_and_names_it(self) -> None:
+        for name in ("NODE_NAME", "HOST_CACHE_ROOT"):
+            with self.subTest(name):
+                completed = self.start(**{name: None})  # type: ignore[arg-type]
+                self.assertEqual(completed.returncode, 2, completed.stderr)
+                self.assertIn(f"node-cache-pruner: {name} is required", completed.stderr)
+                self.assertFalse(self.calls.exists())
+
+    def test_every_numeric_setting_accepts_its_maximum_and_refuses_one_more_and_anything_that_would_wrap(self) -> None:
+        maximum = {"LIMIT_KIB": 1125899906842624, "LIMIT_GIB": 1073741824, "HARD_LIMIT_FACTOR": 1024, "CHECK_SECONDS": 86400}
+        for name, largest in maximum.items():
+            with self.subTest(name):
+                overrides: dict[str, str | None] = {"LIMIT_KIB": None} if name == "LIMIT_GIB" else {}
+                accepted = self.start(**{**overrides, name: str(largest)})  # type: ignore[arg-type]
+                self.assertEqual(accepted.returncode, 0, accepted.stderr)
+                for value in (largest + 1, 10**18, 10**19, 10**30):
+                    refused = self.start(**{**overrides, name: str(value)})  # type: ignore[arg-type]
+                    self.assertEqual(refused.returncode, 2, f"{name}={value}: {refused.stdout}{refused.stderr}")
+                    self.assertIn(f"node-cache-pruner: {name} must be at most {largest}", refused.stderr)
+                    self.assertTrue((self.root / "arc-a" / "main" / "pnpm" / "blob").exists())
+
+    def test_the_value_that_made_the_hard_limit_wrap_to_zero_is_refused(self) -> None:
+        completed = self.start(LIMIT_KIB=None, LIMIT_GIB="8796093022208")  # type: ignore[arg-type]
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("LIMIT_GIB must be at most 1073741824", completed.stderr)
+
+    def test_the_largest_accepted_settings_together_cannot_wrap_the_hard_limit(self) -> None:
+        # 2^50 KiB times 2^10 is 2^60, under 2^63 - 1: the largest limit and the largest factor give a positive hard limit.
+        self.assertLess(1125899906842624 * 1024, 2**63 - 1)
+        self.assertEqual(1073741824 * 1024 * 1024, 1125899906842624)
 
     def test_valid_settings_start_normally_and_a_gibibyte_limit_is_converted(self) -> None:
         completed = self.start(LIMIT_KIB=None, LIMIT_GIB="1", HARD_LIMIT_FACTOR="3", CHECK_SECONDS="60")  # type: ignore[arg-type]

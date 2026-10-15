@@ -927,6 +927,22 @@ def arc_node_cache_profiles(profiles: Sequence[Mapping[str, Any]], catalogue: Ma
     ]
 
 
+def arc_bounded_integer_errors(value: Any, name: str, maximum: int, pattern: str, allow_zero: bool = False) -> list[str]:
+    """Return what is wrong with a numeric node cache setting, the way the pruner (scripts/node-cache-pruner.sh) checks it at start-up: the text of the value must match pattern entirely, which is a positive integer with no sign, leading zero, space or fraction, and be at most maximum. allow_zero lets 0 through, for a setting where it means that nothing is installed.
+
+    Args:
+        value: the setting as given, a number or a string. name: the setting's name, for the message. maximum: the largest value allowed. pattern: the pruner's POSITIVE_INTEGER pattern, from the role's variables. allow_zero: whether 0 is valid.
+    """
+    text = str(value)
+    if allow_zero and text == "0":
+        return []
+    if not re.fullmatch(pattern, text):
+        return [f"{name} must be a positive integer with no sign, leading zero, space or fraction (got {text!r})"]
+    if int(text) > maximum:
+        return [f"{name} must be at most {maximum}, so that the pruner's arithmetic cannot wrap (got {text!r})"]
+    return []
+
+
 def arc_label_selectors(labels: Mapping[str, str]) -> list[str]:
     """Return a label mapping as the list of key=value selectors that matches exactly the objects carrying all of them."""
     return [f"{key}={value}" for key, value in labels.items()]
@@ -1416,6 +1432,7 @@ class FilterModule:
             "arc_node_cache_root": arc_node_cache_root,
             "arc_node_cache_access_to_remove": arc_node_cache_access_to_remove,
             "arc_label_selectors": arc_label_selectors,
+            "arc_bounded_integer_errors": arc_bounded_integer_errors,
             "arc_node_cache_dir": arc_node_cache_dir,
             "arc_node_cache_path_errors": arc_node_cache_path_errors,
             "arc_registry_cache": arc_registry_cache,

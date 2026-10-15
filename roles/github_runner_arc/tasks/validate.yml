@@ -32,12 +32,12 @@
   vars:
     github_runner_arc_node_cache_problems: >-
       {{
-        ([] if github_runner_arc_node_cache_size_limit_gib | string is match('^[0-9]+$')
-         else ['github_runner_arc_node_cache_size_limit_gib must be a whole number of gibibytes, 0 for no pruner (a negative value would otherwise read as no pruner)'])
-        + ([] if github_runner_arc_node_cache_prune_seconds | string is match('^[1-9][0-9]*$')
-           else ['github_runner_arc_node_cache_prune_seconds must be a whole number of seconds, at least 1'])
-        + ([] if github_runner_arc_node_cache_hard_limit_factor | string is match('^[1-9][0-9]*$')
-           else ['github_runner_arc_node_cache_hard_limit_factor must be a whole number, at least 1'])
+        (github_runner_arc_node_cache_size_limit_gib
+          | exadev.github_runner.arc_bounded_integer_errors('github_runner_arc_node_cache_size_limit_gib', github_runner_arc_node_cache_max_limit_gib, github_runner_arc_node_cache_positive_integer_pattern, true))
+        + (github_runner_arc_node_cache_prune_seconds
+          | exadev.github_runner.arc_bounded_integer_errors('github_runner_arc_node_cache_prune_seconds', github_runner_arc_node_cache_max_prune_seconds, github_runner_arc_node_cache_positive_integer_pattern))
+        + (github_runner_arc_node_cache_hard_limit_factor
+          | exadev.github_runner.arc_bounded_integer_errors('github_runner_arc_node_cache_hard_limit_factor', github_runner_arc_node_cache_max_hard_limit_factor, github_runner_arc_node_cache_positive_integer_pattern))
         + (github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_host_path_errors)
         + (github_runner_arc_node_cache_path | exadev.github_runner.arc_node_cache_path_errors)
       }}

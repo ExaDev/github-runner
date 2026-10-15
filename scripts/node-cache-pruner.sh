@@ -17,37 +17,61 @@
 # - NODE_NAME: the node this pod runs on (the downward API's spec.nodeName). Required.
 # - HOST_CACHE_ROOT: the cache root as the node knows it, which is the path of the pods' hostPath volumes up to <namespace>/<release>. Required.
 # - CACHE_ROOT: where the node's cache root is mounted in this pod (default: /host-node-cache).
-# - LIMIT_GIB: the most gibibytes one profile's cache may hold, a positive integer. Required unless LIMIT_KIB is set. This, LIMIT_KIB, HARD_LIMIT_FACTOR and CHECK_SECONDS are checked at start-up, and the pruner exits with status 2 and a message on stderr when one is not a positive integer.
-# - LIMIT_KIB: the limit in kibibytes, which takes the place of LIMIT_GIB, so a test need not write gibibytes.
-# - HARD_LIMIT_FACTOR: the hard limit as a multiple of the limit, an integer of at least 1 (default when unset: 2; set and empty is refused).
+# - LIMIT_GIB: the most gibibytes one profile's cache may hold, a positive integer of at most MAX_LIMIT_GIB. Required unless LIMIT_KIB is set.
+# - LIMIT_KIB: the limit in kibibytes, which takes the place of LIMIT_GIB, so a test need not write gibibytes, a positive integer of at most MAX_LIMIT_KIB.
+# - HARD_LIMIT_FACTOR: the hard limit as a multiple of the limit, a positive integer of at most MAX_HARD_LIMIT_FACTOR (default when unset: 2; set and empty is refused).
 # - WANTED_CACHES: the profiles that have a cache, as <namespace>/<release> separated by spaces. When it is set, any other directory under the cache root is removed. Unset leaves every directory alone.
-# - CHECK_SECONDS: seconds between checks (default: 300).
+# - CHECK_SECONDS: seconds between checks, a positive integer of at most MAX_CHECK_SECONDS (default when unset: 300).
 # - PRUNE_ONCE: when "true", check once and exit, for tests.
+#
+# Start-up configuration errors, every one of them (a required variable missing, a number that is not a positive integer or is above its maximum), end the pruner with status 2 and a message on stderr that names the variable, before it does anything. The DaemonSet's pods then crash-loop with that message in their log. The role validates the numeric settings it templates with the same pattern and maxima, but a value changed some other way (an edited DaemonSet) reaches only this check.
 set -uo pipefail
 
-: "${NODE_NAME:?NODE_NAME is required}"
-: "${HOST_CACHE_ROOT:?HOST_CACHE_ROOT is required}"
+# The pattern a positive integer setting must match, and the largest value each numeric setting may have. The role's validation (roles/github_runner_arc/tasks/validate.yml, with the values in vars/main.yml) uses the same pattern and maxima, and a test checks that the two agree.
+#
+# The maxima come from the arithmetic below, which wraps silently at 63 bits: the hard limit is LIMIT_KIB times HARD_LIMIT_FACTOR, and LIMIT_KIB is LIMIT_GIB times 1048576 (2^20). With MAX_HARD_LIMIT_FACTOR 1024 (2^10) and MAX_LIMIT_KIB 1125899906842624 (2^50), the hard limit is at most 2^60, under the 2^63 - 1 a signed 64-bit integer holds. MAX_LIMIT_GIB 1073741824 (2^30) times 2^20 is exactly MAX_LIMIT_KIB. A cache of a pebibyte (2^30 GiB) is far beyond any node's disk, so the bound costs nothing real. MAX_CHECK_SECONDS is a day, which is not arithmetic: a longer interval is a typo that would leave the pruner idle.
+readonly POSITIVE_INTEGER='^[1-9][0-9]*$'
+readonly MAX_LIMIT_GIB=1073741824
+readonly MAX_LIMIT_KIB=1125899906842624
+readonly MAX_HARD_LIMIT_FACTOR=1024
+readonly MAX_CHECK_SECONDS=86400
+
+# Ends the pruner with the one status every start-up configuration error has, naming the variable.
+configuration_error() {
+  echo "node-cache-pruner: $1" >&2
+  exit 2
+}
+
+require_set() {
+  [ -n "${!1-}" ] || configuration_error "$1 is required"
+}
+
+# A setting that must be a positive integer of at most a maximum. The digits are counted first: a value of eighteen digits or fewer is below 2^63 and so can be compared as a number, anything longer is above every maximum, and is refused without being compared, since a longer one would wrap. A limit of 0 would set aside every cache that holds anything on every round, and arithmetic on text or a negative number would fail or invert the comparisons.
+require_positive_integer() {
+  local name=$1 value=$2 maximum=$3
+  if ! [[ "$value" =~ $POSITIVE_INTEGER ]]; then
+    configuration_error "$name must be a positive integer (got '$value')"
+  fi
+  if [ "${#value}" -gt 18 ] || [ "$value" -gt "$maximum" ]; then
+    configuration_error "$name must be at most $maximum (got '$value')"
+  fi
+}
+
+require_set NODE_NAME
+require_set HOST_CACHE_ROOT
 CACHE_ROOT="${CACHE_ROOT:-/host-node-cache}"
 CHECK_SECONDS="${CHECK_SECONDS-300}"
 PRUNE_ONCE="${PRUNE_ONCE:-false}"
 HARD_LIMIT_FACTOR="${HARD_LIMIT_FACTOR-2}"
 
-# A setting that must be a positive integer: a limit of 0 would set aside every cache that holds anything on every round, and arithmetic on text or a negative number would fail or invert the comparisons.
-require_positive_integer() {
-  if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
-    echo "node-cache-pruner: $1 must be a positive integer (got '$2')" >&2
-    exit 2
-  fi
-}
-
 if [ -n "${LIMIT_KIB+x}" ]; then
-  require_positive_integer LIMIT_KIB "$LIMIT_KIB"
+  require_positive_integer LIMIT_KIB "$LIMIT_KIB" "$MAX_LIMIT_KIB"
 else
-  require_positive_integer LIMIT_GIB "${LIMIT_GIB-}"
+  require_positive_integer LIMIT_GIB "${LIMIT_GIB-}" "$MAX_LIMIT_GIB"
   LIMIT_KIB=$((LIMIT_GIB * 1024 * 1024))
 fi
-require_positive_integer HARD_LIMIT_FACTOR "$HARD_LIMIT_FACTOR"
-require_positive_integer CHECK_SECONDS "$CHECK_SECONDS"
+require_positive_integer HARD_LIMIT_FACTOR "$HARD_LIMIT_FACTOR" "$MAX_HARD_LIMIT_FACTOR"
+require_positive_integer CHECK_SECONDS "$CHECK_SECONDS" "$MAX_CHECK_SECONDS"
 HARD_LIMIT_KIB=$((LIMIT_KIB * HARD_LIMIT_FACTOR))
 TRASH_DIR="${CACHE_ROOT}/.trash"
 LIST_ERRORS="$(mktemp)"
@@ -114,12 +138,12 @@ set_aside_and_delete() {
   rm -rf "$aside" || log "node cache ${namespace}/${release}: the set-aside copy could not be deleted; the next round retries"
 }
 
-# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first. Returns 0 when the directory was removed, 1 when a pod mounts it and it was kept, 2 when the pods could not be listed and it was kept.
+# Removes the directory of a profile whose cache has been emptied, and its namespace's directory when that is empty too, unless a pod has come to mount it since: a pod that mounted a directory the kubelet created for it would lose it. The pods are listed once more first. Returns 0 when the directory was removed, 1 when a pod mounts it and it was kept, 2 when the pods could not be listed and it was kept, 3 when it was kept because something has been written to it since the cache was set aside.
 remove_retired_directory() {
   local directory=$1 namespace=$2 release=$3 pods
   pods="$(pods_using "$namespace" "$release")" || return 2
   [ -z "$pods" ] || return 1
-  rmdir "$directory" 2>/dev/null
+  rmdir "$directory" 2>/dev/null || return 3
   rmdir "$(dirname "$directory")" 2>/dev/null
   return 0
 }
@@ -163,6 +187,7 @@ check_profile() {
         case $? in
           0) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, and its directory removed" ;;
           1) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory is kept because a runner pod may mount it now" ;;
+          3) log "node cache ${label} is no longer wanted and held ${size} KiB: deleted, but its directory is kept because it is not empty (something was written to it after the cache was set aside)" ;;
           *) log "$(list_failure_prefix) ${label} size_kib=${size}: deleted, but the runner pods could not be listed, so its directory is kept" ;;
         esac
       else
