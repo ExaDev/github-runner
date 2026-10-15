@@ -343,8 +343,8 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertEqual(init["name"], "capability-pnpm-store")
         self.assertEqual(init["image"], BUSYBOX)
         self.assertEqual(init["command"][-3:], ["1001:1001", "/node-cache", "/node-cache/pnpm"])
-        self.assertEqual(init["securityContext"]["runAsUser"], 0)
-        self.assertEqual(init["securityContext"]["capabilities"], {"drop": ["ALL"], "add": ["CHOWN"]})
+        # Explicit, so a pod-level non-root securityContext is overridden. Root needs DAC_OVERRIDE and FOWNER as well as CHOWN: the command gives /node-cache to the runner user first, and root without them cannot then create /node-cache/pnpm in it.
+        self.assertEqual(init["securityContext"], {"runAsUser": 0, "runAsNonRoot": False, "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE", "FOWNER"]}})
         self.assertEqual(init["volumeMounts"], [{"name": "node-cache", "mountPath": NODE_CACHE}])
         container = runner(result["values"])
         self.assertEqual(container["volumeMounts"], [{"name": "node-cache", "mountPath": NODE_CACHE}])
