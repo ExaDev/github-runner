@@ -1,3 +1,18 @@
+## [1.31.1](https://github.com/ExaDev/github-runner/compare/v1.31.0...v1.31.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **arc:** bound the pruner's numeric settings so its arithmetic cannot wrap, in the role too ([e7d4e1f](https://github.com/ExaDev/github-runner/commit/e7d4e1f445ae25cd49cd9a4236c1575f892cc27d))
+* **arc:** build node cache paths from one canonical root and report what the pruner could not do ([d44aba0](https://github.com/ExaDev/github-runner/commit/d44aba02388a36f79459257d1a47caf8b7cde63d))
+* **arc:** empty a node cache atomically, drain a node past its hard limit, and narrow the pruner ([886b4b4](https://github.com/ExaDev/github-runner/commit/886b4b4125df68685cb08c02db9a95ef59ae6aad))
+* **arc:** keep a departed profile's pod access while the pruner runs, and match only the role's own ([7439708](https://github.com/ExaDev/github-runner/commit/74397080b149b2d8123010f819a09de170969329))
+* **arc:** refuse a pruner start with an invalid limit, and name the cause when a final list fails ([8d53e99](https://github.com/ExaDev/github-runner/commit/8d53e9931b5c1fc3bda7b597f53d2422aa990e72))
+* **arc:** remove only the cluster role 1.31.0 made, report why rmdir failed, and guard empty arrays ([ad1edc3](https://github.com/ExaDev/github-runner/commit/ad1edc31b6383bd324910219b70f4bbb16bf5fbd))
+* **arc:** report a busy node cache over its hard limit instead of cordoning, and gate each rename ([0c4e3fc](https://github.com/ExaDev/github-runner/commit/0c4e3fca03eba1d6308df8ec20d92c29a0e515ef))
+* **arc:** tell a refused pod list from a failed one, and build images from the release tag ([6ad1ea4](https://github.com/ExaDev/github-runner/commit/6ad1ea4235101e7305b8d6a388ad9530fe8b6fc5))
+* **arc:** treat the 1.31.0 cluster role and binding together, and say what the cleanup needs ([949ebb2](https://github.com/ExaDev/github-runner/commit/949ebb2fb09cd7e2b97b1e4d01c458b7a009f201))
+
 # [1.31.0](https://github.com/ExaDev/github-runner/compare/v1.30.1...v1.31.0) (2026-10-14)
 
 
