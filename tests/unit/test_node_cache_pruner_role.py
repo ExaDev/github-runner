@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -286,13 +287,21 @@ class ValidationTest(unittest.TestCase):
         cls.expression: str = task["vars"]["github_runner_arc_node_cache_problems"]
 
     def problems(self, **role_vars: Any) -> list[str]:
-        with tempfile.TemporaryDirectory() as work:
-            template, output = Path(work) / "problems.j2", Path(work) / "problems.json"
-            template.write_text("{{ (" + self.expression.strip().removeprefix("{{").removesuffix("}}") + ") | to_json }}")
-            completed = ansible(KEPT, kept_template=str(template), kept_output=str(output), **role_vars)
-            assert completed.returncode == 0, completed.stdout + completed.stderr
-            found: list[str] = json.loads(output.read_text())
-            return found
+        defaults = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
+        constants = yaml.safe_load((ROLE / "vars" / "main.yml").read_text())
+        found: list[str] = evaluate(self.expression, {**defaults, **constants, **role_vars})
+        return found
+
+    def test_the_task_expression_gives_the_same_answer_under_ansible(self) -> None:
+        cases = ({}, {"github_runner_arc_node_cache_host_path": "/var/lib"}, {"github_runner_arc_node_cache_hard_limit_factor": "08"}, {"github_runner_arc_node_cache_size_limit_gib": 1073741825})
+        for role_vars in cases:
+            with self.subTest(role_vars):
+                with tempfile.TemporaryDirectory() as work:
+                    template, output = Path(work) / "problems.j2", Path(work) / "problems.json"
+                    template.write_text("{{ (" + self.expression.strip().removeprefix("{{").removesuffix("}}") + ") | to_json }}")
+                    completed = ansible(KEPT, kept_template=str(template), kept_output=str(output), **role_vars)
+                    self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                    self.assertEqual(json.loads(output.read_text()), self.problems(**role_vars))
 
     def test_the_defaults_are_valid(self) -> None:
         self.assertEqual(self.problems(), [])
@@ -320,6 +329,96 @@ class ValidationTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertNotEqual(self.problems(**{name: value}), [], name)
         self.assertEqual(self.problems(github_runner_arc_node_cache_size_limit_gib=0), [])
+
+
+def evaluate(expression: str, variables: dict[str, Any]) -> Any:
+    """Evaluate a task's Jinja expression with the role's own filters (registered under their short names, with the collection prefix dropped from the expression) and the given variables. It is the same filter code Ansible runs; test_the_task_expression_gives_the_same_answer_under_ansible checks the wiring once with Ansible itself."""
+    import jinja2
+
+    environment = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    environment.filters.update(arc.FilterModule().filters())
+    source = expression.strip().removeprefix("{{").removesuffix("}}").replace("exadev.github_runner.", "")
+    return environment.compile_expression(source)(**variables)
+
+
+PRUNER_SCRIPT = ROOT / "scripts" / "node-cache-pruner.sh"
+
+
+def script_constants() -> dict[str, str]:
+    """The `readonly NAME=value` constants of the pruner script, values without their quotes."""
+    found = re.findall(r"^readonly (\w+)=(.+)$", PRUNER_SCRIPT.read_text(), flags=re.MULTILINE)
+    return {name: value.strip("'") for name, value in found}
+
+
+class NumericSettingsTest(unittest.TestCase):
+    """The role's validation of the numeric settings and the pruner's own start-up checks, which must agree."""
+
+    # The role's setting, the pruner's variable for it, and the largest value it takes.
+    SETTINGS = (
+        ("github_runner_arc_node_cache_size_limit_gib", "LIMIT_GIB", "MAX_LIMIT_GIB"),
+        ("github_runner_arc_node_cache_hard_limit_factor", "HARD_LIMIT_FACTOR", "MAX_HARD_LIMIT_FACTOR"),
+        ("github_runner_arc_node_cache_prune_seconds", "CHECK_SECONDS", "MAX_CHECK_SECONDS"),
+    )
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.role_vars = yaml.safe_load((ROLE / "vars" / "main.yml").read_text())
+        cls.constants = script_constants()
+        tasks = yaml.safe_load((ROLE / "tasks" / "validate.yml").read_text())
+        [task] = [task for task in tasks if task["name"] == "Fail on invalid node cache settings"]
+        cls.expression: str = task["vars"]["github_runner_arc_node_cache_problems"]
+
+    def role_problems(self, **role_vars: Any) -> list[str]:
+        defaults = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
+        found: list[str] = evaluate(self.expression, {**defaults, **self.role_vars, **role_vars})
+        return found
+
+    def pruner_accepts(self, variable: str, value: str) -> bool:
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work) / "root"
+            root.mkdir()
+            env = {**os.environ, "NODE_NAME": "n", "HOST_CACHE_ROOT": "/var/lib/x/node-cache", "CACHE_ROOT": str(root), "PRUNE_ONCE": "true", "LIMIT_GIB": "1", "WANTED_CACHES": "", **{variable: value}}
+            completed = subprocess.run(["bash", str(PRUNER_SCRIPT)], env=env, capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+            return completed.returncode == 0
+
+    def test_the_roles_constants_are_the_pruners(self) -> None:
+        self.assertEqual(self.role_vars["github_runner_arc_node_cache_positive_integer_pattern"], self.constants["POSITIVE_INTEGER"])
+        self.assertEqual(self.role_vars["github_runner_arc_node_cache_max_limit_gib"], int(self.constants["MAX_LIMIT_GIB"]))
+        self.assertEqual(self.role_vars["github_runner_arc_node_cache_max_hard_limit_factor"], int(self.constants["MAX_HARD_LIMIT_FACTOR"]))
+        self.assertEqual(self.role_vars["github_runner_arc_node_cache_max_prune_seconds"], int(self.constants["MAX_CHECK_SECONDS"]))
+
+    def test_the_maxima_keep_the_pruners_arithmetic_within_63_bits(self) -> None:
+        largest_kib = int(self.constants["MAX_LIMIT_GIB"]) * 1024 * 1024
+        self.assertEqual(largest_kib, int(self.constants["MAX_LIMIT_KIB"]))
+        self.assertLess(largest_kib * int(self.constants["MAX_HARD_LIMIT_FACTOR"]), 2**63 - 1)
+
+    def test_the_role_refuses_exactly_what_the_pruner_refuses(self) -> None:
+        maximum = {name: int(self.constants[constant]) for name, _, constant in self.SETTINGS}
+        values = ["1", "2", "08", "007", "0", "-1", "", " 5", "5 ", "1.5", "abc", "5\n", "99999999999999999999", "8796093022208"]
+        for setting, variable, _ in self.SETTINGS:
+            for value in values + [str(maximum[setting]), str(maximum[setting] + 1)]:
+                with self.subTest(f"{setting}={value!r}"):
+                    if setting.endswith("size_limit_gib") and value == "0":
+                        # 0 is the role's way to say that nothing is installed, so no pruner ever starts with it.
+                        self.assertEqual(self.role_problems(**{setting: value}), [])
+                        continue
+                    role_accepts = self.role_problems(**{setting: value}) == []
+                    self.assertEqual(role_accepts, self.pruner_accepts(variable, value), f"role {role_accepts}")
+
+    def test_the_boundary_of_each_setting_in_the_role(self) -> None:
+        for setting, _, constant in self.SETTINGS:
+            largest = int(self.constants[constant])
+            with self.subTest(setting):
+                self.assertEqual(self.role_problems(**{setting: largest}), [])
+                self.assertEqual(self.role_problems(**{setting: str(largest)}), [])
+                self.assertNotEqual(self.role_problems(**{setting: largest + 1}), [])
+                self.assertNotEqual(self.role_problems(**{setting: str(largest + 1)}), [])
+
+    def test_a_leading_zero_string_passes_neither(self) -> None:
+        for setting, variable, _ in self.SETTINGS:
+            with self.subTest(setting):
+                self.assertNotEqual(self.role_problems(**{setting: "08"}), [])
+                self.assertFalse(self.pruner_accepts(variable, "08"))
 
 
 class HostPathRootTest(unittest.TestCase):

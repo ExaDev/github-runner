@@ -49,3 +49,9 @@ github_runner_arc_node_cache_pruner_labels:
   app.kubernetes.io/name: node-cache-pruner
   app.kubernetes.io/part-of: github-runner
   app.kubernetes.io/managed-by: exadev.github_runner
+
+# The pattern a numeric node cache setting must match and the largest value each may have, the same constants as scripts/node-cache-pruner.sh (which derives them from its arithmetic, in the comment there) so that the role refuses what the pruner would refuse and a value the pruner would crash on never reaches the DaemonSet. tests/unit/test_node_cache_pruner_role.py checks that the two agree.
+github_runner_arc_node_cache_positive_integer_pattern: '^[1-9][0-9]*$'
+github_runner_arc_node_cache_max_limit_gib: 1073741824
+github_runner_arc_node_cache_max_hard_limit_factor: 1024
+github_runner_arc_node_cache_max_prune_seconds: 86400
