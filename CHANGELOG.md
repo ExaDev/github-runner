@@ -1,3 +1,28 @@
+# [2.0.0](https://github.com/ExaDev/github-runner/compare/v1.31.4...v2.0.0) (2026-10-18)
+
+
+* feat(cluster)!: name the node's Compose files and project in its .env ([88f7e9c](https://github.com/ExaDev/github-runner/commit/88f7e9cfe31087463bd90cb91cbb401f8948817b))
+* feat(cluster)!: pin the k3s and tailscale images every node is built from ([1a37eac](https://github.com/ExaDev/github-runner/commit/1a37eac273b81685b6b7adf214a3c8c3ee0577c4))
+* feat(cluster)!: refuse a k3s version outside the upgrade path from what runs ([cc7255c](https://github.com/ExaDev/github-runner/commit/cc7255cb471277914fe8fc1ba946a46c27bf1c88))
+
+
+### BREAKING CHANGES
+
+* a github_runner_cluster_dir or github_runner_cluster_compose_files
+path with a colon in it is refused, since COMPOSE_FILE separates paths with colons.
+Move the file or directory to a path without one.
+* a cluster that runs a newer k3s than the version the role is
+given, such as one built from latest before the pins, is refused until
+github_runner_cluster_k3s_version names the tag it runs. A deliberate downgrade,
+a cluster being replaced or one that cannot be read needs
+-e github_runner_cluster_allow_k3s_version_jump=true for that run.
+* latest is no longer accepted for github_runner_cluster_k3s_version
+or K3S_VERSION in .env.bootstrap. Set the rancher/k3s tag the cluster runs
+(k3s --version in a node's container, with + written as -), once for the whole
+group, or leave it unset for the default; set github_runner_cluster_tailscale_version
+if the nodes run another Tailscale. The next run rewrites each node's .env and
+recreates nothing.
+
 ## [1.31.4](https://github.com/ExaDev/github-runner/compare/v1.31.3...v1.31.4) (2026-10-18)
 
 ## [1.31.3](https://github.com/ExaDev/github-runner/compare/v1.31.2...v1.31.3) (2026-10-15)
