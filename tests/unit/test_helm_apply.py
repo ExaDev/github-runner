@@ -47,14 +47,14 @@ def tasks(items: Any) -> Iterator[dict[str, Any]]:
             yield from tasks(task.get(key))
 
 
-def helm_tasks() -> list[tuple[str, dict[str, Any]]]:
-    """Return every task in the roles that calls the helm module, with the file it is in."""
+def helm_tasks() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Return every task in the roles that calls the helm module, as its file and name, the whole task (for keywords such as environment) and the module's arguments."""
     found = []
     for path in sorted(ROOT.glob("roles/*/tasks/**/*.yml")):
         for task in tasks(yaml.safe_load(path.read_text())):
             for module in HELM_MODULES:
                 if module in task:
-                    found.append((f"{path.relative_to(ROOT)}: {task.get('name')}", task[module]))
+                    found.append((f"{path.relative_to(ROOT)}: {task.get('name')}", task, task[module]))
     return found
 
 
@@ -101,19 +101,19 @@ class HelmServerSideTest(unittest.TestCase):
 
 class HelmTasksTest(unittest.TestCase):
     def test_the_role_installs_helm_releases(self) -> None:
-        names = [name for name, _ in helm_tasks()]
+        names = [name for name, _, _ in helm_tasks()]
         self.assertTrue(any("install_controller.yml" in name for name in names), names)
         self.assertTrue(any("install_scale_set_profile.yml" in name for name in names), names)
 
     def test_every_helm_release_forces_conflicts_on_helm_4(self) -> None:
-        for name, args in helm_tasks():
+        for name, _, args in helm_tasks():
             with self.subTest(task=name):
                 self.assertIn(FACT, str(args.get("force_conflicts")))
                 self.assertIn(FACT, str(args.get("server_side")))
                 self.assertNotIn("force", args, "force means a client-side replace, which cannot be combined with force_conflicts")
 
     def test_helm_4_gets_server_side_apply_with_forced_conflicts(self) -> None:
-        for name, args in helm_tasks():
+        for name, _, args in helm_tasks():
             with self.subTest(task=name):
                 received = render_options({key: args[key] for key in OPTIONS if key in args}, True)
                 self.assertEqual(set(received), set(OPTIONS))
@@ -123,9 +123,15 @@ class HelmTasksTest(unittest.TestCase):
 
     def test_helm_3_is_passed_neither_option(self) -> None:
         # Below Helm 4 kubernetes.core.helm refuses server_side in any form and force_conflicts when it is true. Both are omitted rather than passed as false, so the role does not depend on how the module treats a false force_conflicts (and on Helm 3 needs no module version that knows the option). Only this test guards that: tests/helm_apply/run.sh's Helm 3 phase passes with a false force_conflicts.
-        for name, args in helm_tasks():
+        for name, _, args in helm_tasks():
             with self.subTest(task=name):
                 self.assertEqual(render_options({key: args[key] for key in OPTIONS if key in args}, False), {})
+
+    def test_every_helm_release_renders_its_diff_against_the_cluster(self) -> None:
+        # kubernetes.core.helm runs helm diff on an existing release whenever the plugin is installed, in check mode or not, and helm-diff's default rendering (helm template) has no cluster access, so the scale-set chart's lookup of the controller's Deployment fails the task. The task sets the variable itself rather than leaving it to every caller's shell.
+        for name, task, _ in helm_tasks():
+            with self.subTest(task=name):
+                self.assertEqual(str(task.get("environment", {}).get("HELM_DIFF_USE_UPGRADE_DRY_RUN")), "true")
 
     def test_the_version_is_read_before_any_release_is_installed(self) -> None:
         main = list(tasks(yaml.safe_load((ROOT / "roles" / "github_runner_arc" / "tasks" / "main.yml").read_text())))
