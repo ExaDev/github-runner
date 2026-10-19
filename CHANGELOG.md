@@ -1,3 +1,10 @@
+## [2.0.1](https://github.com/ExaDev/github-runner/compare/v2.0.0...v2.0.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **arc:** render helm diff through an upgrade dry run in the role's helm tasks ([2c7cc5e](https://github.com/ExaDev/github-runner/commit/2c7cc5e5581cd75c3485402634edb68f4d2a14e6))
+
 # [2.0.0](https://github.com/ExaDev/github-runner/compare/v1.31.4...v2.0.0) (2026-10-18)
 
 
