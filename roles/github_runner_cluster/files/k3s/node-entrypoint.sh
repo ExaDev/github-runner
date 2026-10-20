@@ -1,7 +1,7 @@
 #!/bin/sh
 # Entry point for the k3s and k3s-agent services in docker-compose.yml: starts Tailscale inside the node's own container, then k3s with its --vpn-auth integration, so each node joins the mesh as its own device. Bind-mounted from the Compose project directory the role manages (github_runner_cluster_dir) rather than baked into the k3s image, so a host picks up a change to it with the Compose file that uses it, without rebuilding an image Compose would not otherwise rebuild.
 #
-# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST, K3S_DATASTORE, K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below).
+# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST, K3S_DATASTORE, K3S_API_PORT, K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below).
 # No set -e: a failed `tailscale up` falls through to waiting for an address, as it always has, rather than exiting and restarting the container.
 set -u
 
@@ -27,6 +27,15 @@ set_etcd_timing_flags() {
   fi
 }
 set_etcd_timing_flags
+
+# Sets api_port_flags from K3S_API_PORT, for the server only: --https-listen-port at that port, or nothing when it is unset, which leaves k3s on its own 6443. docker-compose.api-port.yml sets it only for a port other than the default, and docker-compose.yml publishes the same port on the Docker host, so the kubeconfig k3s writes for 127.0.0.1 at its listen port works on the host. Joining nodes dial it too (github_runner_cluster_api_port in their join URL).
+set_api_port_flags() {
+  api_port_flags=""
+  if [ -n "${K3S_API_PORT:-}" ]; then
+    api_port_flags="--https-listen-port=$K3S_API_PORT"
+  fi
+}
+set_api_port_flags
 
 # k3s's own vpn-auth integration only runs `tailscale up`; it does not start the daemon itself (without this, k3s fails outright with "tailscale up failed: ... it doesn't appear to be running"). Waits for the control socket before anything talks to it.
 mkdir -p /var/run/tailscale /var/lib/tailscale
@@ -118,6 +127,8 @@ install_tailscale_up_wait() {
 #
 # --cluster-init (only when K3S_JOIN_SERVER_URL is unset, and K3S_DATASTORE is not sqlite) bootstraps embedded etcd, or converts an existing single-node SQLite datastore to it, the one migration k3s documents; once initialised, k3s ignores it on restart, so it stays in place permanently. A host with K3S_JOIN_SERVER_URL set passes --server <url> instead and joins as another control-plane/etcd member.
 #
+# --https-listen-port is added when K3S_API_PORT is set (set_api_port_flags above), for a second cluster on a Docker host whose default port another cluster already publishes.
+#
 # --tls-san is added once per entry of K3S_TLS_SAN_LIST: every server's certificate must cover every server's own mesh name, since a client reaching any server directly by that name needs the certificate to match it.
 #
 # --etcd-arg=heartbeat-interval and --etcd-arg=election-timeout are added when set (set_etcd_timing_flags above), for peers whose traffic goes through a relay and so exceeds etcd's default timing.
@@ -126,6 +137,7 @@ mesh_server_args() {
     --vpn-auth="$vpn_auth" \
     --resolv-conf=/etc/k3s-resolv.conf \
     --node-ip="$mesh_ip"
+  for flag in $api_port_flags; do set -- "$@" "$flag"; done
   if [ -n "${K3S_JOIN_SERVER_URL:-}" ]; then
     set -- "$@" --server "$K3S_JOIN_SERVER_URL"
   elif [ "${K3S_DATASTORE:-etcd}" != sqlite ]; then
@@ -139,6 +151,7 @@ mesh_server_args() {
 # Sets server_args to the arguments of `k3s server` off the mesh, for a self-hosted bootstrap server whose Headscale server is not answering yet. No --vpn-auth, no --node-ip and no mesh resolver, so k3s and the Headscale static pod come up on the container's own network. No --cluster-init either: a fresh server starts on SQLite, and restarting it on the mesh with --cluster-init converts that to etcd with the mesh IP as etcd's peer address from the start, while an already-initialised server finds its etcd datastore regardless.
 direct_server_args() {
   set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443
+  for flag in $api_port_flags; do set -- "$@" "$flag"; done
   for san in ${K3S_TLS_SAN_LIST:-}; do set -- "$@" --tls-san "$san"; done
   for flag in $etcd_timing_flags; do set -- "$@" "$flag"; done
   server_args="$*"

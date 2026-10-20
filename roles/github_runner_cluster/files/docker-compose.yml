@@ -23,7 +23,8 @@ services:
     entrypoint: ["/bin/sh", "/usr/local/bin/github-runner-node", "server"]
     # Stable node name across container recreations. Without this k3s derives the node name from the container's hostname (its ID), so every recreate (e.g. on an image pull) would register a NEW node and leave the old one stale in etcd. Pinning it keeps `kubectl get nodes` to one entry. This is also the hostname Tailscale registers the container's own new device under, giving it a stable MagicDNS name too. Every server host sets its own K3S_NODE_NAME (Ansible defaults it to the host's own inventory name; a host that joined under a different name, such as a bootstrap host first brought up as "k3s-server", keeps that name through github_runner_cluster_node_name rather than being renamed disruptively).
     hostname: ${K3S_NODE_NAME:-k3s-server}
-    container_name: github-runner-k3s
+    # From .env (github_runner_cluster_container_name), so that a second cluster's Compose project on the same Docker daemon names its container differently; the default is the name every existing node runs under.
+    container_name: ${K3S_CONTAINER_NAME:-github-runner-k3s}
     privileged: true
     restart: unless-stopped
     profiles: ["server"]
@@ -63,7 +64,8 @@ services:
       - ./kubeconfig:/output
       - ./k3s/node-entrypoint.sh:/usr/local/bin/github-runner-node:ro
     ports:
-      - "6443:6443"
+      # The API port, published on the Docker host at the same number k3s listens on inside the container, so that the kubeconfig k3s writes (server https://127.0.0.1:<that port>) works on the host as it is. From .env (github_runner_cluster_api_port); the default is k3s's own. k3s is told to listen on another port only through docker-compose.api-port.yml, which the role adds when the port is not the default, so the default renders the same container configuration as before the port was configurable.
+      - "${K3S_API_PORT:-6443}:${K3S_API_PORT:-6443}"
       # No 8472/udp or 10250/tcp published: Tailscale establishes outbound connections and NAT-traverses itself (DERP relay/STUN), so no inbound Docker port-forwarding is needed for cross-node traffic at all - confirmed live, unlike the VXLAN-over-Docker- port-publish approach this replaced.
 
   k3s-agent:
@@ -75,7 +77,8 @@ services:
     # The same k3s/node-entrypoint.sh as the k3s service; see that service's comment. K3S_URL points at a server's own mesh name, not the host machine's own Tailscale identity.
     entrypoint: ["/bin/sh", "/usr/local/bin/github-runner-node", "agent"]
     hostname: ${K3S_AGENT_NODE_NAME:-k3s-agent}
-    container_name: github-runner-k3s-agent
+    # From .env (github_runner_cluster_agent_container_name), for the same reason as the server's.
+    container_name: ${K3S_AGENT_CONTAINER_NAME:-github-runner-k3s-agent}
     privileged: true
     restart: unless-stopped
     profiles: ["agent"]

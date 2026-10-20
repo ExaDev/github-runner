@@ -1,0 +1,5 @@
+# Merged after docker-compose.yml by the github_runner_cluster role when github_runner_cluster_api_port is not k3s's own default (see github_runner_cluster_compose_file_list in defaults/main.yml): tells the server's entrypoint to start k3s with --https-listen-port at that port, which is also the port docker-compose.yml publishes, the port joining nodes dial and the port in the kubeconfig k3s writes. A separate file rather than an entry in docker-compose.yml, because any entry there, even an empty one, changes the configuration hash Compose compares and so would recreate every running server on the default port when the collection is upgraded.
+services:
+  k3s:
+    environment:
+      - K3S_API_PORT=${K3S_API_PORT:?K3S_API_PORT must be set in .env - the port k3s listens on, publishes and writes into the kubeconfig}
