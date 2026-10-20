@@ -1,0 +1,2 @@
+# The scripts shared with other repositories are sourced or run as bash without a shebang line.
+shell=bash
