@@ -318,17 +318,11 @@ would_recreate() {
   { echo "$output" | tr '\n' ' ' | tr -s ' ' | grep -o 'Compose would recreate grtest-node[0-9]*-k3s' || true; } | sed 's/^Compose would recreate //' | sort -u | tr '\n' ' '
 }
 
-# The echo pod's restart count and readiness on a node, as "<count> <ready>"; empty while the API cannot answer.
-echo_pod_on() {
-  kubectl_on 1 get pods -l app=grtest-echo --field-selector "spec.nodeName=$(node_name "$1")" \
-    -o jsonpath='{.items[0].status.containerStatuses[0].restartCount} {.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true
-}
-
 # Returns once the echo pod on a node has restarted since its count was read and is ready again. Recreating a node's container kills every pod container on it, and the API keeps reporting the old pods as running and ready until the kubelet has restarted them, so the pod-to-pod checks would otherwise run against addresses that no longer answer.
 wait_for_echo_pod_restart() {
   local index="$1" before="$2" now deadline=$((SECONDS + 600))
   while :; do
-    now=$(echo_pod_on "$index")
+    now=$(echo_pod_state "$index" || true)
     if [ -n "$now" ] && [ "${now% *}" -gt "$before" ] && [ "${now#* }" = true ]; then break; fi
     [ "$SECONDS" -lt "$deadline" ] || { kubectl_on 1 get pods -l app=grtest-echo -o wide || true; fail "the echo pod on $(node_name "$index") did not restart and become ready again (was ${before}, now: ${now:-unreadable})"; }
     sleep 5
@@ -355,7 +349,7 @@ recreate_a_joined_server() {
   secret_before=$(kubectl_on 1 get secret -n kube-system "$(node_name "$target").node-password.k3s" -o jsonpath='{.metadata.uid}')
   [ -n "$secret_before" ] || fail "$(node_name "$target") has no node-password Secret"
   password_before=$(docker exec "$(container "$target")" cat /etc/rancher/node/password </dev/null | cksum)
-  echo_restarts_before=$(echo_pod_on "$target")
+  echo_restarts_before=$(echo_pod_state "$target" || true)
   [ -n "$echo_restarts_before" ] || fail "cannot read the echo pod on $(node_name "$target") before recreating its server"
   run_role -e "$drift"
   wait_for_echo_pod_restart "$target" "${echo_restarts_before% *}"
