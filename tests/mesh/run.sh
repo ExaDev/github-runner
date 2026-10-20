@@ -273,6 +273,27 @@ assert_etcd_timing() {
   done
 }
 
+# The echo pod's container restart count and readiness on a node, as "<count> <ready>".
+echo_pod_state() {
+  kubectl_on 1 get pods -l app=grtest-echo --field-selector "spec.nodeName=$(node_name "$1")" \
+    -o jsonpath='{.items[0].status.containerStatuses[0].restartCount} {.items[0].status.containerStatuses[0].ready}' 2>/dev/null
+}
+
+# Restarts a node's container and returns once the cluster has seen it. The API keeps reporting the node and its pods as Ready until the node controller's grace period runs out, so waiting for Ready right after the restart passes at once on the old state, and the pod-to-pod checks then run before the restarted node's pod network exists again. The restart kills the containers of every pod on the node, so the node's echo pod is restarted by its kubelet: the wait is for that pod's restart count to rise and the pod to be ready again, and the checks after it read the pod addresses afresh.
+restart_joined_server() {
+  local index="$1" before after
+  before=$(echo_pod_state "$index") || fail "cannot read the echo pod on $(node_name "$index") before restarting it"
+  docker restart "$(container "$index")" >/dev/null
+  local deadline=$((SECONDS + 600))
+  while :; do
+    after=$(echo_pod_state "$index" || true)
+    if [ -n "$after" ] && [ "${after% *}" -gt "${before% *}" ] && [ "${after#* }" = true ]; then break; fi
+    [ "$SECONDS" -lt "$deadline" ] || { kubectl_on 1 get pods -l app=grtest-echo -o wide || true; fail "the echo pod on $(node_name "$index") did not restart and become ready again after its node restarted (was: ${before}, now: ${after:-unreadable})"; }
+    sleep 5
+  done
+  log "$(node_name "$index") is back: its echo pod restarted (restart count ${before% *} -> ${after% *})"
+}
+
 # Whether a pod reaches another pod's echo server, allowing the mesh time to converge: after a node restarts, its peers take a while to learn its new endpoints and routes again.
 reaches() {
   local _
@@ -308,7 +329,7 @@ scenario_cluster() {
   if [ "$scenario" = hosted ]; then
     # A restart starts k3s's temporary etcd against the initialised datastore, which every --etcd-arg also reaches; the timing flags must not break it. The joined server is restarted, not the bootstrap one the Headscale server runs beside.
     log "Restarting a joined server against its initialised datastore, with the etcd timing set"
-    docker restart "$(container 2)" >/dev/null
+    restart_joined_server 2
     assert_cluster
     assert_etcd_timing
   fi
