@@ -37,12 +37,19 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/grtest-recovery.XXXXXX")"
 export KUBECONFIG="$work/kubeconfig"
 
 log() { echo "==> $*"; }
+# The log of every watcher pod the Deployment has, each read on its own: a rollout can leave the previous pod terminating beside the new one, and a log request for one pod must not hide the other's.
+watcher_logs() {
+  local pod
+  for pod in $(kubectl -n "$platform_namespace" get pods -l app.kubernetes.io/name=node-recovery -o name 2>/dev/null); do
+    kubectl -n "$platform_namespace" logs "$pod" 2>&1 || true
+  done
+}
 fail() {
   echo "FAIL: $*" >&2
   kubectl get nodes -o wide >&2 || true
   kubectl get nodes -o json | jq -r '.items[] | "\(.metadata.name) taints=\(.spec.taints // [] | map(.key) | join(",")) annotations=\(.metadata.annotations // {} | keys | join(","))"' >&2 || true
   kubectl get pods -A -o wide >&2 || true
-  kubectl -n "$platform_namespace" logs deploy/node-recovery --tail=40 >&2 || true
+  watcher_logs | tail -n 40 >&2
   exit 1
 }
 cleanup() {
@@ -253,7 +260,7 @@ unknown_since_s="$(jq -rn --arg t "$unknown_since" '$t | fromdateiso8601')"
 until_past_threshold=$((unknown_since_s + prune_after_seconds + poll_seconds * 3 - $(date +%s)))
 [ "$until_past_threshold" -le 0 ] || sleep "$until_past_threshold"
 node_gone "$doomed_node" && fail "${doomed_node}'s Node was deleted with no etcd voters in the cluster"
-kubectl -n "$platform_namespace" logs -l app.kubernetes.io/name=node-recovery --tail=-1 | grep -q "Not deleting ${doomed_node}: only 0 Ready etcd members would remain" \
+watcher_logs | grep -q "Not deleting ${doomed_node}: only 0 Ready etcd members would remain" \
   || fail "the watcher's log does not say why it kept ${doomed_node}"
 log "${doomed_node} was kept with no etcd voters"
 for voter in "${cluster}-control-plane" "$watcher_node"; do
@@ -264,8 +271,7 @@ node_gone "$doomed_node" && fail "${doomed_node}'s Node was deleted with only $(
 log "${doomed_node} was kept with $((min_voters - 1)) etcd voters"
 kubectl label node "$voter_node" "${etcd_role_label}=true" >/dev/null
 wait_for $((prune_after_seconds + poll_seconds + margin_seconds)) "${doomed_node}'s Node to be deleted" node_gone "$doomed_node"
-# Every pod the Deployment still has: a rollout can leave the previous one terminating beside the one that deleted the Node.
-pruned_line="$(kubectl -n "$platform_namespace" logs -l app.kubernetes.io/name=node-recovery --tail=-1 | grep "Deleted ${doomed_node}:" | head -1 || true)"
+pruned_line="$(watcher_logs | grep "Deleted ${doomed_node}:" | head -1 || true)"
 [ -n "$pruned_line" ] || fail "the watcher's log has no line for the deletion of ${doomed_node}"
 pruned_after="$(sed -E 's/.*not reporting for ([0-9]+)s.*/\1/' <<< "$pruned_line")"
 [ "$pruned_after" -ge "$prune_after_seconds" ] || fail "${doomed_node} was deleted after ${pruned_after}s, before the ${prune_after_seconds}s threshold"
