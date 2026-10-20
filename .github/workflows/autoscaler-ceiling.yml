@@ -1,0 +1,56 @@
+name: Autoscaler ceiling
+
+# Runs the autoscaler's ceiling in a kind cluster (tests/autoscaler_ceiling/run.sh): the real script, as its own service account with the RBAC install_platform.yml grants, against two scale sets installed from the chart with no controller, checked against the role's install-time measurement of the same node.
+#
+# GitHub-hosted ubuntu-latest has Docker, kind and kubectl already. Helm is downloaded and checked against the same pinned digest as helm-apply.yml, so the test depends neither on the image's own Helm nor on the download host vouching for its own archive.
+
+on:
+  pull_request:
+    paths:
+      - scripts/autoscaler.sh
+      - scripts/autoscaler-ceiling.jq
+      - roles/github_runner_arc/tasks/install_platform.yml
+      - plugins/filter/arc.py
+      - tests/autoscaler_ceiling/**
+      - .github/workflows/autoscaler-ceiling.yml
+  workflow_dispatch:
+
+concurrency:
+  group: autoscaler-ceiling-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  autoscaler-ceiling:
+    name: Autoscaler ceiling in kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HELM_VERSION: v4.3.0
+      HELM_SHA256: 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ansible-core for the reference measurement
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core pyyaml jinja2
+
+      - name: Download Helm
+        run: |
+          set -euo pipefail
+          archive="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLo "${RUNNER_TEMP}/${archive}" "https://get.helm.sh/${archive}"
+          echo "${HELM_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/linux-amd64" >> "$GITHUB_PATH"
+
+      - name: Run the ceiling test
+        run: PYTHON="${RUNNER_TEMP}/venv/bin/python" tests/autoscaler_ceiling/run.sh
