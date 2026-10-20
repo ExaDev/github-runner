@@ -1,3 +1,16 @@
+# [2.3.0](https://github.com/ExaDev/github-runner/compare/v2.2.0...v2.3.0) (2026-10-20)
+
+
+### Bug Fixes
+
+* **cluster:** wait for the recreated server heartbeat and relax the check before anything joined ([46cf254](https://github.com/ExaDev/github-runner/commit/46cf25437295cfa28b458059965d886af891b2b5))
+
+
+### Features
+
+* **cluster:** keep a node's password in a volume across container recreation ([e64284e](https://github.com/ExaDev/github-runner/commit/e64284eed1804c8cc64d8e54d836415659ad8bd0))
+* **cluster:** recreate servers one at a time and only while the others are Ready ([c2f356d](https://github.com/ExaDev/github-runner/commit/c2f356d854229f506f0ee3b6812a68e02e4e2522))
+
 # [2.2.0](https://github.com/ExaDev/github-runner/compare/v2.1.0...v2.2.0) (2026-10-20)
 
 
