@@ -1,5 +1,6 @@
-{# The node recovery watcher (see tasks/install_node_recovery.yml and scripts/node-recovery.sh): a ServiceAccount, a ClusterRole allowing only get, list and patch on nodes, its binding, and the Deployment. The namespace is ensured separately, since the platform's other Deployments share it. #}
+{# The node recovery watcher (see tasks/install_node_recovery.yml and scripts/node-recovery.sh): a ServiceAccount, a ClusterRole allowing get, list and patch on nodes and, only while github_runner_arc_node_recovery_prune_after_seconds is set, delete, its binding, and the Deployment. The namespace is ensured separately, since the platform's other Deployments share it. #}
 {% set name = 'node-recovery' %}
+{% set prune = github_runner_arc_node_recovery_prune_after_seconds | string | length > 0 %}
 {% set cluster_name = 'github-runner-node-recovery' %}
 {% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
 apiVersion: v1
@@ -15,10 +16,10 @@ metadata:
   name: {{ cluster_name | to_json }}
   labels: {{ labels | to_json }}
 rules:
-  # Nodes are cluster-scoped, and a taint is part of the Node object, so patch cannot be narrower than this. No delete: the watcher never removes a Node, which on a k3s server would remove its etcd member.
+  # Nodes are cluster-scoped, and a taint is part of the Node object, so patch cannot be narrower than this. Delete only while pruning is on, and then on every node, since RBAC cannot select by label: the script deletes only a labelled node that is not a server or etcd member, which on a k3s server would remove its etcd member.
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "patch"]
+    verbs: {{ (['get', 'list', 'patch'] + (['delete'] if prune else [])) | to_json }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -76,7 +77,13 @@ spec:
               value: {{ github_runner_arc_node_recovery_poll_seconds | string | to_json }}
             - name: NODE_RECOVERY_ANNOTATION
               value: {{ github_runner_arc_node_recovery_annotation | to_json }}
-            # The watcher never taints the node it runs on.
+{% if prune %}
+            - name: NODE_RECOVERY_PRUNE_AFTER_SECONDS
+              value: {{ github_runner_arc_node_recovery_prune_after_seconds | string | to_json }}
+            - name: NODE_RECOVERY_PRUNE_LABEL
+              value: {{ github_runner_arc_node_recovery_prune_label | to_json }}
+{% endif %}
+            # The watcher never taints or deletes the node it runs on.
             - name: NODE_RECOVERY_SELF_NODE
               valueFrom:
                 fieldRef:
