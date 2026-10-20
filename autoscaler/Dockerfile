@@ -1,7 +1,8 @@
 # Tiny image for the autoscaler Deployment (an in-cluster Kubernetes pod, not
 # a host-level Docker Compose service - see
 # roles/github_runner_arc/tasks/install_platform.yml): it only needs
-# kubectl (read/patch the AutoscalingRunnerSet, kubectl top pod/nodes), jq,
+# kubectl (read/patch the AutoscalingRunnerSet, kubectl top pod/nodes, read
+# the nodes and pods the ceiling is worked out from), jq,
 # and bash. Same shape as heartbeat/Dockerfile: Alpine keeps it arch-agnostic
 # and small. Build context is the repo root so it can COPY
 # the scripts the role runs from it (autoscaler.sh, psi-reporter.sh,
@@ -16,6 +17,8 @@ RUN apk add --no-cache bash curl jq kubectl
 
 COPY autoscaler/loop.sh /app/loop.sh
 COPY scripts/autoscaler.sh /app/scripts/autoscaler.sh
+# The ceiling program autoscaler.sh runs from its own directory.
+COPY scripts/autoscaler-ceiling.jq /app/scripts/autoscaler-ceiling.jq
 COPY scripts/psi-reporter.sh /app/scripts/psi-reporter.sh
 COPY scripts/node-cache-pruner.sh /app/scripts/node-cache-pruner.sh
 RUN chmod +x /app/loop.sh /app/scripts/autoscaler.sh /app/scripts/psi-reporter.sh /app/scripts/node-cache-pruner.sh

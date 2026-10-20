@@ -5,7 +5,7 @@
 # - kubectl needs no KUBECONFIG here: running as a pod with a mounted ServiceAccount token, client-go auto-detects in-cluster config.
 # - AUTOSCALER_DRY_RUN: "true" computes and logs only, never patches
 # - AUTOSCALER_USABLE_BUDGET_GI: proven-safe memory budget for every pooled target's runner pods combined, across every node any of them can use
-# - AUTOSCALER_MAX_CEILING: hard operator cap on the pooled maxRunners total, independent of the live arithmetic
+# - AUTOSCALER_MAX_CEILING: an optional upper bound on the pooled maxRunners total; empty means none. The ceiling itself is worked out every poll from the nodes (scripts/autoscaler-ceiling.jq), and this only lowers it
 # - AUTOSCALER_FLOOR: the combined floor every poll reverts the pooled total to under pressure; each Helm upgrade separately reverts its own target's maxRunners to that target's own values-file floor, which need not equal this combined figure divided evenly
 # - AUTOSCALER_RAISE_CONFIRM_POLLS: consecutive polls of confirmed headroom before raising
 # - AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT: MemAvailable-of-MemTotal percentage treated as real pressure, evaluated as the worst case across the nodes runner pods may use (see the kubectl top nodes block below) - no swap-pressure equivalent, see that block's own comment for why
@@ -19,7 +19,8 @@ set -euo pipefail
 TARGETS_RAW="${AUTOSCALER_TARGETS:?AUTOSCALER_TARGETS must be set}"
 DRY_RUN="${AUTOSCALER_DRY_RUN:-true}"
 USABLE_BUDGET_GI="${AUTOSCALER_USABLE_BUDGET_GI:?AUTOSCALER_USABLE_BUDGET_GI must be set}"
-MAX_CEILING="${AUTOSCALER_MAX_CEILING:?AUTOSCALER_MAX_CEILING must be set}"
+CEILING_BOUND="${AUTOSCALER_MAX_CEILING:-}"
+case "$CEILING_BOUND" in *[!0-9]*) echo "AUTOSCALER_MAX_CEILING must be empty or a whole number (got '$CEILING_BOUND')" >&2; exit 1 ;; esac
 FLOOR="${AUTOSCALER_FLOOR:?AUTOSCALER_FLOOR must be set}"
 RAISE_CONFIRM_POLLS="${AUTOSCALER_RAISE_CONFIRM_POLLS:-2}"
 MEM_AVAILABLE_PRESSURE_PCT="${AUTOSCALER_MEM_AVAILABLE_PRESSURE_PCT:-15}"
@@ -40,6 +41,10 @@ JOB_MEMORY_KEY="job-memory"
 JOB_PEAK_KEY="job-peak"
 # The ConfigMap key counting consecutive polls in which one pooled target was saturated while another held spare slots (see rebalance_one), kept apart from the raise path's own `raise-confirm-count`.
 REBALANCE_CONFIRM_KEY="rebalance-confirm-count"
+# The last ceiling worked out from the nodes, which a poll that cannot work it out keeps to (see measure_ceiling).
+CEILING_KEY="ceiling"
+# The program that works the ceiling out, beside this script both in the repository and in the image.
+CEILING_PROGRAM="$(dirname "$0")/autoscaler-ceiling.jq"
 # A pooled target is never rebalanced below this many runners, so a quiet one can always start a job.
 REBALANCE_MIN_MAX=1
 JOB_MEMORY_MAX_ENTRIES=2048
@@ -104,7 +109,11 @@ write_status() {
     --arg mode "$mode" \
     --argjson pod_limit_mib "$WH_MIB" \
     --argjson targets "$(targets_json)" \
-    '{last_run: $last_run, current_max_runners: $current_max_runners, headroom_gi: ($headroom_gi | tonumber? // null), mode: $mode, pod_limit_mib: $pod_limit_mib, targets: $targets}')"
+    --argjson ceiling "${CEILING:-null}" \
+    --argjson ceiling_bound "${CEILING_BOUND:-null}" \
+    --argjson ceiling_measured "$CEILING_FRESH" \
+    --argjson ceiling_nodes "$CEILING_NODES" \
+    '{last_run: $last_run, current_max_runners: $current_max_runners, headroom_gi: ($headroom_gi | tonumber? // null), mode: $mode, pod_limit_mib: $pod_limit_mib, targets: $targets, ceiling: $ceiling, ceiling_bound: $ceiling_bound, ceiling_measured: $ceiling_measured, ceiling_nodes: $ceiling_nodes}')"
   configmap_set "status.json" "$status_json"
 }
 
@@ -232,6 +241,21 @@ record_measured_peaks() {
   store_job_entries "$JOB_PEAK_KEY" "$jobs" false
 }
 
+# Works out how many pooled runner pods the nodes can place now (scripts/autoscaler-ceiling.jq has the rule) and prints the program's result. Each pooled scale set's runner pod spec is read from its live AutoscalingRunnerSet, as its memory limit is above, so a change to the pod's request moves the ceiling with it. The lists go through files, never arguments: every pod in the cluster is more than one argument may hold (see configmap_set). Any failed read, or a figure the program cannot use, prints why on stderr and returns non-zero. A subshell, so the files go with it whichever way it ends; errexit does not apply inside a function called as a condition, so each step checks its own status.
+measure_ceiling() (
+  work="$(mktemp -d)" || exit 1
+  trap 'rm -rf "$work"' EXIT
+  for i in "${!TARGETS[@]}"; do
+    kubectl get autoscalingrunnerset "${RELEASES[$i]}" -n "${NAMESPACES[$i]}" -o json | jq -c '.spec.template.spec' >> "$work/templates" \
+      || { echo "could not read ${TARGETS[$i]}'s runner pod template" >&2; exit 1; }
+  done
+  kubectl get nodes -o json > "$work/nodes" || { echo "could not list the nodes" >&2; exit 1; }
+  kubectl get pods --all-namespaces --field-selector=status.phase!=Succeeded,status.phase!=Failed -o json > "$work/pods" \
+    || { echo "could not list the pods that hold requests" >&2; exit 1; }
+  jq -c --slurpfile templates "$work/templates" --slurpfile nodes "$work/nodes" --argjson pooled "$(printf '%s\n' "${NAMESPACES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+    -f "$CEILING_PROGRAM" "$work/pods"
+)
+
 # For a failure before every target's current state is known: fail_safe patches from that state, so with none or part of it, the only honest outcome is to stop loudly (the API server is unreachable, so nothing could be patched anyway).
 die() {
   echo "ERROR: $1" >&2
@@ -250,6 +274,10 @@ fail_safe() {
 
 declare -a R MAX
 UNSCHEDULABLE_TOTAL=0
+# Set once the ceiling is worked out below; write_status reports them, and a fail-safe exit before then reports no ceiling.
+CEILING=""
+CEILING_FRESH=false
+CEILING_NODES="null"
 
 # Phase 1: every target's own running count, maxRunners and unschedulable runner pods. fail_safe needs all of these to lower anything, so a failure here dies instead.
 for i in "${!TARGETS[@]}"; do
@@ -378,16 +406,36 @@ if [ -n "$NODE_PRESSURE_CONFIGMAP" ]; then
   done <<< "$ELIGIBLE_NODES"
 fi
 
+# The ceiling: how many pooled runner pods the nodes place now, never above CEILING_BOUND when one is set. When it cannot be worked out, the poll says why, keeps the last ceiling it did work out (or the bound, before there is one) for lowering and rebalancing, and does not raise the pool, since a ceiling it cannot see may have fallen.
+LAST_CEILING="$(configmap_get "$CEILING_KEY")"
+case "$LAST_CEILING" in *[!0-9]*) LAST_CEILING="" ;; esac
+if CEILING_RESULT="$(measure_ceiling)"; then
+  MEASURED_CEILING="$(jq -r '.ceiling' <<< "$CEILING_RESULT")"
+  # Per node, the runners it places or why it is not counted, for the status ConfigMap.
+  CEILING_NODES="$(jq -c '[.nodes[] | {name, runners}] + [.skipped[] | {name, not_counted: .reason}]' <<< "$CEILING_RESULT")"
+  CEILING_FRESH=true
+  if [ "$MEASURED_CEILING" != "$LAST_CEILING" ]; then
+    configmap_set "$CEILING_KEY" "$MEASURED_CEILING" || echo "WARN: could not keep the ceiling worked out this poll" >&2
+  fi
+else
+  MEASURED_CEILING="$LAST_CEILING"
+  echo "ERROR: could not work out the ceiling from the nodes; ${LAST_CEILING:+keeping the last one (${LAST_CEILING}) and }not raising the pool this poll" >&2
+fi
+CEILING="$MEASURED_CEILING"
+if [ -n "$CEILING_BOUND" ] && { [ -z "$CEILING" ] || [ "$CEILING" -gt "$CEILING_BOUND" ]; }; then
+  CEILING="$CEILING_BOUND"
+fi
+
 # ---- Algorithm ---------------------------------------------------------
 
 USABLE_BUDGET_MIB=$(( USABLE_BUDGET_GI * 1024 ))
 HEADROOM_MIB=$(( USABLE_BUDGET_MIB - USAGE_MIB ))
 
-echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} node_pressure=${node_pressure} unmeasured_nodes=${unmeasured_nodes} unschedulable=${UNSCHEDULABLE_TOTAL} targets=${TARGETS[*]}"
+echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} node_pressure=${node_pressure} unmeasured_nodes=${unmeasured_nodes} unschedulable=${UNSCHEDULABLE_TOTAL} ceiling=${CEILING:-none} measured_ceiling=${CEILING_FRESH} ceiling_bound=${CEILING_BOUND:-none} targets=${TARGETS[*]}"
 
-# The ceiling is a hard cap on the pooled total, so a total above it (each profile's own static maxRunners can sum to more, and every Helm upgrade restores those) is lowered to it even when nothing else is wrong.
+# The ceiling is a hard cap on the pooled total, so a total above it (each profile's own static maxRunners can sum to more, every Helm upgrade restores those, and the ceiling falls when a node goes) is lowered to it even when nothing else is wrong. With no ceiling known at all there is nothing to compare with.
 over_ceiling=false
-[ "$MAX_TOTAL" -gt "$MAX_CEILING" ] && over_ceiling=true
+[ -n "$CEILING" ] && [ "$MAX_TOTAL" -gt "$CEILING" ] && over_ceiling=true
 
 if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] || [ "$over_ceiling" = "true" ] || [ "$node_pressure" = "true" ]; then
   # Lower immediately, no delay or averaging — lowering never disrupts in-flight jobs (ARC only gates new claims), so there is no cost to being trigger-happy in this direction. Can drop below FLOOR (even to 0, spread across targets by lower_to) if pressure is severe enough.
@@ -395,8 +443,8 @@ if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDU
   configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   target_total=$FLOOR
   # Only the ceiling is exceeded: the pool is otherwise healthy, so it comes down to the ceiling, not to the floor.
-  if [ "$pressure" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$UNSCHEDULABLE_TOTAL" -eq 0 ]; then
-    target_total=$MAX_CEILING
+  if [ "$over_ceiling" = "true" ] && [ "$pressure" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$UNSCHEDULABLE_TOTAL" -eq 0 ]; then
+    target_total=$CEILING
   fi
   # Only a node's own pressure: the pool has the memory, so it steps down by one a poll, not to the floor, and stops at the running count.
   if [ "$node_pressure" = "true" ] && [ "$pressure" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$UNSCHEDULABLE_TOTAL" -eq 0 ] && [ "$over_ceiling" != "true" ]; then
@@ -407,7 +455,7 @@ if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDU
   [ "$target_total" -lt "$R_TOTAL" ] && target_total=$R_TOTAL
   if [ "$target_total" -lt "$MAX_TOTAL" ]; then
     reason="lower: headroom=${HEADROOM_MIB}MiB < Wh=${WH_MIB}MiB"
-    [ "$over_ceiling" = "true" ] && reason="lower: pooled maxRunners ${MAX_TOTAL} is above the ceiling ${MAX_CEILING}"
+    [ "$over_ceiling" = "true" ] && reason="lower: pooled maxRunners ${MAX_TOTAL} is above the ceiling ${CEILING}"
     [ "$node_pressure" = "true" ] && reason="lower: node pressure (${node_pressure_reason})"
     [ "$pressure" = "true" ] && reason="lower: host pressure (mem_available=${mem_available_pct}%)"
     [ "$UNSCHEDULABLE_TOTAL" -gt 0 ] && reason="lower: ${UNSCHEDULABLE_TOTAL} runner pod(s) unschedulable, so the budgeted capacity is not all schedulable"
@@ -416,7 +464,7 @@ if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDU
   else
     write_status "$MAX_TOTAL" "steady: already at or below the safe target" "$HEADROOM_MIB"
   fi
-elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ] && [ "$unmeasured_nodes" -eq 0 ]; then
+elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$CEILING_FRESH" = "true" ] && [ "$MAX_TOTAL" -lt "$CEILING" ] && [ "$unmeasured_nodes" -eq 0 ]; then
   configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   confirm_count="$(configmap_get 'raise-confirm-count')"
   [ -n "$confirm_count" ] || confirm_count=0
@@ -429,13 +477,18 @@ elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ] &&
   else
     write_status "$MAX_TOTAL" "watching: headroom confirmed for ${confirm_count}/${RAISE_CONFIRM_POLLS} polls" "$HEADROOM_MIB"
   fi
-elif [ "$unmeasured_nodes" -gt 0 ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$MAX_CEILING" ]; then
+elif [ "$CEILING_FRESH" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && { [ -z "$CEILING" ] || [ "$MAX_TOTAL" -lt "$CEILING" ]; }; then
+  # Headroom would raise the pool, but the ceiling could not be worked out this poll, so whether the nodes place another runner is not known. Hold, as for an unmeasured node below.
+  configmap_set "raise-confirm-count" "0"
+  configmap_set "$REBALANCE_CONFIRM_KEY" "0"
+  write_status "$MAX_TOTAL" "steady: the ceiling could not be worked out from the nodes, so the pool is not raised" "$HEADROOM_MIB"
+elif [ "$unmeasured_nodes" -gt 0 ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$CEILING" ]; then
   # Headroom would raise the pool, but a node has no fresh pressure report, so whether it can take more is not known. Holding is the safe reading, and it is not lowering, since nothing says there is pressure.
   configmap_set "raise-confirm-count" "0"
   configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   write_status "$MAX_TOTAL" "steady: ${unmeasured_nodes} node(s) have no fresh pressure report, so the pool is not raised" "$HEADROOM_MIB"
 else
-  # Here the pool is healthy and holds as many runners as it may (below the ceiling with enough headroom is the raise branch above; pressure, an unschedulable pod and a total over the ceiling are the lower branch). Slots are fixed per target, so a target that has used all of its own while another sits idle would queue for capacity the pool has. Move one slot at a time, and only once the same imbalance has been seen for as many polls as a raise needs, so a burst that ends within a poll or two moves nothing.
+  # Here the pool is healthy and holds as many runners as it may (below the ceiling with enough headroom is the raise branch above, or a hold when the ceiling or a node is unmeasured; pressure, an unschedulable pod and a total over the ceiling are the lower branch). Slots are fixed per target, so a target that has used all of its own while another sits idle would queue for capacity the pool has. Move one slot at a time, and only once the same imbalance has been seen for as many polls as a raise needs, so a burst that ends within a poll or two moves nothing.
   configmap_set "raise-confirm-count" "0"
   if rebalance_one; then
     rebalance_count="$(configmap_get "$REBALANCE_CONFIRM_KEY")"
