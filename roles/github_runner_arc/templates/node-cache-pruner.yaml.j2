@@ -1,4 +1,4 @@
-{# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each fleet profile's namespace (so the pruner can list the pods it must not prune under, including those of a profile whose cache capability was removed while its directory remains, and nothing wider), and the DaemonSet. `github_runner_arc_fleet` is the fleet's expanded profiles and `github_runner_arc_node_cache_profiles` those with a node cache. #}
+{# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each fleet profile's namespace (so the pruner can list the pods it must not prune under, including those of a profile whose cache capability was removed while its directory remains, and nothing wider), and the DaemonSet. `github_runner_arc_fleet` is the fleet's expanded profiles, `github_runner_arc_node_cache_profiles` those with a node cache and `github_runner_arc_capability_store_namespaces` the namespaces of those that use the capability store, whose root the DaemonSet then mounts as well. #}
 {% set name = 'node-cache-pruner' %}
 {% set labels = github_runner_arc_node_cache_pruner_labels %}
 {% set platform = github_runner_arc_platform_namespace %}
@@ -17,10 +17,16 @@ metadata:
   namespace: {{ profile.namespace | to_json }}
   labels: {{ labels | to_json }}
 rules:
-  # list, to see whether a runner pod of this profile runs on the pruner's node. Nothing else.
+  # list, to see whether a runner pod of this profile runs on the pruner's node, and which capability store entries the pods there use. Nothing else.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list"]
+{% if profile.namespace in github_runner_arc_capability_store_namespaces %}
+  # list, to see which capability store entries the scale sets' pod templates in a namespace that uses the store list.
+  - apiGroups: ["actions.github.com"]
+    resources: ["autoscalingrunnersets"]
+    verbs: ["list"]
+{% endif %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -79,6 +85,12 @@ spec:
               value: {{ github_runner_arc_node_cache_prune_seconds | string | to_json }}
             - name: WANTED_CACHES
               value: {{ (github_runner_arc_node_cache_profiles | map(attribute='target') | list | join(' ')) | to_json }}
+{% if github_runner_arc_capability_store_namespaces | length > 0 %}
+            - name: STORE_ROOT
+              value: /host-capability-store
+            - name: STORE_NAMESPACES
+              value: {{ github_runner_arc_capability_store_namespaces | join(' ') | to_json }}
+{% endif %}
             # kubectl writes its cache under HOME, and the root filesystem is read-only.
             - name: HOME
               value: /tmp
@@ -94,6 +106,10 @@ spec:
           volumeMounts:
             - name: node-cache
               mountPath: /host-node-cache
+{% if github_runner_arc_capability_store_namespaces | length > 0 %}
+            - name: capability-store
+              mountPath: /host-capability-store
+{% endif %}
             - name: tmp
               mountPath: /tmp
           resources:
@@ -110,5 +126,11 @@ spec:
           hostPath:
             path: {{ github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_root | to_json }}
             type: DirectoryOrCreate
+{% if github_runner_arc_capability_store_namespaces | length > 0 %}
+        - name: capability-store
+          hostPath:
+            path: {{ github_runner_arc_capability_store_host_path | to_json }}
+            type: DirectoryOrCreate
+{% endif %}
         - name: tmp
           emptyDir: {}
