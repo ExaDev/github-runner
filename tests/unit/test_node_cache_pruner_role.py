@@ -49,7 +49,7 @@ def render(**role_vars: Any) -> list[dict[str, Any]]:
     """Render the pruner's manifests, in the order the template writes them."""
     with tempfile.TemporaryDirectory() as work:
         output = Path(work) / "pruner.yaml"
-        variables = {"github_runner_arc_fleet": FLEET, "github_runner_arc_node_cache_profiles": PROFILES, "github_runner_arc_node_label_key": "example/ci", "github_runner_arc_node_label_value": "true", **role_vars}
+        variables = {"github_runner_arc_fleet": FLEET, "github_runner_arc_node_cache_profiles": PROFILES, "github_runner_arc_capability_store_namespaces": [], "github_runner_arc_node_label_key": "example/ci", "github_runner_arc_node_label_value": "true", **role_vars}
         completed = ansible(RENDER, pruner_output=str(output), **variables)
         assert completed.returncode == 0, completed.stdout + completed.stderr
         documents: list[dict[str, Any]] = [document for document in yaml.safe_load_all(output.read_text()) if document]
@@ -57,8 +57,10 @@ def render(**role_vars: Any) -> list[dict[str, Any]]:
 
 
 def decide(fleet_targets: list[str], **role_vars: Any) -> dict[str, Any]:
-    """Run the decision for a fleet of the given profile targets, each with the pnpm-store capability when its target is listed in with_cache."""
-    profiles = [{"namespace": target.split("/")[0], "release": target.split("/")[1], "target": target, "capabilities": ["pnpm-store" if target in role_vars.pop("with_cache", fleet_targets) else "node"]} for target in fleet_targets]
+    """Run the decision for a fleet of the given profile targets, each with the pnpm-store capability when its target is listed in with_cache, and using the capability store when it is listed in with_store."""
+    with_cache = role_vars.pop("with_cache", fleet_targets)
+    with_store = role_vars.pop("with_store", [])
+    profiles = [{"namespace": target.split("/")[0], "release": target.split("/")[1], "target": target, "capabilities": ["pnpm-store" if target in with_cache else "node"], "capability_store": target in with_store} for target in fleet_targets]
     with tempfile.TemporaryDirectory() as work:
         output = Path(work) / "decision.json"
         completed = ansible(DECIDE, decide_output=str(output), github_runner_arc_fleet={"profiles": profiles}, github_runner_arc_capabilities=CATALOGUE, **role_vars)
@@ -136,6 +138,37 @@ class DecisionTest(unittest.TestCase):
     def test_a_size_limit_of_zero_means_it_is_not_wanted(self) -> None:
         self.assertEqual(decide(["arc-a/main"], github_runner_arc_node_cache_size_limit_gib=0)["wanted"], False)
 
+    def test_a_profile_using_the_capability_store_wants_the_pruner_without_a_node_cache(self) -> None:
+        self.assertEqual(decide(["arc-a/main"], with_cache=[], with_store=["arc-a/main"]), {"wanted": True, "targets": []})
+
+
+class CapabilityStoreManifestTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.documents = render(github_runner_arc_capability_store_namespaces=["arc-a"])
+        [daemonset] = [document for document in cls.documents if document["kind"] == "DaemonSet"]
+        cls.pod = daemonset["spec"]["template"]["spec"]
+        [cls.container] = cls.pod["containers"]
+
+    def test_the_pruner_is_told_where_the_store_is_and_which_namespaces_use_it(self) -> None:
+        env = {item["name"]: item.get("value") for item in self.container["env"]}
+        self.assertEqual((env["STORE_ROOT"], env["STORE_NAMESPACES"]), ("/host-capability-store", "arc-a"))
+        self.assertIn({"name": "capability-store", "mountPath": "/host-capability-store"}, self.container["volumeMounts"])
+        volumes = {volume["name"]: volume for volume in self.pod["volumes"]}
+        self.assertEqual(volumes["capability-store"]["hostPath"], {"path": "/var/lib/github-runner/capability-store", "type": "DirectoryOrCreate"})
+
+    def test_only_a_namespace_that_uses_the_store_may_have_its_scale_sets_listed(self) -> None:
+        rules = {role["metadata"]["namespace"]: role["rules"] for role in self.documents if role["kind"] == "Role"}
+        self.assertIn({"apiGroups": ["actions.github.com"], "resources": ["autoscalingrunnersets"], "verbs": ["list"]}, rules["arc-a"])
+        self.assertEqual(rules["arc-b"], [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}])
+
+    def test_without_a_store_profile_the_pruner_neither_mounts_nor_prunes_the_store(self) -> None:
+        documents = render()
+        [daemonset] = [document for document in documents if document["kind"] == "DaemonSet"]
+        container = daemonset["spec"]["template"]["spec"]["containers"][0]
+        self.assertNotIn("STORE_ROOT", [item["name"] for item in container["env"]])
+        self.assertNotIn("capability-store", [volume["name"] for volume in daemonset["spec"]["template"]["spec"]["volumes"]])
+
 
 # A stand-in for the kubernetes.core modules the install tasks call: it appends the module name and its arguments to the file named by STUB_LOG, reports no change and finds no resources, so the tasks' control flow runs and what they ask the cluster for can be read.
 STUB_MODULE = """from ansible.module_utils.basic import AnsibleModule
@@ -188,7 +221,7 @@ def legacy_binding(subjects: list[dict[str, Any]] | None = None) -> dict[str, An
 
 def install_with_output(fleet_targets: list[str], with_cache: list[str] | None = None, existing: list[dict[str, Any]] | None = None, **role_vars: Any) -> tuple[list[dict[str, Any]], str]:
     """Run the role's pruner install tasks against the stand-in kubernetes.core, and return the module calls it recorded and the playbook's output. Each fleet profile carries the pnpm-store capability when its target is in with_cache (all of them when it is None)."""
-    profiles = [{"namespace": t.split("/")[0], "release": t.split("/")[1], "target": t, "capabilities": ["pnpm-store"] if with_cache is None or t in with_cache else ["node"]} for t in fleet_targets]
+    profiles = [{"namespace": t.split("/")[0], "release": t.split("/")[1], "target": t, "capabilities": ["pnpm-store"] if with_cache is None or t in with_cache else ["node"], "capability_store": False} for t in fleet_targets]
     with tempfile.TemporaryDirectory() as work:
         modules = Path(work) / "stubs" / "ansible_collections" / "kubernetes" / "core" / "plugins" / "modules"
         modules.mkdir(parents=True)
@@ -372,6 +405,30 @@ class ValidationTest(unittest.TestCase):
         found: list[str] = evaluate(self.expression, {**defaults, **constants, **role_vars})
         return found
 
+    def test_the_capability_store_settings_are_checked(self) -> None:
+        self.assertEqual(self.problems(), [])
+        for role_vars, message in (
+            ({"github_runner_arc_capability_store_host_path": "/var/lib/github-runner/store"}, "named capability-store"),
+            ({"github_runner_arc_capability_store_path": "relative"}, "capability store path must be an absolute directory"),
+            ({"github_runner_arc_capability_store_image": "docker.io/library/busybox:1.37.0"}, "github_runner_arc_capability_store_image must be pinned by digest"),
+        ):
+            with self.subTest(role_vars):
+                problems = self.problems(**role_vars)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn(message, problems[0])
+
+    def test_a_profile_using_the_capability_store_is_refused_without_the_pruner(self) -> None:
+        tasks = yaml.safe_load((ROLE / "tasks" / "validate.yml").read_text())
+        [task] = [task for task in tasks if task["name"] == "Fail when a profile uses the capability store without the pruner"]
+        local = {"profiles": [{"label": "Example-store", "capability_store": True}, {"label": "Example", "capability_store": False}]}
+        refused = lambda limit: evaluate("{{ " + task["when"] + " }}", {"github_runner_arc_node_cache_size_limit_gib": limit, "github_runner_arc_local": local})
+        self.assertTrue(refused(0))
+        self.assertFalse(refused(20))
+        import jinja2
+
+        message = jinja2.Environment(undefined=jinja2.StrictUndefined).from_string(task["ansible.builtin.fail"]["msg"]).render(github_runner_arc_local=local)
+        self.assertTrue(message.startswith("Example-store use the capability store"), message)
+
     def test_the_task_expression_gives_the_same_answer_under_ansible(self) -> None:
         cases = ({}, {"github_runner_arc_node_cache_host_path": "/var/lib"}, {"github_runner_arc_node_cache_hard_limit_factor": "08"}, {"github_runner_arc_node_cache_size_limit_gib": 1073741825})
         for role_vars in cases:
@@ -540,12 +597,12 @@ class DocumentedExampleTest(unittest.TestCase):
         profile = arc.arc_profiles([{"name": "Example", "image": "ghcr.io/example/runner:1", "scale_set_profiles": [{"max_runners": 1, "capabilities": ["pnpm-store"]}]}], require_app_id=False)["profiles"][0]
         self.assertEqual(arc.arc_capability_errors([profile], catalogue), [])
         values = {"template": {"spec": {"containers": [{"name": "runner", "command": ["/home/runner/run.sh"]}]}}}
-        result = arc.arc_capability_pod(values, ["pnpm-store"], catalogue, "/opt/hostedtoolcache", "/opt/sysroot", "/node-cache", "/var/lib/github-runner/node-cache/arc/main", 1001, 1001, "/etc/github-runner/hooks", "job-started")
+        result = arc.arc_capability_pod(values, ["pnpm-store"], catalogue, "/opt/hostedtoolcache", "/opt/sysroot", "/node-cache", "/var/lib/github-runner/node-cache/arc/main", 1001, 1001, "/etc/github-runner/hooks", "job-started", None)
         self.assertEqual(result["errors"], [])
 
     def test_the_example_names_the_store_with_a_variable_pnpm_does_not_read(self) -> None:
         # A pod-wide pnpm_config_store_dir reaches pnpm/action-setup's version switch, which corrupts a shared global virtual store (README, Capabilities), so the example names the directory for a workflow to pass to its install step.
-        env = {item["name"]: item["value"] for item in arc.arc_capability_pod({"template": {"spec": {"containers": [{"name": "runner"}]}}}, ["pnpm-store"], self.example()["github_runner_arc_capabilities"], "/a", "/b", "/node-cache", "/var/lib/x/node-cache/a/b", 1001, 1001, "/h", "c")["values"]["template"]["spec"]["containers"][0]["env"]}
+        env = {item["name"]: item["value"] for item in arc.arc_capability_pod({"template": {"spec": {"containers": [{"name": "runner"}]}}}, ["pnpm-store"], self.example()["github_runner_arc_capabilities"], "/a", "/b", "/node-cache", "/var/lib/x/node-cache/a/b", 1001, 1001, "/h", "c", None)["values"]["template"]["spec"]["containers"][0]["env"]}
         self.assertEqual(env["NODE_CACHE_PNPM_STORE_DIR"], "/node-cache/pnpm")
         self.assertEqual([name for name in env if name.lower().startswith(("pnpm_config_", "npm_config_"))], [])
         readme = (ROLE / "README.md").read_text()

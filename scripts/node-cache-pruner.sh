@@ -11,6 +11,8 @@
 #
 # Every step of one profile's check may fail without stopping the others: a failed or partial size reading skips that profile for the round, and a failed pod list means no pruning, since an unknown set of pods may be using the cache: NODE_CACHE_UNPRUNABLE when the server refused the list as Forbidden (there is no Role for the pruner in that namespace), NODE_CACHE_LIST_FAILED for any other failure (the API server was unreachable, the answer was not a pod list), which the next round retries.
 #
+# The capability store (the role README's "Where the copies live"), when STORE_ROOT is set, holds one entry per image payload, named for the image's digest, plus merged sysroots, and the copies pods are writing under .incoming/<key>.<pod uid>.<container>. An entry stays while a scale set's pod template in one of STORE_NAMESPACES, or an unfinished pod of those namespaces on this node, lists it in its github-runner.exadev.io/capability-store-keys annotation; any other entry is renamed into .trash and deleted, after the lists are taken again directly before the rename, as for a cache. A copy under .incoming stays while the pod whose uid it carries is unfinished on this node. A failed list means no store pruning that round, since an unknown template or pod may use any entry.
+#
 # Which pods count: those in the profile's namespace on this node, not finished (Succeeded or Failed), that have a hostPath volume at exactly the profile's directory on the host (HOST_CACHE_ROOT/<namespace>/<release>). Another profile's pods, finished pods and pods that do not mount the cache are ignored.
 #
 # Env:
@@ -22,6 +24,8 @@
 # - HARD_LIMIT_FACTOR: the hard limit as a multiple of the limit, a positive integer of at most MAX_HARD_LIMIT_FACTOR (default when unset: 2; set and empty is refused).
 # - WANTED_CACHES: the profiles that have a cache, as <namespace>/<release> separated by spaces. When it is set, any other directory under the cache root is removed. Unset leaves every directory alone.
 # - CHECK_SECONDS: seconds between checks, a positive integer of at most MAX_CHECK_SECONDS (default when unset: 300).
+# - STORE_ROOT: where the node's capability store is mounted in this pod. Unset leaves the store alone, as on a fleet with no profile using it.
+# - STORE_NAMESPACES: the namespaces of the profiles that use the store, separated by spaces, whose scale sets' templates and pods on this node are what keep an entry.
 # - PRUNE_ONCE: when "true", check once and exit, for tests.
 #
 # Start-up configuration errors, every one of them (a required variable missing, a number that is not a positive integer or is above its maximum), end the pruner with status 2 and a message on stderr that names the variable, before it does anything. The DaemonSet's pods then crash-loop with that message in their log. The role validates the numeric settings it templates with the same pattern and maxima, but a value changed some other way (an edited DaemonSet) reaches only this check.
@@ -206,6 +210,59 @@ check_profile() {
   esac
 }
 
+readonly STORE_KEYS_ANNOTATION=github-runner.exadev.io/capability-store-keys
+
+# Every store entry a scale set's pod template or an unfinished pod on this node lists, one per line, and each such pod's uid as uid:<uid>, or a failure when anything could not be listed, in which case the errors are in LIST_ERRORS.
+store_references() {
+  local namespace
+  : > "$LIST_ERRORS"
+  for namespace in ${STORE_NAMESPACES-}; do
+    kubectl get autoscalingrunnersets.actions.github.com -n "$namespace" -o json 2>>"$LIST_ERRORS" \
+      | jq -r --arg key "$STORE_KEYS_ANNOTATION" '.items[] | (.spec.template.metadata.annotations[$key] // "") | split(" ")[] | select(length > 0)' 2>>"$LIST_ERRORS" || return 1
+    kubectl get pods -n "$namespace" --field-selector "spec.nodeName=${NODE_NAME},status.phase!=Succeeded,status.phase!=Failed" -o json 2>>"$LIST_ERRORS" \
+      | jq -r --arg key "$STORE_KEYS_ANNOTATION" '.items[] | ("uid:" + .metadata.uid), ((.metadata.annotations[$key] // "") | split(" ")[] | select(length > 0))' 2>>"$LIST_ERRORS" || return 1
+  done
+}
+
+# Whether a store entry, or a copy under .incoming, is still used according to references: an entry by name, a copy by the uid in its name, <key>.<pod uid>.<container> (neither a key nor a uid nor a container name has a dot).
+store_entry_used() {
+  local entry=$1 references=$2 name
+  name="${entry##*/}"
+  if [ "${entry%/*}" = "${STORE_ROOT}/.incoming" ]; then
+    name="uid:$(echo "$name" | cut -d. -f2)"
+  fi
+  grep -qxF -- "$name" <<<"$references"
+}
+
+check_store() {
+  local entry references candidates=()
+  [ -n "${STORE_ROOT-}" ] && [ -d "$STORE_ROOT" ] || return 0
+  rm -rf "${STORE_ROOT:?}/.trash" 2>/dev/null
+  if ! references="$(store_references)"; then
+    log "$(list_failure_prefix) capability store: the scale sets or the pods on this node could not be listed; not pruned"
+    return 0
+  fi
+  shopt -s nullglob
+  for entry in "$STORE_ROOT"/* "$STORE_ROOT"/.incoming/*; do
+    store_entry_used "$entry" "$references" || candidates+=("$entry")
+  done
+  shopt -u nullglob
+  for entry in ${candidates[@]+"${candidates[@]}"}; do
+    # Listed again directly before the rename: a template or a pod may have come to use the entry since.
+    if ! references="$(store_references)"; then
+      log "$(list_failure_prefix) capability store: the scale sets or the pods on this node could not be listed part way through; the rest is left in place"
+      return 0
+    fi
+    store_entry_used "$entry" "$references" && continue
+    if mkdir -p "${STORE_ROOT}/.trash" && mv "$entry" "${STORE_ROOT}/.trash/"; then
+      rm -rf "${STORE_ROOT:?}/.trash/${entry##*/}" || log "capability store: ${entry##*/} was set aside but could not be deleted; the next round retries"
+      log "capability store: removed ${entry##*/}, which no scale set or pod on this node uses"
+    else
+      log "capability store: ${entry##*/} could not be set aside; the next round retries"
+    fi
+  done
+}
+
 check() {
   local directory
   # Whatever an earlier round left in the trash was set aside from a cache already: it is garbage.
@@ -218,6 +275,7 @@ check() {
 
 while true; do
   check
+  check_store
   [ "$PRUNE_ONCE" = "true" ] && exit 0
   sleep "$CHECK_SECONDS"
 done

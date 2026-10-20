@@ -15,7 +15,7 @@ from typing import Any
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "node-cache-pruner.sh"
 HOST_ROOT = "/var/lib/example/node-cache"
 
-# `get pods` answers JSON for the pods in FAKE_PODS (a JSON list of {name, namespace, node, phase, volumes: [hostPath paths], from_call?}) that match its -n namespace and its --field-selector terms (spec.nodeName=<node> and status.phase!=<phase>, as kubectl evaluates them), counting that namespace's calls from 0 and leaving out a pod whose from_call is later. It fails for a namespace in FAKE_FAIL_PODS, answers a Forbidden error for one in FAKE_FORBIDDEN, and text that is not JSON for one in FAKE_BAD_JSON. Every call is recorded, with a snapshot of the cache root at that moment.
+# `get autoscalingrunnersets.actions.github.com` answers JSON for the scale sets in FAKE_SCALE_SETS (a JSON list of {namespace, store_keys}) of its -n namespace, and fails for a namespace in FAKE_FAIL_SCALE_SETS. `get pods` answers JSON for the pods in FAKE_PODS (a JSON list of {name, namespace, node, phase, volumes: [hostPath paths], from_call?, uid?, store_keys?}) that match its -n namespace and its --field-selector terms (spec.nodeName=<node> and status.phase!=<phase>, as kubectl evaluates them), counting that namespace's calls from 0 and leaving out a pod whose from_call is later. It fails for a namespace in FAKE_FAIL_PODS, answers a Forbidden error for one in FAKE_FORBIDDEN, and text that is not JSON for one in FAKE_BAD_JSON. Every call is recorded, with a snapshot of the cache root at that moment.
 FAKE_KUBECTL = textwrap.dedent(
     """\
     #!/usr/bin/env python3
@@ -23,6 +23,16 @@ FAKE_KUBECTL = textwrap.dedent(
     args = sys.argv[1:]
     state = os.environ["FAKE_STATE_DIR"]
     open(os.path.join(state, "calls.txt"), "a").write(" ".join(args) + "\\n")
+    listed = lambda name: [item for item in os.environ.get(name, "").split(",") if item]
+    annotations = lambda keys: {"github-runner.exadev.io/capability-store-keys": " ".join(keys)} if keys else {}
+    if args[:2] == ["get", "autoscalingrunnersets.actions.github.com"]:
+        namespace = args[args.index("-n") + 1]
+        if namespace in listed("FAKE_FAIL_SCALE_SETS"):
+            sys.stderr.write("the server is unavailable\\n")
+            sys.exit(1)
+        scale_sets = [item for item in json.loads(os.environ.get("FAKE_SCALE_SETS", "[]")) if item["namespace"] == namespace]
+        print(json.dumps({"items": [{"spec": {"template": {"metadata": {"annotations": annotations(item["store_keys"])}}}} for item in scale_sets]}))
+        sys.exit(0)
     if args[:2] != ["get", "pods"]:
         sys.stderr.write("unexpected kubectl call: %s\\n" % args)
         sys.exit(2)
@@ -64,7 +74,7 @@ FAKE_KUBECTL = textwrap.dedent(
     items = []
     for pod in json.loads(os.environ.get("FAKE_PODS", "[]")):
         if pod["namespace"] == namespace and matches(pod) and count >= pod.get("from_call", 0):
-            metadata = {"name": pod["name"]}
+            metadata = {"name": pod["name"], "uid": pod.get("uid", pod["name"]), "annotations": annotations(pod.get("store_keys", []))}
             if pod.get("deleting"):
                 metadata["deletionTimestamp"] = "2026-01-01T00:00:00Z"
             items.append({"metadata": metadata, "spec": {"volumes": [{"name": "v%d" % index, "hostPath": {"path": path}} for index, path in enumerate(pod["volumes"])]}})
@@ -563,6 +573,70 @@ class StartupTest(unittest.TestCase):
         # 100 KiB is far under 1 GiB, so the cache is left alone and no pod is listed.
         self.assertTrue((self.root / "arc-a" / "main" / "pnpm" / "blob").exists())
         self.assertFalse(self.calls.exists())
+
+
+
+KEY_A = "a" * 64
+KEY_B = "b" * 64
+KEY_C = "c" * 64
+
+
+class CapabilityStorePrunerTest(unittest.TestCase):
+    """The capability store's pruning: an entry stays while a scale set's template or an unfinished pod on this node lists it, and a copy under .incoming stays while its pod is unfinished on this node."""
+
+    # PrunerTest's helpers, borrowed rather than inherited so its cases do not run twice.
+    setup_work = PrunerTest.setup_work
+    environment = PrunerTest.environment
+    run_pruner = PrunerTest.run_pruner
+
+    def run_store(self, entries: list[str], incoming: list[str] | None = None, scale_sets: list[dict[str, Any]] | None = None, pods: list[dict[str, Any]] | None = None, **env: str) -> tuple[Run, Path]:
+        root, bin_dir, state = self.setup_work()
+        store = root.parent / "store"
+        for name in entries:
+            (store / name).mkdir(parents=True)
+            (store / name / "payload").write_text(name)
+        for name in incoming or []:
+            (store / ".incoming" / name).mkdir(parents=True)
+        environment = {**self.environment(root, bin_dir, state, pods, [], {"STORE_ROOT": str(store), "STORE_NAMESPACES": "arc-a", "FAKE_SCALE_SETS": json.dumps(scale_sets or []), **env})}
+        completed = subprocess.run(["bash", str(SCRIPT)], check=True, env=environment, capture_output=True, text=True)
+        return Run(root, state, completed.stdout), store
+
+    def store_pod(self, keys: list[str], node: str = "node-a", phase: str = "Running", uid: str = "pod-1", from_call: int = 0) -> dict[str, Any]:
+        return {"name": f"runner-{uid}", "uid": uid, "namespace": "arc-a", "node": node, "phase": phase, "volumes": [], "store_keys": keys, "from_call": from_call}
+
+    def remaining(self, store: Path) -> list[str]:
+        return sorted(path.name for path in store.iterdir() if not path.name.startswith("."))
+
+    def test_an_entry_no_template_or_pod_uses_is_removed_and_one_a_template_lists_is_kept(self) -> None:
+        run, store = self.run_store([KEY_A, KEY_B], scale_sets=[{"namespace": "arc-a", "store_keys": [KEY_A]}])
+        self.assertEqual(self.remaining(store), [KEY_A])
+        self.assertIn(f"capability store: removed {KEY_B}, which no scale set or pod on this node uses", run.output)
+
+    def test_an_entry_an_unfinished_pod_on_this_node_lists_is_kept_after_its_template_moved_on(self) -> None:
+        _, store = self.run_store([KEY_A, KEY_B, KEY_C], scale_sets=[{"namespace": "arc-a", "store_keys": [KEY_C]}], pods=[self.store_pod([KEY_A]), self.store_pod([KEY_B], phase="Pending", uid="pod-2")])
+        self.assertEqual(self.remaining(store), [KEY_A, KEY_B, KEY_C])
+
+    def test_a_finished_pod_or_one_on_another_node_keeps_nothing(self) -> None:
+        _, store = self.run_store([KEY_A, KEY_B], pods=[self.store_pod([KEY_A], phase="Succeeded"), self.store_pod([KEY_B], node="node-b", uid="pod-2")])
+        self.assertEqual(self.remaining(store), [])
+
+    def test_a_pod_that_starts_using_an_entry_before_it_is_removed_keeps_it(self) -> None:
+        # The pod appears from the second list on: the first finds the entry unused, the list taken again before the rename finds the pod.
+        _, store = self.run_store([KEY_A], pods=[self.store_pod([KEY_A], from_call=1)])
+        self.assertEqual(self.remaining(store), [KEY_A])
+
+    def test_a_copy_in_progress_is_kept_while_its_pod_runs_and_removed_once_it_is_gone(self) -> None:
+        _, store = self.run_store([], incoming=[f"{KEY_A}.pod-1.capability-node", f"{KEY_B}.pod-gone.capability-node"], pods=[self.store_pod([KEY_A])])
+        self.assertEqual(sorted(path.name for path in (store / ".incoming").iterdir()), [f"{KEY_A}.pod-1.capability-node"])
+
+    def test_nothing_is_removed_when_the_scale_sets_cannot_be_listed(self) -> None:
+        run, store = self.run_store([KEY_A], FAKE_FAIL_SCALE_SETS="arc-a")
+        self.assertEqual(self.remaining(store), [KEY_A])
+        self.assertIn("NODE_CACHE_LIST_FAILED capability store: the scale sets or the pods on this node could not be listed; not pruned", run.output)
+
+    def test_without_a_store_root_the_store_is_not_looked_at(self) -> None:
+        run = self.run_pruner({})
+        self.assertFalse([call for call in run.calls() if "autoscalingrunnersets" in call])
 
 
 if __name__ == "__main__":
