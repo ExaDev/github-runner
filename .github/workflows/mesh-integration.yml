@@ -1,6 +1,6 @@
 name: Mesh integration
 
-# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check, plus the role's refusal of a Docker Compose release that recreates the containers it has just built. headscale_in_cluster also runs with github_runner_cluster_docker_context pinned while the current Docker context points at nothing, which covers the cluster role's own docker calls and the recovery playbook's, and context_checks checks the role refuses a pin it cannot honour. Only on changes that can affect how nodes join the mesh.
+# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check, plus the role's refusal of a Docker Compose release that recreates the containers it has just built. headscale_in_cluster also runs with github_runner_cluster_docker_context pinned while the current Docker context points at nothing, which covers the cluster role's own docker calls and the recovery playbook's, and context_checks checks the role refuses a pin it cannot honour. regrade turns memory-pressure regrading on and steps a server down to etcd-only under (simulated) pressure and back up, checking that it keeps its etcd seat and vote and that no other server steps meanwhile. Only on changes that can affect how nodes join the mesh.
 #
 # Runs on GitHub-hosted ubuntu-latest, whose Docker daemon runs the privileged containers the test needs (k3s, and Tailscale inside it). The work directory sits under runner.temp, which the job always has write access to.
 
@@ -37,6 +37,7 @@ jobs:
           - {scenario: existing, compose: v5.5.1}
           - {scenario: hosted, compose: v5.5.1}
           - {scenario: in_cluster, compose: v5.5.1}
+          - {scenario: regrade, compose: v5.5.1}
           - {scenario: hosted, compose: v2.39.0}
           - {scenario: compose_faulty, compose: v2.38.2}
           - {scenario: in_cluster, compose: v5.5.1, pin: true}
