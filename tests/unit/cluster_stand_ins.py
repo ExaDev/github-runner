@@ -54,7 +54,7 @@ def flatten(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return found
 
 
-# Stands in for the docker CLI, with its state in files under $DOCKER_STUB: containers/<name>.state (what docker ps prints), .image, .hash (the Compose configuration hash label), .node/ (the files of the container's /etc/rancher/node), .volume (the volume mounted there) and .cp-fails; volumes/<name>/ and labels/<name>; rendered/<project>.txt (what docker compose config --hash prints); cluster.nodes (what kubectl get nodes prints, "<node> <Ready status>" per line); and containers/<name>.kubectl-fails and never-ready-<node>. Every call is appended to calls.log with its DOCKER_CONTEXT, and the owner and mode of each file docker cp extracts to owners.log. docker cp moves a real tar stream between processes, so a pipeline that is wired wrongly moves nothing.
+# Stands in for the docker CLI, with its state in files under $DOCKER_STUB: containers/<name>.state (what docker ps prints), .image, .hash (the Compose configuration hash label), .node/ (the files of the container's /etc/rancher/node), .volume (the volume mounted there) and .cp-fails; volumes/<name>/ and labels/<name>; rendered/<project>.txt (what docker compose config --hash prints); cluster.nodes (what kubectl get nodes prints, "<node> <Ready status>" per line); and containers/<name>.kubectl-fails and never-ready-<node>; leases/<node> counts reads of a node's lease, whose renewal is older than its container's start on the first read and later after that, which is also when the node reports Ready (kubelet confirming itself) unless never-ready-<node> exists. Every call is appended to calls.log with its DOCKER_CONTEXT, and the owner and mode of each file docker cp extracts to owners.log. docker cp moves a real tar stream between processes, so a pipeline that is wired wrongly moves nothing.
 DOCKER_STUB = """#!{python}
 import os, re, sys, tarfile
 stub = os.environ["DOCKER_STUB"]
@@ -114,6 +114,8 @@ elif command == "inspect":
         die("Error: No such object: " + args[-1])
     if ".Image" in args[2]:
         print(read("containers", args[-1] + ".image"))
+    elif ".State.StartedAt" in args[2]:
+        print(read("containers", args[-1] + ".started") or "2000-01-01T00:00:00.000000000Z")
     else:
         print(read("containers", args[-1] + ".hash") or "")
 elif args[:2] == ["volume", "ls"]:
@@ -169,13 +171,21 @@ elif command == "exec":
     if rest[:2] == ["kubectl", "get"]:
         if read("containers", container + ".kubectl-fails") is not None:
             die("The connection to the server 127.0.0.1:6443 was refused")
-        print(read("cluster.nodes") or "", end="")
-    elif rest[:2] == ["kubectl", "wait"]:
-        node = [value for value in rest if value.startswith("node/")][0].removeprefix("node/")
-        if read("never-ready-" + node) is not None:
-            die("error: timed out waiting for the condition on nodes/" + node)
-        set_node(node, "True")
-        print("node/" + node + " condition met")
+        if rest[2] == "nodes":
+            print(read("cluster.nodes") or "", end="")
+        elif rest[2] == "node":
+            print(dict(line.split() for line in (read("cluster.nodes") or "").splitlines() if len(line.split()) == 2).get(rest[3], ""), end="")
+        elif rest[2] == "lease":
+            node = rest[5]
+            calls = int(read("leases", node) or 0) + 1
+            write("leases", node, text=str(calls))
+            if read("never-ready-" + node) is None and calls >= 2:
+                set_node(node, "True")
+                print("2000-01-01T00:00:10.000000Z", end="")
+            else:
+                print("2000-01-01T00:00:00.000000Z", end="")
+        else:
+            die("unexpected docker exec: " + " ".join(rest))
     else:
         die("unexpected docker exec: " + " ".join(rest))
 else:
@@ -189,7 +199,7 @@ echo "stand-in: $(basename "$0") must not be called in this test" >&2
 exit 99
 """
 
-# Stands in for community.docker.docker_compose_v2, which would drive a real Compose project: logs the call, and, outside check mode, starts a project's k3s container, or recreates it when the hash Compose renders differs from the container's, which takes its node out of Ready until something waits for it (docker exec kubectl wait). The project is named for its node.
+# Stands in for community.docker.docker_compose_v2, which would drive a real Compose project: logs the call, and, outside check mode, starts a project's k3s container, or recreates it when the hash Compose renders differs from the container's, which takes its node out of Ready (or, with a stale-ready file in the stub directory, leaves its old Ready condition in place, as the API does for a while) until a read of its lease shows the new kubelet. The project is named for its node.
 COMPOSE_MODULE = """#!/usr/bin/python
 from __future__ import annotations
 import os
@@ -218,10 +228,14 @@ def main():
                 handle.write("running")
             with open(hash_path, "w") as handle:
                 handle.write(wanted)
+            lease = os.path.join(stub, "leases", project)
+            if os.path.exists(lease):
+                os.remove(lease)
             nodes = os.path.join(stub, "cluster.nodes")
             lines = [line for line in (open(nodes).read().splitlines() if os.path.exists(nodes) else []) if line.split()[0] != project]
+            stale = os.path.exists(os.path.join(stub, "stale-ready"))
             with open(nodes, "w") as handle:
-                handle.write("\\n".join(lines + [project + " False"]) + "\\n")
+                handle.write("\\n".join(lines + [project + (" True" if stale else " False")]) + "\\n")
     module.exit_json(changed=changed)
 
 main()

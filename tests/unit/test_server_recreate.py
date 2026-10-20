@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import itertools
+import re
 import subprocess
 import tempfile
 import unittest
@@ -99,7 +100,15 @@ class RecreateBlockersTest(unittest.TestCase):
         self.assertEqual(recreate.cluster_recreate_blockers(["b"], read_of("a False\nb True\nagent1 False\n")), [])
 
     def test_a_node_name_that_only_contains_a_server_s_is_not_that_server(self) -> None:
-        self.assertEqual(recreate.cluster_recreate_blockers(["node1"], read_of("node10 True\n")), ["server node1 is not registered"])
+        self.assertEqual(recreate.cluster_recreate_blockers(["node1", "node2"], read_of("node10 True\nnode2 True\n")), ["server node1 is not registered"])
+
+    def test_a_cluster_still_being_brought_up_has_no_quorum_to_keep(self) -> None:
+        # The bootstrap server restarted before any other server has joined: only itself is listed.
+        self.assertEqual(recreate.cluster_recreate_blockers(["b", "c"], read_of("a False\n")), [])
+        self.assertEqual(recreate.cluster_recreate_blockers(["b", "c"], read_of("")), [])
+
+    def test_once_any_other_server_is_registered_a_missing_one_blocks(self) -> None:
+        self.assertEqual(recreate.cluster_recreate_blockers(["b", "c"], read_of("a True\nc True\n")), ["server b is not registered"])
 
     def test_a_failed_read_blocks_with_docker_s_message(self) -> None:
         found = recreate.cluster_recreate_blockers(["b"], {"rc": 1, "stdout": "", "stderr": "warning\nThe connection to the server 127.0.0.1:6443 was refused\n"})
@@ -116,16 +125,19 @@ class RecreateBlockersTest(unittest.TestCase):
             with self.subTest(result=result):
                 self.assertIn("within github_runner_cluster_cluster_read_timeout", recreate.cluster_recreate_blockers(["b"], result)[0])
 
-    def test_an_answer_that_is_empty_means_no_server_is_registered(self) -> None:
-        self.assertEqual(recreate.cluster_recreate_blockers(["b"], read_of("")), ["server b is not registered"])
-
     def test_unusable_input_is_an_error(self) -> None:
         for peers, result in (("b", read_of("")), ([1], read_of("")), (["b"], "text")):
             with self.subTest(peers=peers), self.assertRaises(recreate.AnsibleFilterError):
                 recreate.cluster_recreate_blockers(peers, result)
 
+    def test_registered_peers_are_the_ones_the_cluster_lists(self) -> None:
+        self.assertEqual(recreate.cluster_peers_registered(["b", "c", "d"], read_of("a True\nd False\nb True\n")), ["b", "d"])
+        self.assertEqual(recreate.cluster_peers_registered(["b"], read_of("a True\n")), [])
+        self.assertEqual(recreate.cluster_peers_registered(["b"], {"rc": 1, "stdout": "b True\n", "stderr": "refused"}), [])
+
     def test_the_filters_are_registered(self) -> None:
         filters = recreate.FilterModule().filters()
+        self.assertIs(filters["cluster_peers_registered"], recreate.cluster_peers_registered)
         self.assertIs(filters["cluster_rendered_config_hash"], recreate.cluster_rendered_config_hash)
         self.assertIs(filters["cluster_recreate_reason"], recreate.cluster_recreate_reason)
         self.assertIs(filters["cluster_recreate_blockers"], recreate.cluster_recreate_blockers)
@@ -252,21 +264,35 @@ class ServerReadyTest(RoleTestCase):
         hosts, group_vars = self.hosts(("node1",), **extra)
         return self.run_tasks("server_ready", hosts, group_vars)
 
+    def lease_reads(self) -> int:
+        return len([call for call in self.calls() if " kubectl get lease " in call])
+
+    def test_a_node_waits_for_a_heartbeat_from_the_new_container(self) -> None:
+        # The old container's Ready condition is still in the API: it counts for nothing until the lease shows the new kubelet.
+        self.container("node1-k3s")
+        self.nodes(node1="True")
+        result = self.wait()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lease_reads(), 2)
+        self.assertIn("- exec node1-k3s kubectl get lease --namespace kube-node-lease node1 -o jsonpath={.spec.renewTime}", self.calls())
+        self.assertIn("- inspect --format {{.State.StartedAt}} node1-k3s", self.calls())
+        self.assertEqual(recap(result.stdout, "node1")["changed"], 0)
+
     def test_a_node_that_becomes_ready_ends_the_wait(self) -> None:
         self.container("node1-k3s")
         self.nodes(node1="False")
         result = self.wait()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("- exec node1-k3s kubectl wait --for=condition=Ready node/node1 --timeout=5s", self.calls())
-        self.assertEqual(recap(result.stdout, "node1")["changed"], 0)
+        self.assertEqual((self.stub / "cluster.nodes").read_text().split(), ["node1", "True"])
 
     def test_a_node_that_never_becomes_ready_fails_the_run_after_the_timeout_derived_attempts(self) -> None:
         self.container("node1-k3s")
+        self.nodes(node1="True")
         self.write("never-ready-node1", text="")
         result = self.wait(github_runner_cluster_server_ready_timeout=20)
         self.assertNotEqual(result.returncode, 0)
         # 20 seconds in attempts of 5 seconds' wait and 5 seconds' delay is two retries after the first attempt.
-        self.assertEqual(len([call for call in self.calls() if " kubectl wait " in call]), 3)
+        self.assertEqual(self.lease_reads(), 3)
 
     def test_a_container_whose_api_is_not_listening_yet_is_retried(self) -> None:
         # docker exec fails at once while the container is not running; the wait carries on until the timeout, then fails.
@@ -287,16 +313,23 @@ class StartServersTest(RoleTestCase):
             self.rendered(name, HASH_NEW)
         self.nodes(**{name: "True" for name in hashes})
 
+    def turns_do_not_overlap(self) -> None:
+        """Every server's calls in the log lie wholly before or wholly after every other's, whichever went first."""
+        spans = sorted((min(self.events(f"node{n}")), max(self.events(f"node{n}"))) for n in (1, 2, 3))
+        for (_, ended), (began, _) in itertools.pairwise(spans):
+            self.assertLess(ended, began)
+
     def events(self, node: str) -> list[int]:
         """The positions in the calls log of everything that concerns one node's turn."""
         return [index for index, call in enumerate(self.calls()) if f"--project-name {node} " in call or ("-k3s kubectl" in call and f"{node}-k3s" in call) or call.startswith(f"module up {node} ")]
 
-    def test_every_server_whose_configuration_changed_is_recreated_in_inventory_order(self) -> None:
+    def test_every_server_whose_configuration_changed_is_recreated(self) -> None:
         self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_OLD})
         result = self.start()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         ups = [call for call in self.calls() if call.startswith("module up")]
-        self.assertEqual(ups, [f"module up node{n} profiles=server check=False" for n in (1, 2, 3)])
+        # Which server goes first is the order the hosts' results arrive in, so only the set is fixed.
+        self.assertCountEqual(ups, [f"module up node{n} profiles=server check=False" for n in (1, 2, 3)])
         self.assertEqual((self.stub / "cluster.nodes").read_text().split(), ["node1", "True", "node2", "True", "node3", "True"])
 
     def test_a_server_is_ready_again_before_the_next_servers_turn_begins(self) -> None:
@@ -304,11 +337,31 @@ class StartServersTest(RoleTestCase):
         self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_OLD})
         result = self.start()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        spans = [(min(self.events(f"node{n}")), max(self.events(f"node{n}"))) for n in (1, 2, 3)]
-        for (_, ended), (began, _) in itertools.pairwise(spans):
-            self.assertLess(ended, began)
+        self.turns_do_not_overlap()
         for n in (1, 2, 3):
-            self.assertIn(f"- exec node{n}-k3s kubectl wait --for=condition=Ready node/node{n} --timeout=5s", self.calls())
+            self.assertIn(f"- exec node{n}-k3s kubectl get lease --namespace kube-node-lease node{n} -o jsonpath={{.spec.renewTime}}", self.calls())
+
+    def test_a_node_the_api_still_reports_ready_does_not_end_the_wait_before_its_heartbeat(self) -> None:
+        # The API keeps the old container's Ready condition for a while, so a turn that trusted it would end at once and the next server would be recreated beside a server still coming back. Here the condition never leaves Ready, and only the lease tells.
+        self.write("stale-ready", text="")
+        self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_OLD})
+        result = self.start()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for n in (1, 2, 3):
+            reads = [call for call in self.calls() if f"kubectl get lease --namespace kube-node-lease node{n} " in call]
+            self.assertEqual(len(reads), 2, "the first read still showed the old container's heartbeat")
+        self.turns_do_not_overlap()
+
+    def test_a_bootstrap_server_restarted_before_anything_joined_it_is_recreated_without_a_wait(self) -> None:
+        # The first run of a cluster that runs its own mesh starts the bootstrap server early, with settings that change before the other servers exist: only itself is registered, so there is no quorum to keep and nothing to wait for.
+        self.running_cluster({"node1": HASH_OLD})
+        self.rendered("node2", HASH_NEW)
+        self.rendered("node3", HASH_NEW)
+        self.nodes(node1="True")
+        result = self.start()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.calls() if call.startswith("module up node1")], ["module up node1 profiles=server check=False"])
+        self.assertEqual([call for call in self.calls() if " kubectl get lease " in call], [])
 
     def test_a_server_whose_configuration_is_unchanged_is_started_without_a_wait(self) -> None:
         self.running_cluster({"node1": HASH_NEW, "node2": HASH_NEW, "node3": HASH_NEW})
@@ -325,25 +378,36 @@ class StartServersTest(RoleTestCase):
         self.assertEqual([call for call in self.calls() if " kubectl " in call], [])
         self.assertEqual(len([call for call in self.calls() if call.startswith("module up")]), 3)
 
-    def test_servers_are_not_recreated_while_one_is_down_except_the_one_that_is_down(self) -> None:
-        self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_OLD})
+    def test_servers_are_not_recreated_while_another_is_down(self) -> None:
+        self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_NEW})
         self.nodes(node1="True", node2="True", node3="False")
         result = self.start()
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual([call for call in self.calls() if call.startswith("module up")], ["module up node3 profiles=server check=False"])
+        self.assertEqual([call for call in self.calls() if call.startswith("module up") and "node3" not in call], [])
         self.assertIn("fatal: [node1]", result.stdout)
         self.assertIn("fatal: [node2]", result.stdout)
         self.assertNotIn("fatal: [node3]", result.stdout)
         self.assertIn("server node3 is not Ready", result.stdout)
 
     def test_a_server_that_does_not_come_back_stops_the_run_before_the_next_is_touched(self) -> None:
+        # No server comes back, so whichever goes first fails its wait and no other server is touched.
         self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_OLD})
-        self.write("never-ready-node1", text="")
+        for n in (1, 2, 3):
+            self.write(f"never-ready-node{n}", text="")
         result = self.start(github_runner_cluster_server_ready_timeout=10)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fatal: [node1]", result.stdout)
-        self.assertEqual([call for call in self.calls() if call.startswith("module up")], ["module up node1 profiles=server check=False"])
-        self.assertIn("node1 False", (self.stub / "cluster.nodes").read_text())
+        self.assertEqual(len([call for call in self.calls() if call.startswith("module up")]), 1)
+        self.assertEqual(len(re.findall(r"fatal: \[node\d\]", result.stdout)), 1)
+
+    def test_a_server_whose_old_ready_condition_lingers_but_never_returns_still_stops_the_run(self) -> None:
+        # The API still says Ready for the server that failed to come back, so no other server's check would refuse: only ending the play for every host keeps the rest untouched.
+        self.write("stale-ready", text="")
+        self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_OLD})
+        for n in (1, 2, 3):
+            self.write(f"never-ready-node{n}", text="")
+        result = self.start(github_runner_cluster_server_ready_timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len([call for call in self.calls() if call.startswith("module up")]), 1)
 
     def test_a_limited_run_gives_a_turn_to_the_hosts_in_the_play_only(self) -> None:
         self.running_cluster({"node1": HASH_OLD, "node2": HASH_OLD, "node3": HASH_OLD})
@@ -359,7 +423,7 @@ class StartServersTest(RoleTestCase):
             self.assertIn(f"Compose would recreate node{n}-k3s on node{n}", result.stdout)
             self.assertEqual(recap(result.stdout, f"node{n}")["changed"], 1)
         self.assertEqual([call for call in self.calls() if call.startswith("module up") and "check=False" in call], [])
-        self.assertEqual([call for call in self.calls() if " kubectl wait " in call], [])
+        self.assertEqual([call for call in self.calls() if " kubectl get lease " in call], [])
         self.assertEqual((self.stub / "cluster.nodes").read_text().split(), ["node1", "True", "node2", "True", "node3", "True"])
 
     def test_check_mode_refuses_what_a_run_would_refuse(self) -> None:
