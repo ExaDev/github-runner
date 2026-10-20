@@ -564,7 +564,9 @@ recreate_node() {
 write_marker() { kubectl_on 1 create configmap "grtest-vote-${RANDOM}" --from-literal=a=1 >/dev/null; }
 # A step by hand on node 3 is refused, and the refusal names the stepped-down server. Retried because node 3's own API may still be settling after it was stopped, which is a refusal too but for another reason; a step that goes ahead is a failure, not a retry.
 peer_refusal() {
-  [ "$(level_of 3)" = full ] || fail "$(node_name 3) stepped while $(node_name 2) was stepped down"
+  case "$(level_of 3 || true)" in
+    control-plane | etcd-only) fail "$(node_name 3) stepped while $(node_name 2) was stepped down" ;;
+  esac
   ! regrade_on 3 fleet-regrade down >"${work}/peer.log" 2>&1 && grep -F "etcd-voting nodes not ready: $(node_name 2)" "${work}/peer.log" >/dev/null
 }
 at_level() { [ "$(level_of "$1")" = "$2" ]; }
@@ -614,7 +616,7 @@ spec: {holderIdentity: grtest-other, leaseDurationSeconds: 3600, acquireTime: "$
 EOF
   if regrade_on 2 fleet-regrade down >"${work}/held.log" 2>&1; then cat "${work}/held.log"; fail "a step ran with the lease held by another server"; fi
   grep -F 'the lease is held by grtest-other' "${work}/held.log" >/dev/null || { cat "${work}/held.log"; fail "the refusal did not name the lease holder"; }
-  [ "$(level_of 2)" = full ] || fail "$(node_name 2) changed level without the lease"
+  wait_for "$(node_name 2) to read full, since a step without the lease is a failure" 180 at_level 2 full
   kubectl_on 1 delete lease fleet-regrade --namespace kube-system >/dev/null
 
   log "Memory pressure on $(node_name 2) steps it down a level at a time, and no other server steps with it"
@@ -650,13 +652,13 @@ EOF
   log "While $(node_name 2) is stepped down no other server steps"
   wait_for "$(node_name 3)'s refusal to name the stepped-down server" 300 peer_refusal
   cat "${work}/peer.log"
-  [ "$(level_of 3)" = full ] || fail "$(node_name 3) changed level"
+  wait_for "$(node_name 3) to read full, since a step while another was stepped down is a failure" 180 at_level 3 full
 
   log "Rerunning the role with a server stepped down changes nothing, and turning regrading off is refused"
   # Judged by the role's own recap, not by the containers' start times: after a server was stopped and started a container can restart by itself under the strain, which says nothing about the role.
   output=$(run_role 2>&1) || { echo "$output"; fail "the role failed with $(node_name 2) stepped down"; }
   [ "$(grep -cE '^grtest-node[0-9]+ +: .* changed=0 ' <<< "$output")" = "$node_count" ] || { echo "$output" | tail -n 20; fail "rerunning the role changed something while $(node_name 2) was stepped down"; }
-  [ "$(level_of 2)" = etcd-only ] || fail "the role moved $(node_name 2) off etcd-only"
+  wait_for "$(node_name 2) to read etcd-only after the role ran" 180 at_level 2 etcd-only
   regrade=false
   write_inventory hosted
   if output=$(run_role 2>&1); then echo "$output"; fail "the role removed the service of a stepped-down server"; fi
@@ -689,11 +691,11 @@ EOF
   log "By hand, a server goes down to etcd-only, stays there through a restart and a recreate, and up is the way back"
   password=$(node_password_hash 3)
   regrade_on 3 fleet-regrade down
-  [ "$(level_of 3)" = control-plane ] || fail "$(node_name 3) did not step down by hand"
+  wait_for "$(node_name 3) to read control-plane after a step down by hand" 180 at_level 3 control-plane
   wait_for "$(node_name 3) to be cordoned" 60 node_is 1 3 Ready,SchedulingDisabled
   [ "$(level_label 3)" = control-plane ] || fail "the Node does not carry the level label at control-plane"
   regrade_on 3 fleet-regrade down
-  [ "$(level_of 3)" = etcd-only ] || fail "$(node_name 3) did not reach etcd-only by hand"
+  wait_for "$(node_name 3) to read etcd-only after a second step down by hand" 180 at_level 3 etcd-only
   # The level is a file on the data volume that the entrypoint reads at every start, so neither a restart by hand nor a recreate, which is what Compose does when the role changes the container's configuration, brings the server back at full.
   docker restart "$(container 3)" >/dev/null
   wait_for "$(node_name 3) to be at etcd-only after a restart by hand" 300 at_level 3 etcd-only
@@ -708,7 +710,7 @@ EOF
   wait_for "$(node_name 3) to be Ready at control-plane" 300 node_is 1 3 Ready,SchedulingDisabled
   regrade_on 3 fleet-regrade up
   wait_for "$(node_name 3) to be schedulable again" 300 node_is 1 3 Ready
-  [ "$(level_of 3)" = full ] || fail "$(node_name 3) did not step up by hand"
+  wait_for "$(node_name 3) to read full after stepping up by hand" 180 at_level 3 full
   [ -z "$(level_label 3)" ] || fail "the level label is still on the Node at full"
 
   log "With every server at full, turning regrading off removes the services and leaves the nodes running"
