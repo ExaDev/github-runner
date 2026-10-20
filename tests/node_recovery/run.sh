@@ -26,7 +26,7 @@ recovery_bound=$((grace_seconds + after_seconds + poll_seconds + margin_seconds)
 stuck_watch_seconds=60
 # Longer than after_seconds, as the watcher requires. Counted from when the worker went Unknown, which phase 3 reached long before phase 4 turns pruning on.
 prune_after_seconds=60
-removable_label=github-runner.exadev/removable
+removable_label=github-runner.exadev.io/removable
 out_of_service=node.kubernetes.io/out-of-service
 annotation=github-runner.exadev/out-of-service-applied-at
 work="$(mktemp -d "${TMPDIR:-/tmp}/grtest-recovery.XXXXXX")"

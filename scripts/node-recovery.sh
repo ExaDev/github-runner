@@ -12,7 +12,7 @@ after="${NODE_RECOVERY_AFTER_SECONDS:?NODE_RECOVERY_AFTER_SECONDS must be set}"
 annotation="${NODE_RECOVERY_ANNOTATION:-github-runner.exadev/out-of-service-applied-at}"
 self_node="${NODE_RECOVERY_SELF_NODE:-}"
 prune_after="${NODE_RECOVERY_PRUNE_AFTER_SECONDS:-}"
-prune_label="${NODE_RECOVERY_PRUNE_LABEL:-github-runner.exadev/removable}"
+prune_label="${NODE_RECOVERY_PRUNE_LABEL:-github-runner.exadev.io/removable}"
 taint_key="node.kubernetes.io/out-of-service"
 taint_value="nodeshutdown"
 
