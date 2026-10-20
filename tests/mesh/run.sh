@@ -380,7 +380,6 @@ scenario_cluster() {
     assert_cluster
     assert_etcd_timing
   fi
-  recreate_a_joined_server
   if [ "$scenario" = in_cluster ]; then
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
     ansible_run -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml" \
@@ -388,6 +387,7 @@ scenario_cluster() {
     if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the recovery playbook changed the current Docker context"; fi
     assert_cluster
   fi
+  recreate_a_joined_server
 }
 
 # One node and only the settings the role reads before its first check fails, for the scenarios that expect it to stop before touching the host.
