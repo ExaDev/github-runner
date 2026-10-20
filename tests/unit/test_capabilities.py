@@ -750,7 +750,10 @@ class CapabilityStoreExternalsTest(unittest.TestCase):
         values = store_pod(DIND_VALUES, ["node"])["values"]
         result = arc.arc_capability_store_externals(values, STORE, 1001, 1001)
         spec = result["values"]["template"]["spec"]
-        self.assertEqual([container["name"] for container in spec["initContainers"]].count("capability-store-prepare"), 1)
+        names = [container["name"] for container in spec["initContainers"]]
+        # The values' own externals copy comes before the capabilities' containers, so the preparation moves ahead of it.
+        self.assertEqual(names[:3], ["capability-store-prepare", "init-dind-externals", "capability-store-publish-externals"])
+        self.assertEqual(names.count("capability-store-prepare"), 1)
         self.assertEqual([volume["name"] for volume in spec["volumes"]].count("capability-store"), 1)
         self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{DIGEST_A} {DIGEST_RUNNER}")
 
