@@ -77,13 +77,37 @@ join_mesh() {
   fi
 }
 
-# A joining server has to resolve K3S_JOIN_SERVER_URL's hostname (the bootstrap host's MagicDNS name) before k3s can even attempt to bootstrap against it. Confirmed live: k3s failed outright with "dial tcp: lookup <bootstrap host>: no such host" immediately after `tailscale ip -4` had returned a real address, because Tailscale assigns the IP and wires up its MagicDNS resolver as two separate steps. Waits for the bootstrap host to be a peer in this node's network map (`tailscale ip -4 <name>`) and for MagicDNS itself to answer for it, asking 100.100.100.100 directly: a bare nslookup goes to whatever /etc/resolv.conf names at that moment, which may not yet be Tailscale's resolver. Confirmed in the mesh integration test: a bare nslookup passed, k3s then failed to resolve the same name seconds later and exited, and every restart of the container repeated it before Tailscale had delivered its peers. Only when joining; the bootstrap host has nothing to resolve.
-wait_for_join_server() {
-  if [ -n "${K3S_JOIN_SERVER_URL:-}" ]; then
-    join_host=${K3S_JOIN_SERVER_URL#https://}
-    join_host=${join_host%%:*}
-    until tailscale ip -4 "$join_host" >/dev/null 2>&1 && nslookup "$join_host" 100.100.100.100 >/dev/null 2>&1; do sleep 0.5; done
+# The host a joining node dials, from its server URL (https://<host>:<port>): K3S_JOIN_SERVER_URL for a server, K3S_URL for an agent. Empty for the bootstrap server, which joins nothing.
+join_host_of() {
+  join_host=${1#https://}
+  join_host=${join_host%%:*}
+  printf '%s' "$join_host"
+}
+
+# A joining node has to resolve its server URL's hostname (the bootstrap host's MagicDNS name) before k3s can even attempt to bootstrap against it. Confirmed live: k3s failed outright with "dial tcp: lookup <bootstrap host>: no such host" immediately after `tailscale ip -4` had returned a real address, because Tailscale assigns the IP and wires up its MagicDNS resolver as two separate steps. Waits for the host to be a peer in this node's network map (`tailscale ip -4 <name>`) and for MagicDNS itself to answer for it, asking 100.100.100.100 directly: a bare nslookup goes to whatever /etc/resolv.conf names at that moment, which may not yet be Tailscale's resolver. Confirmed in the mesh integration test: a bare nslookup passed, k3s then failed to resolve the same name seconds later and exited, and every restart of the container repeated it before Tailscale had delivered its peers. Only when joining; the bootstrap host has nothing to resolve.
+wait_for_mesh_host() {
+  if [ -n "$1" ]; then
+    until tailscale ip -4 "$1" >/dev/null 2>&1 && nslookup "$1" 100.100.100.100 >/dev/null 2>&1; do sleep 0.5; done
   fi
+}
+
+# Writes a `tailscale` into $2, which k3s is started with first on its PATH (tailscale_up_wait_dir below), that runs the real one ($3) for every command unchanged and, after `tailscale up`, waits as wait_for_mesh_host does for $1, the host this node joins. k3s's own --vpn-auth start (StartVPN in k3s's pkg/vpn/vpn.go) runs `tailscale up --authkey ... --timeout=30s --reset` on every start, which restarts the Tailscale backend from its cached network map, and k3s dials the join host as soon as that command returns. Confirmed live on Tailscale's own control plane with Tailscale v1.102.4: the backend reloaded a cached map with no peers ("Start: loaded netmap from disk cache; 0 peers"), so the join host was neither a peer nor a MagicDNS name for about a second, k3s exited with "no such host", and every restart of the container repeated it, so the node never joined. The wait above, before k3s starts, cannot cover it, since the reset comes after it. $2 is under /run, a tmpfs in docker-compose.yml, so the wrapper is written afresh at every start of the container and never stands in front of the entrypoint's own tailscale commands; it follows the entrypoint, so it needs no image rebuild, and a node that joins nothing gets none.
+tailscale_up_wait_dir=/run/github-runner-node/bin
+install_tailscale_up_wait() {
+  if [ -z "$1" ]; then
+    return 0
+  fi
+  mkdir -p "$2"
+  {
+    echo '#!/bin/sh'
+    echo '# Written by node-entrypoint.sh (install_tailscale_up_wait) at every start of this container.'
+    printf "'%s' \"\$@\" || exit\n" "$3"
+    # shellcheck disable=SC2016 # Written into the wrapper unexpanded, for the wrapper to expand.
+    echo 'if [ "${1:-}" = up ]; then'
+    printf "  until '%s' ip -4 '%s' >/dev/null 2>&1 && nslookup '%s' 100.100.100.100 >/dev/null 2>&1; do sleep 0.5; done\n" "$3" "$1" "$1"
+    echo 'fi'
+  } > "$2/tailscale"
+  chmod 0755 "$2/tailscale"
 }
 
 # Sets server_args to the arguments of `k3s server` on the mesh.
@@ -166,15 +190,19 @@ case "$role" in
       supervise_self_hosted
     fi
     join_mesh
-    wait_for_join_server
+    server_join_host=$(join_host_of "${K3S_JOIN_SERVER_URL:-}")
+    wait_for_mesh_host "$server_join_host"
+    install_tailscale_up_wait "$server_join_host" "$tailscale_up_wait_dir" /usr/local/bin/tailscale
     rm -f /output/kubeconfig.yaml
     mesh_server_args
     # shellcheck disable=SC2086 # As above.
-    exec /bin/k3s server $server_args $node_taint_flags
+    PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s server $server_args $node_taint_flags
     ;;
   agent)
+    agent_join_host=$(join_host_of "${K3S_URL:-}")
+    install_tailscale_up_wait "$agent_join_host" "$tailscale_up_wait_dir" /usr/local/bin/tailscale
     # shellcheck disable=SC2086 # As above.
-    exec /bin/k3s agent --vpn-auth="$vpn_auth" --resolv-conf=/etc/k3s-resolv.conf $node_taint_flags
+    PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s agent --vpn-auth="$vpn_auth" --resolv-conf=/etc/k3s-resolv.conf $node_taint_flags
     ;;
   *)
     echo "usage: node-entrypoint.sh server|agent" >&2
