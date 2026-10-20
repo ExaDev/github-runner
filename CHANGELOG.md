@@ -1,3 +1,15 @@
+## [2.7.4](https://github.com/ExaDev/github-runner/compare/v2.7.3...v2.7.4) (2026-10-20)
+
+### Bug Fixes
+
+* **cluster:** leave a level someone else changed for the cooldown ([8f9257e](https://github.com/ExaDev/github-runner/commit/8f9257eba71599db3d41516977a47e46c22f5d89))
+
+### Tests
+
+* **mesh:** count only a known reduced level as a server having stepped ([9c3d075](https://github.com/ExaDev/github-runner/commit/9c3d0756b10880711dc79bff463adae76ffdc555))
+* **mesh:** print what regrading recorded for each node when a scenario fails ([458a474](https://github.com/ExaDev/github-runner/commit/458a474236720ab8f16404e8d2614fa74ea43dc1))
+* **mesh:** wait for a level to read instead of asserting one read ([6bef0c6](https://github.com/ExaDev/github-runner/commit/6bef0c6d0d24b8b578f1b1e5f1e51525cfbeaa45))
+
 ## [2.7.3](https://github.com/ExaDev/github-runner/compare/v2.7.2...v2.7.3) (2026-10-20)
 
 ### Bug Fixes
