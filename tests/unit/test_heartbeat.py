@@ -51,13 +51,19 @@ FAKE_KUBECTL = textwrap.dedent(
     """
 )
 
-# Records the body of the gist update; heartbeat.sh discards curl's output, so a file is the only way to see the call.
+# A call with a body is the gist update, whose body is recorded because heartbeat.sh discards curl's output. A call without one is the read of the gist's last document, answered from FAKE_PREVIOUS (a file holding the health document the previous tick published) or refused when the test has none.
 FAKE_CURL = textwrap.dedent(
     """\
     #!/usr/bin/env python3
-    import os, sys
+    import json, os, sys
     args = sys.argv[1:]
-    open(os.environ["FAKE_CURL_BODY"], "w").write(args[args.index("-d") + 1])
+    if "-d" in args:
+        open(os.environ["FAKE_CURL_BODY"], "w").write(args[args.index("-d") + 1])
+        sys.exit(0)
+    previous = os.environ.get("FAKE_PREVIOUS")
+    if not previous or not os.path.exists(previous):
+        sys.exit(22)
+    sys.stdout.write(json.dumps({"files": {"fleet-health.json": {"content": open(previous).read()}}}))
     """
 )
 
@@ -87,6 +93,7 @@ class HeartbeatTest(unittest.TestCase):
         listeners: dict[str, int] | None = None,
         configmap: dict[str, str] | None = None,
         nodes: list[dict[str, object]] | None = None,
+        previous: dict[str, object] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         state = self.dir / "state.json"
         state.write_text(
@@ -102,11 +109,15 @@ class HeartbeatTest(unittest.TestCase):
             )
         )
         body = self.dir / "curl-body.json"
+        previous_file = self.dir / "previous-health.json"
+        if previous is not None:
+            previous_file.write_text(json.dumps(previous))
         env = {
             **os.environ,
             "PATH": f"{self.dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_STATE": str(state),
             "FAKE_CURL_BODY": str(body),
+            "FAKE_PREVIOUS": str(previous_file),
             "HEARTBEAT_GH_TOKEN": "test-token",
             "HEARTBEAT_GIST_ID": "test-gist",
             "HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS": str(UNSCHEDULABLE_AFTER_SECONDS),
@@ -222,6 +233,50 @@ class HeartbeatTest(unittest.TestCase):
         self.assertEqual((summary["jobs"], summary["repos"]), (3, 2))
         self.assertEqual((summary["first_seen"], summary["last_seen"]), ("1970-01-01T00:16:40Z", "1970-01-01T00:50:00Z"))
         self.assertNotIn("org/a", files["job-peak-summary.json"])
+
+    def health(self, **kwargs: object) -> dict[str, object]:
+        _, files = self.tick(**kwargs)  # type: ignore[arg-type]
+        health: dict[str, object] = json.loads(files[HEALTH_FILE])
+        return health
+
+    def test_a_healthy_fleet_has_no_unhealthy_onset_and_no_not_ready_nodes(self) -> None:
+        health = self.health()
+        self.assertIsNone(health["unhealthy_since"])
+        self.assertEqual(health["not_ready_nodes"], [])
+
+    def test_a_not_ready_server_is_published_as_one_with_the_time_it_was_first_seen(self) -> None:
+        nodes = [self.node("a", None), self.node("b", None, ready=False, control_plane=True), self.node("c", None, ready=False)]
+        health = self.health(nodes=nodes)
+        self.assertEqual([(n["node"], n["control_plane"]) for n in health["not_ready_nodes"]], [("b", True), ("c", False)])  # type: ignore[attr-defined, union-attr]
+        self.assertTrue(all(n["since"] == health["at"] for n in health["not_ready_nodes"]))  # type: ignore[attr-defined, union-attr]
+
+    def test_a_node_still_not_ready_keeps_the_onset_the_last_tick_published(self) -> None:
+        previous = {"healthy": True, "unhealthy_since": None, "not_ready_nodes": [{"node": "b", "control_plane": True, "since": "2000-01-01T00:00:00Z"}]}
+        nodes = [self.node("a", None), self.node("b", None, ready=False, control_plane=True), self.node("c", None, ready=False)]
+        health = self.health(nodes=nodes, previous=previous)
+        since = {n["node"]: n["since"] for n in health["not_ready_nodes"]}  # type: ignore[attr-defined, union-attr]
+        self.assertEqual(since["b"], "2000-01-01T00:00:00Z")
+        self.assertEqual(since["c"], health["at"])
+
+    def test_an_unhealthy_fleet_publishes_when_it_stopped_being_healthy(self) -> None:
+        health = self.health(controller_replicas=0)
+        self.assertEqual(health["unhealthy_since"], health["at"])
+
+    def test_a_fleet_still_unhealthy_keeps_the_onset_the_last_tick_published(self) -> None:
+        previous = {"healthy": False, "unhealthy_since": "2000-01-01T00:00:00Z", "not_ready_nodes": []}
+        health = self.health(controller_replicas=0, previous=previous)
+        self.assertEqual(health["unhealthy_since"], "2000-01-01T00:00:00Z")
+
+    def test_a_fleet_that_was_healthy_last_tick_starts_a_new_onset(self) -> None:
+        previous = {"healthy": True, "unhealthy_since": "2000-01-01T00:00:00Z", "not_ready_nodes": []}
+        health = self.health(controller_replicas=0, previous=previous)
+        self.assertEqual(health["unhealthy_since"], health["at"])
+
+    def test_a_failed_read_of_the_last_document_restarts_every_onset_at_now(self) -> None:
+        health = self.health(controller_replicas=0, nodes=[self.node("b", None, ready=False, control_plane=True), self.node("a", None)])
+        self.assertEqual(health["unhealthy_since"], health["at"])
+        self.assertEqual(health["not_ready_nodes"][0]["since"], health["at"])  # type: ignore[index]
+
 
     ANNOTATION = "github-runner.exadev.com/deployed-version"
 
