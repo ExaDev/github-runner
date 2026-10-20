@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Managed by the github_runner_cluster role of the exadev.github_runner collection: changes are overwritten on its next run. Starts the Colima profile at login; starting a profile that already runs does nothing. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ github_runner_cluster_runtime_launchd_label | e }}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>colima</string>
+    <string>start</string>
+    <string>--profile</string>
+    <string>{{ github_runner_cluster_effective_runtime.colima_profile | e }}</string>
+    <string>--activate=false</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{{ github_runner_cluster_runtime_path | e }}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>{{ ansible_facts['env']['HOME'] | e }}/Library/Logs/{{ github_runner_cluster_runtime_launchd_label | e }}.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{ ansible_facts['env']['HOME'] | e }}/Library/Logs/{{ github_runner_cluster_runtime_launchd_label | e }}.log</string>
+</dict>
+</plist>
