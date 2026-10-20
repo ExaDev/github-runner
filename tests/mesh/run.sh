@@ -318,9 +318,26 @@ would_recreate() {
   { echo "$output" | tr '\n' ' ' | tr -s ' ' | grep -o 'Compose would recreate grtest-node[0-9]*-k3s' || true; } | sed 's/^Compose would recreate //' | sort -u | tr '\n' ' '
 }
 
+# The echo pod's restart count and readiness on a node, as "<count> <ready>"; empty while the API cannot answer.
+echo_pod_on() {
+  kubectl_on 1 get pods -l app=grtest-echo --field-selector "spec.nodeName=$(node_name "$1")" \
+    -o jsonpath='{.items[0].status.containerStatuses[0].restartCount} {.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true
+}
+
+# Returns once the echo pod on a node has restarted since its count was read and is ready again. Recreating a node's container kills every pod container on it, and the API keeps reporting the old pods as running and ready until the kubelet has restarted them, so the pod-to-pod checks would otherwise run against addresses that no longer answer.
+wait_for_echo_pod_restart() {
+  local index="$1" before="$2" now deadline=$((SECONDS + 600))
+  while :; do
+    now=$(echo_pod_on "$index")
+    if [ -n "$now" ] && [ "${now% *}" -gt "$before" ] && [ "${now#* }" = true ]; then break; fi
+    [ "$SECONDS" -lt "$deadline" ] || { kubectl_on 1 get pods -l app=grtest-echo -o wide || true; fail "the echo pod on $(node_name "$index") did not restart and become ready again (was ${before}, now: ${now:-unreadable})"; }
+    sleep 5
+  done
+}
+
 # A joined server's container is recreated because its Compose configuration changed. Its node must rejoin without anyone deleting its node-password Secret, because /etc/rancher/node is a volume that outlives the container, and no other node's container may restart. The change is a label, in a Compose file named only through github_runner_cluster_compose_files; the other nodes get an empty one, so their configuration is unchanged.
 recreate_a_joined_server() {
-  local target=2 index drift password_before password_after secret_before secret_after
+  local target=2 index drift password_before password_after secret_before secret_after echo_restarts_before
   local -a started_before=() started_after=()
   drift='{"github_runner_cluster_compose_files": ["compose.grtest.yml", "compose.grtest-drift.yml"]}'
   log "A cluster the role has just started must have nothing to recreate"
@@ -338,7 +355,10 @@ recreate_a_joined_server() {
   secret_before=$(kubectl_on 1 get secret -n kube-system "$(node_name "$target").node-password.k3s" -o jsonpath='{.metadata.uid}')
   [ -n "$secret_before" ] || fail "$(node_name "$target") has no node-password Secret"
   password_before=$(docker exec "$(container "$target")" cat /etc/rancher/node/password </dev/null | cksum)
+  echo_restarts_before=$(echo_pod_on "$target")
+  [ -n "$echo_restarts_before" ] || fail "cannot read the echo pod on $(node_name "$target") before recreating its server"
   run_role -e "$drift"
+  wait_for_echo_pod_restart "$target" "${echo_restarts_before% *}"
   for index in $(seq 1 "$node_count"); do started_after+=("$(started_of "$index")"); done
   for index in $(seq 1 "$node_count"); do
     if [ "$index" = "$target" ]; then
