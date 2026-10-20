@@ -144,7 +144,25 @@
         mode: "0600"
       no_log: true
 
+    - name: Read whether the agent's Compose project directory exists
+      # Under --check on a first run the directory was not created above, and Compose cannot read a project directory that does not exist.
+      ansible.builtin.stat:
+        path: "{{ github_runner_cluster_dir }}"
+      register: github_runner_cluster_dir_state
+      check_mode: false
+
+    - name: Report that the agent would be started in a project directory this run creates
+      ansible.builtin.debug:
+        msg: >-
+          Would create {{ github_runner_cluster_dir }} and start the k3s agent there, as {{ github_runner_cluster_node_container }}
+          in the Compose project {{ github_runner_cluster_compose_project }}.
+      changed_when: true
+      when:
+        - ansible_check_mode
+        - not github_runner_cluster_dir_state.stat.exists
+
     - name: Join the cluster as an agent
+      when: not (ansible_check_mode and not github_runner_cluster_dir_state.stat.exists)
       community.docker.docker_compose_v2:
         project_src: "{{ github_runner_cluster_dir }}"
         project_name: "{{ github_runner_cluster_compose_project }}"
