@@ -248,8 +248,10 @@ check_can yes delete nodes
 check_can no create nodes
 node_gone() { ! kubectl get node "$1" >/dev/null 2>&1; }
 
-# With fewer than min_voters Ready nodes carrying the etcd role label the watcher must delete nothing, however long the Node has been Unknown, and say why.
-sleep $((poll_seconds * 3))
+# With fewer than min_voters Ready nodes carrying the etcd role label the watcher must delete nothing, however long the Node has been Unknown, and say why. The refusal is only reached once the node is past the prune threshold, so wait for that, plus a few polls.
+unknown_since_s="$(jq -rn --arg t "$unknown_since" '$t | fromdateiso8601')"
+until_past_threshold=$((unknown_since_s + prune_after_seconds + poll_seconds * 3 - $(date +%s)))
+[ "$until_past_threshold" -le 0 ] || sleep "$until_past_threshold"
 node_gone "$doomed_node" && fail "${doomed_node}'s Node was deleted with no etcd voters in the cluster"
 kubectl -n "$platform_namespace" logs -l app.kubernetes.io/name=node-recovery --tail=-1 | grep -q "Not deleting ${doomed_node}: only 0 Ready etcd members would remain" \
   || fail "the watcher's log does not say why it kept ${doomed_node}"
