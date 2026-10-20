@@ -92,6 +92,9 @@ _SYSROOT_IMAGE_PAYLOAD = "/sysroot"
 _PATH_COMPONENT = re.compile(r"^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$")
 # A variable a system-library capability may set: a shell and POSIX environment variable name.
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The media an emptyDir can sit on for the copies the capabilities make: the node's disk (the empty string, the Kubernetes default) or RAM (Memory, a tmpfs). A RAM-backed copy writes nothing to the node's disk, and its pages count against the pod's memory, so a profile that uses it raises its pods' memory requests and limits by what the copies hold.
+_CAPABILITY_VOLUME_MEDIA = ("", "Memory")
+
 # The pod volumes the capabilities add: the tool cache every tool-cache capability copies into, the sysroot every system-library capability copies into, and the ConfigMap holding the job-started hook.
 _TOOL_CACHE_VOLUME = "tool-cache"
 _SYSROOT_VOLUME = "sysroot"
@@ -463,6 +466,15 @@ def _capability_names(profile: Mapping[str, Any], where: str, errors: list[str])
     return list(dict.fromkeys(names))
 
 
+def _capability_volume_medium(profile: Mapping[str, Any], where: str, errors: list[str]) -> str:
+    """Return the medium a profile's tool cache and sysroot sit on, recording an error when it is not one of _CAPABILITY_VOLUME_MEDIA."""
+    medium = profile.get("capability_volume_medium", "")
+    if medium not in _CAPABILITY_VOLUME_MEDIA:
+        errors.append(f"{where}.capability_volume_medium must be one of {', '.join(repr(value) for value in _CAPABILITY_VOLUME_MEDIA)}")
+        return ""
+    return str(medium)
+
+
 def _explicit_max_runners(profile: Mapping[str, Any], where: str, errors: list[str]) -> int | None:
     """Return the profile's own max_runners as a whole number, None when unset, recording an error when it is not a whole number of at least 0."""
     value = profile.get("max_runners")
@@ -595,6 +607,7 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
         "burst_runners": burst_runners,
         "max_runners": max_runners,
         "capabilities": _capability_names(profile, where, errors),
+        "capability_volume_medium": _capability_volume_medium(profile, where, errors),
         "label": f"{org_name}{suffix}",
         "settings": dict(profile),
     }
@@ -1031,13 +1044,13 @@ def _node_cache_init_container(name: str, capability: Mapping[str, Any], node_ca
     }
 
 
-def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, sysroot_path: str, node_cache_path: str, node_cache_host_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str) -> dict[str, Any]:
+def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, sysroot_path: str, node_cache_path: str, node_cache_host_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str, volume_medium: str) -> dict[str, Any]:
     """Add a profile's capabilities to its scale set's Helm values.
 
     Each tool-cache capability becomes an init container, running its image as the runner's user, that copies the image's /toolcache payload into an emptyDir mounted on the runner container at tool_cache_path, which RUNNER_TOOL_CACHE names; the files then belong to the runner user, so a setup action can still add a version beside them. Each system-library capability likewise becomes an init container that copies the image's /sysroot payload into an emptyDir mounted at sysroot_path; several share it, later ones overwriting a file an earlier one also wrote. Hook capabilities, the path of any tool-cache capability that sets one, and the sysroot's environment (its search paths and the capabilities' env) go into a ConfigMap mounted at hooks_dir, whose dispatcher ACTIONS_RUNNER_HOOK_JOB_STARTED names. Everything is appended after what the values already hold, so a values file's own init containers, volumes, environment and mounts are kept. Lists are replaced wholesale when Helm merges values, which is why this edits the merged values rather than adding an overlay.
 
     Args:
-        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. sysroot_path: where the sysroot is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace.
+        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. sysroot_path: where the sysroot is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace. volume_medium: the emptyDir medium of the tool cache and the sysroot, one of _CAPABILITY_VOLUME_MEDIA, which the profile's capability_volume_medium sets (the node cache is a hostPath and keeps its own).
 
     Returns:
         A dict with ``errors`` (empty when the values can carry the capabilities), ``values`` (the values with the capabilities added, or as given when there are none or errors) and ``hooks`` (the ConfigMap's data apart from the dispatcher, which the role adds from its own file; empty when the profile needs no ConfigMap).
@@ -1074,12 +1087,13 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     volumes: list[dict[str, Any]] = []
     mounts: list[dict[str, Any]] = []
     env: list[dict[str, Any]] = []
+    copy_volume: dict[str, Any] = {"medium": volume_medium} if volume_medium else {}
     if tool_capabilities:
-        volumes.append({"name": _TOOL_CACHE_VOLUME, "emptyDir": {}})
+        volumes.append({"name": _TOOL_CACHE_VOLUME, "emptyDir": dict(copy_volume)})
         mounts.append({"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path})
         env.append({"name": _TOOL_CACHE_ENV, "value": tool_cache_path})
     if sysroot_capabilities:
-        volumes.append({"name": _SYSROOT_VOLUME, "emptyDir": {}})
+        volumes.append({"name": _SYSROOT_VOLUME, "emptyDir": dict(copy_volume)})
         mounts.append({"name": _SYSROOT_VOLUME, "mountPath": sysroot_path})
     if node_cache_capabilities:
         volumes.append({"name": _NODE_CACHE_VOLUME, "hostPath": {"path": node_cache_host_path, "type": "DirectoryOrCreate"}})

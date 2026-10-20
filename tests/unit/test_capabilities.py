@@ -54,7 +54,7 @@ def expanded(profile: dict[str, Any]) -> dict[str, Any]:
 
 def pod(values: dict[str, Any], names: list[str]) -> dict[str, Any]:
     """Add names' capabilities from CATALOGUE to values with the role's default settings."""
-    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, "")
     return result
 
 
@@ -76,6 +76,16 @@ class ProfileCapabilitiesTest(unittest.TestCase):
             with self.subTest(capabilities=capabilities):
                 result = arc.arc_profiles([{"name": "Example", "image": "i:1", "scale_set_profiles": [{"max_runners": 1, "capabilities": capabilities}]}], require_app_id=False)
                 self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
+
+    def test_a_profile_copies_onto_the_nodes_disk_unless_it_names_a_medium(self) -> None:
+        self.assertEqual(expanded({"max_runners": 1})["capability_volume_medium"], "")
+        self.assertEqual(expanded({"max_runners": 1, "capability_volume_medium": "Memory"})["capability_volume_medium"], "Memory")
+
+    def test_a_capability_volume_medium_the_copies_cannot_use_is_an_error(self) -> None:
+        for medium in ("memory", "HugePages", 1, None):
+            with self.subTest(medium=medium):
+                result = arc.arc_profiles([{"name": "Example", "image": "i:1", "scale_set_profiles": [{"max_runners": 1, "capability_volume_medium": medium}]}], require_app_id=False)
+                self.assertTrue(any("capability_volume_medium must be one of '', 'Memory'" in error for error in result["errors"]), result["errors"])
 
 
 class CatalogueTest(unittest.TestCase):
@@ -305,8 +315,21 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertEqual([variable["name"] for variable in runner(result["values"])["env"]], ["RUNNER_TOOL_CACHE", "ACTIONS_RUNNER_HOOK_JOB_STARTED"])
         self.assertTrue(result["hooks"]["sysroot-env"].endswith("CMAKE_PREFIX_PATH+=/opt/sysroot\nOPAL_PREFIX=/opt/sysroot\n"))
 
+    def test_a_memory_medium_puts_the_tool_cache_and_the_sysroot_in_ram_and_leaves_the_node_cache_on_the_node(self) -> None:
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["node", "mpi", "pnpm-store"], CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, "Memory")
+        self.assertEqual(result["errors"], [])
+        volumes = {volume["name"]: volume for volume in result["values"]["template"]["spec"]["volumes"]}
+        self.assertEqual(volumes["tool-cache"]["emptyDir"], {"medium": "Memory"})
+        self.assertEqual(volumes["sysroot"]["emptyDir"], {"medium": "Memory"})
+        self.assertNotIn("emptyDir", volumes["node-cache"])
+
+    def test_without_a_medium_the_copies_sit_on_the_nodes_disk(self) -> None:
+        volumes = {volume["name"]: volume for volume in pod(DEFAULT_VALUES, ["node", "mpi"])["values"]["template"]["spec"]["volumes"]}
+        self.assertEqual(volumes["tool-cache"]["emptyDir"], {})
+        self.assertEqual(volumes["sysroot"]["emptyDir"], {})
+
     def test_the_sysroot_follows_its_configured_path(self) -> None:
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], {"mpi": {"sysroot_image": "ghcr.io/example/m:1"}}, TOOL_CACHE, "/srv/libs/", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], {"mpi": {"sysroot_image": "ghcr.io/example/m:1"}}, TOOL_CACHE, "/srv/libs/", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, "")
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["values"]["template"]["spec"]["initContainers"][0]["command"][-1], "/srv/libs/")
         self.assertEqual(result["hooks"]["sysroot-env"].splitlines()[:2], ["PATH+=/srv/libs/bin", "LD_LIBRARY_PATH+=/srv/libs/lib"])
@@ -322,12 +345,12 @@ class CapabilityPodTest(unittest.TestCase):
         }
         for case, (path, message) in cases.items():
             with self.subTest(case):
-                result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], CATALOGUE, TOOL_CACHE, path, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+                result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], CATALOGUE, TOOL_CACHE, path, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, "")
                 self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
                 self.assertIs(result["values"], DEFAULT_VALUES)
 
     def test_the_sysroot_path_is_not_checked_for_a_profile_without_a_system_library(self) -> None:
-        self.assertEqual(arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, "relative", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)["errors"], [])
+        self.assertEqual(arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, "relative", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, "")["errors"], [])
 
     def test_a_volume_already_named_sysroot_is_an_error(self) -> None:
         values = {"template": {"spec": {"volumes": [{"name": "sysroot", "emptyDir": {}}], "containers": [{"name": "runner"}]}}}
@@ -371,7 +394,7 @@ class CapabilityPodTest(unittest.TestCase):
 
     def test_a_node_cache_capability_shares_one_volume_with_every_capability_of_the_profile(self) -> None:
         catalogue = {**CATALOGUE, "yarn-cache": {"node_cache": {"init_image": BUSYBOX, "dirs": {"YARN_CACHE_FOLDER": "yarn"}}}}
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store", "yarn-cache", "node"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store", "yarn-cache", "node"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, "")
         self.assertEqual(result["errors"], [])
         spec = result["values"]["template"]["spec"]
         self.assertEqual([volume["name"] for volume in spec["volumes"]], ["tool-cache", "node-cache"])
@@ -379,7 +402,7 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertEqual({variable["name"] for variable in runner(result["values"])["env"]}, {"RUNNER_TOOL_CACHE", "pnpm_config_store_dir", "pnpm_config_enable_global_virtual_store", "YARN_CACHE_FOLDER"})
 
     def test_a_profile_without_a_node_cache_capability_gets_no_node_volume_and_its_path_is_not_checked(self) -> None:
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, SYSROOT, "relative", "also/relative", 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, SYSROOT, "relative", "also/relative", 1001, 1001, HOOKS_DIR, CONFIGMAP, "")
         self.assertEqual(result["errors"], [])
         self.assertNotIn("node-cache", [volume["name"] for volume in result["values"]["template"]["spec"]["volumes"]])
 
@@ -397,7 +420,7 @@ class CapabilityPodTest(unittest.TestCase):
         }
         for case, (mount, host, message) in cases.items():
             with self.subTest(case):
-                result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store"], CATALOGUE, TOOL_CACHE, SYSROOT, mount, host, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+                result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store"], CATALOGUE, TOOL_CACHE, SYSROOT, mount, host, 1001, 1001, HOOKS_DIR, CONFIGMAP, "")
                 self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
 
     def test_two_node_cache_capabilities_setting_one_variable_differently_is_an_error(self) -> None:
@@ -405,7 +428,7 @@ class CapabilityPodTest(unittest.TestCase):
             "a": {"node_cache": {"init_image": BUSYBOX, "dirs": {"STORE": "one"}}},
             "b": {"node_cache": {"init_image": BUSYBOX, "dirs": {"STORE": "two"}}},
         }
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["a", "b"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["a", "b"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, "")
         self.assertEqual(result["errors"], ["node-cache capabilities a and b set STORE to different values"])
 
     def test_a_volume_already_named_node_cache_is_an_error(self) -> None:
