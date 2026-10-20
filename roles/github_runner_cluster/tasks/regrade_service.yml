@@ -62,7 +62,7 @@
         msg: >-
           github_runner_cluster_regrade is false, but {{ inventory_hostname }} is running at the level
           {{ github_runner_cluster_regrade_level.stdout | trim }}, below full, and the regrade service is what steps it back up. Run
-          `docker compose exec regrade fleet-regrade up` in {{ github_runner_cluster_dir }} until it reports full (status shows the
+          `docker compose --profile regrade exec regrade fleet-regrade up` in {{ github_runner_cluster_dir }} until it reports full (status shows the
           level), then run again. Nothing was changed.
       when:
         - github_runner_cluster_regrade_level.rc == 0
