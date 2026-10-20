@@ -1,0 +1,3 @@
+# The regrade tests define functions only the sourced core calls, which older shellcheck releases report as unreachable (SC2317; newer ones as SC2329, which the files already disable). A shellcheckrc replaces the one above it rather than adding to it, so the shell is named again.
+shell=bash
+disable=SC2317
