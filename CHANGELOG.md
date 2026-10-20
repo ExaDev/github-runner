@@ -1,3 +1,15 @@
+# [2.6.0](https://github.com/ExaDev/github-runner/compare/v2.5.0...v2.6.0) (2026-10-20)
+
+
+### Features
+
+* **cluster:** apply regrade levels to a Docker node ([8284a4d](https://github.com/ExaDev/github-runner/commit/8284a4d081417ec42efd3f75003a13e7b6ca4021))
+* **cluster:** let the cluster role run the regrade service ([ce4ff38](https://github.com/ExaDev/github-runner/commit/ce4ff38644c64a54237b9f9830fe4ef03bf226f8))
+* **cluster:** let the regrade core step a server back up by itself ([a45e7fb](https://github.com/ExaDev/github-runner/commit/a45e7fb3d1d5d25c504cdcc21e7eb81ae17534f8))
+* **cluster:** ship the platform-neutral regrade core and its tests ([7db7948](https://github.com/ExaDev/github-runner/commit/7db7948e74491c4df793efec5b7bfe2026a72157))
+* **cluster:** stop the regrade service on a kernel without memory pressure ([acf2c7c](https://github.com/ExaDev/github-runner/commit/acf2c7cb9729d2c014098da24c5260f9ce623c87))
+* **heartbeat:** publish a stepped-down server's level and spare it from the alert ([d69f7c7](https://github.com/ExaDev/github-runner/commit/d69f7c782505d735ad1cc87599e9eb72c69f49e7))
+
 # [2.5.0](https://github.com/ExaDev/github-runner/compare/v2.4.0...v2.5.0) (2026-10-20)
 
 
