@@ -1,5 +1,5 @@
 ---
-# One server's turn of starting the k3s servers (see tasks/start_servers.yml, which gives each server of the play its turn in inventory order, one at a time): checks whether Compose would recreate this server's container and whether that is safe, starts it, and, when it was recreated, waits for its node to report Ready again, so that the next server's turn finds a whole quorum. Runs for the host whose turn it is, and needs the .env already templated.
+# One server's turn of starting the k3s servers (see tasks/start_servers.yml, which gives each server of the play its turn, one at a time): checks whether Compose would recreate this server's container and whether that is safe, starts it, and, when it was recreated, waits for its node to report Ready again, so that the next server's turn finds a whole quorum. Runs for the host whose turn it is, and needs the .env already templated.
 
 - name: Check whether Compose would recreate this server's container, and refuse if that would take quorum away
   ansible.builtin.include_tasks: server_recreate_check.yml
@@ -14,9 +14,10 @@
     state: present
 
 - name: Wait for this server's node to report Ready again after its container was recreated
-  # Only after a recreate of a running server: a first start waits for nothing here (a bootstrap server with a mesh of its own is not Ready until the mesh steps have run), and a server Compose only started was not part of the quorum.
+  # Only after a recreate of a running server that other servers are registered with: a first start waits for nothing here, a bootstrap server restarted before anything has joined it has no quorum to hand back and may not be Ready until the mesh steps after it have run, and a server Compose only started was not part of the quorum.
   ansible.builtin.include_tasks: server_ready.yml
   when:
     - github_runner_cluster_recreate_reason | length > 0
     - github_runner_cluster_recreate_running | bool
+    - github_runner_cluster_recreate_held | bool
     - not ansible_check_mode

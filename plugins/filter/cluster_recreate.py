@@ -44,28 +44,67 @@ def cluster_recreate_reason(running_hash: Any, rendered_hash: Any) -> str:
     return f"the running container's Compose configuration hash {running[:SHOWN_HASH_LENGTH]} differs from the rendered configuration's {shown}"
 
 
-def cluster_recreate_blockers(peers: Any, read: Any) -> list[str]:
-    """Say why a server must not be recreated now: the other servers must report Ready, so that the cluster keeps its etcd quorum while this one is away.
-
-    :param peers: the node names of the other servers of the cluster. :param read: the result of listing the nodes through this node's own container (``kubectl get nodes`` printing ``<node> <Ready status>`` lines), as Ansible registers it. :returns: one sentence per server that is not Ready or has not registered, or a single sentence when the nodes could not be read, or an empty list when every other server is Ready (or there is no other server).
-    """
-    if not isinstance(peers, Sequence) or isinstance(peers, str) or not all(isinstance(peer, str) for peer in peers):
-        raise AnsibleFilterError("The peers must be a list of node names.")
-    if not isinstance(read, Mapping):
-        raise AnsibleFilterError(f"{read!r} is not a task result.")
-    if len(peers) == 0:
-        return []
-    message = str(read.get("msg", "") or "")
-    if read.get("timedout") or any(text in message for text in TIMEOUT_MESSAGES):
-        return ["the nodes could not be listed through this node's own container within github_runner_cluster_cluster_read_timeout"]
-    if read.get("rc") != 0:
-        reason = [line.strip() for line in str(read.get("stderr", "") or message).splitlines() if line.strip()]
-        return [f"the nodes could not be listed through this node's own container ({reason[-1] if reason else 'exit status ' + str(read.get('rc'))})"]
+def _node_status(read: Mapping[str, Any]) -> dict[str, str]:
+    """The ``<node> <Ready status>`` lines of a successful node listing as a mapping from node name to status ("" when the line has none)."""
     status: dict[str, str] = {}
     for line in str(read.get("stdout", "")).splitlines():
         fields = line.split()
         if fields:
             status[fields[0]] = fields[1] if len(fields) > 1 else ""
+    return status
+
+
+def _read_problem(read: Mapping[str, Any]) -> str | None:
+    """Say why a node listing did not succeed, or return None when it did."""
+    message = str(read.get("msg", "") or "")
+    if read.get("timedout") or any(text in message for text in TIMEOUT_MESSAGES):
+        return "the nodes could not be listed through this node's own container within github_runner_cluster_cluster_read_timeout"
+    if read.get("rc") != 0:
+        reason = [line.strip() for line in str(read.get("stderr", "") or message).splitlines() if line.strip()]
+        return f"the nodes could not be listed through this node's own container ({reason[-1] if reason else 'exit status ' + str(read.get('rc'))})"
+    return None
+
+
+def _checked_input(peers: Any, read: Any) -> tuple[Sequence[str], Mapping[str, Any]]:
+    if not isinstance(peers, Sequence) or isinstance(peers, str) or not all(isinstance(peer, str) for peer in peers):
+        raise AnsibleFilterError("The peers must be a list of node names.")
+    if not isinstance(read, Mapping):
+        raise AnsibleFilterError(f"{read!r} is not a task result.")
+    return peers, read
+
+
+def cluster_peers_registered(peers: Any, read: Any) -> list[str]:
+    """Name the other servers whose nodes the cluster lists, which are the ones that hold quorum for this server.
+
+    :param peers: the node names of the other servers of the cluster.
+    :param read: the result of listing the nodes through this node's own container, as Ansible registers it.
+    :returns: the peers that are registered, in the order given; empty when the listing failed.
+    """
+    peers, read = _checked_input(peers, read)
+    if _read_problem(read) is not None:
+        return []
+    status = _node_status(read)
+    return [peer for peer in peers if peer in status]
+
+
+def cluster_recreate_blockers(peers: Any, read: Any) -> list[str]:
+    """Say why a server must not be recreated now: the other servers must report Ready, so that the cluster keeps its etcd quorum while this one is away.
+
+    A cluster whose other servers have not registered at all is one still being brought up (the bootstrap server restarted before anything joined it), where there is no quorum to keep; once any of them is registered, one that is missing blocks like one that is not Ready.
+
+    :param peers: the node names of the other servers of the cluster.
+    :param read: the result of listing the nodes through this node's own container (``kubectl get nodes`` printing ``<node> <Ready status>`` lines), as Ansible registers it.
+    :returns: one sentence per server that is not Ready or has not registered, or a single sentence when the nodes could not be read, or an empty list when every other server is Ready (or there is no other server, or none is registered yet).
+    """
+    peers, read = _checked_input(peers, read)
+    if len(peers) == 0:
+        return []
+    problem = _read_problem(read)
+    if problem is not None:
+        return [problem]
+    status = _node_status(read)
+    if not any(peer in status for peer in peers):
+        return []
     problems: list[str] = []
     for peer in peers:
         if peer not in status:
@@ -83,5 +122,6 @@ class FilterModule:
         return {
             "cluster_rendered_config_hash": cluster_rendered_config_hash,
             "cluster_recreate_reason": cluster_recreate_reason,
+            "cluster_peers_registered": cluster_peers_registered,
             "cluster_recreate_blockers": cluster_recreate_blockers,
         }

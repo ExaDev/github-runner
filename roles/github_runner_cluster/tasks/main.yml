@@ -115,7 +115,7 @@
         mode: "0600"
       no_log: true
 
-    - name: Start the servers one at a time, in inventory order
+    - name: Start the servers one at a time
       # See tasks/start_servers.yml for why, and for what a server's turn checks before Compose may recreate its container.
       ansible.builtin.include_tasks: start_servers.yml
 
