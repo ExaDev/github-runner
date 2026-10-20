@@ -58,7 +58,7 @@ class WrapperTest(unittest.TestCase):
         nslookup.write_text(NSLOOKUP_STUB)
         nslookup.chmod(0o755)
         (self.stub / "peer-after").write_text("3")
-        self.wrapper_dir = self.work / "run" / "github-runner-node" / "bin"
+        self.wrapper_dir = self.work / "usr" / "local" / "lib" / "github-runner-node" / "bin"
 
     def install(self, host: str = HOST) -> subprocess.CompletedProcess[str]:
         script = "\n".join(["set -u", function_source("install_tailscale_up_wait"), f'install_tailscale_up_wait "{host}" "{self.wrapper_dir}" "{self.real}"'])
@@ -80,6 +80,13 @@ class WrapperTest(unittest.TestCase):
             ["up --authkey example --timeout=30s --reset", f"ip -4 {HOST}", f"ip -4 {HOST}", f"ip -4 {HOST}", f"nslookup {HOST} 100.100.100.100"],
         )
 
+    def test_the_wait_is_written_to_the_container_s_log_without_failing_when_it_cannot_be(self) -> None:
+        # Outside a container /proc/1/fd/2 is not this test's to write, which is the case the wrapper must survive; inside one it is the container's log, where the mesh integration test finds the line.
+        self.install()
+        self.assertIn(f"echo 'github-runner-node: {HOST} is a peer and resolves after tailscale up' 2>/dev/null > /proc/1/fd/2 || true", (self.wrapper_dir / "tailscale").read_text())
+        result = self.run_wrapper("up")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_any_other_command_runs_unchanged_and_waits_for_nothing(self) -> None:
         self.install()
         result = self.run_wrapper("status", "--json")
@@ -96,6 +103,12 @@ class WrapperTest(unittest.TestCase):
     def test_a_node_that_joins_nothing_gets_no_wrapper(self) -> None:
         self.assertEqual(self.install(host="").returncode, 0)
         self.assertFalse(self.wrapper_dir.exists())
+
+    def test_a_wrapper_left_by_an_earlier_start_is_removed_when_the_node_joins_nothing_now(self) -> None:
+        # The container's filesystem outlives a restart, so without this a node whose configuration no longer joins anything would wait for its old join host.
+        self.install()
+        self.assertEqual(self.install(host="").returncode, 0)
+        self.assertFalse((self.wrapper_dir / "tailscale").exists())
 
 
 class JoinHostTest(unittest.TestCase):
@@ -127,13 +140,16 @@ class EntrypointTest(unittest.TestCase):
         self.assertIn('install_tailscale_up_wait "$agent_join_host" "$tailscale_up_wait_dir" /usr/local/bin/tailscale', body)
         self.assertIn('PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s agent', body)
 
-    def test_the_wrapper_lives_on_a_tmpfs_of_both_services_so_every_start_writes_it_afresh(self) -> None:
+    def test_the_wrapper_is_on_the_image_s_filesystem_where_it_may_be_executed(self) -> None:
+        # Docker mounts a tmpfs noexec, and Go's exec.LookPath passes over a file it may not execute, so a wrapper under a tmpfs or a mount is never run. A mount's options are not visible here, so the directory is kept clear of every mount either service has.
         directory = re.search(r"^tailscale_up_wait_dir=(\S+)$", ENTRYPOINT.read_text(), re.MULTILINE)
         assert directory is not None
         services = yaml.safe_load(COMPOSE.read_text())["services"]
         for name in ("k3s", "k3s-agent"):
-            with self.subTest(service=name):
-                self.assertTrue(any(directory.group(1).startswith(mount.rstrip("/") + "/") for mount in services[name]["tmpfs"]))
+            mounts = [*services[name]["tmpfs"], *(volume.split(":")[1] for volume in services[name]["volumes"])]
+            for mount in mounts:
+                with self.subTest(service=name, mount=mount):
+                    self.assertFalse((directory.group(1) + "/").startswith(mount.rstrip("/") + "/"))
 
 
 if __name__ == "__main__":
