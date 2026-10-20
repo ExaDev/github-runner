@@ -29,6 +29,16 @@ class ImageContentsTest(unittest.TestCase):
     def test_the_role_runs_at_least_the_pruner_and_the_pressure_reporter_from_the_image(self) -> None:
         self.assertLessEqual({"node-cache-pruner.sh", "psi-reporter.sh"}, scripts_run_from_the_image())
 
+    def test_every_file_autoscaler_sh_reads_from_its_own_directory_is_copied_beside_it(self) -> None:
+        script = (ROOT / "scripts" / "autoscaler.sh").read_text()
+        beside = re.findall(r'"\$\(dirname "\$0"\)/([A-Za-z0-9._-]+)"', script)
+        self.assertIn("autoscaler-ceiling.jq", beside)
+        dockerfile = DOCKERFILE.read_text()
+        for name in beside:
+            with self.subTest(name):
+                self.assertTrue((ROOT / "scripts" / name).is_file(), name)
+                self.assertIn(f"COPY scripts/{name} /app/scripts/{name}", dockerfile)
+
     def test_every_script_the_role_runs_from_the_image_is_copied_into_it_and_made_executable(self) -> None:
         dockerfile = DOCKERFILE.read_text()
         for script in scripts_run_from_the_image():
