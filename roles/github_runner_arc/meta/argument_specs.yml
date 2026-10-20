@@ -350,7 +350,7 @@ argument_specs:
         default: ""
         description:
           - Empty turns pruning off. A whole number of seconds, greater than github_runner_arc_node_recovery_after_seconds, makes the watcher delete the Node object of a node that has been Unknown that long and carries github_runner_arc_node_recovery_prune_label with the value true.
-          - Setting it also gives the watcher's ClusterRole the delete verb on nodes, a cluster-wide permission. Servers and etcd members are never deleted.
+          - Setting it also gives the watcher's ClusterRole the delete verb on nodes, a cluster-wide permission. Servers and etcd members are never deleted, and nothing is deleted unless at least three Ready etcd members would remain.
       github_runner_arc_node_recovery_prune_label:
         type: str
         default: github-runner.exadev.io/removable

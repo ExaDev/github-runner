@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Integration test for the github_runner_arc role's node recovery watcher: renders the role's manifests, applies them to a three-node kind cluster with the watcher image built from this checkout, and stops one worker's container to stand in for a node that goes down. A single-replica StatefulSet stands in for an ARC listener: like the listener, its controller waits for the old pod to go before it creates a new one, so a pod stuck Terminating on a stopped node stalls it the same way.
 #
-# First, with the watcher scaled to zero, it shows the failure: the stand-in's pod on the stopped node stays Terminating and is never replaced. Then the watcher taints that node out of service and the pod is replaced on a healthy node; the worker is started again and the taint is removed. Finally, with the watcher running throughout and the stand-in on default tolerations, it stops the worker again and asserts the pod is replaced within the node monitor grace period plus the threshold plus a margin, well before Kubernetes' own five-minute eviction, and not before the threshold. Also checks the watcher's permissions, that it deletes no Node while pruning is off and that it leaves healthy nodes alone. Last, phase 4 turns pruning on with the stopped worker carrying the removable label and checks the watcher deletes its Node only after the prune threshold, leaves the others, and that the Node is registered again, labelled and Ready, when the worker is started.
+# First, with the watcher scaled to zero, it shows the failure: the stand-in's pod on the stopped node stays Terminating and is never replaced. Then the watcher taints that node out of service and the pod is replaced on a healthy node; the worker is started again and the taint is removed. Finally, with the watcher running throughout and the stand-in on default tolerations, it stops the worker again and asserts the pod is replaced within the node monitor grace period plus the threshold plus a margin, well before Kubernetes' own five-minute eviction, and not before the threshold. Also checks the watcher's permissions, that it deletes no Node while pruning is off and that it leaves healthy nodes alone. Last, phase 4 turns pruning on with the stopped worker carrying the removable label and checks the watcher deletes its Node only after the prune threshold and only once three Ready nodes carry the etcd role label (it keeps the Node, and says why, with none and with two), leaves the others, and that the Node is registered again, labelled and Ready, when the worker is started.
 #
 # Usage: tests/node_recovery/run.sh. Needs Docker, kind, kubectl, jq and ansible-playbook (ANSIBLE_PLAYBOOK overrides which). Creates a kind cluster named grtest-recovery and removes it on exit unless GRTEST_KEEP=1.
 set -euo pipefail
@@ -15,6 +15,7 @@ image=grtest/node-recovery:test
 pod_image=busybox:1.36
 watcher_node="${cluster}-worker"
 doomed_node="${cluster}-worker2"
+voter_node="${cluster}-worker3"
 after_seconds=30
 poll_seconds=5
 # kube-controller-manager's default node-monitor-grace-period: 50s from Kubernetes 1.32, 40s before.
@@ -24,6 +25,9 @@ margin_seconds=60
 recovery_bound=$((grace_seconds + after_seconds + poll_seconds + margin_seconds))
 # How long the failure is watched for, with the watcher off, before it is taken as not recovering on its own.
 stuck_watch_seconds=60
+# Voting etcd members the prune pass needs to remain, the quorum floor for tolerating one failure. kind runs no etcd member beyond its control plane's, so phase 4 gives three Ready nodes the etcd role label.
+min_voters=3
+etcd_role_label=node-role.kubernetes.io/etcd
 # Longer than after_seconds, as the watcher requires. Counted from when the worker went Unknown, which phase 3 reached long before phase 4 turns pruning on.
 prune_after_seconds=60
 removable_label=github-runner.exadev.io/removable
@@ -126,6 +130,7 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
+  - role: worker
   - role: worker
   # Registers with the removable label every time its kubelet starts, as a k3s agent does with --node-label.
   - role: worker
@@ -242,6 +247,20 @@ kubectl -n "$platform_namespace" rollout status deployment/node-recovery --timeo
 check_can yes delete nodes
 check_can no create nodes
 node_gone() { ! kubectl get node "$1" >/dev/null 2>&1; }
+
+# With fewer than min_voters Ready nodes carrying the etcd role label the watcher must delete nothing, however long the Node has been Unknown, and say why.
+sleep $((poll_seconds * 3))
+node_gone "$doomed_node" && fail "${doomed_node}'s Node was deleted with no etcd voters in the cluster"
+kubectl -n "$platform_namespace" logs -l app.kubernetes.io/name=node-recovery --tail=-1 | grep -q "Not deleting ${doomed_node}: only 0 Ready etcd members would remain" \
+  || fail "the watcher's log does not say why it kept ${doomed_node}"
+log "${doomed_node} was kept with no etcd voters"
+for voter in "${cluster}-control-plane" "$watcher_node"; do
+  kubectl label node "$voter" "${etcd_role_label}=true" >/dev/null
+done
+sleep $((poll_seconds * 3))
+node_gone "$doomed_node" && fail "${doomed_node}'s Node was deleted with only $((min_voters - 1)) etcd voters"
+log "${doomed_node} was kept with $((min_voters - 1)) etcd voters"
+kubectl label node "$voter_node" "${etcd_role_label}=true" >/dev/null
 wait_for $((prune_after_seconds + poll_seconds + margin_seconds)) "${doomed_node}'s Node to be deleted" node_gone "$doomed_node"
 # Every pod the Deployment still has: a rollout can leave the previous one terminating beside the one that deleted the Node.
 pruned_line="$(kubectl -n "$platform_namespace" logs -l app.kubernetes.io/name=node-recovery --tail=-1 | grep "Deleted ${doomed_node}:" | head -1 || true)"
@@ -249,7 +268,7 @@ pruned_line="$(kubectl -n "$platform_namespace" logs -l app.kubernetes.io/name=n
 pruned_after="$(sed -E 's/.*not reporting for ([0-9]+)s.*/\1/' <<< "$pruned_line")"
 [ "$pruned_after" -ge "$prune_after_seconds" ] || fail "${doomed_node} was deleted after ${pruned_after}s, before the ${prune_after_seconds}s threshold"
 log "${doomed_node}'s Node was deleted after ${pruned_after}s Unknown (threshold ${prune_after_seconds}s)"
-for kept in "${cluster}-control-plane" "$watcher_node"; do
+for kept in "${cluster}-control-plane" "$watcher_node" "$voter_node"; do
   kubectl get node "$kept" >/dev/null || fail "${kept} was deleted"
 done
 docker start "$doomed_node" >/dev/null
