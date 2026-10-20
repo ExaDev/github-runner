@@ -1,5 +1,14 @@
 ---
-# Renders one scale-set profile's Helm values on the control node, with `profile` (the expanded profile from plugins/filter/arc.py) and `org` (its org entry) set by the includer: the profile's values file (or the role's default template), the role's own overlay merged over it, then the profile's capabilities added (plugins/filter/arc.py's arc_capability_pod), and then, with the registry cache on, its Docker daemon pointed at the cache (arc_registry_cache_pod). Sets github_runner_arc_scale_set_values, the release's values, github_runner_arc_job_started_data, the job-started ConfigMap's data (empty when the profile needs none), github_runner_arc_registry_cache_wired, whether the profile's pods use the registry cache, and github_runner_arc_registry_cache_data, the data of the registry cache ConfigMap they then mount. Included by install_scale_set_profile.yml, and by tests/capabilities/render.yml so the tests render exactly what the role installs.
+# Renders one scale-set profile's Helm values on the control node, with `profile` (the expanded profile from plugins/filter/arc.py) and `org` (its org entry) set by the includer: the profile's values file (or the role's default template), the role's own overlay merged over it, then the profile's capabilities added (plugins/filter/arc.py's arc_capability_pod), then, with the registry cache on, its Docker daemon pointed at the cache (arc_registry_cache_pod), and last, with the profile's capability store on, the dind sidecar's copy of the runner's externals moved into the store (arc_capability_store_externals). Sets github_runner_arc_scale_set_values, the release's values, github_runner_arc_job_started_data, the job-started ConfigMap's data (empty when the profile needs none), github_runner_arc_registry_cache_wired, whether the profile's pods use the registry cache, and github_runner_arc_registry_cache_data, the data of the registry cache ConfigMap they then mount. Included by install_scale_set_profile.yml, and by tests/capabilities/render.yml so the tests render exactly what the role installs.
+
+- name: Set the capability store settings for {{ profile.label }}
+  ansible.builtin.set_fact:
+    # None when the profile copies into each pod; the filters take the store's root on the node, its mount path in the pod and the image that publishes its entries.
+    github_runner_arc_capability_store_settings: >-
+      {{
+        {'host_path': github_runner_arc_capability_store_host_path, 'path': github_runner_arc_capability_store_path, 'image': github_runner_arc_capability_store_image}
+        if profile.capability_store else none
+      }}
 
 - name: Render the Helm values for {{ profile.label }}
   ansible.builtin.set_fact:
@@ -12,7 +21,7 @@
             profile.capabilities, github_runner_arc_capabilities, github_runner_arc_tool_cache_path, github_runner_arc_sysroot_path,
             github_runner_arc_node_cache_path, github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_dir(profile.namespace, profile.release),
             github_runner_arc_runner_uid, github_runner_arc_runner_gid,
-            github_runner_arc_job_started_hooks_dir, github_runner_arc_job_started_configmap)
+            github_runner_arc_job_started_hooks_dir, github_runner_arc_job_started_configmap, github_runner_arc_capability_store_settings)
       }}
   vars:
     github_runner_arc_values_source: >-
@@ -58,3 +67,18 @@
     github_runner_arc_registry_cache_wired: "{{ github_runner_arc_registry_cache_render.wired }}"
     # The registry cache ConfigMap's data for the profile's namespace; empty when its pods do not use the cache, and the ConfigMap is then removed.
     github_runner_arc_registry_cache_data: "{{ (github_runner_arc_registry_cache | exadev.github_runner.arc_registry_cache_configmap) if github_runner_arc_registry_cache_render.wired else {} }}"
+
+# After the registry cache, which may write the dind containers out with their externals copy; values that leave the dind sidecar to the chart have no copy here to move.
+- name: Move the dind sidecar's externals copy into the capability store for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_capability_store_render: >-
+      {{ github_runner_arc_scale_set_values | exadev.github_runner.arc_capability_store_externals(github_runner_arc_capability_store_settings, github_runner_arc_runner_uid, github_runner_arc_runner_gid) }}
+
+- name: Fail when the values cannot keep the externals copy in the capability store for {{ profile.label }}
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_capability_store_render.errors | map('regex_replace', '^', profile.label ~ ': ') | list }}"
+  when: github_runner_arc_capability_store_render.errors | length > 0
+
+- name: Keep the values with the externals copy in the capability store for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_scale_set_values: "{{ github_runner_arc_capability_store_render['values'] }}"

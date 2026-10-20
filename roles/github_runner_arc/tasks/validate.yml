@@ -43,8 +43,18 @@
           | exadev.github_runner.arc_bounded_integer_errors('github_runner_arc_node_cache_hard_limit_factor', github_runner_arc_node_cache_max_hard_limit_factor, github_runner_arc_node_cache_positive_integer_pattern))
         + (github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_host_path_errors)
         + (github_runner_arc_node_cache_path | exadev.github_runner.arc_node_cache_path_errors)
+        + (github_runner_arc_capability_store_host_path | exadev.github_runner.arc_capability_store_host_path_errors)
+        + (github_runner_arc_capability_store_path | exadev.github_runner.arc_capability_store_path_errors)
+        + (github_runner_arc_capability_store_image | exadev.github_runner.arc_capability_store_image_errors)
       }}
   when: github_runner_arc_node_cache_problems | length > 0
+
+# The pruner is what removes the store's unused entries, and a size limit of zero installs no pruner, so the store would only grow.
+- name: Fail when a profile uses the capability store without the pruner
+  ansible.builtin.fail:
+    msg: >-
+      {{ github_runner_arc_local.profiles | selectattr('capability_store') | map(attribute='label') | join(', ') }} use the capability store, which needs the node cache pruner to remove the entries no scale set uses, but github_runner_arc_node_cache_size_limit_gib is 0, which installs no pruner
+  when: github_runner_arc_node_cache_size_limit_gib | int == 0 and github_runner_arc_local.profiles | selectattr('capability_store') | list | length > 0
 
 - name: Fail on invalid registry cache settings
   ansible.builtin.fail:
