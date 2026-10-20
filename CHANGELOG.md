@@ -1,3 +1,11 @@
+# [2.7.0](https://github.com/ExaDev/github-runner/compare/v2.6.1...v2.7.0) (2026-10-20)
+
+
+### Features
+
+* **arc:** grant the autoscaler its ceiling read and make the ceiling a bound ([11e99e4](https://github.com/ExaDev/github-runner/commit/11e99e42187fb01c67c2189dcbd6f8f56703a105)), closes [#120](https://github.com/ExaDev/github-runner/issues/120)
+* **autoscaler:** work the ceiling out from the nodes every poll ([5eaff58](https://github.com/ExaDev/github-runner/commit/5eaff58e9d55a9035bd906a6d6aa31a3c817110d)), closes [#120](https://github.com/ExaDev/github-runner/issues/120)
+
 ## [2.6.1](https://github.com/ExaDev/github-runner/compare/v2.6.0...v2.6.1) (2026-10-20)
 
 
