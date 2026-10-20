@@ -207,7 +207,8 @@ assert_cluster() {
   # The entrypoint's wrapper around k3s's own `tailscale up` logs this line after it has waited for the join host; its absence means k3s never ran the wrapper (as when it sat on a noexec tmpfs, where exec.LookPath passes over it), whether or not this control server needed the wait.
   log "Checking each joining server's k3s ran the wait after its own tailscale up"
   for index in $(seq 2 "$node_count"); do
-    docker logs "$(container "$index")" 2>&1 | grep -qF "github-runner-node: $(node_name 1).mesh.grtest.internal is a peer and resolves after tailscale up" \
+    # grep without -q reads the whole log: with -q it would stop at the first match and, under pipefail, the docker logs it cut off would fail the check.
+    docker logs "$(container "$index")" 2>&1 | grep -F "github-runner-node: $(node_name 1).mesh.grtest.internal is a peer and resolves after tailscale up" >/dev/null \
       || fail "$(container "$index") never logged the wait after k3s's tailscale up"
   done
 
