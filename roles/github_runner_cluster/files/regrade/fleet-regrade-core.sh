@@ -1,4 +1,4 @@
-# The platform-neutral core of fleet-regrade: it steps a k3s server down through levels of reduced function when memory runs short, and, by hand, back up. Nothing here knows how a level is entered; that is the actuator's job, so the same core drives a NixOS node (modules/fleet-regrade-nix.sh) and, later, a server that runs in Docker. It has no Nix store paths and no NixOS assumptions, so it can move to another repository unchanged.
+# The platform-neutral core of fleet-regrade: it steps a k3s server down through levels of reduced function when memory runs short, and back up: by hand, or by itself once memory has been calm for long enough (STEP_UP, below). Nothing here knows how a level is entered; that is the actuator's job, so the same core drives a NixOS node (modules/fleet-regrade-nix.sh) and, later, a server that runs in Docker. It has no Nix store paths and no NixOS assumptions, so it can move to another repository unchanged.
 #
 # THE ACTUATOR CONTRACT. The file that is concatenated after this one, or sources it, defines exactly three functions and then calls `regrade_main "$@"`:
 #
@@ -10,7 +10,9 @@
 #
 # The core owns the coordination between servers too: a step starts only while the node holds a Lease and every other etcd-voting node is Ready, so two servers never step at once and a step never starts while a peer is down.
 #
-# The core owns the signals (memory pressure and available memory), the decision (over the limit for long enough, one step at a time, a cooldown between steps), shedding and restoring workloads with kubectl, waiting for the API server, and the command line. The sustain period is the hysteresis: a reading under the limit ends a streak, so a node has to be over for the whole period, with nothing under it, before a step.
+# The core owns the signals (memory pressure and available memory), the decision (over the limit for long enough, one step at a time, a cooldown between steps, and, when STEP_UP is automatic, calm for long enough to go back up one level), shedding and restoring workloads with kubectl, waiting for the API server, and the command line. The sustain period is the hysteresis: a reading under the limit ends a streak, so a node has to be over for the whole period, with nothing under it, before a step down, and calm for the whole period, with nothing over it, before a step up. Calm is stricter than not being over: pressure under the threshold and MemAvailable at or above the floor, both, where over needs both to be bad, so a reading between the two states ends both streaks and a node does not step down and up on the same noise. The cooldown after a step, in either direction, is longer than the pressure window, so a node that cannot hold a higher level cycles no faster than once per cooldown and sustain period.
+#
+# STEP_UP is optional: `automatic` lets the watcher step up one level at a time, `manual` (the default when it is unset, which is what the core did before it existed) leaves stepping up to `fleet-regrade up`. Giving up an etcd vote is not a level, and nothing here ever does it.
 #
 # It needs bash, awk, jq and kubectl. Configuration comes from the environment file named by FLEET_REGRADE_ENV; the paths below default to the real system and are overridden only by tests.
 
@@ -59,11 +61,18 @@ is_over() {
     'BEGIN { exit !(p + 0 >= t + 0 && a * 100 < m * f) }'
 }
 
-# Succeeds when the reading has been over for the sustain period and the cooldown since the last step has passed. above_since and last_step are uptime seconds, empty when unset.
+# Succeeds when the reading is calm: pressure under the threshold and MemAvailable at or above the floor. It is not the opposite of is_over, which needs both signals to be bad: a node between the two states is neither, and a streak of either ends there.
+is_calm() {
+  local pressure=$1 available_kb=$2 total_kb=$3
+  awk -v p="$pressure" -v t="$PRESSURE_THRESHOLD" -v a="$available_kb" -v m="$total_kb" -v f="$AVAILABLE_FLOOR_PERCENT" \
+    'BEGIN { exit !(p + 0 < t + 0 && a * 100 >= m * f) }'
+}
+
+# Succeeds when the reading has held (over, to step down; calm, to step up) for the sustain period and the cooldown since the last step has passed. since and last_step are uptime seconds, empty when unset.
 may_step() {
-  local now=$1 above_since=$2 last_step=$3
-  [ -n "$above_since" ] || return 1
-  [ $((now - above_since)) -ge "$SUSTAIN_SECONDS" ] || return 1
+  local now=$1 since=$2 last_step=$3
+  [ -n "$since" ] || return 1
+  [ $((now - since)) -ge "$SUSTAIN_SECONDS" ] || return 1
   [ -z "$last_step" ] || [ $((now - last_step)) -ge "$COOLDOWN_SECONDS" ]
 }
 
@@ -247,7 +256,7 @@ step_down() {
   log "now at $to"
 }
 
-# One step up, by hand. Returning to the first level also lifts the taint and uncordons the node, once the API server answers.
+# One step up, by hand or by the watcher. Returning to the first level also lifts the taint and uncordons the node, once the API server answers.
 step_up() {
   local from=$1 to=$2
   log "step up $from -> $to"
@@ -267,12 +276,13 @@ reading_text() {
     "$1" "$PRESSURE_THRESHOLD" "$2" "$3" "$AVAILABLE_FLOOR_PERCENT"
 }
 
-# One look at the signals. The streak and the time of the last step are kept in WATCH_ABOVE_SINCE and WATCH_LAST_STEP, which a loop (or a test) carries from one sample to the next.
+# One look at the signals. The streaks and the time of the last step are kept in WATCH_ABOVE_SINCE, WATCH_CALM_SINCE and WATCH_LAST_STEP, which a loop (or a test) carries from one sample to the next.
 WATCH_ABOVE_SINCE=''
+WATCH_CALM_SINCE=''
 WATCH_LAST_STEP=''
 WATCH_WARNED=''
 watch_sample() {
-  local level next pressure available total now text
+  local level next previous pressure available total now text
   level=$(current_level)
   if [ "$level" = unknown ]; then
     [ -n "$WATCH_WARNED" ] || log "the running system is not one of the levels; not stepping"
@@ -294,10 +304,25 @@ watch_sample() {
     WATCH_ABOVE_SINCE=''
     log "level $level: back under the limit: $text"
   fi
+  if is_calm "$pressure" "$available" "$total"; then
+    if [ -z "$WATCH_CALM_SINCE" ]; then
+      WATCH_CALM_SINCE=$now
+      if [ "${STEP_UP:-manual}" = automatic ] && next_level_up "$level" > /dev/null; then
+        log "level $level: calm: $text"
+      fi
+    fi
+  else
+    WATCH_CALM_SINCE=''
+  fi
   if next=$(next_level_down "$level") && may_step "$now" "$WATCH_ABOVE_SINCE" "$WATCH_LAST_STEP"; then
     coordinated step_down "$level" "$next" "$text" || true
     WATCH_LAST_STEP=$(uptime_seconds)
     WATCH_ABOVE_SINCE=''
+    WATCH_CALM_SINCE=''
+  elif [ "${STEP_UP:-manual}" = automatic ] && previous=$(next_level_up "$level") && may_step "$now" "$WATCH_CALM_SINCE" "$WATCH_LAST_STEP"; then
+    coordinated step_up "$level" "$previous" || true
+    WATCH_LAST_STEP=$(uptime_seconds)
+    WATCH_CALM_SINCE=''
   fi
 }
 
@@ -313,7 +338,7 @@ cmd_status() {
   load_levels
   log "level: $(current_level) (of: ${LEVELS[*]})"
   log "$(reading_text "$(psi_avg300)" "$(meminfo_kb MemAvailable)" "$(meminfo_kb MemTotal)")"
-  log "sample ${SAMPLE_SECONDS}s, sustained for ${SUSTAIN_SECONDS}s, cooldown ${COOLDOWN_SECONDS}s"
+  log "sample ${SAMPLE_SECONDS}s, sustained for ${SUSTAIN_SECONDS}s, cooldown ${COOLDOWN_SECONDS}s, step up ${STEP_UP:-manual}"
 }
 
 # One step down by hand, for trying a level without waiting for pressure.
@@ -326,7 +351,7 @@ cmd_down() {
   coordinated step_down "$level" "$next" "by hand"
 }
 
-# One step up by hand: the only way back up. A reboot also returns to the first level.
+# One step up by hand.
 cmd_up() {
   local level next
   load_levels
