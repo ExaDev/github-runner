@@ -1,3 +1,10 @@
+## [2.7.1](https://github.com/ExaDev/github-runner/compare/v2.7.0...v2.7.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **cluster:** run the join wait from the image's filesystem ([e8d0607](https://github.com/ExaDev/github-runner/commit/e8d0607760f609b7a9db0eb55dba9441d54f2749)), closes [#116](https://github.com/ExaDev/github-runner/issues/116)
+
 # [2.7.0](https://github.com/ExaDev/github-runner/compare/v2.6.1...v2.7.0) (2026-10-20)
 
 
