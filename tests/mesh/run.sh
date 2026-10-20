@@ -547,6 +547,11 @@ wait_for() {
   done
 }
 
+# Recreates a node's k3s container from its own Compose project, as the role does when it changes the container's configuration; the project's .env names the Compose files and the project.
+recreate_node() {
+  docker compose --project-directory "${work}/$(node_name "$1")" --profile server up -d --force-recreate --no-deps k3s >/dev/null
+}
+
 # A write to the cluster, under a name of its own each time: a write the API server committed but did not answer is not repeated under the same name.
 write_marker() { kubectl_on 1 create configmap "grtest-vote-${RANDOM}" --from-literal=a=1 >/dev/null; }
 # A step by hand on node 3 is refused, and the refusal names the stepped-down server. Retried because node 3's own API may still be settling after it was stopped, which is a refusal too but for another reason; a step that goes ahead is a failure, not a retry.
@@ -671,13 +676,28 @@ EOF
   [ "$(node_password_hash 2)" = "$password" ] || fail "$(node_name 2)'s node password changed"
   assert_cluster
 
-  log "By hand, a server goes down a level and up again through the same lease"
+  log "By hand, a server goes down to etcd-only, stays there through a restart and a recreate, and up is the way back"
+  password=$(node_password_hash 3)
   regrade_on 3 fleet-regrade down
   [ "$(level_of 3)" = control-plane ] || fail "$(node_name 3) did not step down by hand"
   wait_for "$(node_name 3) to be cordoned" 60 node_is 1 3 Ready,SchedulingDisabled
   [ "$(level_label 3)" = control-plane ] || fail "the Node does not carry the level label at control-plane"
+  regrade_on 3 fleet-regrade down
+  [ "$(level_of 3)" = etcd-only ] || fail "$(node_name 3) did not reach etcd-only by hand"
+  # The level is a file on the data volume that the entrypoint reads at every start, so neither a restart by hand nor a recreate, which is what Compose does when the role changes the container's configuration, brings the server back at full.
+  docker restart "$(container 3)" >/dev/null
+  wait_for "$(node_name 3) to be at etcd-only after a restart by hand" 300 at_level 3 etcd-only
+  before=$(docker inspect --format '{{.Id}}' "$(container 3)")
+  recreate_node 3
+  [ "$before" != "$(docker inspect --format '{{.Id}}' "$(container 3)")" ] || fail "$(node_name 3)'s container was not recreated"
+  wait_for "$(node_name 3) to be at etcd-only after a recreate" 300 at_level 3 etcd-only
+  [ "$(level_label 3)" = etcd-only ] || fail "the Node lost its level label across the recreate"
+  [ "$(node_password_hash 3)" = "$password" ] || fail "$(node_name 3)'s node password changed across the recreate"
+  [ "$(etcd_member_ids 1)" = "$ids" ] || fail "the etcd members changed across the restart and the recreate"
   regrade_on 3 fleet-regrade up
-  wait_for "$(node_name 3) to be schedulable again" 120 node_is 1 3 Ready
+  wait_for "$(node_name 3) to be Ready at control-plane" 300 node_is 1 3 Ready,SchedulingDisabled
+  regrade_on 3 fleet-regrade up
+  wait_for "$(node_name 3) to be schedulable again" 300 node_is 1 3 Ready
   [ "$(level_of 3)" = full ] || fail "$(node_name 3) did not step up by hand"
   [ -z "$(level_label 3)" ] || fail "the level label is still on the Node at full"
 
