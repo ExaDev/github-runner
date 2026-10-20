@@ -34,7 +34,7 @@ github_runner_cluster_regrade: false
 github_runner_cluster_regrade_step_up: automatic
 # The window of the longest pressure average the kernel reports (avg300 in /proc/pressure/memory), in seconds. A fact about the kernel, not a setting: every default below that is a time is a multiple of it or of the sample period, so that a reading always spans the level it describes.
 github_runner_cluster_regrade_pressure_window_seconds: 300
-# The "some" avg300 of /proc/pressure/memory, in percent, at or above which the server counts as under pressure: for that share of the last five minutes some task was stalled waiting for memory, a rate at which etcd's heartbeat and election timers, which run in tenths of a second, are being missed. A reasoned starting point, not a measurement: read the service's log (`docker compose logs regrade`) on a real host and tune it.
+# The "some" avg300 of /proc/pressure/memory, in percent, at or above which the server counts as under pressure: for that share of the last five minutes some task was stalled waiting for memory, a rate at which etcd's heartbeat and election timers, which run in tenths of a second, are being missed. A reasoned starting point, not a measurement: read the service's log (`docker compose --profile regrade logs regrade`) on a real host and tune it.
 github_runner_cluster_regrade_pressure_threshold: 10
 # MemAvailable, as a percentage of MemTotal, below which a pressure reading counts. It guards against stepping down on pressure caused by reclaim while plenty is available, and, as a share rather than a number of bytes, is right for any host. Chosen, not measured.
 github_runner_cluster_regrade_available_floor_percent: 15
