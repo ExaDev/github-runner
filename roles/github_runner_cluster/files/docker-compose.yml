@@ -126,6 +126,20 @@ services:
           sleep "$${DOCKER_PRUNE_INTERVAL_SECONDS}"
         done
 
+  # Steps this server down through levels of reduced function when memory runs short, so a small host keeps its place in etcd's quorum instead of being lost to the OOM killer, and back up again; see the role README's Memory-pressure regrading. The core (regrade/fleet-regrade-core.sh) reads memory pressure from the Docker VM's /proc and decides; the Docker actuator (regrade/fleet-regrade-docker.sh) applies a level by recording it in the k3s container and restarting that container, so this service needs the Docker socket, the same permission cost as docker-prune above and for the same reason: it acts on the host's other containers. The scripts and the settings (regrade/fleet-regrade.env, templated by the role) are mounted, not built in, so a collection upgrade reaches the service when the role restarts it, without an image Compose would not otherwise rebuild. Selected by its own profile, which the role adds only when github_runner_cluster_regrade is true.
+  regrade:
+    build:
+      context: ./regrade
+    restart: unless-stopped
+    profiles: ["regrade"]
+    # Keeps the watchdog alive when memory is short, which is when it is needed. Matches the NixOS module's watchdog; -1000 would exempt it from the OOM killer altogether.
+    oom_score_adj: -900
+    environment:
+      - FLEET_REGRADE_ENV=/usr/local/lib/fleet-regrade/fleet-regrade.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./regrade:/usr/local/lib/fleet-regrade:ro
+
 volumes:
   k3s-data: {}
   k3s-agent-data: {}

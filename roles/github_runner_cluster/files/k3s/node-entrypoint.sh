@@ -37,6 +37,25 @@ set_api_port_flags() {
 }
 set_api_port_flags
 
+# Sets regrade_flags to the arguments that put this server at the level the regrade service (docker-compose.yml, files/regrade) last recorded for it, and records the level k3s is about to start at. A server that has never been stepped down has no record and starts at full. Only etcd-only changes k3s's arguments: it turns off the API server, controller manager, scheduler and agent, so the node keeps its etcd member, and its vote, and little else. full and control-plane run the same k3s and differ in the cordon and taint the regrade service puts on the Node.
+#
+# The regrade service writes regrade_level_file, on the k3s data volume, before it restarts the container, so the level survives the container being recreated and the host restarting; a level is left only by stepping up. regrade_started_file is on the container's tmpfs, so it exists only while this container runs and says what its k3s started at, which the regrade service reads as the level the node is at: k3s hides its arguments from /proc, so they cannot be read back. The paths are the regrade service's too (fleet-regrade-docker.sh); the environment variables replace them only in tests.
+regrade_level_file=${REGRADE_LEVEL_FILE:-/var/lib/rancher/k3s/regrade-level}
+regrade_started_file=${REGRADE_STARTED_FILE:-/run/regrade-level}
+# Empty unless set_regrade_flags says otherwise, which only the plain server start below calls: a bootstrap server that supervises k3s for an in-cluster Headscale server is never regraded, since etcd-only would stop the kubelet that runs it (the role refuses that combination).
+regrade_flags=""
+
+set_regrade_flags() {
+  regrade_level=full
+  if [ -r "$regrade_level_file" ]; then
+    read -r regrade_level < "$regrade_level_file"
+  fi
+  if [ "$regrade_level" = etcd-only ]; then
+    regrade_flags="--disable-apiserver --disable-controller-manager --disable-scheduler --disable-agent"
+  fi
+  printf '%s\n' "$regrade_level" > "$regrade_started_file"
+}
+
 # k3s's own vpn-auth integration only runs `tailscale up`; it does not start the daemon itself (without this, k3s fails outright with "tailscale up failed: ... it doesn't appear to be running"). Waits for the control socket before anything talks to it.
 mkdir -p /var/run/tailscale /var/lib/tailscale
 tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
@@ -132,6 +151,8 @@ install_tailscale_up_wait() {
 # --tls-san is added once per entry of K3S_TLS_SAN_LIST: every server's certificate must cover every server's own mesh name, since a client reaching any server directly by that name needs the certificate to match it.
 #
 # --etcd-arg=heartbeat-interval and --etcd-arg=election-timeout are added when set (set_etcd_timing_flags above), for peers whose traffic goes through a relay and so exceeds etcd's default timing.
+#
+# regrade_flags (set_regrade_flags above) are added last, and are empty at every level but etcd-only.
 mesh_server_args() {
   set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 \
     --vpn-auth="$vpn_auth" \
@@ -145,6 +166,7 @@ mesh_server_args() {
   fi
   for san in ${K3S_TLS_SAN_LIST:-}; do set -- "$@" --tls-san "$san"; done
   for flag in $etcd_timing_flags; do set -- "$@" "$flag"; done
+  for flag in $regrade_flags; do set -- "$@" "$flag"; done
   server_args="$*"
 }
 
@@ -207,6 +229,7 @@ case "$role" in
     wait_for_mesh_host "$server_join_host"
     install_tailscale_up_wait "$server_join_host" "$tailscale_up_wait_dir" /usr/local/bin/tailscale
     rm -f /output/kubeconfig.yaml
+    set_regrade_flags
     mesh_server_args
     # shellcheck disable=SC2086 # As above.
     PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s server $server_args $node_taint_flags
