@@ -1,3 +1,17 @@
+# [2.4.0](https://github.com/ExaDev/github-runner/compare/v2.3.0...v2.4.0) (2026-10-20)
+
+
+### Bug Fixes
+
+* **arc:** confine the node-deleting watcher pod to control-plane nodes ([3d57b9e](https://github.com/ExaDev/github-runner/commit/3d57b9edc05d513977377ac8bf965f2a0f2e39fd))
+* **arc:** default the prune label to the fleet's node label domain ([f15e146](https://github.com/ExaDev/github-runner/commit/f15e1469f325c77f7d9577e1e9f5689e1e60819a))
+
+
+### Features
+
+* **arc:** delete no node unless three Ready etcd members would remain ([bcfe065](https://github.com/ExaDev/github-runner/commit/bcfe0652d1cb856b3fed05ea324f372970ca1018))
+* **arc:** let the node recovery watcher delete a labelled node that stayed Unknown ([80fa540](https://github.com/ExaDev/github-runner/commit/80fa540f516487147809daeda5d2de972d9d8675))
+
 # [2.3.0](https://github.com/ExaDev/github-runner/compare/v2.2.0...v2.3.0) (2026-10-20)
 
 
