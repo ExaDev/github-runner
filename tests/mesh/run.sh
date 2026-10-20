@@ -549,6 +549,11 @@ wait_for() {
 
 # A write to the cluster, under a name of its own each time: a write the API server committed but did not answer is not repeated under the same name.
 write_marker() { kubectl_on 1 create configmap "grtest-vote-${RANDOM}" --from-literal=a=1 >/dev/null; }
+# A step by hand on node 3 is refused, and the refusal names the stepped-down server. Retried because node 3's own API may still be settling after it was stopped, which is a refusal too but for another reason; a step that goes ahead is a failure, not a retry.
+peer_refusal() {
+  [ "$(level_of 3)" = full ] || fail "$(node_name 3) stepped while $(node_name 2) was stepped down"
+  ! regrade_on 3 fleet-regrade down >"${work}/peer.log" 2>&1 && grep -F "etcd-voting nodes not ready: $(node_name 2)" "${work}/peer.log" >/dev/null
+}
 at_level() { [ "$(level_of "$1")" = "$2" ]; }
 node_is() { [ "$(node_status "$1" "$2")" = "$3" ]; }
 
@@ -623,11 +628,12 @@ EOF
   docker stop "$(container 3)" >/dev/null
   wait_for "a write through $(node_name 1) with $(node_name 3) stopped" 180 write_marker
   docker start "$(container 3)" >/dev/null
-  wait_for "$(node_name 3) to be Ready again" 600 node_is 1 3 Ready
+  # Through its own API, not the others' view of it: for the grace period of the node controller the others still show the Ready it had before it was stopped.
+  wait_for "$(node_name 3) to be Ready again" 600 node_is 3 3 Ready
 
   log "While $(node_name 2) is stepped down no other server steps"
-  if regrade_on 3 fleet-regrade down >"${work}/peer.log" 2>&1; then cat "${work}/peer.log"; fail "$(node_name 3) stepped while $(node_name 2) was stepped down"; fi
-  grep -F "etcd-voting nodes not ready: $(node_name 2)" "${work}/peer.log" >/dev/null || { cat "${work}/peer.log"; fail "the refusal did not name the stepped-down server"; }
+  wait_for "$(node_name 3)'s refusal to name the stepped-down server" 300 peer_refusal
+  cat "${work}/peer.log"
   [ "$(level_of 3)" = full ] || fail "$(node_name 3) changed level"
 
   log "Rerunning the role with a server stepped down changes nothing, and turning regrading off is refused"
