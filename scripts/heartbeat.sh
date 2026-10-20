@@ -36,7 +36,10 @@ HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS="${HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS:-
 healthy=true
 reasons=()
 
-if ! kubectl get nodes --no-headers 2>/dev/null | grep -q Ready; then
+# One read of the nodes serves the Ready check, the pressure report and the not-Ready report below. A node counts as Ready only when its Ready condition is True: matching the word in `kubectl get nodes` output also matches NotReady, so a fleet of nothing but NotReady nodes used to be vouched for.
+nodes_json="$(kubectl get nodes -o json 2>/dev/null || true)"
+ready_nodes="$(jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' <<< "${nodes_json:-null}" 2>/dev/null || true)"
+if [ "${ready_nodes:-0}" -lt 1 ]; then
   reasons+=("no node reports Ready")
   healthy=false
 fi
@@ -79,13 +82,11 @@ elif [ "$unschedulable" -gt 0 ]; then
 fi
 
 # Nodes reporting a pressure condition (disk, memory, PIDs) are named in the published reason without making the fleet unhealthy: the other nodes still serve jobs, but the lost capacity would otherwise go unseen until jobs queued (a node sat under disk pressure for days with nothing reporting it).
-node_pressure="$(kubectl get nodes -o json 2>/dev/null \
-  | jq -c '[.items[] | {node: .metadata.name, conditions: [.status.conditions[]? | select((.type | endswith("Pressure")) and .status == "True") | .type]} | select(.conditions | length > 0)]' || echo '[]')"
+node_pressure="$(jq -c '[.items[] | {node: .metadata.name, conditions: [.status.conditions[]? | select((.type | endswith("Pressure")) and .status == "True") | .type]} | select(.conditions | length > 0)]' <<< "${nodes_json:-null}" 2>/dev/null || echo '[]')"
 
 # The collection version each playbook scope last recorded: the ARC and platform scope in a ConfigMap, each server host on its own node. A scope with no stamp is null (never applied by a release that stamps, or an agent host, which cannot stamp). This is what was applied, not what is running, but it makes a host that a run never reached show as behind the pinned version instead of looking identical to one that is current.
 platform_version="$(kubectl get configmap "$DEPLOYED_STATE_CONFIGMAP" -n "$HEARTBEAT_STATE_NAMESPACE" -o jsonpath='{.data.arc}' 2>/dev/null || true)"
-node_versions="$(kubectl get nodes -o json 2>/dev/null \
-  | jq -c --arg key "$DEPLOYED_VERSION_ANNOTATION" '[.items[] | {key: .metadata.name, value: (.metadata.annotations[$key] // null)}] | from_entries' || echo '{}')"
+node_versions="$(jq -c --arg key "$DEPLOYED_VERSION_ANNOTATION" '[.items[] | {key: .metadata.name, value: (.metadata.annotations[$key] // null)}] | from_entries' <<< "${nodes_json:-null}" 2>/dev/null || echo '{}')"
 deployed_json="$(jq -nc --arg platform "$platform_version" --argjson nodes "$node_versions" '{platform: (if $platform == "" then null else $platform end), nodes: $nodes}')"
 
 # The reason file is written on every tick, healthy or not, so the gist always says why the fleet is or is not being vouched for. GitHub deletes a gist file whose content is empty, hence the JSON object rather than an empty string for the healthy case.

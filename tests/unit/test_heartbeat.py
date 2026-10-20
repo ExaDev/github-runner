@@ -26,9 +26,6 @@ FAKE_KUBECTL = textwrap.dedent(
     if args[:2] == ["get", "nodes"] and "-o" in args:
         sys.stdout.write(json.dumps({"items": state.get("nodes", [])}))
         sys.exit(0)
-    if args[:2] == ["get", "nodes"]:
-        sys.stdout.write("node1 Ready\\n" if state["node_ready"] else "node1 NotReady\\n")
-        sys.exit(0)
     if args[:2] == ["get", "deployment"]:
         sys.stdout.write(str(state["controller_replicas"]))
         sys.exit(0)
@@ -85,7 +82,6 @@ class HeartbeatTest(unittest.TestCase):
     def tick(
         self,
         pods: list[dict[str, object]] | None = None,
-        node_ready: bool = True,
         controller_replicas: int = 1,
         scale_sets: tuple[str, ...] = ("runners-a", "runners-b"),
         listeners: dict[str, int] | None = None,
@@ -96,13 +92,12 @@ class HeartbeatTest(unittest.TestCase):
         state.write_text(
             json.dumps(
                 {
-                    "node_ready": node_ready,
                     "controller_replicas": controller_replicas,
                     "pods": pods or [],
                     "scale_sets": list(scale_sets),
                     "listeners": {"runners-a": 1, "runners-b": 1} if listeners is None else listeners,
                     "configmap": configmap or {},
-                    "nodes": nodes or [],
+                    "nodes": [self.node("node1", None)] if nodes is None else nodes,
                 }
             )
         )
@@ -155,6 +150,22 @@ class HeartbeatTest(unittest.TestCase):
         result, files = self.tick(listeners={"runners-a": 1, "runners-b": 0})
         self.assertEqual(result.returncode, 1)
         self.assertIn("arc-runners-b/runners-b has no running listener", result.stderr)
+        self.assertWithheld(files)
+
+    def test_a_fleet_of_nothing_but_not_ready_nodes_withholds_the_refresh(self) -> None:
+        result, files = self.tick(nodes=[self.node("a", None, ready=False), self.node("b", None, ready=False)])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no node reports Ready", result.stderr)
+        self.assertWithheld(files)
+
+    def test_one_not_ready_node_among_ready_ones_does_not_withhold_the_refresh(self) -> None:
+        result, files = self.tick(nodes=[self.node("a", None), self.node("b", None, ready=False)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(TIMESTAMP_FILE, files)
+
+    def test_a_cluster_with_no_nodes_withholds_the_refresh(self) -> None:
+        result, files = self.tick(nodes=[])
+        self.assertEqual(result.returncode, 1)
         self.assertWithheld(files)
 
     def test_a_controller_without_a_ready_replica_withholds_the_refresh(self) -> None:
@@ -214,9 +225,13 @@ class HeartbeatTest(unittest.TestCase):
 
     ANNOTATION = "github-runner.exadev.com/deployed-version"
 
-    def node(self, name: str, version: str | None) -> dict[str, object]:
+    def node(self, name: str, version: str | None, ready: bool = True, control_plane: bool = False) -> dict[str, object]:
         annotations = {} if version is None else {self.ANNOTATION: version}
-        return {"metadata": {"name": name, "annotations": annotations}}
+        labels = {"node-role.kubernetes.io/control-plane": "true"} if control_plane else {}
+        return {
+            "metadata": {"name": name, "annotations": annotations, "labels": labels},
+            "status": {"conditions": [{"type": "Ready", "status": "True" if ready else "False"}]},
+        }
 
     def deployed(self, **kwargs: object) -> dict[str, object]:
         result, files = self.tick(**kwargs)  # type: ignore[arg-type]
