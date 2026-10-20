@@ -276,10 +276,11 @@ reading_text() {
     "$1" "$PRESSURE_THRESHOLD" "$2" "$3" "$AVAILABLE_FLOOR_PERCENT"
 }
 
-# One look at the signals. The streaks and the time of the last step are kept in WATCH_ABOVE_SINCE, WATCH_CALM_SINCE and WATCH_LAST_STEP, which a loop (or a test) carries from one sample to the next.
+# One look at the signals. The streaks, the time of the last step and the level the last sample saw are kept in WATCH_ABOVE_SINCE, WATCH_CALM_SINCE, WATCH_LAST_STEP and WATCH_LEVEL, which a loop (or a test) carries from one sample to the next. A level that is not the one the last sample saw, and that this watcher did not step to, was changed by someone else (a step by hand, another watcher, a restart): the streaks end and the cooldown starts, so the watcher does not undo it on a streak that began before it.
 WATCH_ABOVE_SINCE=''
 WATCH_CALM_SINCE=''
 WATCH_LAST_STEP=''
+WATCH_LEVEL=''
 WATCH_WARNED=''
 watch_sample() {
   local level next previous pressure available total now text
@@ -294,6 +295,13 @@ watch_sample() {
   available=$(meminfo_kb MemAvailable)
   total=$(meminfo_kb MemTotal)
   now=$(uptime_seconds)
+  if [ -n "$WATCH_LEVEL" ] && [ "$level" != "$WATCH_LEVEL" ]; then
+    log "level $level: changed from $WATCH_LEVEL by something other than this watcher; waiting out the cooldown"
+    WATCH_ABOVE_SINCE=''
+    WATCH_CALM_SINCE=''
+    WATCH_LAST_STEP=$now
+  fi
+  WATCH_LEVEL=$level
   text=$(reading_text "$pressure" "$available" "$total")
   if is_over "$pressure" "$available" "$total"; then
     if [ -z "$WATCH_ABOVE_SINCE" ]; then
@@ -317,11 +325,13 @@ watch_sample() {
   if next=$(next_level_down "$level") && may_step "$now" "$WATCH_ABOVE_SINCE" "$WATCH_LAST_STEP"; then
     coordinated step_down "$level" "$next" "$text" || true
     WATCH_LAST_STEP=$(uptime_seconds)
+    WATCH_LEVEL=$(current_level)
     WATCH_ABOVE_SINCE=''
     WATCH_CALM_SINCE=''
   elif [ "${STEP_UP:-manual}" = automatic ] && previous=$(next_level_up "$level") && may_step "$now" "$WATCH_CALM_SINCE" "$WATCH_LAST_STEP"; then
     coordinated step_up "$level" "$previous" || true
     WATCH_LAST_STEP=$(uptime_seconds)
+    WATCH_LEVEL=$(current_level)
     WATCH_CALM_SINCE=''
   fi
 }

@@ -71,6 +71,7 @@ run_scenario() {
   WATCH_ABOVE_SINCE=''
   WATCH_CALM_SINCE=''
   WATCH_LAST_STEP=''
+  WATCH_LEVEL=''
   WATCH_WARNED=''
   echo "${3:-full}" > "$work/level"
   for sample in $(seq 1 "$samples"); do
@@ -144,6 +145,18 @@ steps=$(run_scenario always_calm 60 etcd-only)
 SUSTAIN_SECONDS=120
 COOLDOWN_SECONDS=900
 check "a step up starts a fresh calm streak" test "$steps" = "21:1 42:0 "
+
+# A level changed by someone else, a step by hand say, is not undone on a calm streak that began before it: the watcher has been calm since its first sample, and the level becomes control-plane at sample 10 (300 s), which it notices at once; the cooldown starts there and ends at 1200 s, sample 40, so that is the step up. Without noticing, it would step up at sample 10.
+changed_by_hand() {
+  set_reading "$calm_pressure" "$calm_available"
+  if [ "$1" -eq 10 ]; then echo control-plane > "$work/level"; fi
+}
+steps=$(run_scenario changed_by_hand 60)
+check "a level changed by someone else is left for the cooldown, not undone at once" test "$steps" = "40:0 "
+
+# The same for a level this watcher stepped to and that is then read back as it left it: no change is seen.
+steps=$(run_scenario rise_and_fall 110)
+check "its own steps are not mistaken for someone else's" test "$steps" = "6:1 36:2 75:1 105:0 "
 
 # The coordination reaches the step up as it does the step down.
 nodes_json False
