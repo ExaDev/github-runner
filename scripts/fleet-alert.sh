@@ -3,7 +3,7 @@
 #
 # An outage is any of these holding for at least FLEET_ALERT_AFTER_SECONDS:
 # - the heartbeat has not published for that long (the heartbeat pod, the cluster or the gist write is down);
-# - a control-plane server node has not been Ready for that long;
+# - a control-plane server node has not been Ready for that long, other than one memory-pressure regrading has stepped down on purpose (the heartbeat publishes its regrade_level), which is not Ready by design;
 # - the heartbeat has not vouched for the fleet for that long (a scale set missing or without a listener, no ready ARC controller, no Ready node, runner pods that cannot be scheduled).
 # The onset of the last two is recorded by the heartbeat itself (unhealthy_since, and since on each entry of not_ready_nodes), so this script keeps no clock of its own. An alert fires once per outage, not on every pass, and a recovery note follows when every condition has cleared.
 #
@@ -86,7 +86,7 @@ conditions="$(jq -c --argjson now "$now" --argjson after "$after" '
   if (.at | age) >= $after then
     [{kind: "heartbeat_stale", detail: "the heartbeat has not published since \(.at)", since: .at}]
   else
-    [ (.not_ready_nodes[] | select(.control_plane and (.since | age) >= $after)
+    [ (.not_ready_nodes[] | select(.control_plane and (.regrade_level == null) and (.since | age) >= $after)
         | {kind: "server_not_ready", detail: "server node \(.node) is not Ready", since: .since}),
       (select((.healthy | not) and (.unhealthy_since | age) >= $after)
         | {kind: "fleet_not_vouched", detail: "the heartbeat is not vouching for the fleet: \(.reasons | join("; "))", since: .unhealthy_since}) ]

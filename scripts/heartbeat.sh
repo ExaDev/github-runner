@@ -10,6 +10,7 @@
 # - HEALTH_GIST_FILE: the gist file the health reason (healthy, why not, nodes under pressure) is written to every tick (default fleet-health.json)
 # - HEARTBEAT_STATE_NAMESPACE: namespace holding the autoscaler's own status ConfigMap (see scripts/autoscaler.sh)
 # - AUTOSCALER_STATUS_CONFIGMAP: name of that ConfigMap
+# - HEARTBEAT_REGRADE_LEVEL_LABEL: the label memory-pressure regrading puts on a server it has stepped down, with the level as its value (default github-runner.exadev.com/regrade-level, the cluster role's github_runner_cluster_regrade_level_label)
 # - HEARTBEAT_DEPLOYED_STATE_CONFIGMAP: name of the ConfigMap, in the state namespace, holding the collection version the ARC role last applied (default deployed-state)
 # - HEARTBEAT_DEPLOYED_VERSION_ANNOTATION: the node annotation holding the collection version the cluster role last applied on that node's host
 # - HEARTBEAT_CONTROLLER_NAMESPACE: namespace of the ARC controller's Deployment, when it is not the default actions-runner-controller
@@ -27,6 +28,7 @@ AUTOSCALER_STATUS_CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 AUTOSCALER_STATUS_GIST_FILE="${AUTOSCALER_STATUS_GIST_FILE:-autoscaler-status.json}"
 DEPLOYED_STATE_CONFIGMAP="${HEARTBEAT_DEPLOYED_STATE_CONFIGMAP:-deployed-state}"
 DEPLOYED_VERSION_ANNOTATION="${HEARTBEAT_DEPLOYED_VERSION_ANNOTATION:-github-runner.exadev.com/deployed-version}"
+REGRADE_LEVEL_LABEL="${HEARTBEAT_REGRADE_LEVEL_LABEL:-github-runner.exadev.com/regrade-level}"
 # How far in the future to set the timestamp: comfortably longer than the loop interval, so a single missed/slow tick doesn't look like an outage, but short enough that a real outage is detected promptly.
 HEARTBEAT_WINDOW_SECONDS="${HEARTBEAT_WINDOW_SECONDS:-600}"
 HEARTBEAT_CONTROLLER_NAMESPACE="${HEARTBEAT_CONTROLLER_NAMESPACE:-actions-runner-controller}"
@@ -98,12 +100,12 @@ previous_health="$(curl -fsS -H "Authorization: Bearer ${HEARTBEAT_GH_TOKEN}" -H
   "https://api.github.com/gists/${HEARTBEAT_GIST_ID}" 2>/dev/null \
   | jq -c --arg file "$HEALTH_GIST_FILE" '.files[$file].content // empty | fromjson' 2>/dev/null || true)"
 
-# A server node is one carrying the control-plane role label, which k3s sets on every server. A node that is not Ready is listed whether or not it is a server, but only a server's absence endangers etcd quorum and the API, which is why the flag is published.
-not_ready_json="$(jq -c --arg at "$at" --argjson previous "${previous_health:-null}" '
+# A server node is one carrying the control-plane role label, which k3s sets on every server. A node that is not Ready is listed whether or not it is a server, but only a server's absence endangers etcd quorum and the API, which is why the flag is published. A server that regrading has stepped down carries the level label and is not Ready on purpose (at etcd-only it runs no kubelet), so its level is published beside it, for a reader to tell it from a server that has failed.
+not_ready_json="$(jq -c --arg at "$at" --arg level_label "$REGRADE_LEVEL_LABEL" --argjson previous "${previous_health:-null}" '
   ($previous.not_ready_nodes // []) as $before
   | [.items[]
       | select(any(.status.conditions[]?; .type == "Ready" and .status == "True") | not)
-      | {node: .metadata.name, control_plane: ((.metadata.labels // {}) | has("node-role.kubernetes.io/control-plane"))} as $n
+      | {node: .metadata.name, control_plane: ((.metadata.labels // {}) | has("node-role.kubernetes.io/control-plane")), regrade_level: ((.metadata.labels // {})[$level_label] // null)} as $n
       | $n + {since: (first($before[] | select(.node == $n.node) | .since) // $at)}]' <<< "${nodes_json:-null}" 2>/dev/null || echo '[]')"
 unhealthy_since="$(jq -nc --arg at "$at" --argjson healthy "$healthy" --argjson previous "${previous_health:-null}" \
   'if $healthy then null else (if $previous.healthy == false then ($previous.unhealthy_since // $at) else $at end) end')"
