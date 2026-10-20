@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
@@ -554,6 +555,11 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
     except TypeError:
         errors.append(f"{where}.autoscale must be a boolean")
         autoscale = False
+    try:
+        capability_store = boolean(profile.get("capability_store", False), strict=True)
+    except TypeError:
+        errors.append(f"{where}.capability_store must be a boolean")
+        capability_store = False
     sizing_result = None
     if profile.get("sizing") is not None:
         sizing_result = arc_max_runners(profile["sizing"])
@@ -595,6 +601,7 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
         "burst_runners": burst_runners,
         "max_runners": max_runners,
         "capabilities": _capability_names(profile, where, errors),
+        "capability_store": capability_store,
         "label": f"{org_name}{suffix}",
         "settings": dict(profile),
     }
@@ -1031,13 +1038,244 @@ def _node_cache_init_container(name: str, capability: Mapping[str, Any], node_ca
     }
 
 
-def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, sysroot_path: str, node_cache_path: str, node_cache_host_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str) -> dict[str, Any]:
+# --- The capability store: one copy per node of what every runner pod would otherwise copy at its start ---
+# A pod's tool-cache and system-library copies (and the runner's externals for the dind sidecar) are the same bytes on every pod of a profile, taken from digest-pinned images. With a profile's capability_store on, each image's payload is copied once per node into <store>/<digest>, where <digest> is the image's sha256 digest, and pods mount the store read-only instead of writing their own copy. The store root is a hostPath of its own, apart from the node cache, whose last component names it.
+_CAPABILITY_STORE_HOST_PATH_NAME = re.compile(r"^(?:capability-store|[a-z0-9][a-z0-9-]*-capability-store)$")
+# A copy is written under <store>/.incoming/<key>.<pod uid>.<container> and published with one rename onto <store>/<key>: rename(2) onto a non-empty directory fails, so of two pods copying the same image at once the first rename wins and the other's copy is deleted, and a reader never sees a part-written entry, since an entry exists only once it is complete. The pod uid comes from the downward API and the container name keeps two copies of one image within a pod apart.
+_CAPABILITY_STORE_INCOMING = ".incoming"
+_CAPABILITY_STORE_VOLUME = "capability-store"
+_CAPABILITY_STORE_PREPARE = "capability-store-prepare"
+_CAPABILITY_STORE_PUBLISH = "capability-store-publish"
+_CAPABILITY_STORE_SYSROOT = "capability-store-sysroot"
+_CAPABILITY_STORE_TOOL_CACHE = "capability-store-tool-cache"
+_CAPABILITY_STORE_EXTERNALS_PUBLISH = "capability-store-publish-externals"
+# The annotation that lists the store entries a pod uses, separated by spaces, which the node cache pruner reads so that it never removes an entry a pod on its node still uses.
+_CAPABILITY_STORE_KEYS_ANNOTATION = "github-runner.exadev.io/capability-store-keys"
+_IMAGE_DIGEST = re.compile(r"@sha256:([0-9a-f]{64})$")
+_POD_UID_ENV = {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}
+# The chart's names for the runner externals copy the dind sidecar mounts (gha-runner-scale-set templates/_helpers.tpl: dind-init-container and dind-volume), which a values file that writes the dind containers out uses as the chart does.
+_DIND_EXTERNALS_INIT = "init-dind-externals"
+_DIND_EXTERNALS_VOLUME = "dind-externals"
+
+
+def arc_capability_store_host_path_errors(host_path: Any) -> list[str]:
+    """Return what is wrong with github_runner_arc_capability_store_host_path: the same rules as the node cache's root (an absolute canonical path at least a dedicated directory deep, not a system directory or inside one), with a last component named capability-store or ending in -capability-store, since the role creates it and the pruner removes entries from it as root."""
+    if not isinstance(host_path, str) or not host_path.startswith("/") or any(character in host_path for character in ":\n\r"):
+        return [f"the capability store's host path must be an absolute directory with no ':' or line break (got {host_path!r})"]
+    if host_path != _canonical_path(host_path):
+        return [f"the capability store's host path must not contain '//' or end with '/' (got {host_path!r}, which is {_canonical_path(host_path)!r} written plainly)"]
+    components = host_path.split("/")[1:]
+    if len(components) < _NODE_CACHE_HOST_PATH_MIN_COMPONENTS or ".." in components or "." in components:
+        return [f"the capability store's host path must be a dedicated directory at least {_NODE_CACHE_HOST_PATH_MIN_COMPONENTS} levels deep with no '.' or '..' (such as /var/lib/github-runner/capability-store) (got {host_path!r})"]
+    if not _CAPABILITY_STORE_HOST_PATH_NAME.match(components[-1]):
+        return [f"the capability store's host path must end in a directory named capability-store, or a lower-case name ending in -capability-store (got {host_path!r}), since the role creates it and removes entries from it as root"]
+    lowered = host_path.lower()
+    inside = [denied for denied in _NODE_CACHE_DENIED_HOST_PATHS if lowered == denied or lowered.startswith(f"{denied}/")]
+    return [f"the capability store's host path {host_path} is inside {inside[0]}, which the node itself uses"] if inside else []
+
+
+def arc_capability_store_path_errors(store_path: Any) -> list[str]:
+    """Return what is wrong with github_runner_arc_capability_store_path, where the store is mounted read-only on the runner container: empty when it is an absolute directory other than / with no colon or line break."""
+    if not isinstance(store_path, str) or not store_path.startswith("/") or store_path == "/" or any(character in store_path for character in ":\n\r"):
+        return [f"the capability store path must be an absolute directory other than / with no ':' or line break (got {store_path!r})"]
+    return []
+
+
+def arc_capability_store_image_errors(image: Any) -> list[str]:
+    """Return what is wrong with github_runner_arc_capability_store_image: empty when it is pinned by digest (name@sha256:<64 hex digits>), as an image whose container runs as root on a hostPath must be."""
+    if isinstance(image, str) and _IMAGE_DIGEST.search(image) and image.split("@")[0]:
+        return []
+    return [f"github_runner_arc_capability_store_image must be pinned by digest (name@sha256:<64 hex digits>), since its preparation container runs as root on a hostPath (got {image!r})"]
+
+
+def arc_capability_store_key(image: str) -> str | None:
+    """Return the store entry name of an image's payload, its sha256 digest in hex, or None when the image is not pinned by digest and so has no name that changes exactly when its content does."""
+    match = _IMAGE_DIGEST.search(image)
+    return match.group(1) if match else None
+
+
+def _capability_store_merged_key(keys: Sequence[str]) -> str:
+    """Return the store entry name of the sysroot merged from keys in their order: a hash of the ordered keys, so a different set or order of system libraries is a different entry, since a later one's file overwrites an earlier one's."""
+    return "sysroot-" + hashlib.sha256(" ".join(keys).encode()).hexdigest()
+
+
+def _capability_store_prepare_container(store: Mapping[str, Any], runner_user: int, runner_group: int) -> dict[str, Any]:
+    """Return the init container that creates the store's root and its incoming directory and gives both to the runner's user, as the node cache's preparation does: as root with CHOWN, and DAC_OVERRIDE to create the incoming directory in a root already handed over."""
+    root = store["path"].rstrip("/")
+    return {
+        "name": _CAPABILITY_STORE_PREPARE,
+        "image": store["image"],
+        "command": ["/bin/sh", "-c", 'owner=$1; shift; for directory in "$@"; do mkdir -p "$directory" && chown "$owner" "$directory"; done', "prepare-capability-store", f"{int(runner_user)}:{int(runner_group)}", root, f"{root}/{_CAPABILITY_STORE_INCOMING}"],
+        "securityContext": {"runAsUser": 0, "runAsNonRoot": False, "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE"]}},
+        "volumeMounts": [{"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"]}],
+    }
+
+
+def _runner_security_context(runner_user: int, runner_group: int) -> dict[str, Any]:
+    """Return the securityContext of an init container that runs as the runner's user, as the per-pod copies do."""
+    return {"runAsUser": int(runner_user), "runAsGroup": int(runner_group), "runAsNonRoot": True, "allowPrivilegeEscalation": False}
+
+
+def _capability_store_copy_container(name: str, image: str, payload: str, key: str, store: Mapping[str, Any], runner_user: int, runner_group: int) -> dict[str, Any]:
+    """Return the init container that copies an image's payload into the store's incoming directory, unless the store already holds it. It runs the capability's own image, so it may use only what the image contract promises: a POSIX sh, its test builtin and cp. cp -R onto a path that does not exist creates it as the copy, so no mkdir is needed."""
+    root = store["path"].rstrip("/")
+    return {
+        "name": name,
+        "image": image,
+        "command": ["/bin/sh", "-c", '[ -d "$1/$2" ] || cp -R "$3" "$1/' + _CAPABILITY_STORE_INCOMING + '/$2.$POD_UID.$4"', "copy-to-capability-store", root, key, payload, name],
+        "env": [dict(_POD_UID_ENV)],
+        "securityContext": _runner_security_context(runner_user, runner_group),
+        "volumeMounts": [{"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"]}],
+    }
+
+
+# Publishes each key's copies from this pod: a rename onto <store>/<key> for the first, and deletion for a copy whose key another pod published first. Then fails unless every key is in the store, so a pod never starts on an entry that is not there.
+_PUBLISH_SCRIPT = (
+    'root=$1; shift; for key in "$@"; do'
+    ' for incoming in "$root/' + _CAPABILITY_STORE_INCOMING + '/$key.$POD_UID".*; do [ -e "$incoming" ] || continue; mv -T "$incoming" "$root/$key" 2>/dev/null || rm -rf "$incoming"; done;'
+    ' [ -d "$root/$key" ] || { echo "capability store: $key is not in $root after publishing" >&2; exit 1; };'
+    ' done'
+)
+
+
+def _capability_store_publish_container(name: str, keys: Sequence[str], store: Mapping[str, Any], runner_user: int, runner_group: int) -> dict[str, Any]:
+    """Return the init container that publishes this pod's copies of keys into the store with the store image (busybox), whose mv has -T."""
+    return {
+        "name": name,
+        "image": store["image"],
+        "command": ["/bin/sh", "-c", _PUBLISH_SCRIPT, "publish-capability-store", store["path"].rstrip("/"), *keys],
+        "env": [dict(_POD_UID_ENV)],
+        "securityContext": _runner_security_context(runner_user, runner_group),
+        "volumeMounts": [{"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"]}],
+    }
+
+
+# Builds the merged sysroot from the system-library entries in the profile's order, as hard links (cp -l) so it costs no data, later entries' files replacing earlier ones' (cp -f) as the per-pod copies did, then publishes it like any other entry.
+_SYSROOT_MERGE_SCRIPT = (
+    'root=$1; merged=$2; shift 2; [ -d "$root/$merged" ] && exit 0;'
+    ' incoming="$root/' + _CAPABILITY_STORE_INCOMING + '/$merged.$POD_UID.merge"; mkdir "$incoming" || exit 1;'
+    ' for key in "$@"; do cp -alf "$root/$key/." "$incoming/" || exit 1; done;'
+    ' mv -T "$incoming" "$root/$merged" 2>/dev/null || rm -rf "$incoming";'
+    ' [ -d "$root/$merged" ] || { echo "capability store: $merged is not in $root after publishing" >&2; exit 1; }'
+)
+
+# Fills the pod's own tool cache with a link to each <tool>/<version>/<arch> directory in the store and a copy of its <arch>.complete marker, which is how the Actions tool cache finds a tool. The version directories are the pod's own, so a setup action can still install another version or architecture beside them; the store itself is read-only to the pod.
+_TOOL_CACHE_LINK_SCRIPT = (
+    'root=$1; cache=$2; shift 2; for key in "$@"; do for arch in "$root/$key"/*/*/*; do'
+    ' [ -d "$arch" ] || continue; relative=${arch#"$root/$key/"};'
+    ' mkdir -p "$cache/${relative%/*}" && ln -sfn "$arch" "$cache/$relative" || exit 1;'
+    ' [ ! -e "$arch.complete" ] || cp "$arch.complete" "$cache/$relative.complete" || exit 1;'
+    ' done; done'
+)
+
+
+def _capability_store_volume(store: Mapping[str, Any]) -> dict[str, Any]:
+    return {"name": _CAPABILITY_STORE_VOLUME, "hostPath": {"path": store["host_path"], "type": "DirectoryOrCreate"}}
+
+
+def _annotate_store_keys(template: dict[str, Any], keys: Sequence[str]) -> None:
+    """Add keys to the pod template's list of the store entries its pods use, keeping any already there."""
+    annotations = template.setdefault("metadata", {}).setdefault("annotations", {})
+    existing = annotations.get(_CAPABILITY_STORE_KEYS_ANNOTATION, "").split()
+    annotations[_CAPABILITY_STORE_KEYS_ANNOTATION] = " ".join(dict.fromkeys([*existing, *keys]))
+
+
+def _ensure_store_prepared(spec: dict[str, Any], init_containers: list[dict[str, Any]], store: Mapping[str, Any], runner_user: int, runner_group: int) -> None:
+    """Add the store's volume to spec, and its preparation to the front of init_containers, unless spec already has them."""
+    if not any(volume.get("name") == _CAPABILITY_STORE_VOLUME for volume in spec.get("volumes") or []):
+        spec["volumes"] = list(spec.get("volumes") or []) + [_capability_store_volume(store)]
+    if not any(container.get("name") == _CAPABILITY_STORE_PREPARE for container in [*(spec.get("initContainers") or []), *init_containers]):
+        init_containers.insert(0, _capability_store_prepare_container(store, runner_user, runner_group))
+
+
+def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, store: Mapping[str, Any], runner_user: int, runner_group: int) -> tuple[list[dict[str, Any]], list[str], str | None]:
+    """Return the init containers that put a profile's tool-cache and system-library payloads in the store and give the pod its view of them, the store entries the pod uses, and the merged sysroot's entry (None without a system library)."""
+    root = store["path"].rstrip("/")
+    copies: list[dict[str, Any]] = []
+    tool_keys: list[str] = []
+    sysroot_keys: list[str] = []
+    for name in names:
+        capability = catalogue[name]
+        image = capability.get("image") or capability.get("sysroot_image")
+        if image is None:
+            continue
+        key = arc_capability_store_key(image)
+        assert key is not None
+        payload = _TOOL_IMAGE_PAYLOAD if capability.get("image") is not None else _SYSROOT_IMAGE_PAYLOAD
+        copies.append(_capability_store_copy_container(f"{_CAPABILITY_CONTAINER_PREFIX}{name}", image, payload, key, store, runner_user, runner_group))
+        (tool_keys if capability.get("image") is not None else sysroot_keys).append(key)
+    keys = list(dict.fromkeys([*tool_keys, *sysroot_keys]))
+    containers = copies + [_capability_store_publish_container(_CAPABILITY_STORE_PUBLISH, keys, store, runner_user, runner_group)]
+    merged = _capability_store_merged_key(sysroot_keys) if sysroot_keys else None
+    if merged is not None:
+        containers.append({
+            "name": _CAPABILITY_STORE_SYSROOT,
+            "image": store["image"],
+            "command": ["/bin/sh", "-c", _SYSROOT_MERGE_SCRIPT, "merge-capability-store-sysroot", root, merged, *sysroot_keys],
+            "env": [dict(_POD_UID_ENV)],
+            "securityContext": _runner_security_context(runner_user, runner_group),
+            "volumeMounts": [{"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"]}],
+        })
+    if tool_keys:
+        containers.append({
+            "name": _CAPABILITY_STORE_TOOL_CACHE,
+            "image": store["image"],
+            "command": ["/bin/sh", "-c", _TOOL_CACHE_LINK_SCRIPT, "link-capability-store-tool-cache", root, tool_cache_path, *dict.fromkeys(tool_keys)],
+            "securityContext": _runner_security_context(runner_user, runner_group),
+            "volumeMounts": [{"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"], "readOnly": True}, {"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path}],
+        })
+    return containers, keys + ([merged] if merged is not None else []), merged
+
+
+def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str, Any] | None, runner_user: int, runner_group: int) -> dict[str, Any]:
+    """Move a scale set's copy of the runner's externals for the dind sidecar into the capability store.
+
+    Applies to values that write the dind containers out (a values file, or the role's registry cache wiring), whose init container named init-dind-externals copies the runner image's externals into the volume named dind-externals, as the chart's own dind template does. That copy becomes a store entry named for the image's digest, published like a capability's, and the dind container mounts it read-only through a subPath of the store. Values without that init container, or a profile without the store, are returned as given.
+
+    Args:
+        values: the release's rendered Helm values. store: the profile's capability store settings ({host_path, path, image}), or None when the profile does not use the store. runner_user, runner_group: the runner's user and group ids, which the copy and publish containers run as.
+
+    Returns:
+        A dict with ``errors`` (empty when the values can use the store) and ``values`` (the values with the copy moved, or as given).
+    """
+    if store is None:
+        return {"errors": [], "values": values}
+    result = copy.deepcopy(dict(values))
+    template = result.setdefault("template", {})
+    spec = template.setdefault("spec", {})
+    init_containers = list(spec.get("initContainers") or [])
+    copier = next((container for container in init_containers if container.get("name") == _DIND_EXTERNALS_INIT), None)
+    if copier is None:
+        return {"errors": [], "values": values}
+    key = arc_capability_store_key(str(copier.get("image", "")))
+    if key is None:
+        return {"errors": [f"the capability store needs {_DIND_EXTERNALS_INIT}'s image pinned by digest (name@sha256:<64 hex digits>), since its store entry is named for the digest (got {copier.get('image')!r})"], "values": values}
+    index = init_containers.index(copier)
+    replacement = [
+        _capability_store_copy_container(_DIND_EXTERNALS_INIT, copier["image"], _RUNNER_EXTERNALS_DIR, key, store, runner_user, runner_group),
+        _capability_store_publish_container(_CAPABILITY_STORE_EXTERNALS_PUBLISH, [key], store, runner_user, runner_group),
+    ]
+    init_containers[index:index + 1] = replacement
+    spec["volumes"] = [volume for volume in spec.get("volumes") or [] if volume.get("name") != _DIND_EXTERNALS_VOLUME]
+    for container in spec.get("containers") or []:
+        container["volumeMounts"] = [
+            {"name": _CAPABILITY_STORE_VOLUME, "mountPath": mount["mountPath"], "subPath": key, "readOnly": True} if mount.get("name") == _DIND_EXTERNALS_VOLUME else mount
+            for mount in container.get("volumeMounts") or []
+        ]
+    prefix: list[dict[str, Any]] = []
+    _ensure_store_prepared(spec, prefix, store, runner_user, runner_group)
+    spec["initContainers"] = prefix + init_containers
+    _annotate_store_keys(template, [key])
+    return {"errors": [], "values": result}
+
+
+def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, sysroot_path: str, node_cache_path: str, node_cache_host_path: str, runner_user: int, runner_group: int, hooks_dir: str, hooks_configmap: str, store: Mapping[str, Any] | None) -> dict[str, Any]:
     """Add a profile's capabilities to its scale set's Helm values.
 
     Each tool-cache capability becomes an init container, running its image as the runner's user, that copies the image's /toolcache payload into an emptyDir mounted on the runner container at tool_cache_path, which RUNNER_TOOL_CACHE names; the files then belong to the runner user, so a setup action can still add a version beside them. Each system-library capability likewise becomes an init container that copies the image's /sysroot payload into an emptyDir mounted at sysroot_path; several share it, later ones overwriting a file an earlier one also wrote. Hook capabilities, the path of any tool-cache capability that sets one, and the sysroot's environment (its search paths and the capabilities' env) go into a ConfigMap mounted at hooks_dir, whose dispatcher ACTIONS_RUNNER_HOOK_JOB_STARTED names. Everything is appended after what the values already hold, so a values file's own init containers, volumes, environment and mounts are kept. Lists are replaced wholesale when Helm merges values, which is why this edits the merged values rather than adding an overlay.
 
     Args:
-        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. sysroot_path: where the sysroot is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace.
+        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. sysroot_path: where the sysroot is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace. store: the profile's capability store settings ({host_path, path, image}: the store's root on the node, where it is mounted in the pod, and the digest-pinned busybox image that publishes and links its entries), or None when the profile copies into each pod. With the store, each tool-cache and system-library payload is copied into it once per node instead of into each pod (see arc_capability_store_externals for the store's layout): the tool cache stays the pod's own emptyDir, filled with links to the store, the sysroot is the store's merged entry mounted read-only, and the pod template is annotated with the entries it uses.
 
     Returns:
         A dict with ``errors`` (empty when the values can carry the capabilities), ``values`` (the values with the capabilities added, or as given when there are none or errors) and ``hooks`` (the ConfigMap's data apart from the dispatcher, which the role adds from its own file; empty when the profile needs no ConfigMap).
@@ -1061,6 +1299,14 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
         errors.extend(_sysroot_path_errors(sysroot_path, {"tool cache path": tool_cache_path, "job-started hooks directory": hooks_dir}))
     if node_cache_capabilities:
         errors.extend(_node_cache_path_errors(node_cache_path, node_cache_host_path, {"tool cache path": tool_cache_path, "sysroot path": sysroot_path, "job-started hooks directory": hooks_dir}))
+    if store is not None and (tool_capabilities or sysroot_capabilities):
+        store_path_errors = arc_capability_store_path_errors(store["path"])
+        errors.extend(store_path_errors or _overlap_errors("capability store path", store["path"], {"tool cache path": tool_cache_path, "sysroot path": sysroot_path, "job-started hooks directory": hooks_dir, "node cache path": node_cache_path}))
+        errors.extend(
+            f"capability {name}'s image must be pinned by digest (name@sha256:<64 hex digits>) for the capability store, since its store entry is named for the digest"
+            for name, capability in [*tool_capabilities, *sysroot_capabilities]
+            if arc_capability_store_key(capability.get("image") or capability["sysroot_image"]) is None
+        )
     tool_paths = [capability["path"] for _, capability in tool_capabilities if capability.get("path") is not None]
     hooks: dict[str, str] = {}
     if tool_paths:
@@ -1078,7 +1324,12 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
         volumes.append({"name": _TOOL_CACHE_VOLUME, "emptyDir": {}})
         mounts.append({"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path})
         env.append({"name": _TOOL_CACHE_ENV, "value": tool_cache_path})
-    if sysroot_capabilities:
+    use_store = store is not None and bool(tool_capabilities or sysroot_capabilities)
+    if use_store:
+        assert store is not None
+        volumes.append(_capability_store_volume(store))
+        mounts.append({"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"], "readOnly": True})
+    elif sysroot_capabilities:
         volumes.append({"name": _SYSROOT_VOLUME, "emptyDir": {}})
         mounts.append({"name": _SYSROOT_VOLUME, "mountPath": sysroot_path})
     if node_cache_capabilities:
@@ -1100,6 +1351,20 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     if errors:
         return {"errors": errors, "values": values, "hooks": {}}
     assert runner is not None
+    if use_store:
+        assert store is not None
+        store_containers, store_keys, merged = _capability_store_init_containers(names, catalogue, tool_cache_path, store, runner_user, runner_group)
+        if merged is not None:
+            mounts.append({"name": _CAPABILITY_STORE_VOLUME, "mountPath": sysroot_path, "subPath": merged, "readOnly": True})
+        init_containers = [_capability_store_prepare_container(store, runner_user, runner_group), *store_containers] + [
+            _node_cache_init_container(name, catalogue[name], node_cache_path, runner_user, runner_group) for name in names if catalogue[name].get("node_cache") is not None
+        ]
+        _annotate_store_keys(result.setdefault("template", {}), store_keys)
+        spec["initContainers"] = list(spec.get("initContainers") or []) + init_containers
+        spec["volumes"] = list(spec.get("volumes") or []) + volumes
+        runner["env"] = list(runner.get("env") or []) + env
+        runner["volumeMounts"] = list(runner.get("volumeMounts") or []) + mounts
+        return {"errors": [], "values": result, "hooks": hooks}
     # In the profile's order, so a later system-library capability's files overwrite an earlier one's.
     init_containers = [
         _copy_init_container(name, catalogue[name]["image"], _TOOL_IMAGE_PAYLOAD, _TOOL_CACHE_VOLUME, tool_cache_path, runner_user, runner_group)
@@ -1466,6 +1731,11 @@ class FilterModule:
             "arc_runner_placement": arc_runner_placement,
             "arc_capability_errors": arc_capability_errors,
             "arc_capability_pod": arc_capability_pod,
+            "arc_capability_store_externals": arc_capability_store_externals,
+            "arc_capability_store_host_path_errors": arc_capability_store_host_path_errors,
+            "arc_capability_store_path_errors": arc_capability_store_path_errors,
+            "arc_capability_store_key": arc_capability_store_key,
+            "arc_capability_store_image_errors": arc_capability_store_image_errors,
             "arc_node_cache_profiles": arc_node_cache_profiles,
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
             "arc_node_cache_root": arc_node_cache_root,

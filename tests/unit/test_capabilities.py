@@ -54,7 +54,7 @@ def expanded(profile: dict[str, Any]) -> dict[str, Any]:
 
 def pod(values: dict[str, Any], names: list[str]) -> dict[str, Any]:
     """Add names' capabilities from CATALOGUE to values with the role's default settings."""
-    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+    result: dict[str, Any] = arc.arc_capability_pod(values, names, CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
     return result
 
 
@@ -306,7 +306,7 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertTrue(result["hooks"]["sysroot-env"].endswith("CMAKE_PREFIX_PATH+=/opt/sysroot\nOPAL_PREFIX=/opt/sysroot\n"))
 
     def test_the_sysroot_follows_its_configured_path(self) -> None:
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], {"mpi": {"sysroot_image": "ghcr.io/example/m:1"}}, TOOL_CACHE, "/srv/libs/", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], {"mpi": {"sysroot_image": "ghcr.io/example/m:1"}}, TOOL_CACHE, "/srv/libs/", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["values"]["template"]["spec"]["initContainers"][0]["command"][-1], "/srv/libs/")
         self.assertEqual(result["hooks"]["sysroot-env"].splitlines()[:2], ["PATH+=/srv/libs/bin", "LD_LIBRARY_PATH+=/srv/libs/lib"])
@@ -322,12 +322,12 @@ class CapabilityPodTest(unittest.TestCase):
         }
         for case, (path, message) in cases.items():
             with self.subTest(case):
-                result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], CATALOGUE, TOOL_CACHE, path, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+                result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], CATALOGUE, TOOL_CACHE, path, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
                 self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
                 self.assertIs(result["values"], DEFAULT_VALUES)
 
     def test_the_sysroot_path_is_not_checked_for_a_profile_without_a_system_library(self) -> None:
-        self.assertEqual(arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, "relative", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)["errors"], [])
+        self.assertEqual(arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, "relative", NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)["errors"], [])
 
     def test_a_volume_already_named_sysroot_is_an_error(self) -> None:
         values = {"template": {"spec": {"volumes": [{"name": "sysroot", "emptyDir": {}}], "containers": [{"name": "runner"}]}}}
@@ -371,7 +371,7 @@ class CapabilityPodTest(unittest.TestCase):
 
     def test_a_node_cache_capability_shares_one_volume_with_every_capability_of_the_profile(self) -> None:
         catalogue = {**CATALOGUE, "yarn-cache": {"node_cache": {"init_image": BUSYBOX, "dirs": {"YARN_CACHE_FOLDER": "yarn"}}}}
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store", "yarn-cache", "node"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store", "yarn-cache", "node"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
         self.assertEqual(result["errors"], [])
         spec = result["values"]["template"]["spec"]
         self.assertEqual([volume["name"] for volume in spec["volumes"]], ["tool-cache", "node-cache"])
@@ -379,7 +379,7 @@ class CapabilityPodTest(unittest.TestCase):
         self.assertEqual({variable["name"] for variable in runner(result["values"])["env"]}, {"RUNNER_TOOL_CACHE", "pnpm_config_store_dir", "pnpm_config_enable_global_virtual_store", "YARN_CACHE_FOLDER"})
 
     def test_a_profile_without_a_node_cache_capability_gets_no_node_volume_and_its_path_is_not_checked(self) -> None:
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, SYSROOT, "relative", "also/relative", 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["node"], CATALOGUE, TOOL_CACHE, SYSROOT, "relative", "also/relative", 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
         self.assertEqual(result["errors"], [])
         self.assertNotIn("node-cache", [volume["name"] for volume in result["values"]["template"]["spec"]["volumes"]])
 
@@ -397,7 +397,7 @@ class CapabilityPodTest(unittest.TestCase):
         }
         for case, (mount, host, message) in cases.items():
             with self.subTest(case):
-                result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store"], CATALOGUE, TOOL_CACHE, SYSROOT, mount, host, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+                result = arc.arc_capability_pod(DEFAULT_VALUES, ["pnpm-store"], CATALOGUE, TOOL_CACHE, SYSROOT, mount, host, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
                 self.assertTrue(any(message in error for error in result["errors"]), result["errors"])
 
     def test_two_node_cache_capabilities_setting_one_variable_differently_is_an_error(self) -> None:
@@ -405,7 +405,7 @@ class CapabilityPodTest(unittest.TestCase):
             "a": {"node_cache": {"init_image": BUSYBOX, "dirs": {"STORE": "one"}}},
             "b": {"node_cache": {"init_image": BUSYBOX, "dirs": {"STORE": "two"}}},
         }
-        result = arc.arc_capability_pod(DEFAULT_VALUES, ["a", "b"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP)
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["a", "b"], catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
         self.assertEqual(result["errors"], ["node-cache capabilities a and b set STORE to different values"])
 
     def test_a_volume_already_named_node_cache_is_an_error(self) -> None:
@@ -590,6 +590,268 @@ class DispatcherTest(unittest.TestCase):
         completed = self.run_hook()
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("does not exist", completed.stderr)
+
+
+
+DIGEST_A = "a" * 64
+DIGEST_B = "b" * 64
+DIGEST_C = "c" * 64
+DIGEST_RUNNER = "d" * 64
+STORE = {"host_path": "/var/lib/example/capability-store", "path": "/opt/capability-store", "image": BUSYBOX}
+STORE_CATALOGUE: dict[str, Any] = {
+    "node": {"image": f"ghcr.io/example/toolcache-node:22@sha256:{DIGEST_A}"},
+    "mpi": {"sysroot_image": f"ghcr.io/example/sysroot-openmpi:5@sha256:{DIGEST_B}", "env": {"OPAL_PREFIX": SYSROOT}},
+    "libpq": {"sysroot_image": f"ghcr.io/example/sysroot-libpq:16@sha256:{DIGEST_C}"},
+    "pnpm-store": CATALOGUE["pnpm-store"],
+    "untagged": {"image": "ghcr.io/example/toolcache-go:1.23"},
+}
+
+
+def store_pod(values: dict[str, Any], names: list[str], catalogue: dict[str, Any] = STORE_CATALOGUE) -> dict[str, Any]:
+    """Add names' capabilities with the capability store on."""
+    result: dict[str, Any] = arc.arc_capability_pod(values, names, catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, STORE)
+    return result
+
+
+class CapabilityStoreProfileTest(unittest.TestCase):
+    def test_a_profile_copies_into_each_pod_unless_it_turns_the_store_on(self) -> None:
+        self.assertFalse(expanded({"max_runners": 1})["capability_store"])
+        self.assertTrue(expanded({"max_runners": 1, "capability_store": True})["capability_store"])
+
+    def test_a_capability_store_that_is_not_a_boolean_is_an_error(self) -> None:
+        result = arc.arc_profiles([{"name": "Example", "image": "i:1", "scale_set_profiles": [{"max_runners": 1, "capability_store": "sometimes"}]}], require_app_id=False)
+        self.assertTrue(any("capability_store must be a boolean" in error for error in result["errors"]), result["errors"])
+
+
+class CapabilityStoreSettingsTest(unittest.TestCase):
+    def test_a_dedicated_store_directory_is_accepted(self) -> None:
+        self.assertEqual(arc.arc_capability_store_host_path_errors("/var/lib/github-runner/capability-store"), [])
+        self.assertEqual(arc.arc_capability_store_host_path_errors("/srv/ci/runner-capability-store"), [])
+
+    def test_a_store_directory_that_is_not_dedicated_is_refused(self) -> None:
+        for path, message in (
+            ("var/lib/x/capability-store", "absolute directory"),
+            ("/var/lib//capability-store", "must not contain '//'"),
+            ("/srv/capability-store", "at least 3 levels deep"),
+            ("/var/lib/github-runner/store", "named capability-store"),
+            ("/var/lib/kubelet/x/capability-store", "inside /var/lib/kubelet"),
+        ):
+            with self.subTest(path=path):
+                errors = arc.arc_capability_store_host_path_errors(path)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(message, errors[0])
+
+    def test_the_store_mount_path_must_be_an_absolute_directory(self) -> None:
+        self.assertEqual(arc.arc_capability_store_path_errors("/opt/capability-store"), [])
+        for path in ("relative", "/", "/a:b", 3):
+            with self.subTest(path=path):
+                self.assertEqual(len(arc.arc_capability_store_path_errors(path)), 1)
+
+    def test_an_entry_is_named_for_its_images_digest_and_an_unpinned_image_has_no_name(self) -> None:
+        self.assertEqual(arc.arc_capability_store_key(f"ghcr.io/example/x:1@sha256:{DIGEST_A}"), DIGEST_A)
+        self.assertIsNone(arc.arc_capability_store_key("ghcr.io/example/x:1"))
+
+
+class CapabilityStorePodTest(unittest.TestCase):
+    def test_without_the_store_the_copies_stay_in_each_pod(self) -> None:
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["mpi"], STORE_CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, None)
+        spec = result["values"]["template"]["spec"]
+        self.assertEqual([volume["name"] for volume in spec["volumes"]], ["sysroot", "job-started-hooks"])
+        self.assertNotIn("metadata", result["values"]["template"])
+
+    def test_with_the_store_each_payload_is_copied_once_per_node_and_published_before_the_pod_uses_it(self) -> None:
+        result = store_pod(DEFAULT_VALUES, ["node", "mpi", "libpq", "pnpm-store"])
+        self.assertEqual(result["errors"], [])
+        template = result["values"]["template"]
+        spec = template["spec"]
+        names = [container["name"] for container in spec["initContainers"]]
+        self.assertEqual(names, ["capability-store-prepare", "capability-node", "capability-mpi", "capability-libpq", "capability-store-publish", "capability-store-sysroot", "capability-store-tool-cache", "capability-pnpm-store"])
+        containers = {container["name"]: container for container in spec["initContainers"]}
+        # The copy runs the capability's own image as the runner user, only when the store lacks the entry, into a name of its own under .incoming.
+        copier = containers["capability-node"]
+        self.assertEqual(copier["image"], STORE_CATALOGUE["node"]["image"])
+        self.assertEqual(copier["command"][3:], ["copy-to-capability-store", "/opt/capability-store", DIGEST_A, "/toolcache", "capability-node"])
+        self.assertEqual(copier["securityContext"], {"runAsUser": 1001, "runAsGroup": 1001, "runAsNonRoot": True, "allowPrivilegeEscalation": False})
+        self.assertEqual(copier["env"], [{"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}])
+        self.assertEqual(containers["capability-mpi"]["command"][6], "/sysroot")
+        self.assertEqual(containers["capability-store-publish"]["command"][4:], ["/opt/capability-store", DIGEST_A, DIGEST_B, DIGEST_C])
+        self.assertEqual(containers["capability-store-publish"]["image"], BUSYBOX)
+        # Only the preparation runs as root, with the two capabilities it needs.
+        self.assertEqual(containers["capability-store-prepare"]["securityContext"]["capabilities"], {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE"]})
+        merged = containers["capability-store-sysroot"]["command"][5]
+        self.assertRegex(merged, r"^sysroot-[0-9a-f]{64}$")
+        self.assertEqual(containers["capability-store-sysroot"]["command"][6:], [DIGEST_B, DIGEST_C])
+        self.assertEqual(containers["capability-store-tool-cache"]["command"][4:], ["/opt/capability-store", TOOL_CACHE, DIGEST_A])
+        self.assertEqual(containers["capability-store-tool-cache"]["volumeMounts"], [{"name": "capability-store", "mountPath": "/opt/capability-store", "readOnly": True}, {"name": "tool-cache", "mountPath": TOOL_CACHE}])
+        volumes = {volume["name"]: volume for volume in spec["volumes"]}
+        self.assertEqual(volumes["capability-store"], {"name": "capability-store", "hostPath": {"path": STORE["host_path"], "type": "DirectoryOrCreate"}})
+        self.assertEqual(volumes["tool-cache"], {"name": "tool-cache", "emptyDir": {}})
+        self.assertNotIn("sysroot", volumes)
+        mounts = runner(result["values"])["volumeMounts"]
+        self.assertIn({"name": "capability-store", "mountPath": "/opt/capability-store", "readOnly": True}, mounts)
+        self.assertIn({"name": "capability-store", "mountPath": SYSROOT, "subPath": merged, "readOnly": True}, mounts)
+        self.assertIn({"name": "tool-cache", "mountPath": TOOL_CACHE}, mounts)
+        self.assertEqual(template["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{DIGEST_A} {DIGEST_B} {DIGEST_C} {merged}")
+
+    def test_a_different_order_of_system_libraries_is_a_different_merged_sysroot(self) -> None:
+        first = store_pod(DEFAULT_VALUES, ["mpi", "libpq"])["values"]["template"]["spec"]["initContainers"]
+        second = store_pod(DEFAULT_VALUES, ["libpq", "mpi"])["values"]["template"]["spec"]["initContainers"]
+        merged = [next(container for container in containers if container["name"] == "capability-store-sysroot")["command"][5] for containers in (first, second)]
+        self.assertNotEqual(merged[0], merged[1])
+
+    def test_with_the_store_an_unpinned_capability_image_is_an_error(self) -> None:
+        result = store_pod(DEFAULT_VALUES, ["untagged"])
+        self.assertEqual(result["errors"], ["capability untagged's image must be pinned by digest (name@sha256:<64 hex digits>) for the capability store, since its store entry is named for the digest"])
+
+    def test_a_store_path_that_overlaps_a_capability_mount_is_an_error(self) -> None:
+        result = arc.arc_capability_pod(DEFAULT_VALUES, ["node"], STORE_CATALOGUE, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, {**STORE, "path": f"{TOOL_CACHE}/store"})
+        self.assertEqual(len(result["errors"]), 1, result["errors"])
+        self.assertIn("capability store path", result["errors"][0])
+
+    def test_a_profile_with_only_hooks_or_a_node_cache_uses_no_store(self) -> None:
+        result = store_pod(DEFAULT_VALUES, ["pnpm-store"])
+        self.assertNotIn("capability-store", [volume["name"] for volume in result["values"]["template"]["spec"]["volumes"]])
+        self.assertNotIn("metadata", result["values"]["template"])
+
+
+DIND_VALUES: dict[str, Any] = {
+    "template": {
+        "spec": {
+            "initContainers": [
+                {"name": "init-dind-externals", "image": f"ghcr.io/example/runner:2@sha256:{DIGEST_RUNNER}", "command": ["cp", "-r", "/home/runner/externals/.", "/home/runner/tmpDir/"], "volumeMounts": [{"name": "dind-externals", "mountPath": "/home/runner/tmpDir"}]},
+                {"name": "init-dind-mtu", "image": BUSYBOX},
+            ],
+            "containers": [
+                {"name": "runner", "volumeMounts": [{"name": "work", "mountPath": "/home/runner/_work"}]},
+                {"name": "dind", "volumeMounts": [{"name": "work", "mountPath": "/home/runner/_work"}, {"name": "dind-externals", "mountPath": "/home/runner/externals"}]},
+            ],
+            "volumes": [{"name": "work", "emptyDir": {}}, {"name": "dind-externals", "emptyDir": {}}],
+        }
+    }
+}
+
+
+class CapabilityStoreExternalsTest(unittest.TestCase):
+    def test_the_dind_externals_copy_moves_into_the_store_and_dind_mounts_its_entry_read_only(self) -> None:
+        result = arc.arc_capability_store_externals(DIND_VALUES, STORE, 1001, 1001)
+        self.assertEqual(result["errors"], [])
+        template = result["values"]["template"]
+        spec = template["spec"]
+        self.assertEqual([container["name"] for container in spec["initContainers"]], ["capability-store-prepare", "init-dind-externals", "capability-store-publish-externals", "init-dind-mtu"])
+        copier = spec["initContainers"][1]
+        self.assertEqual(copier["command"][3:], ["copy-to-capability-store", "/opt/capability-store", DIGEST_RUNNER, "/home/runner/externals", "init-dind-externals"])
+        self.assertEqual([volume["name"] for volume in spec["volumes"]], ["work", "capability-store"])
+        dind = next(container for container in spec["containers"] if container["name"] == "dind")
+        self.assertEqual(dind["volumeMounts"][1], {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": DIGEST_RUNNER, "readOnly": True})
+        self.assertEqual(template["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], DIGEST_RUNNER)
+        self.assertEqual(DIND_VALUES["template"]["spec"]["volumes"][1]["name"], "dind-externals")
+
+    def test_after_the_capabilities_the_store_is_prepared_once_and_the_annotation_keeps_both_lists(self) -> None:
+        values = store_pod(DIND_VALUES, ["node"])["values"]
+        result = arc.arc_capability_store_externals(values, STORE, 1001, 1001)
+        spec = result["values"]["template"]["spec"]
+        self.assertEqual([container["name"] for container in spec["initContainers"]].count("capability-store-prepare"), 1)
+        self.assertEqual([volume["name"] for volume in spec["volumes"]].count("capability-store"), 1)
+        self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{DIGEST_A} {DIGEST_RUNNER}")
+
+    def test_without_the_store_or_without_an_externals_copy_the_values_are_left_alone(self) -> None:
+        self.assertIs(arc.arc_capability_store_externals(DIND_VALUES, None, 1001, 1001)["values"], DIND_VALUES)
+        self.assertIs(arc.arc_capability_store_externals(DEFAULT_VALUES, STORE, 1001, 1001)["values"], DEFAULT_VALUES)
+
+    def test_an_unpinned_runner_image_cannot_use_the_store(self) -> None:
+        values = json.loads(json.dumps(DIND_VALUES))
+        values["template"]["spec"]["initContainers"][0]["image"] = "ghcr.io/example/runner:2"
+        self.assertIn("pinned by digest", arc.arc_capability_store_externals(values, STORE, 1001, 1001)["errors"][0])
+
+
+class CapabilityStoreScriptTest(unittest.TestCase):
+    """Runs the store's init container commands with sh against a temporary store, as the pods would: the copy, the publishing (including two pods racing to publish one image), the sysroot merge and the tool cache links. Needs a mv with -T and a cp with -l, as busybox and GNU coreutils have."""
+
+    def setUp(self) -> None:
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work)
+        self.root = self.work / "store"
+        (self.root / ".incoming").mkdir(parents=True)
+
+    def run_container(self, container: dict[str, Any], uid: str, rewrite: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        """Run an init container's command with sh, as pod uid, with its paths rewritten to the temporary ones."""
+        command = [rewrite.get(argument, argument) for argument in container["command"]]
+        return subprocess.run(command, env={**os.environ, "POD_UID": uid}, capture_output=True, text=True, check=False)
+
+    def payload(self, name: str, files: dict[str, str]) -> Path:
+        directory = self.work / name
+        for relative, content in files.items():
+            (directory / relative).parent.mkdir(parents=True, exist_ok=True)
+            (directory / relative).write_text(content)
+        return directory
+
+    def containers(self, names: list[str]) -> dict[str, dict[str, Any]]:
+        spec = store_pod(DEFAULT_VALUES, names)["values"]["template"]["spec"]
+        return {container["name"]: container for container in spec["initContainers"]}
+
+    def test_a_payload_is_copied_once_and_published_and_a_later_pod_copies_nothing(self) -> None:
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary", "node/22.0.0/x64.complete": ""})
+        containers = self.containers(["node"])
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
+        for uid in ("pod-1", "pod-2"):
+            self.assertEqual(self.run_container(containers["capability-node"], uid, rewrite).returncode, 0)
+            published = self.run_container(containers["capability-store-publish"], uid, rewrite)
+            self.assertEqual(published.returncode, 0, published.stderr)
+            self.assertEqual(sorted(path.name for path in (self.root / ".incoming").iterdir()), [])
+        self.assertEqual((self.root / DIGEST_A / "node/22.0.0/x64/bin/node").read_text(), "binary")
+
+    def test_of_two_pods_copying_one_image_at_once_the_first_to_publish_wins_and_the_other_copy_is_deleted(self) -> None:
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
+        containers = self.containers(["node"])
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
+        # Both copy before either publishes, as two pods starting together on a node without the entry would.
+        for uid in ("pod-1", "pod-2"):
+            self.assertEqual(self.run_container(containers["capability-node"], uid, rewrite).returncode, 0)
+        (self.root / ".incoming" / f"{DIGEST_A}.pod-1.capability-node" / "marker").write_text("pod-1")
+        for uid in ("pod-1", "pod-2"):
+            published = self.run_container(containers["capability-store-publish"], uid, rewrite)
+            self.assertEqual(published.returncode, 0, published.stderr)
+        self.assertEqual((self.root / DIGEST_A / "marker").read_text(), "pod-1")
+        self.assertFalse((self.root / DIGEST_A / f"{DIGEST_A}.pod-2.capability-node").exists())
+        self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_publishing_fails_when_the_entry_is_neither_copied_nor_in_the_store(self) -> None:
+        containers = self.containers(["node"])
+        published = self.run_container(containers["capability-store-publish"], "pod-1", {"/opt/capability-store": str(self.root)})
+        self.assertNotEqual(published.returncode, 0)
+        self.assertIn(f"{DIGEST_A} is not in", published.stderr)
+
+    def test_the_merged_sysroot_links_every_library_and_a_later_one_wins_a_shared_file(self) -> None:
+        for digest, files in ((DIGEST_B, {"lib/libmpi.so": "mpi", "include/shared.h": "from mpi"}), (DIGEST_C, {"lib/libpq.so": "pq", "include/shared.h": "from libpq"})):
+            for relative, content in files.items():
+                (self.root / digest / relative).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / digest / relative).write_text(content)
+        merge = self.containers(["mpi", "libpq"])["capability-store-sysroot"]
+        merged = merge["command"][5]
+        completed = self.run_container(merge, "pod-1", {"/opt/capability-store": str(self.root)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual((self.root / merged / "include/shared.h").read_text(), "from libpq")
+        self.assertEqual((self.root / merged / "lib/libmpi.so").stat().st_ino, (self.root / DIGEST_B / "lib/libmpi.so").stat().st_ino)
+        # A second pod finds it published and does nothing.
+        self.assertEqual(self.run_container(merge, "pod-2", {"/opt/capability-store": str(self.root)}).returncode, 0)
+        self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_the_tool_cache_links_each_version_into_the_pods_own_directory_with_its_marker(self) -> None:
+        (self.root / DIGEST_A / "node/22.0.0/x64/bin").mkdir(parents=True)
+        (self.root / DIGEST_A / "node/22.0.0/x64/bin/node").write_text("binary")
+        (self.root / DIGEST_A / "node/22.0.0/x64.complete").write_text("")
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        link = self.containers(["node"])["capability-store-tool-cache"]
+        completed = self.run_container(link, "pod-1", {"/opt/capability-store": str(self.root), TOOL_CACHE: str(cache)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue((cache / "node/22.0.0/x64").is_symlink())
+        self.assertEqual((cache / "node/22.0.0/x64/bin/node").read_text(), "binary")
+        self.assertTrue((cache / "node/22.0.0/x64.complete").is_file())
+        self.assertFalse((cache / "node/22.0.0/x64.complete").is_symlink())
+        # The version directory is the pod's own, so a setup action can add an architecture beside the link without touching the store.
+        (cache / "node/22.0.0/arm64").mkdir()
+        self.assertFalse((self.root / DIGEST_A / "node/22.0.0/arm64").exists())
 
 
 if __name__ == "__main__":
