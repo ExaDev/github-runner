@@ -100,10 +100,13 @@ wait_for_mesh_host() {
   fi
 }
 
-# Writes a `tailscale` into $2, which k3s is started with first on its PATH (tailscale_up_wait_dir below), that runs the real one ($3) for every command unchanged and, after `tailscale up`, waits as wait_for_mesh_host does for $1, the host this node joins. k3s's own --vpn-auth start (StartVPN in k3s's pkg/vpn/vpn.go) runs `tailscale up --authkey ... --timeout=30s --reset` on every start, which restarts the Tailscale backend from its cached network map, and k3s dials the join host as soon as that command returns. Confirmed live on Tailscale's own control plane with Tailscale v1.102.4: the backend reloaded a cached map with no peers ("Start: loaded netmap from disk cache; 0 peers"), so the join host was neither a peer nor a MagicDNS name for about a second, k3s exited with "no such host", and every restart of the container repeated it, so the node never joined. The wait above, before k3s starts, cannot cover it, since the reset comes after it. $2 is under /run, a tmpfs in docker-compose.yml, so the wrapper is written afresh at every start of the container and never stands in front of the entrypoint's own tailscale commands; it follows the entrypoint, so it needs no image rebuild, and a node that joins nothing gets none.
-tailscale_up_wait_dir=/run/github-runner-node/bin
+# Writes a `tailscale` into $2, which k3s is started with first on its PATH (tailscale_up_wait_dir below), that runs the real one ($3) for every command unchanged and, after `tailscale up`, waits as wait_for_mesh_host does for $1, the host this node joins, then says so in the container's log. k3s's own --vpn-auth start (StartVPN in k3s's pkg/vpn/vpn.go) runs `tailscale up --authkey ... --timeout=30s --reset` on every start, which restarts the Tailscale backend from its cached network map, and k3s dials the join host as soon as that command returns. Confirmed live on Tailscale's own control plane with Tailscale v1.102.4: the backend reloaded a cached map with no peers ("Start: loaded netmap from disk cache; 0 peers"), so the join host was neither a peer nor a MagicDNS name for about a second, k3s exited with "no such host", and every restart of the container repeated it, so the node never joined. The wait above, before k3s starts, cannot cover it, since the reset comes after it.
+#
+# $2 is on the image's own filesystem, never under the service's tmpfs mounts: Docker mounts a tmpfs noexec unless told otherwise, and k3s finds the command with Go's exec.LookPath, which passes over a file it may not execute, so a wrapper under /run was never run (confirmed live: the node kept failing as before, with the wrapper in place). The container's filesystem outlives a restart, so the wrapper is written afresh at every start, and removed when the node joins nothing, so a wrapper from an earlier configuration never waits for a host this node no longer joins. Only k3s has $2 on its PATH, so the entrypoint's own tailscale commands run the real one.
+tailscale_up_wait_dir=/usr/local/lib/github-runner-node/bin
 install_tailscale_up_wait() {
   if [ -z "$1" ]; then
+    rm -f "$2/tailscale"
     return 0
   fi
   mkdir -p "$2"
@@ -114,6 +117,8 @@ install_tailscale_up_wait() {
     # shellcheck disable=SC2016 # Written into the wrapper unexpanded, for the wrapper to expand.
     echo 'if [ "${1:-}" = up ]; then'
     printf "  until '%s' ip -4 '%s' >/dev/null 2>&1 && nslookup '%s' 100.100.100.100 >/dev/null 2>&1; do sleep 0.5; done\n" "$3" "$1" "$1"
+    # The container's log is PID 1's standard error, k3s's own once the entrypoint has exec'd it; k3s keeps this command's output to itself. Best effort: the line is for whoever reads the log (and the mesh integration test), and failing to write it must not fail k3s's tailscale up.
+    printf "  echo 'github-runner-node: %s is a peer and resolves after tailscale up' 2>/dev/null > /proc/1/fd/2 || true\n" "$1"
     echo 'fi'
   } > "$2/tailscale"
   chmod 0755 "$2/tailscale"
