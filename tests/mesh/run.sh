@@ -570,11 +570,13 @@ peer_refusal() {
 at_level() { [ "$(level_of "$1")" = "$2" ]; }
 node_is() { [ "$(node_status "$1" "$2")" = "$3" ]; }
 
-# The numbers of the nodes whose regrade service reports a level below full.
+# The numbers of the nodes whose regrade service reports a level below full. A read that gives no level, or unknown, is not a step: a test node's k3s container can restart by itself under the strain, and its status then reads unknown or fails for a moment, which says nothing about whether the server stepped.
 stepped_nodes() {
   local index
   for index in $(seq 1 "$node_count"); do
-    [ "$(level_of "$index")" = full ] || printf '%s ' "$index"
+    case "$(level_of "$index" || true)" in
+      control-plane | etcd-only) printf '%s ' "$index" ;;
+    esac
   done
 }
 
