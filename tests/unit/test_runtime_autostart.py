@@ -66,7 +66,7 @@ class DefaultsTest(unittest.TestCase):
     def test_the_node_container_follows_the_node_s_role(self) -> None:
         template = DEFAULTS["github_runner_cluster_node_container"]
         self.assertIn("github_runner_cluster_container_name", template)
-        self.assertIn("'github-runner-k3s-agent'", template)
+        self.assertIn("github_runner_cluster_agent_container_name", template)
 
     def test_every_new_variable_is_in_the_readme(self) -> None:
         readme = (ROLE / "README.md").read_text()

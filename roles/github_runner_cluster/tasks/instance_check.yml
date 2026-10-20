@@ -1,0 +1,65 @@
+---
+# Checks, before the role writes anything to the host, that this cluster's Compose project has the host's Docker daemon to itself for what it needs: its container names (github_runner_cluster_container_name, github_runner_cluster_agent_container_name), the API port a server publishes (github_runner_cluster_api_port) and its project directory (github_runner_cluster_dir). A second cluster on the same hosts needs its own of each, and Docker would otherwise refuse the name or the port only when Compose starts the container, after the role has rewritten the project's files. Read-only, so it runs under --check too.
+
+- name: Fail if the API port is not a port number
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_api_port is '{{ github_runner_cluster_api_port }}'; it must be a whole number from 1 to 65535.
+      Nothing was changed.
+  when: >-
+    (github_runner_cluster_api_port | string) is not match('^[1-9][0-9]*\\Z')
+    or github_runner_cluster_api_port | int > 65535
+
+- name: Fail if the hosts of the cluster group do not all use the same API port
+  # Every joining node dials the bootstrap server at the port in its own join URL, which tasks/topology.yml builds from this host's value, so a host with another value would dial a port nothing listens on. Read for every host through hostvars, which never sees role defaults, so a host that sets nothing counts as the default.
+  vars:
+    github_runner_cluster_group_api_ports: >-
+      {{ groups[github_runner_cluster_group] | map('extract', hostvars)
+         | map(attribute='github_runner_cluster_api_port', default=github_runner_cluster_k3s_default_api_port) | map('string') | list }}
+  ansible.builtin.fail:
+    msg: >-
+      The hosts of {{ github_runner_cluster_group }} do not all use the same github_runner_cluster_api_port
+      ({{ groups[github_runner_cluster_group] | zip(github_runner_cluster_group_api_ports) | map('join', ': ') | join('; ') }}).
+      It is the port every server listens on and every joining node dials, so set it once for the whole group. Nothing was changed.
+  when: github_runner_cluster_group_api_ports | unique | length > 1
+
+- name: Fail if a container name is not one Docker accepts, or both are the same
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_container_name is '{{ github_runner_cluster_container_name }}' and github_runner_cluster_agent_container_name
+      is '{{ github_runner_cluster_agent_container_name }}'. Each must be a Docker container name (a letter or digit, then letters, digits,
+      '_', '.' or '-'), and they must differ, since docker-compose.yml names the server's and the agent's containers with them. Nothing was changed.
+  when: >-
+    github_runner_cluster_container_name is not match('^[a-zA-Z0-9][a-zA-Z0-9_.-]*\\Z')
+    or github_runner_cluster_agent_container_name is not match('^[a-zA-Z0-9][a-zA-Z0-9_.-]*\\Z')
+    or github_runner_cluster_container_name == github_runner_cluster_agent_container_name
+
+- name: Read every container on this host's Docker daemon, with its Compose project, project directory and published ports
+  # docker inspect rather than docker ps, since docker ps shows a stopped container's ports as none, and a stopped container still claims its host port the next time it starts.
+  ansible.builtin.shell: |
+    set -eu
+    ids=$(docker ps --all --quiet)
+    if [ -n "$ids" ]; then
+      # shellcheck disable=SC2086 # One argument per container id.
+      docker inspect --format '{% raw %}{"name":{{json .Name}},"labels":{{json .Config.Labels}},"ports":{{json .HostConfig.PortBindings}}}{% endraw %}' $ids
+    fi
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
+  register: github_runner_cluster_instance_containers
+  changed_when: false
+  check_mode: false
+
+- name: Fail if another Compose project on this daemon already uses this cluster's container names, API port or directory
+  vars:
+    github_runner_cluster_instance_conflicts: >-
+      {{ github_runner_cluster_instance_containers.stdout_lines | exadev.github_runner.cluster_instance_conflicts(
+           github_runner_cluster_compose_project,
+           [github_runner_cluster_container_name, github_runner_cluster_agent_container_name],
+           github_runner_cluster_api_port if github_runner_cluster_effective_node_role == 'server' else '',
+           github_runner_cluster_dir) }}
+  ansible.builtin.fail:
+    msg: >-
+      Not setting up the Compose project {{ github_runner_cluster_compose_project }} on {{ inventory_hostname }}:
+      {{ github_runner_cluster_instance_conflicts | join('; ') }}. A second cluster on this Docker daemon needs its own
+      github_runner_cluster_container_name, github_runner_cluster_agent_container_name, github_runner_cluster_api_port and
+      github_runner_cluster_dir (see the role README's Several clusters on one host). Nothing was changed.
+  when: github_runner_cluster_instance_conflicts | length > 0

@@ -63,6 +63,10 @@
 - name: Check the Compose files the node's .env names
   ansible.builtin.include_tasks: compose_files.yml
 
+- name: Check this cluster's container names, API port and directory are its own on this host's Docker daemon
+  # Before anything is written to the host, so that a second cluster set up with a name, port or directory another Compose project already uses fails here rather than halfway through. See tasks/instance_check.yml.
+  ansible.builtin.include_tasks: instance_check.yml
+
 - name: Create this host's Compose project directory
   ansible.builtin.file:
     path: "{{ github_runner_cluster_dir }}/{{ item }}"
@@ -78,6 +82,7 @@
     mode: "{{ item.mode }}"
   loop:
     - {src: docker-compose.yml, mode: "0644"}
+    - {src: docker-compose.api-port.yml, mode: "0644"}
     - {src: k3s/Dockerfile, mode: "0644"}
     - {src: k3s/node-entrypoint.sh, mode: "0755"}
 
