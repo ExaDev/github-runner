@@ -132,6 +132,28 @@ class FleetOrgsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("configured more than once", result.stdout)
 
+    # An autoscaled profile on the host that installs the platform, so the pool settings are checked.
+    AUTOSCALED = BASE | {
+        "github_runner_arc_heartbeat_gist_id": "0123abcd",
+        "github_runner_arc_orgs": [{"name": "example-org", "app_id": 1, "image": "ghcr.io/example/runner:1", "scale_set_profiles": [{"namespace": "example-runners", "values_file": str(REPO / "galaxy.yml"), "autoscale": True}]}],
+        "github_runner_arc_autoscaler_usable_budget_gi": 40,
+        "github_runner_arc_autoscaler_floor": 3,
+    }
+
+    def test_an_autoscaled_pool_needs_no_ceiling_since_the_autoscaler_works_it_out(self) -> None:
+        for unset in ({}, {"github_runner_arc_autoscaler_max_ceiling": None}, {"github_runner_arc_autoscaler_max_ceiling": ""}):
+            with self.subTest(unset):
+                result, _, _ = run(self.AUTOSCALED | unset, LOCALHOST_INVENTORY)
+                self.assertEqual(result.returncode, 0, result.stdout[-3000:])
+
+    def test_a_bound_on_the_ceiling_must_be_a_whole_number_no_lower_than_the_floor(self) -> None:
+        for bound, accepted in ((3, True), (8, True), (2, False), ("four", False)):
+            with self.subTest(bound):
+                result, _, _ = run(self.AUTOSCALED | {"github_runner_arc_autoscaler_max_ceiling": bound}, LOCALHOST_INVENTORY)
+                self.assertEqual(result.returncode == 0, accepted, result.stdout[-3000:])
+                if not accepted:
+                    self.assertIn("any bound on its ceiling", result.stdout)
+
     def test_a_gist_id_passed_as_a_play_variable_needs_no_bootstrap(self) -> None:
         result, _, called = run({"github_runner_arc_heartbeat_bootstrap_gist": True, "github_runner_arc_heartbeat_gist_id": "0123abcd"}, LOCALHOST_INVENTORY)
         self.assertEqual(result.returncode, 0, result.stdout[-3000:])

@@ -206,6 +206,35 @@
             name: github-runner-autoscaler-node-metrics-reader
             apiGroup: rbac.authorization.k8s.io
 
+    # autoscaler: list every pod in the cluster, to subtract from each node what the pods on it request when working out how many runners it places (scripts/autoscaler-ceiling.jq). A node's pods can be in any namespace, so this is cluster-wide, as the heartbeat's own pod read is; it reads pods only, and the nodes come from node-metrics-reader above.
+    - name: "Platform: autoscaler RBAC - read the pods on every node"
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRole
+          metadata:
+            name: github-runner-autoscaler-node-pods-reader
+          rules:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["get", "list"]
+
+    - name: "Platform: autoscaler RBAC - bind node-pods-reader"
+      kubernetes.core.k8s:
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: github-runner-autoscaler-node-pods-reader
+          subjects:
+            - kind: ServiceAccount
+              name: autoscaler
+              namespace: "{{ github_runner_arc_platform_namespace }}"
+          roleRef:
+            kind: ClusterRole
+            name: github-runner-autoscaler-node-pods-reader
+            apiGroup: rbac.authorization.k8s.io
+
     # autoscaler: read and patch each pooled profile's own AutoscalingRunnerSet (scoped to that one object by resourceNames), and read pod metrics in its namespace. One Role/RoleBinding pair per pooled profile, since each lives in its own namespace.
     - name: "Platform: autoscaler RBAC - manage each pooled AutoscalingRunnerSet and read pod metrics"
       kubernetes.core.k8s:
@@ -467,13 +496,14 @@
                     value: "{{ github_runner_arc_autoscaler_poll_seconds | string }}"
                   - name: AUTOSCALER_USABLE_BUDGET_GI
                     value: "{{ github_runner_arc_autoscaler_usable_budget_gi | string }}"
+                  # An upper bound on the ceiling the autoscaler works out from the nodes each poll (scripts/autoscaler-ceiling.jq); empty leaves it unbounded.
                   - name: AUTOSCALER_MAX_CEILING
                     value: >-
                       {{
                         (github_runner_arc_measured_sizing[(github_runner_arc_sized | first).label].max_runners
                          if github_runner_arc_sized | length > 0 and (github_runner_arc_sized | first).label in (github_runner_arc_measured_sizing | default({}))
                          else (github_runner_arc_sized | first).sizing.max_runners if github_runner_arc_sized | length > 0
-                         else github_runner_arc_autoscaler_max_ceiling) | string
+                         else github_runner_arc_autoscaler_max_ceiling | default('', true)) | string
                       }}
                   - name: AUTOSCALER_FLOOR
                     value: "{{ github_runner_arc_autoscaler_floor | string }}"
