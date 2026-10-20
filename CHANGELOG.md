@@ -1,3 +1,10 @@
+## [2.6.1](https://github.com/ExaDev/github-runner/compare/v2.6.0...v2.6.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* **cluster:** report a first run's Compose start under --check ([e9bf55c](https://github.com/ExaDev/github-runner/commit/e9bf55c96ee03c45a8d987523abd396c465aa0c9)), closes [#122](https://github.com/ExaDev/github-runner/issues/122)
+
 # [2.6.0](https://github.com/ExaDev/github-runner/compare/v2.5.0...v2.6.0) (2026-10-20)
 
 
