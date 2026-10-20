@@ -1,0 +1,11 @@
+---
+# Reports which servers' containers the cluster role would recreate, for tests/mesh/run.sh: the role's own check before its Compose step (tasks/server_recreate_check.yml), run on its own against the cluster the test brought up. Run with --check, which is when the check says so; it changes nothing.
+- name: Report which k3s containers the role would recreate
+  hosts: github_runner_cluster
+  gather_facts: false
+  tasks:
+    - name: Run the role's checks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: "{{ item }}"
+      loop: [docker_context, topology, server_recreate_check]
