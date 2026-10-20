@@ -115,14 +115,9 @@
         mode: "0600"
       no_log: true
 
-    - name: Start k3s via docker compose (bootstrapping or joining, per this host's own .env)
-      community.docker.docker_compose_v2:
-        project_src: "{{ github_runner_cluster_dir }}"
-        project_name: "{{ github_runner_cluster_compose_project }}"
-        profiles: ["server"]
-        cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
-        files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
-        state: present
+    - name: Start the servers one at a time, in inventory order
+      # See tasks/start_servers.yml for why, and for what a server's turn checks before Compose may recreate its container.
+      ansible.builtin.include_tasks: start_servers.yml
 
     - name: Check the runtime and this node's container are up
       ansible.builtin.include_tasks: end_checks.yml
