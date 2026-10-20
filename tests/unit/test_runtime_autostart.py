@@ -112,7 +112,8 @@ class GuardTest(unittest.TestCase):
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
         for role in ("server", "agent"):
             [block] = [task for task in tasks if "block" in task and task.get("when") == f'github_runner_cluster_effective_node_role == "{role}"']
-            steps = [step.get("ansible.builtin.include_tasks") or ("compose" if "community.docker.docker_compose_v2" in step else None) for step in block["block"]]
+            # A server starts through its turn (tasks/start_servers.yml), which runs the Compose start; an agent starts with the Compose task itself.
+            steps = [("compose" if step.get("ansible.builtin.include_tasks") == "start_servers.yml" else step.get("ansible.builtin.include_tasks")) or ("compose" if "community.docker.docker_compose_v2" in step else None) for step in block["block"]]
             with self.subTest(role=role):
                 self.assertLess(steps.index("compose"), steps.index("end_checks.yml"))
 
