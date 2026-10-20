@@ -1,3 +1,13 @@
+## [2.7.3](https://github.com/ExaDev/github-runner/compare/v2.7.2...v2.7.3) (2026-10-20)
+
+### Bug Fixes
+
+* **release:** list every conventional commit type in the release notes ([99e6a6d](https://github.com/ExaDev/github-runner/commit/99e6a6dad0112bade113e5ec1d9a560f814ef5d5))
+
+### Documentation
+
+* **changelog:** backfill the commits earlier notes left out ([69b855d](https://github.com/ExaDev/github-runner/commit/69b855d32ad1a087b4b476b815381080f8cc87a8))
+
 ## [2.7.2](https://github.com/ExaDev/github-runner/compare/v2.7.1...v2.7.2) (2026-10-20)
 
 ### Documentation
