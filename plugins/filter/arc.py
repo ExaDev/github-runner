@@ -1180,12 +1180,12 @@ def _annotate_store_keys(template: dict[str, Any], keys: Sequence[str]) -> None:
     annotations[_CAPABILITY_STORE_KEYS_ANNOTATION] = " ".join(dict.fromkeys([*existing, *keys]))
 
 
-def _ensure_store_prepared(spec: dict[str, Any], init_containers: list[dict[str, Any]], store: Mapping[str, Any], runner_user: int, runner_group: int) -> None:
-    """Add the store's volume to spec, and its preparation to the front of init_containers, unless spec already has them."""
+def _ensure_store_prepared(spec: dict[str, Any], store: Mapping[str, Any], runner_user: int, runner_group: int) -> None:
+    """Add the store's volume to spec unless it has it, and make the store's preparation spec's first init container, moving it there when the capabilities put it after the values' own init containers, since every copy into the store needs the directories it creates."""
     if not any(volume.get("name") == _CAPABILITY_STORE_VOLUME for volume in spec.get("volumes") or []):
         spec["volumes"] = list(spec.get("volumes") or []) + [_capability_store_volume(store)]
-    if not any(container.get("name") == _CAPABILITY_STORE_PREPARE for container in [*(spec.get("initContainers") or []), *init_containers]):
-        init_containers.insert(0, _capability_store_prepare_container(store, runner_user, runner_group))
+    others = [container for container in spec.get("initContainers") or [] if container.get("name") != _CAPABILITY_STORE_PREPARE]
+    spec["initContainers"] = [_capability_store_prepare_container(store, runner_user, runner_group), *others]
 
 
 def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, store: Mapping[str, Any], runner_user: int, runner_group: int) -> tuple[list[dict[str, Any]], list[str], str | None]:
@@ -1262,9 +1262,8 @@ def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str
             {"name": _CAPABILITY_STORE_VOLUME, "mountPath": mount["mountPath"], "subPath": key, "readOnly": True} if mount.get("name") == _DIND_EXTERNALS_VOLUME else mount
             for mount in container.get("volumeMounts") or []
         ]
-    prefix: list[dict[str, Any]] = []
-    _ensure_store_prepared(spec, prefix, store, runner_user, runner_group)
-    spec["initContainers"] = prefix + init_containers
+    spec["initContainers"] = init_containers
+    _ensure_store_prepared(spec, store, runner_user, runner_group)
     _annotate_store_keys(template, [key])
     return {"errors": [], "values": result}
 
