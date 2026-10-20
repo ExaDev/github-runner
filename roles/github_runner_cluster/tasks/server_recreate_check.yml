@@ -1,0 +1,96 @@
+---
+# Decides, before Docker Compose touches this server's container, whether that run would recreate it, and refuses when the recreate would take quorum away. Compose recreates a container whose configuration hash (the com.docker.compose.config-hash label it put on the container) differs from the hash of the configuration it renders now, so the role compares the two the same way, from the files on the host. A server's recreate stops its etcd member, so it goes ahead only while every other server reports Ready; the caller (tasks/start_server.yml) takes one server's turn at a time, so two servers are never away together. Publishes github_runner_cluster_recreate_reason (empty when Compose would keep the container, or there is none) and github_runner_cluster_recreate_running (whether the container that would be recreated is running). Every task only reads; under --check the same answers are reported, as a change when a container would be recreated and as a failure when the run would refuse. Compares what the files on the host hold now, so a difference this same run would only write (the Compose file or .env a task before this one has just changed, which --check does not write) shows once they are written.
+
+- name: Read the state and Compose configuration hash of this server's container
+  # docker ps rather than docker inspect, so that a container that does not exist reads as absent while a daemon that cannot be reached fails the run. The label is empty on a container Compose did not make.
+  ansible.builtin.shell: |
+    set -eu
+    state=$(docker ps --all --filter "name=^/${container}\$" --format '{{ '{{' }}.State{{ '}}' }}')
+    echo "state=${state:-absent}"
+    if [ -n "$state" ]; then
+      echo "hash=$(docker inspect --format '{{ '{{' }}index .Config.Labels "com.docker.compose.config-hash"{{ '}}' }}' "$container")"
+    fi
+  environment: "{{ github_runner_cluster_docker_cli_environment | combine({'container': github_runner_cluster_node_container}) }}"
+  register: github_runner_cluster_recreate_container
+  changed_when: false
+  check_mode: false
+
+- name: Read the configuration hash of this server's service as Compose renders it now
+  # The files and .env on the host, with the project directory and name the role starts the server with. Only when there is a container to compare with.
+  ansible.builtin.command:
+    argv: >-
+      {{ ['docker', 'compose', '--project-name', github_runner_cluster_compose_project, '--project-directory', github_runner_cluster_dir]
+         + (github_runner_cluster_compose_file_list | map('regex_replace', '^(?!/)', github_runner_cluster_dir ~ '/') | map('regex_replace', '^', '--file=') | list)
+         + ['--profile', github_runner_cluster_effective_node_role, 'config', '--hash', '*'] }}
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
+  register: github_runner_cluster_recreate_rendered
+  changed_when: false
+  check_mode: false
+  when: "'state=absent' not in github_runner_cluster_recreate_container.stdout_lines"
+
+- name: Work out whether Compose would recreate this server's container
+  vars:
+    github_runner_cluster_recreate_lines: "{{ github_runner_cluster_recreate_container.stdout_lines }}"
+  ansible.builtin.set_fact:
+    github_runner_cluster_recreate_running: "{{ 'state=running' in github_runner_cluster_recreate_lines }}"
+    github_runner_cluster_recreate_reason: >-
+      {{ ((github_runner_cluster_recreate_lines | select('match', '^hash=') | first | regex_replace('^hash=', ''))
+          | exadev.github_runner.cluster_recreate_reason(github_runner_cluster_recreate_rendered.stdout
+                                                         | exadev.github_runner.cluster_rendered_config_hash(github_runner_cluster_node_service)))
+         if 'state=absent' not in github_runner_cluster_recreate_lines else '' }}
+
+- name: List the other servers of the cluster
+  # By node name, which is what the Node objects are called, from the topology every host works out the same.
+  ansible.builtin.set_fact:
+    github_runner_cluster_recreate_peers: >-
+      {{ github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
+         | rejectattr('key', 'equalto', inventory_hostname) | map(attribute='value.node_name') | list }}
+
+- name: Read which nodes are Ready, through this server's own container
+  # Only for a running server that would be recreated, and only when there is another server whose state matters. The image's kubectl inside the container reads that server's own kubeconfig; it is run as kubectl, since `k3s kubectl` in the rancher/k3s image answers "unknown command". A read that fails is recorded rather than failing here, so the filter can say why. Bounded by github_runner_cluster_cluster_read_timeout as a whole and as the API call's --request-timeout.
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ github_runner_cluster_node_container }}"
+      - kubectl
+      - get
+      - nodes
+      - "--request-timeout={{ github_runner_cluster_cluster_read_timeout }}s"
+      - -o
+      - 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
+  register: github_runner_cluster_recreate_nodes
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+  when:
+    - github_runner_cluster_recreate_reason | length > 0
+    - github_runner_cluster_recreate_running | bool
+    - github_runner_cluster_recreate_peers | length > 0
+
+- name: Refuse to recreate this server while another server is not Ready
+  vars:
+    github_runner_cluster_recreate_blockers: >-
+      {{ github_runner_cluster_recreate_peers | exadev.github_runner.cluster_recreate_blockers(github_runner_cluster_recreate_nodes) }}
+  ansible.builtin.fail:
+    msg: >-
+      Not recreating {{ github_runner_cluster_node_container }} on {{ inventory_hostname }}: {{ github_runner_cluster_recreate_reason }},
+      so Compose would replace the container and stop this server's etcd member, but {{ github_runner_cluster_recreate_blockers | join('; ') }}.
+      A server is recreated only while every other server reports Ready, so that the cluster keeps its quorum while this one is away.
+      Bring the other servers back and run again. Nothing was changed.
+  when:
+    - github_runner_cluster_recreate_nodes is not skipped
+    - github_runner_cluster_recreate_blockers | length > 0
+
+- name: Report that this server's container would be recreated
+  # An explicit change under --check, with the reason; in a real run the Compose task that follows is the change.
+  ansible.builtin.debug:
+    msg: >-
+      Compose would recreate {{ github_runner_cluster_node_container }} on {{ inventory_hostname }}: {{ github_runner_cluster_recreate_reason }}.
+      {% if not github_runner_cluster_recreate_running | bool %}The container is not running, so the recreate takes no member away from the cluster.{% elif github_runner_cluster_recreate_peers | length > 0 %}Every other server reports Ready, so the recreate may go ahead.{% endif %}
+  changed_when: true
+  when:
+    - github_runner_cluster_recreate_reason | length > 0
+    - ansible_check_mode

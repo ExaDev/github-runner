@@ -1,0 +1,9 @@
+---
+# Starts this play's k3s servers one at a time, in inventory order, from the server hosts' own runs. A server's container is recreated when its Compose configuration changed, which stops its etcd member, so the servers take turns: each turn (tasks/start_server.yml) refuses to recreate a running server unless every other server reports Ready, and waits for a recreated server to be Ready again before the next one starts. This relies on Ansible's linear strategy, the default, where every host takes the same task together: the tasks one turn includes run for that host alone while the others wait, so no two servers are ever away together. Hosts outside the play (--limit) take no turn.
+
+- name: Give each server its turn to start
+  ansible.builtin.include_tasks: start_server.yml
+  loop: "{{ github_runner_cluster_topology.servers | select('in', ansible_play_hosts_all) | list }}"
+  loop_control:
+    loop_var: github_runner_cluster_turn
+  when: github_runner_cluster_turn == inventory_hostname

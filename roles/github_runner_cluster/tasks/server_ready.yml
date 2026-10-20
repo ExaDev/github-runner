@@ -1,0 +1,22 @@
+---
+# Waits, through this server's own container, until its node reports Ready, for about github_runner_cluster_server_ready_timeout seconds. Each attempt is one kubectl wait of a few seconds (the poll below) followed by that many seconds of delay, so a container whose API has not started listening yet (kubectl fails at once) is retried at the same pace as one whose node has not registered; the retries are the timeout divided by an attempt and its delay, and the first attempt is not a retry. The run fails when the node does not come back, before the next server is touched.
+
+- name: Wait for this server's node to report Ready
+  vars:
+    github_runner_cluster_ready_poll: 5
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ github_runner_cluster_node_container }}"
+      - kubectl
+      - wait
+      - --for=condition=Ready
+      - "node/{{ github_runner_cluster_effective_node_name }}"
+      - "--timeout={{ github_runner_cluster_ready_poll }}s"
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
+  register: github_runner_cluster_server_ready
+  until: github_runner_cluster_server_ready.rc == 0
+  retries: "{{ ((github_runner_cluster_server_ready_timeout | int) / (2 * github_runner_cluster_ready_poll)) | round(0, 'ceil') | int }}"
+  delay: "{{ github_runner_cluster_ready_poll }}"
+  changed_when: false
