@@ -1,0 +1,12 @@
+---
+# Runs some of the cluster role's task files (run_tasks, comma-separated, each a task file's name without .yml) through the role itself, for tests/unit/test_node_password.py, so that its defaults load as role defaults do in a real run. The docker the tasks call is the test's stand-in on PATH.
+- name: Run the cluster role's node password and server start tasks
+  hosts: "{{ check_hosts | default('github_runner_cluster') }}"
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Include the role's tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: "{{ item }}"
+      loop: "{{ run_tasks.split(',') }}"

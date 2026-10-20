@@ -81,6 +81,10 @@
     - {src: k3s/Dockerfile, mode: "0644"}
     - {src: k3s/node-entrypoint.sh, mode: "0755"}
 
+- name: Keep this node's password across container recreation
+  # Before the mesh step, which can start the bootstrap server's Compose project, and before any Compose task below: the first recreate that mounts the node's password volume must find the password in it. See tasks/node_password.yml.
+  ansible.builtin.include_tasks: node_password.yml
+
 - name: Set up the mesh the nodes join, and publish its join key and control server
   # Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read the mesh facts it publishes. See tasks/mesh/main.yml for the provider interface.
   ansible.builtin.include_tasks: mesh/main.yml
@@ -171,7 +175,7 @@
   when: github_runner_cluster_record_deployed_version | bool
 
 - name: Wait for every node to report Ready, self-healing a stale server/agent node-password registration if any node fails to rejoin
-  # /etc/rancher/node/password lives inside the joining container's own writable filesystem, not a persisted volume, so a fresh container (e.g. after docker compose --force-recreate) generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS container's password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See README's Non-obvious behaviour section; the same failure mode applies to a joining server's own container recreation, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name, as tasks/topology.yml recorded it), since that, not the inventory name, is what k3s names the Node and its node-password Secret after. Only ever touches cluster members that are NOT the bootstrap host (as tasks/topology.yml decided it), and of those only the ones whose node is missing or not Ready: the bootstrap host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway, and a Ready node's registration is not stale.
+  # A recreated container keeps its password (/etc/rancher/node is a named volume, seeded by tasks/node_password.yml), so this only fires for a node that is genuinely new under an old name: a replaced host or a node whose volume was removed generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See the role README's Node passwords section; the same failure mode applies to a joining server, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name, as tasks/topology.yml recorded it), since that, not the inventory name, is what k3s names the Node and its node-password Secret after. Only ever touches cluster members that are NOT the bootstrap host (as tasks/topology.yml decided it), and of those only the ones whose node is missing or not Ready: the bootstrap host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway, and a Ready node's registration is not stale.
   when: github_runner_cluster_wait_for_nodes | bool
   block:
     - name: Wait for every node to report Ready

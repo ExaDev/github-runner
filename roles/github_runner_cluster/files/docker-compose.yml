@@ -58,6 +58,8 @@ services:
       - k3s-data:/var/lib/rancher/k3s
       # Persists this container's own Tailscale device identity/keys across recreations - without this, every recreate would register a brand new device on the tailnet instead of reconnecting as the same one, since the join key is reusable by design.
       - k3s-tailscale-data:/var/lib/tailscale
+      # k3s keeps this node's password here and the cluster holds a Secret for the same password, so a recreated container with a fresh one is rejected ("Node password rejected") and stays NotReady. The role seeds the volume from a running container before the first recreate that mounts it (tasks/node_password.yml).
+      - k3s-node:/etc/rancher/node
       - ./kubeconfig:/output
       - ./k3s/node-entrypoint.sh:/usr/local/bin/github-runner-node:ro
     ports:
@@ -98,6 +100,8 @@ services:
       - k3s-agent-data:/var/lib/rancher/k3s
       # Same reasoning as the k3s service's own tailscale volume.
       - k3s-agent-tailscale-data:/var/lib/tailscale
+      # Same reasoning as the k3s service's own node volume.
+      - k3s-agent-node:/etc/rancher/node
       - ./k3s/node-entrypoint.sh:/usr/local/bin/github-runner-node:ro
 
   # Keeps the Docker host's disk from filling with build cache. The node's ephemeral storage lives on the host's Docker disk, shared with whatever else builds there, so a cache nobody trims eventually puts the node under disk pressure, which taints it unschedulable (the kubelet can reclaim nothing, since the data is not in a pod). Removes only build cache and dangling images older than DOCKER_PRUNE_AFTER (a week by default, long enough that a layer still in use has been rebuilt and so refreshed), once every DOCKER_PRUNE_INTERVAL_SECONDS (daily). Tagged images, containers and volumes are never touched. Runs on every host whatever its k3s role.
@@ -124,3 +128,5 @@ volumes:
   k3s-agent-data: {}
   k3s-tailscale-data: {}
   k3s-agent-tailscale-data: {}
+  k3s-node: {}
+  k3s-agent-node: {}

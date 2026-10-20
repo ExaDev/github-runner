@@ -130,6 +130,10 @@ github_runner_cluster_docker_context: ""
 github_runner_cluster_container_name: github-runner-k3s
 # The node's k3s container as this host runs it: the server's, or the agent's, which docker-compose.yml names differently. Derived, never set directly.
 github_runner_cluster_node_container: "{{ github_runner_cluster_container_name if github_runner_cluster_effective_node_role == 'server' else 'github-runner-k3s-agent' }}"
+# Derived, never set directly: the Compose service and the named volume that holds /etc/rancher/node (the node's password) for this host's role, as docker-compose.yml names them, and the volume's name in Docker, which Compose forms from the project and the volume's key. The role seeds the volume from the running container before the first recreate that mounts it (tasks/node_password.yml).
+github_runner_cluster_node_service: "{{ 'k3s' if github_runner_cluster_effective_node_role == 'server' else 'k3s-agent' }}"
+github_runner_cluster_node_password_volume_key: "{{ 'k3s-node' if github_runner_cluster_effective_node_role == 'server' else 'k3s-agent-node' }}"
+github_runner_cluster_node_password_volume: "{{ github_runner_cluster_compose_project }}_{{ github_runner_cluster_node_password_volume_key }}"
 
 # macOS hosts only (Linux hosts are never touched): whether the role makes the container runtime come back after a reboot. On a Colima host it installs a per-user launchd agent that starts the Colima profile at login, loads it, and starts the profile at once if it is stopped. true (the default) does that for Colima hosts and nothing for the others: the role cannot start Docker Desktop, whose start-at-login setting is documented in the README. false installs nothing and leaves an agent from an earlier run as it is. Either way the end checks fail unless the runtime is up and the node's container is running.
 github_runner_cluster_runtime_autostart: true
