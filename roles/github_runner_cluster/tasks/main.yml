@@ -49,6 +49,9 @@
 - name: Check the k3s version against what this node and the cluster run now
   ansible.builtin.include_tasks: running_version.yml
 
+- name: Check etcd's heartbeat interval and election timeout
+  ansible.builtin.include_tasks: etcd_timing.yml
+
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-

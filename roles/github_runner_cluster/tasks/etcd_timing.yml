@@ -1,0 +1,54 @@
+---
+# Checks etcd's heartbeat interval and election timeout (github_runner_cluster_etcd_heartbeat_interval, github_runner_cluster_etcd_election_timeout) before the role changes anything on the host. Run after the topology is known, since the servers must agree. Both unset is the default and passes: k3s then keeps its own timing.
+
+- name: Fail if only one of etcd's heartbeat interval and election timeout is set
+  # etcd requires the election timeout to be at least five times the heartbeat interval, which cannot be judged against the other value's k3s default without knowing it, so the two are set together.
+  ansible.builtin.assert:
+    that: (github_runner_cluster_etcd_heartbeat_interval | string | length > 0) == (github_runner_cluster_etcd_election_timeout | string | length > 0)
+    quiet: true
+    fail_msg: >-
+      github_runner_cluster_etcd_heartbeat_interval is '{{ github_runner_cluster_etcd_heartbeat_interval }}' and
+      github_runner_cluster_etcd_election_timeout is '{{ github_runner_cluster_etcd_election_timeout }}'; set both or neither.
+      Nothing was changed.
+
+- name: Fail if etcd's heartbeat interval or election timeout is not a positive whole number of milliseconds
+  ansible.builtin.assert:
+    that:
+      - (github_runner_cluster_etcd_heartbeat_interval | string) is match('^[1-9][0-9]*\\Z')
+      - (github_runner_cluster_etcd_election_timeout | string) is match('^[1-9][0-9]*\\Z')
+    quiet: true
+    fail_msg: >-
+      github_runner_cluster_etcd_heartbeat_interval is '{{ github_runner_cluster_etcd_heartbeat_interval }}' and
+      github_runner_cluster_etcd_election_timeout is '{{ github_runner_cluster_etcd_election_timeout }}'; each must be a
+      positive whole number of milliseconds. Nothing was changed.
+  when: github_runner_cluster_etcd_heartbeat_interval | string | length > 0
+
+- name: Fail if etcd's election timeout is under five times its heartbeat interval
+  ansible.builtin.assert:
+    that: (github_runner_cluster_etcd_election_timeout | int) >= 5 * (github_runner_cluster_etcd_heartbeat_interval | int)
+    quiet: true
+    fail_msg: >-
+      github_runner_cluster_etcd_election_timeout ({{ github_runner_cluster_etcd_election_timeout }} ms) must be at least five
+      times github_runner_cluster_etcd_heartbeat_interval ({{ github_runner_cluster_etcd_heartbeat_interval }} ms), which is
+      {{ 5 * (github_runner_cluster_etcd_heartbeat_interval | int) }} ms; etcd refuses to start with a shorter one. Nothing was changed.
+  when: github_runner_cluster_etcd_heartbeat_interval | string | length > 0
+
+- name: Fail if the cluster's servers are given different etcd timing
+  # Every host is compared through hostvars, its own included, so the result is the same on whichever host runs it, and under --limit to the host that is out of step. etcd members that disagree on the heartbeat interval or election timeout elect and fail over unreliably. Changing the timing means changing it for the whole group and applying it to every server (see the role README).
+  vars:
+    github_runner_cluster_etcd_timing_by_server: >-
+      {%- set by_server = {} -%}
+      {%- for server in github_runner_cluster_topology.servers -%}
+      {%- set heartbeat = hostvars[server].github_runner_cluster_etcd_heartbeat_interval | default('') | string -%}
+      {%- set election = hostvars[server].github_runner_cluster_etcd_election_timeout | default('') | string -%}
+      {%- set _ = by_server.update({server: (heartbeat ~ ' ms heartbeat, ' ~ election ~ ' ms election') if (heartbeat ~ election) | length > 0 else "k3s's own"}) -%}
+      {%- endfor -%}
+      {{ by_server }}
+  ansible.builtin.assert:
+    that: github_runner_cluster_etcd_timing_by_server.values() | unique | list | length <= 1
+    quiet: true
+    fail_msg: >-
+      The servers of {{ github_runner_cluster_group }} do not all have the same etcd timing
+      ({% for server, timing in github_runner_cluster_etcd_timing_by_server.items() %}{{ server }}: {{ timing }}{{ '; ' if not loop.last }}{% endfor %}).
+      Set github_runner_cluster_etcd_heartbeat_interval and github_runner_cluster_etcd_election_timeout once for the whole group.
+      Nothing was changed.

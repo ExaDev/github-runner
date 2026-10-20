@@ -1,7 +1,7 @@
 #!/bin/sh
 # Entry point for the k3s and k3s-agent services in docker-compose.yml: starts Tailscale inside the node's own container, then k3s with its --vpn-auth integration, so each node joins the mesh as its own device. Bind-mounted from the Compose project directory the role manages (github_runner_cluster_dir) rather than baked into the k3s image, so a host picks up a change to it with the Compose file that uses it, without rebuilding an image Compose would not otherwise rebuild.
 #
-# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST and K3S_DATASTORE (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below).
+# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST, K3S_DATASTORE, K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below).
 # No set -e: a failed `tailscale up` falls through to waiting for an address, as it always has, rather than exiting and restarting the container.
 set -u
 
@@ -15,6 +15,18 @@ node_taint_flags=""
 for node_taint in ${K3S_NODE_TAINTS:-}; do
   node_taint_flags="$node_taint_flags --node-taint $node_taint"
 done
+
+# Sets etcd_timing_flags from etcd's timing, for the server only (the agent runs no etcd): K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT, in milliseconds, both set or both empty (the role checks that the election timeout is at least five times the heartbeat interval, and that every server has the same values). Empty leaves etcd on k3s's own timing. Each is passed as an --etcd-arg, which k3s also hands to the temporary etcd it starts on every restart to reconcile with an initialised datastore; these two flags do not change what that instance binds to, unlike the listen-peer-urls override that once broke it (see the README's known issues).
+set_etcd_timing_flags() {
+  etcd_timing_flags=""
+  if [ -n "${K3S_ETCD_HEARTBEAT_INTERVAL:-}" ]; then
+    etcd_timing_flags="$etcd_timing_flags --etcd-arg=heartbeat-interval=$K3S_ETCD_HEARTBEAT_INTERVAL"
+  fi
+  if [ -n "${K3S_ETCD_ELECTION_TIMEOUT:-}" ]; then
+    etcd_timing_flags="$etcd_timing_flags --etcd-arg=election-timeout=$K3S_ETCD_ELECTION_TIMEOUT"
+  fi
+}
+set_etcd_timing_flags
 
 # k3s's own vpn-auth integration only runs `tailscale up`; it does not start the daemon itself (without this, k3s fails outright with "tailscale up failed: ... it doesn't appear to be running"). Waits for the control socket before anything talks to it.
 mkdir -p /var/run/tailscale /var/lib/tailscale
@@ -83,6 +95,8 @@ wait_for_join_server() {
 # --cluster-init (only when K3S_JOIN_SERVER_URL is unset, and K3S_DATASTORE is not sqlite) bootstraps embedded etcd, or converts an existing single-node SQLite datastore to it, the one migration k3s documents; once initialised, k3s ignores it on restart, so it stays in place permanently. A host with K3S_JOIN_SERVER_URL set passes --server <url> instead and joins as another control-plane/etcd member.
 #
 # --tls-san is added once per entry of K3S_TLS_SAN_LIST: every server's certificate must cover every server's own mesh name, since a client reaching any server directly by that name needs the certificate to match it.
+#
+# --etcd-arg=heartbeat-interval and --etcd-arg=election-timeout are added when set (set_etcd_timing_flags above), for peers whose traffic goes through a relay and so exceeds etcd's default timing.
 mesh_server_args() {
   set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 \
     --vpn-auth="$vpn_auth" \
@@ -94,6 +108,7 @@ mesh_server_args() {
     set -- "$@" --cluster-init
   fi
   for san in ${K3S_TLS_SAN_LIST:-}; do set -- "$@" --tls-san "$san"; done
+  for flag in $etcd_timing_flags; do set -- "$@" "$flag"; done
   server_args="$*"
 }
 
@@ -101,6 +116,7 @@ mesh_server_args() {
 direct_server_args() {
   set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443
   for san in ${K3S_TLS_SAN_LIST:-}; do set -- "$@" --tls-san "$san"; done
+  for flag in $etcd_timing_flags; do set -- "$@" "$flag"; done
   server_args="$*"
 }
 
