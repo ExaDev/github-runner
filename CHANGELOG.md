@@ -1,3 +1,17 @@
+## [2.7.5](https://github.com/ExaDev/github-runner/compare/v2.7.4...v2.7.5) (2026-10-20)
+
+### Bug Fixes
+
+* **autoscaler:** count a runner pod with no metrics yet at its limit, keep a slot per set ([01d41fd](https://github.com/ExaDev/github-runner/commit/01d41fd6f1196774cb21ac5f22f13279b010a833)), closes [#134](https://github.com/ExaDev/github-runner/issues/134)
+
+### Documentation
+
+* **autoscaler:** describe unmeasured runner pods and the one-slot minimum ([082124d](https://github.com/ExaDev/github-runner/commit/082124d0b27ed40a7e31e1ad34b2d6dcb9205381)), closes [#134](https://github.com/ExaDev/github-runner/issues/134)
+
+### Tests
+
+* **autoscaler:** show a runner pod with no metrics on a real cluster ([ca182c0](https://github.com/ExaDev/github-runner/commit/ca182c04008e0183923d54f1aea8f527571b9b98)), closes [#134](https://github.com/ExaDev/github-runner/issues/134)
+
 ## [2.7.4](https://github.com/ExaDev/github-runner/compare/v2.7.3...v2.7.4) (2026-10-20)
 
 ### Bug Fixes
