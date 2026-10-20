@@ -1,0 +1,101 @@
+---
+# Checks the memory-pressure regrading settings (github_runner_cluster_regrade and the settings beside it) before the role changes anything on the host. Run after the topology is known: whether a step down can work depends on the other servers. Off is the default and passes.
+
+- name: Fail if regrading is not true or false
+  ansible.builtin.assert:
+    that: github_runner_cluster_regrade is boolean
+    quiet: true
+    fail_msg: github_runner_cluster_regrade is '{{ github_runner_cluster_regrade }}'; it must be true or false. Nothing was changed.
+
+- name: Check the settings of a host that regrades
+  when: github_runner_cluster_regrade | bool
+  block:
+    - name: Fail if this host is not a server
+      # An agent has no control plane to shed and no etcd vote to keep.
+      ansible.builtin.assert:
+        that: github_runner_cluster_effective_node_role == 'server'
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade is true, but {{ inventory_hostname }} is an agent. Regrading steps a server down while it
+          keeps its etcd vote; an agent has neither. Set it for the servers only. Nothing was changed.
+
+    - name: Fail if no other server of the group could keep the cluster's API up
+      # At etcd-only this server has no API server of its own, and the core drains it, takes its Lease and brings it back through another server's.
+      ansible.builtin.assert:
+        that: github_runner_cluster_topology.servers | reject('equalto', inventory_hostname) | list | length > 0
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade is true, but {{ inventory_hostname }} is the only server in {{ github_runner_cluster_group }}.
+          A server at etcd-only has no API server, and needs another server's to be drained, coordinated and brought back. Nothing
+          was changed.
+
+    - name: Fail if this host runs the in-cluster Headscale server
+      # headscale_in_cluster runs Headscale as a static pod on the bootstrap server's kubelet, which etcd-only switches off, taking the mesh's control server with it.
+      ansible.builtin.assert:
+        that: not (github_runner_cluster_mesh == 'headscale_in_cluster' and github_runner_cluster_effective_bootstrap | bool)
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade is true, but {{ inventory_hostname }} is the bootstrap server of a headscale_in_cluster mesh,
+          whose Headscale server is a static pod on this server's kubelet; etcd-only would switch it off and take the mesh's control
+          server with it. Regrade the other servers. Nothing was changed.
+
+    - name: Fail if stepping up is neither automatic nor manual
+      ansible.builtin.assert:
+        that: github_runner_cluster_regrade_step_up in ['automatic', 'manual']
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade_step_up is '{{ github_runner_cluster_regrade_step_up }}'; it must be automatic or manual.
+          Nothing was changed.
+
+    - name: Fail if a time or the available-memory floor is not a positive whole number
+      ansible.builtin.assert:
+        that: (lookup('ansible.builtin.vars', item) | string) is match('^[1-9][0-9]*\Z')
+        quiet: true
+        fail_msg: >-
+          {{ item }} is '{{ lookup('ansible.builtin.vars', item) }}'; it must be a positive whole number. Nothing was changed.
+      loop:
+        - github_runner_cluster_regrade_pressure_window_seconds
+        - github_runner_cluster_regrade_available_floor_percent
+        - github_runner_cluster_regrade_sample_seconds
+        - github_runner_cluster_regrade_sustain_seconds
+        - github_runner_cluster_regrade_cooldown_seconds
+        - github_runner_cluster_regrade_operation_timeout_seconds
+        - github_runner_cluster_regrade_lease_duration_seconds
+
+    - name: Fail if the pressure threshold is not a number from 0 to 100
+      ansible.builtin.assert:
+        that:
+          - (github_runner_cluster_regrade_pressure_threshold | string) is match('^[0-9]+(\.[0-9]+)?\Z')
+          - (github_runner_cluster_regrade_pressure_threshold | float) <= 100
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade_pressure_threshold is '{{ github_runner_cluster_regrade_pressure_threshold }}'; it must be a
+          percentage, a number from 0 to 100. Nothing was changed.
+
+    - name: Fail if the available-memory floor is over 100 percent
+      ansible.builtin.assert:
+        that: (github_runner_cluster_regrade_available_floor_percent | int) <= 100
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade_available_floor_percent is {{ github_runner_cluster_regrade_available_floor_percent }}; it is a
+          share of MemTotal, so it must be at most 100. Nothing was changed.
+
+    - name: Fail if the cooldown is shorter than the pressure window
+      # The average a reading is judged by still holds the data from before the step for a whole window afterwards.
+      ansible.builtin.assert:
+        that: (github_runner_cluster_regrade_cooldown_seconds | int) >= (github_runner_cluster_regrade_pressure_window_seconds | int)
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade_cooldown_seconds ({{ github_runner_cluster_regrade_cooldown_seconds }}) must be at least
+          github_runner_cluster_regrade_pressure_window_seconds ({{ github_runner_cluster_regrade_pressure_window_seconds }}), or a
+          reading after a step still holds data from before it. Nothing was changed.
+
+    - name: Fail if the Lease can run out while a step is still working
+      # A step is a drain, a stop that waits for k3s to shut down, and the wait for the server to serve again, each bounded by the operation timeout.
+      ansible.builtin.assert:
+        that: (github_runner_cluster_regrade_lease_duration_seconds | int) >= 3 * (github_runner_cluster_regrade_operation_timeout_seconds | int)
+        quiet: true
+        fail_msg: >-
+          github_runner_cluster_regrade_lease_duration_seconds ({{ github_runner_cluster_regrade_lease_duration_seconds }}) must be at least
+          three times github_runner_cluster_regrade_operation_timeout_seconds ({{ github_runner_cluster_regrade_operation_timeout_seconds }}),
+          or another server could take the Lease while this one is still stepping. Nothing was changed.
