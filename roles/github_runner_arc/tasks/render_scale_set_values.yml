@@ -3,12 +3,11 @@
 
 - name: Set the capability store settings for {{ profile.label }}
   ansible.builtin.set_fact:
-    # None when the profile copies into each pod; the filters take the store's root on the node, its mount path in the pod and the image that publishes its entries.
-    github_runner_arc_capability_store_settings: >-
-      {{
-        {'host_path': github_runner_arc_capability_store_host_path, 'path': github_runner_arc_capability_store_path, 'image': github_runner_arc_capability_store_image}
-        if profile.capability_store else none
-      }}
+    # The store's root on the node, its mount path in the pod and the image that publishes its entries. The filters below are given these, or none for a profile that copies into each pod, inside their own expressions: a fact set to none comes back as the string "None" on some ansible-core releases (2.16 among them).
+    github_runner_arc_capability_store_settings:
+      host_path: "{{ github_runner_arc_capability_store_host_path }}"
+      path: "{{ github_runner_arc_capability_store_path }}"
+      image: "{{ github_runner_arc_capability_store_image }}"
 
 - name: Render the Helm values for {{ profile.label }}
   ansible.builtin.set_fact:
@@ -21,7 +20,8 @@
             profile.capabilities, github_runner_arc_capabilities, github_runner_arc_tool_cache_path, github_runner_arc_sysroot_path,
             github_runner_arc_node_cache_path, github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_dir(profile.namespace, profile.release),
             github_runner_arc_runner_uid, github_runner_arc_runner_gid,
-            github_runner_arc_job_started_hooks_dir, github_runner_arc_job_started_configmap, github_runner_arc_capability_store_settings)
+            github_runner_arc_job_started_hooks_dir, github_runner_arc_job_started_configmap,
+            github_runner_arc_capability_store_settings if profile.capability_store else none)
       }}
   vars:
     github_runner_arc_values_source: >-
@@ -72,7 +72,10 @@
 - name: Move the dind sidecar's externals copy into the capability store for {{ profile.label }}
   ansible.builtin.set_fact:
     github_runner_arc_capability_store_render: >-
-      {{ github_runner_arc_scale_set_values | exadev.github_runner.arc_capability_store_externals(github_runner_arc_capability_store_settings, github_runner_arc_runner_uid, github_runner_arc_runner_gid) }}
+      {{
+        github_runner_arc_scale_set_values | exadev.github_runner.arc_capability_store_externals(
+          github_runner_arc_capability_store_settings if profile.capability_store else none, github_runner_arc_runner_uid, github_runner_arc_runner_gid)
+      }}
 
 - name: Fail when the values cannot keep the externals copy in the capability store for {{ profile.label }}
   ansible.builtin.fail:
