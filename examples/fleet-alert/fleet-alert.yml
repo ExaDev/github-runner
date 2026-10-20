@@ -1,0 +1,71 @@
+name: Fleet alert
+
+# Copy this file to .github/workflows/ in a repository that is not served by the fleet, and set the repository variables and secrets listed below. It reads the heartbeat's fleet-health.json from its gist and announces an outage that has lasted longer than a window (see "Fleet-down notification" in the collection's README).
+#
+# It runs on GitHub-hosted ubuntu-latest on purpose: a job routed to the fleet would not start when the fleet is down, which is exactly when this has to run. Do not change runs-on to the fleet's label or to runner-fallback-action's output.
+#
+# Repository variables:
+#   FLEET_ALERT_GIST_ID           the heartbeat gist's id (required)
+#   FLEET_ALERT_AFTER_SECONDS     the window (optional, the script's default applies when unset)
+#   FLEET_ALERT_ISSUE_REPO        owner/repo to open the issue in (optional; defaults to this repository; set to "none" to turn issue delivery off)
+#   FLEET_ALERT_SCRIPT_REF        the collection tag to take scripts/fleet-alert.sh from (default: main; pin a release tag in practice)
+# Repository secrets:
+#   FLEET_ALERT_WEBHOOK_URL       a webhook that receives a JSON POST (optional)
+#   FLEET_ALERT_ISSUE_TOKEN       a token that can write issues in FLEET_ALERT_ISSUE_REPO, needed only when that is another repository; this repository's own issues use the workflow's token
+#
+# Issue titles and bodies name nodes and the heartbeat's reasons, so open them in a private repository.
+
+on:
+  schedule:
+    # GitHub may delay a scheduled run, and does not run one more often than every five minutes. Pick a spacing well inside the window: the window is how long the outage has lasted, this is how soon after that it is noticed.
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  # Two passes at once could both find no open issue and each open one.
+  group: fleet-alert
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Check the fleet
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # The secrets context is not available to a step's `if`, so the presence of the webhook is carried in the job's environment.
+      WEBHOOK_CONFIGURED: ${{ secrets.FLEET_ALERT_WEBHOOK_URL != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ExaDev/github-runner
+          ref: ${{ vars.FLEET_ALERT_SCRIPT_REF || 'main' }}
+          sparse-checkout: scripts/fleet-alert.sh
+          path: collection
+      - name: Restore the webhook's record of what it announced
+        if: env.WEBHOOK_CONFIGURED == 'true'
+        uses: actions/cache@v6
+        with:
+          path: fleet-alert-state.json
+          # A cache entry is never overwritten, so each run saves under its own key and the next restores the newest.
+          key: fleet-alert-state-${{ github.run_id }}
+          restore-keys: fleet-alert-state-
+      - name: Check the heartbeat and announce
+        env:
+          FLEET_ALERT_GIST_ID: ${{ vars.FLEET_ALERT_GIST_ID }}
+          FLEET_ALERT_GIST_TOKEN: ${{ github.token }}
+          FLEET_ALERT_AFTER_SECONDS: ${{ vars.FLEET_ALERT_AFTER_SECONDS }}
+          FLEET_ALERT_ISSUE_REPO: ${{ vars.FLEET_ALERT_ISSUE_REPO == 'none' && '' || vars.FLEET_ALERT_ISSUE_REPO || github.repository }}
+          FLEET_ALERT_ISSUE_TOKEN: ${{ secrets.FLEET_ALERT_ISSUE_TOKEN || github.token }}
+          FLEET_ALERT_WEBHOOK_URL: ${{ secrets.FLEET_ALERT_WEBHOOK_URL }}
+          FLEET_ALERT_STATE_FILE: ${{ env.WEBHOOK_CONFIGURED == 'true' && 'fleet-alert-state.json' || '' }}
+        run: |
+          set -euo pipefail
+          # An unset variable arrives as an empty string, which the script reads as its default.
+          if [ -z "$FLEET_ALERT_AFTER_SECONDS" ]; then
+            unset FLEET_ALERT_AFTER_SECONDS
+          fi
+          bash collection/scripts/fleet-alert.sh
