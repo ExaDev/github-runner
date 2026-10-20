@@ -236,7 +236,7 @@ class ComposeFileTest(unittest.TestCase):
     def test_every_service_built_from_the_k3s_context_requires_both_versions(self) -> None:
         # Compose stops at the first unset required variable in the whole file, so the render test below cannot tell whether a second service would also refuse; this reads each service's own arguments.
         services = yaml.safe_load(COMPOSE.read_text())["services"]
-        built = {name: service["build"]["args"] for name, service in services.items() if "build" in service}
+        built = {name: service["build"]["args"] for name, service in services.items() if service.get("build", {}).get("context") == "./k3s"}
         self.assertEqual(sorted(built), ["k3s", "k3s-agent"])
         for name, args in built.items():
             for variable in ("K3S_VERSION", "TAILSCALE_VERSION"):
