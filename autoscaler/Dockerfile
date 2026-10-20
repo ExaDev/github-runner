@@ -17,8 +17,10 @@ RUN apk add --no-cache bash curl jq kubectl
 
 COPY autoscaler/loop.sh /app/loop.sh
 COPY scripts/autoscaler.sh /app/scripts/autoscaler.sh
-# The ceiling program autoscaler.sh runs from its own directory.
+# The jq programs autoscaler.sh runs from its own directory, and the module they share.
 COPY scripts/autoscaler-ceiling.jq /app/scripts/autoscaler-ceiling.jq
+COPY scripts/autoscaler-usage.jq /app/scripts/autoscaler-usage.jq
+COPY scripts/autoscaler-quantity.jq /app/scripts/autoscaler-quantity.jq
 COPY scripts/psi-reporter.sh /app/scripts/psi-reporter.sh
 COPY scripts/node-cache-pruner.sh /app/scripts/node-cache-pruner.sh
 RUN chmod +x /app/loop.sh /app/scripts/autoscaler.sh /app/scripts/psi-reporter.sh /app/scripts/node-cache-pruner.sh

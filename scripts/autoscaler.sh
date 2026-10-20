@@ -45,8 +45,15 @@ REBALANCE_CONFIRM_KEY="rebalance-confirm-count"
 CEILING_KEY="ceiling"
 # The program that works the ceiling out, beside this script both in the repository and in the image.
 CEILING_PROGRAM="$(dirname "$0")/autoscaler-ceiling.jq"
-# A pooled target is never rebalanced below this many runners, so a quiet one can always start a job.
-REBALANCE_MIN_MAX=1
+# The program that works out each pooled namespace's memory usage from the metrics API, and the module both programs take quantities from, all beside this script; jq finds the module through -L.
+USAGE_PROGRAM="$(dirname "$0")/autoscaler-usage.jq"
+QUANTITY_MODULE="$(dirname "$0")/autoscaler-quantity.jq"
+JQ_MODULES="$(dirname "$QUANTITY_MODULE")"
+# Files the poll keeps between its phases, such as each target's runner pods, which can be more than one argument may hold.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+# No pooled target is ever lowered or rebalanced below this many runners. A scale set at 0 asks for no runner, so a job queued for it waits with nothing to start it, and the cluster keeps no record of a queued job the autoscaler could see to bring it back; one slot each is the least that lets every set start a job.
+MIN_MAX_PER_TARGET=1
 JOB_MEMORY_MAX_ENTRIES=2048
 JOB_MEMORY_RETENTION_SECONDS=$(( 30 * 24 * 60 * 60 ))
 
@@ -135,7 +142,7 @@ apply_new_max() {
   write_status "$total" "$reason" "$headroom_mib"
 }
 
-# Lowers the combined total toward $1 by taking slack (a target's own MAX minus its own R) from whichever pooled target currently has the most of it, one runner at a time, so the target closest to actually using its allotment keeps the most of what it has. Never takes a target below its own R: a currently-running job must never be orphaned by its own scale set shrinking under it, so the combined result can stay above $1 when demand alone already exceeds it.
+# Lowers the combined total toward $1 by taking slack (a target's own MAX above the larger of its own R and MIN_MAX_PER_TARGET) from whichever pooled target currently has the most of it, one runner at a time, so the target closest to actually using its allotment keeps the most of what it has. Never takes a target below its own R, since a currently-running job must never be orphaned by its own scale set shrinking under it, nor below MIN_MAX_PER_TARGET, since a set at 0 cannot start a job queued for it; the combined result can stay above $1 when those alone already exceed it.
 lower_to() {
   local combined_target=$1 i combined=0
   for ((i = 0; i < ${#TARGETS[@]}; i++)); do
@@ -145,13 +152,14 @@ lower_to() {
   while [ "$combined" -gt "$combined_target" ]; do
     local best=-1 best_slack=0
     for ((i = 0; i < ${#TARGETS[@]}; i++)); do
-      local slack=$(( NEW_MAX[i] - R[i] ))
+      local keep=$(( R[i] > MIN_MAX_PER_TARGET ? R[i] : MIN_MAX_PER_TARGET ))
+      local slack=$(( NEW_MAX[i] - keep ))
       if [ "$slack" -gt "$best_slack" ]; then
         best_slack=$slack
         best=$i
       fi
     done
-    [ "$best" -ge 0 ] || break # every target is already down at its own R; can't lower further without orphaning a running job
+    [ "$best" -ge 0 ] || break # every target is already down at its own R or MIN_MAX_PER_TARGET; lowering further would orphan a running job or leave a set unable to start one
     NEW_MAX[best]=$(( NEW_MAX[best] - 1 ))
     combined=$(( combined - 1 ))
   done
@@ -171,7 +179,7 @@ raise_by_one() {
   NEW_MAX[best]=$(( NEW_MAX[best] + 1 ))
 }
 
-# Moves one slot from the pooled target with the most spare slots to a target that has used all of its own, without changing the combined total, so a pool at its ceiling is not stuck with an idle target's share while another queues. Sets NEW_MAX and returns 0 when a move applies, 1 when none does. A target counts as saturated when its running count has reached its own maxRunners; a donor must keep at least its running count and at least REBALANCE_MIN_MAX runners after giving one up. Ties go to the first target, so a poll's choice is stable.
+# Moves one slot from the pooled target with the most spare slots to a target that has used all of its own, without changing the combined total, so a pool at its ceiling is not stuck with an idle target's share while another queues. Sets NEW_MAX and returns 0 when a move applies, 1 when none does. A target counts as saturated when its running count has reached its own maxRunners; a donor must keep at least its running count and at least MIN_MAX_PER_TARGET runners after giving one up. Ties go to the first target, so a poll's choice is stable.
 rebalance_one() {
   local i saturated=-1 donor=-1 donor_slack=0 slack
   for ((i = 0; i < ${#TARGETS[@]}; i++)); do
@@ -184,7 +192,7 @@ rebalance_one() {
   for ((i = 0; i < ${#TARGETS[@]}; i++)); do
     [ "$i" -ne "$saturated" ] || continue
     slack=$(( MAX[i] - R[i] ))
-    [ "$(( MAX[i] - 1 ))" -ge "$REBALANCE_MIN_MAX" ] || continue
+    [ "$(( MAX[i] - 1 ))" -ge "$MIN_MAX_PER_TARGET" ] || continue
     if [ "$slack" -gt "$donor_slack" ]; then
       donor_slack=$slack
       donor=$i
@@ -253,7 +261,7 @@ measure_ceiling() (
   kubectl get pods --all-namespaces --field-selector=status.phase!=Succeeded,status.phase!=Failed -o json > "$work/pods" \
     || { echo "could not list the pods that hold requests" >&2; exit 1; }
   jq -c --slurpfile templates "$work/templates" --slurpfile nodes "$work/nodes" --argjson pooled "$(printf '%s\n' "${NAMESPACES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
-    -f "$CEILING_PROGRAM" "$work/pods"
+    -L "$JQ_MODULES" -f "$CEILING_PROGRAM" "$work/pods"
 )
 
 # For a failure before every target's current state is known: fail_safe patches from that state, so with none or part of it, the only honest outcome is to stop loudly (the API server is unreachable, so nothing could be patched anyway).
@@ -298,8 +306,10 @@ for i in "${!TARGETS[@]}"; do
   MAX[i]=$max
 
   # Runner pods the scheduler has found no node for. The memory budget below sums every node's capacity, so it cannot see that a node is cordoned or tainted (disk pressure, for one) or that a pod's request fits no single node; a pod stuck Unschedulable is the direct evidence that the budgeted capacity is not real.
-  unschedulable="$(kubectl get pods -n "$namespace" -l actions-ephemeral-runner=True -o json 2>/dev/null \
-    | jq '[.items[] | select(any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))] | length')" \
+  # The list is kept for phase 2, which counts a placed runner pod with no metrics yet at its limit.
+  kubectl get pods -n "$namespace" -l actions-ephemeral-runner=True -o json > "$WORK/runner-pods-$i" 2>/dev/null \
+    || die "could not list ${target}'s runner pods"
+  unschedulable="$(jq '[.items[] | select(any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable"))] | length' "$WORK/runner-pods-$i")" \
     || die "could not list ${target}'s unschedulable runner pods"
   case "$unschedulable" in ''|*[!0-9]*) die "${target}'s unschedulable runner pod count was not a plain integer ('$unschedulable')" ;; esac
   UNSCHEDULABLE_TOTAL=$(( UNSCHEDULABLE_TOTAL + unschedulable ))
@@ -307,6 +317,9 @@ done
 
 # Phase 2: memory measurements. Any failure fails safe, which can now lower every target because phase 1 read them all.
 USAGE_MIB=0
+# Memory assumed for the runner pods that have no metrics yet, each at its own limit, and how many there are.
+ASSUMED_MIB=0
+UNMEASURED_PODS=0
 JOB_OBSERVATIONS="[]"
 WH_MIB=0 # the largest pooled target's own pod memory limit, used as the headroom threshold: raising or lowering must leave room for whichever pooled target's next pod would be the largest.
 for i in "${!TARGETS[@]}"; do
@@ -322,16 +335,15 @@ for i in "${!TARGETS[@]}"; do
   wh_mib="$(to_mib "$wh_raw")" || fail_safe "could not parse ${target}'s runner pod memory limit ('$wh_raw')"
   [ "$wh_mib" -gt "$WH_MIB" ] && WH_MIB=$wh_mib
 
-  # Actual current memory usage of running runner pods, summed — this, not a static per-pod request/limit, is the entire point of "usage-driven". Requires metrics-server; k3s bundles it by default unless explicitly disabled with --disable metrics-server (this repo's docker-compose.yml only disables traefik).
-  top_output="$(kubectl top pod -n "$namespace" --no-headers 2>/dev/null)" \
-    || fail_safe "kubectl top pod failed for ${namespace} (metrics-server unreachable?)"
-  if [ -n "$top_output" ]; then
-    while read -r pod_name _cpu mem _rest; do
-      pod_mib="$(to_mib "$mem")" || fail_safe "could not parse a runner pod's memory usage in ${namespace} ('$mem')"
-      USAGE_MIB=$(( USAGE_MIB + pod_mib ))
-      JOB_OBSERVATIONS="$(jq -c --arg namespace "$namespace" --arg pod "$pod_name" --argjson mib "$pod_mib" '. + [{namespace: $namespace, pod: $pod, mib: $mib}]' <<< "$JOB_OBSERVATIONS")"
-    done <<< "$top_output"
-  fi
+  # Actual current memory usage of running runner pods, summed: this, not a static per-pod request/limit, is the entire point of "usage-driven". Read from the metrics API's list for the namespace, not `kubectl top pod`, which fails the whole namespace when one pod has no metrics yet, as every new runner pod has none until metrics-server first samples it. The list fails only when the metrics API itself does, which fails safe; a pod missing from it is unmeasured (scripts/autoscaler-usage.jq). Requires metrics-server; k3s bundles it by default unless explicitly disabled with --disable metrics-server (this repo's docker-compose.yml only disables traefik).
+  kubectl get --raw "/apis/metrics.k8s.io/v1beta1/namespaces/${namespace}/pods" > "$WORK/metrics-$i" 2>"$WORK/metrics-error" \
+    || fail_safe "the metrics API failed for ${namespace} ($(tr '\n' ' ' < "$WORK/metrics-error"| sed 's/ $//'))"
+  usage="$(jq -c -L "$JQ_MODULES" --slurpfile pods "$WORK/runner-pods-$i" --argjson fallback_mib "$wh_mib" -f "$USAGE_PROGRAM" "$WORK/metrics-$i")" \
+    || fail_safe "could not work out the runner pods' memory usage in ${namespace}"
+  USAGE_MIB=$(( USAGE_MIB + $(jq '.usage_mib' <<< "$usage") ))
+  ASSUMED_MIB=$(( ASSUMED_MIB + $(jq '.assumed_mib' <<< "$usage") ))
+  UNMEASURED_PODS=$(( UNMEASURED_PODS + $(jq '.unmeasured | length' <<< "$usage") ))
+  JOB_OBSERVATIONS="$(jq -c --arg namespace "$namespace" --argjson usage "$usage" '. + [$usage.observations[] | {namespace: $namespace, pod, mib}]' <<< "$JOB_OBSERVATIONS")"
 done
 
 # Capacity decisions never depend on this record, so a failure to keep it is reported and the poll carries on.
@@ -430,8 +442,10 @@ fi
 
 USABLE_BUDGET_MIB=$(( USABLE_BUDGET_GI * 1024 ))
 HEADROOM_MIB=$(( USABLE_BUDGET_MIB - USAGE_MIB ))
+# The headroom left if every runner pod with no metrics yet were at its limit. Lowering is decided on what is measured, so a new pod never lowers the pool by itself; raising needs this worst case to leave room too, so it never counts on memory a new pod may yet take.
+WORST_HEADROOM_MIB=$(( HEADROOM_MIB - ASSUMED_MIB ))
 
-echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} node_pressure=${node_pressure} unmeasured_nodes=${unmeasured_nodes} unschedulable=${UNSCHEDULABLE_TOTAL} ceiling=${CEILING:-none} measured_ceiling=${CEILING_FRESH} ceiling_bound=${CEILING_BOUND:-none} targets=${TARGETS[*]}"
+echo "R_total=${R_TOTAL} maxRunners_total=${MAX_TOTAL} Wh=${WH_MIB}MiB usage=${USAGE_MIB}MiB headroom=${HEADROOM_MIB}MiB mem_available=${mem_available_pct}% pressure=${pressure} node_pressure=${node_pressure} unmeasured_nodes=${unmeasured_nodes} unmeasured_pods=${UNMEASURED_PODS} assumed=${ASSUMED_MIB}MiB unschedulable=${UNSCHEDULABLE_TOTAL} ceiling=${CEILING:-none} measured_ceiling=${CEILING_FRESH} ceiling_bound=${CEILING_BOUND:-none} targets=${TARGETS[*]}"
 
 # The ceiling is a hard cap on the pooled total, so a total above it (each profile's own static maxRunners can sum to more, every Helm upgrade restores those, and the ceiling falls when a node goes) is lowered to it even when nothing else is wrong. With no ceiling known at all there is nothing to compare with.
 over_ceiling=false
@@ -464,7 +478,7 @@ if [ "$pressure" = "true" ] || [ "$HEADROOM_MIB" -lt "$WH_MIB" ] || [ "$UNSCHEDU
   else
     write_status "$MAX_TOTAL" "steady: already at or below the safe target" "$HEADROOM_MIB"
   fi
-elif [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$CEILING_FRESH" = "true" ] && [ "$MAX_TOTAL" -lt "$CEILING" ] && [ "$unmeasured_nodes" -eq 0 ]; then
+elif [ "$WORST_HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$CEILING_FRESH" = "true" ] && [ "$MAX_TOTAL" -lt "$CEILING" ] && [ "$unmeasured_nodes" -eq 0 ]; then
   configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   confirm_count="$(configmap_get 'raise-confirm-count')"
   [ -n "$confirm_count" ] || confirm_count=0
@@ -482,6 +496,11 @@ elif [ "$CEILING_FRESH" != "true" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && { [ 
   configmap_set "raise-confirm-count" "0"
   configmap_set "$REBALANCE_CONFIRM_KEY" "0"
   write_status "$MAX_TOTAL" "steady: the ceiling could not be worked out from the nodes, so the pool is not raised" "$HEADROOM_MIB"
+elif [ "$WORST_HEADROOM_MIB" -lt "$WH_MIB" ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$CEILING" ]; then
+  # The measured headroom would raise the pool, but not with the runner pods that have no metrics yet at their limits. Hold until they are measured; nothing says there is pressure, so this does not lower either.
+  configmap_set "raise-confirm-count" "0"
+  configmap_set "$REBALANCE_CONFIRM_KEY" "0"
+  write_status "$MAX_TOTAL" "steady: ${UNMEASURED_PODS} runner pod(s) have no metrics yet, and at their limits (${ASSUMED_MIB}MiB) they would leave less than a pod's room, so the pool is not raised" "$HEADROOM_MIB"
 elif [ "$unmeasured_nodes" -gt 0 ] && [ "$HEADROOM_MIB" -ge "$WH_MIB" ] && [ "$MAX_TOTAL" -lt "$CEILING" ]; then
   # Headroom would raise the pool, but a node has no fresh pressure report, so whether it can take more is not known. Holding is the safe reading, and it is not lowering, since nothing says there is pressure.
   configmap_set "raise-confirm-count" "0"
