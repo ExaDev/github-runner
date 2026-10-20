@@ -51,6 +51,9 @@ services:
       # Empty (not :?required) on the bootstrap host - the one server with nothing to join. Every OTHER server host's own .env sets this to the bootstrap host's own URL.
       - K3S_JOIN_SERVER_URL=${K3S_JOIN_SERVER_URL:-}
       - K3S_NODE_TAINTS=${K3S_NODE_TAINTS:-}
+      # Both empty (k3s's own etcd timing) or both set, in milliseconds; the Ansible role checks them before templating .env. The agent has no etcd and takes neither.
+      - K3S_ETCD_HEARTBEAT_INTERVAL=${K3S_ETCD_HEARTBEAT_INTERVAL:-}
+      - K3S_ETCD_ELECTION_TIMEOUT=${K3S_ETCD_ELECTION_TIMEOUT:-}
     volumes:
       - k3s-data:/var/lib/rancher/k3s
       # Persists this container's own Tailscale device identity/keys across recreations - without this, every recreate would register a brand new device on the tailnet instead of reconnecting as the same one, since the join key is reusable by design.
