@@ -94,6 +94,7 @@ class HeartbeatTest(unittest.TestCase):
         configmap: dict[str, str] | None = None,
         nodes: list[dict[str, object]] | None = None,
         previous: dict[str, object] | None = None,
+        env: dict[str, str] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         state = self.dir / "state.json"
         state.write_text(
@@ -122,6 +123,7 @@ class HeartbeatTest(unittest.TestCase):
             "HEARTBEAT_GIST_ID": "test-gist",
             "HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS": str(UNSCHEDULABLE_AFTER_SECONDS),
             "HEARTBEAT_EXPECTED_SCALE_SETS": " ".join(EXPECTED),
+            **(env or {}),
         }
         result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
         files = {name: entry["content"] for name, entry in json.loads(body.read_text())["files"].items()} if body.exists() else {}
@@ -250,6 +252,22 @@ class HeartbeatTest(unittest.TestCase):
         self.assertEqual([(n["node"], n["control_plane"]) for n in health["not_ready_nodes"]], [("b", True), ("c", False)])  # type: ignore[attr-defined, union-attr]
         self.assertTrue(all(n["since"] == health["at"] for n in health["not_ready_nodes"]))  # type: ignore[attr-defined, union-attr]
 
+    def test_a_server_regrading_has_stepped_down_is_published_with_its_level(self) -> None:
+        nodes = [self.node("a", None), self.node("b", None, ready=False, control_plane=True, regrade_level="etcd-only"), self.node("c", None, ready=False, control_plane=True)]
+        health = self.health(nodes=nodes)
+        self.assertEqual([(n["node"], n["regrade_level"]) for n in health["not_ready_nodes"]], [("b", "etcd-only"), ("c", None)])  # type: ignore[attr-defined, union-attr]
+
+    def test_a_ready_server_at_a_level_below_full_is_not_listed(self) -> None:
+        # control-plane is cordoned and drained but still Ready, so there is nothing to report.
+        health = self.health(nodes=[self.node("a", None), self.node("b", None, control_plane=True, regrade_level="control-plane")])
+        self.assertEqual(health["not_ready_nodes"], [])
+
+    def test_the_label_the_level_is_read_from_can_be_changed(self) -> None:
+        node = self.node("b", None, ready=False, control_plane=True)
+        node["metadata"]["labels"]["example.test/level"] = "etcd-only"  # type: ignore[index]
+        _, files = self.tick(nodes=[self.node("a", None), node], env={"HEARTBEAT_REGRADE_LEVEL_LABEL": "example.test/level"})
+        self.assertEqual(json.loads(files[HEALTH_FILE])["not_ready_nodes"][0]["regrade_level"], "etcd-only")
+
     def test_a_node_still_not_ready_keeps_the_onset_the_last_tick_published(self) -> None:
         previous = {"healthy": True, "unhealthy_since": None, "not_ready_nodes": [{"node": "b", "control_plane": True, "since": "2000-01-01T00:00:00Z"}]}
         nodes = [self.node("a", None), self.node("b", None, ready=False, control_plane=True), self.node("c", None, ready=False)]
@@ -280,9 +298,11 @@ class HeartbeatTest(unittest.TestCase):
 
     ANNOTATION = "github-runner.exadev.com/deployed-version"
 
-    def node(self, name: str, version: str | None, ready: bool = True, control_plane: bool = False) -> dict[str, object]:
+    def node(self, name: str, version: str | None, ready: bool = True, control_plane: bool = False, regrade_level: str | None = None) -> dict[str, object]:
         annotations = {} if version is None else {self.ANNOTATION: version}
         labels = {"node-role.kubernetes.io/control-plane": "true"} if control_plane else {}
+        if regrade_level is not None:
+            labels["github-runner.exadev.com/regrade-level"] = regrade_level
         return {
             "metadata": {"name": name, "annotations": annotations, "labels": labels},
             "status": {"conditions": [{"type": "Ready", "status": "True" if ready else "False"}]},

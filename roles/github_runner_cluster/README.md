@@ -207,7 +207,7 @@ A level is applied by the Docker actuator, which records it in a file on the k3s
 
 A step that restarts the container returns only when etcd serves again, read from the container's log since it started, and, for a level that runs the agent, when the node reports Ready on a heartbeat from the new container. The Lease is released as soon as a step returns, so a step that returned early would let another server step on top of an etcd that has not come back.
 
-The Node carries the label `github-runner.exadev.com/regrade-level` (`github_runner_cluster_regrade_level_label`) with the level as its value, from the first step down until the server is back at `full`. The role's wait for every node to be Ready leaves such a node out, so running the role against a fleet with a stepped-down server neither fails nor clears its node-password Secret.
+The Node carries the label `github-runner.exadev.com/regrade-level` (`github_runner_cluster_regrade_level_label`) with the level as its value, from the first step down until the server is back at `full`. The role's wait for every node to be Ready leaves such a node out, so running the role against a fleet with a stepped-down server neither fails nor clears its node-password Secret. The heartbeat publishes the level beside each not-Ready node in `fleet-health.json`, and `scripts/fleet-alert.sh` does not count a stepped-down server as an outage; a heartbeat image that predates the field alerts on it as it would on any server that is not Ready, so update that image before turning regrading on.
 
 By hand, in the project directory (the `.env` the role writes names the Compose files and project, so these act on the right one):
 

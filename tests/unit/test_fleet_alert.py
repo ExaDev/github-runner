@@ -65,13 +65,14 @@ def health(
     unhealthy_for: int | None = None,
     reasons: tuple[str, ...] = ("scale set arc-runners-a/runners-a has no running listener",),
     not_ready: tuple[tuple[str, bool, int], ...] = (),
+    stepped_down: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """The document scripts/heartbeat.sh publishes: when it was written, whether the fleet is vouched for and since when not, and the nodes not Ready as (name, is a server, seconds not Ready)."""
+    """The document scripts/heartbeat.sh publishes: when it was written, whether the fleet is vouched for and since when not, the nodes not Ready as (name, is a server, seconds not Ready), and, of those, the names regrading has stepped down on purpose."""
     return {
         "healthy": unhealthy_for is None,
         "reasons": [] if unhealthy_for is None else list(reasons),
         "unhealthy_since": None if unhealthy_for is None else stamp(unhealthy_for),
-        "not_ready_nodes": [{"node": name, "control_plane": server, "since": stamp(seconds)} for name, server, seconds in not_ready],
+        "not_ready_nodes": [{"node": name, "control_plane": server, "regrade_level": "etcd-only" if name in stepped_down else None, "since": stamp(seconds)} for name, server, seconds in not_ready],
         "node_pressure": [],
         "deployed": {"platform": None, "nodes": {}},
         "at": stamp(heartbeat_age),
@@ -161,6 +162,24 @@ class FleetAlertTest(unittest.TestCase):
         result = self.alert(health(not_ready=(("server-a", True, AFTER_SECONDS - 60),)), **self.issue_env())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.writes(), [])
+
+    def test_a_server_regrading_stepped_down_is_not_an_outage_however_long_it_stays(self) -> None:
+        result = self.alert(health(not_ready=(("server-a", True, AFTER_SECONDS * 10),), stepped_down=("server-a",)), **self.issue_env())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.writes(), [])
+        self.assertIn("no outage", result.stdout)
+
+    def test_only_the_stepped_down_server_is_spared(self) -> None:
+        result = self.alert(health(not_ready=(("server-a", True, AFTER_SECONDS + 1), ("server-b", True, AFTER_SECONDS + 1)), stepped_down=("server-a",)), **self.issue_env())
+        self.assertIn("server node server-b is not Ready", result.stdout)
+        self.assertNotIn("server node server-a is not Ready", result.stdout)
+
+    def test_a_heartbeat_that_predates_the_level_field_still_alerts(self) -> None:
+        document = health(not_ready=(("server-a", True, AFTER_SECONDS + 1),))
+        for entry in document["not_ready_nodes"]:
+            del entry["regrade_level"]
+        result = self.alert(document, **self.issue_env())
+        self.assertIn("server node server-a is not Ready", result.stdout)
 
     def test_a_worker_not_ready_for_the_window_is_not_an_outage(self) -> None:
         result = self.alert(health(not_ready=(("agent-a", False, AFTER_SECONDS * 10),)), **self.issue_env())
