@@ -103,7 +103,7 @@ reset_environment() {
   fi
 }
 
-# Each node gets its own cluster directory, which the role fills with the Compose file and k3s build context, plus an override that renames its container, drops the host port every node would otherwise publish, and puts it on the shared test network at a fixed address.
+# Each node gets its own cluster directory, which the role fills with the Compose file and k3s build context, plus an override that drops the host port every node would otherwise publish and puts it on the shared test network at a fixed address. Its container is named by github_runner_cluster_container_name in the inventory.
 prepare_nodes() {
   local scenario="$1" index dir
   for index in $(seq 1 "$node_count"); do
@@ -112,7 +112,6 @@ prepare_nodes() {
     {
       echo "services:"
       echo "  k3s:"
-      echo "    container_name: $(container "$index")"
       if [ "$scenario" = in_cluster ] && [ "$index" = 1 ] && [ "$api_on_host" = true ]; then
         echo "    ports: !override [\"127.0.0.1:18080:8080\"]"
       else
