@@ -282,6 +282,8 @@ class RoleTestCase(unittest.TestCase):
         hosts: dict[str, Any] = {}
         for name in (*servers, *agents):
             server = name in servers
+            # Every earlier run of the role created the node's Compose project directory, which the role reads before starting Compose under --check.
+            (self.work / "nodes" / name).mkdir(parents=True, exist_ok=True)
             hosts[name] = {
                 "github_runner_cluster_effective_node_role": "server" if server else "agent",
                 "github_runner_cluster_effective_node_name": name,

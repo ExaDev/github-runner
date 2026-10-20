@@ -426,6 +426,26 @@ class StartServersTest(RoleTestCase):
         self.assertEqual([call for call in self.calls() if " kubectl get lease " in call], [])
         self.assertEqual((self.stub / "cluster.nodes").read_text().split(), ["node1", "True", "node2", "True", "node3", "True"])
 
+    def test_check_mode_on_a_first_run_reports_the_start_it_cannot_ask_compose_about(self) -> None:
+        # A first run's dry run creates no project directory, and Compose cannot read a project directory that does not exist.
+        hosts, group_vars = self.hosts(("node1", "node2", "node3"))
+        for name in hosts:
+            (self.work / "nodes" / name).rmdir()
+        result = self.run_tasks("start_servers", hosts, group_vars, check=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for n in (1, 2, 3):
+            self.assertIn(f"Would create {self.work / 'nodes' / f'node{n}'} and start the k3s server there, as node{n}-k3s", result.stdout.replace("\n", " "))
+        self.assertEqual([call for call in self.calls() if call.startswith("module up")], [])
+        self.assertFalse((self.work / "nodes").joinpath("node1").exists())
+
+    def test_check_mode_asks_compose_once_the_project_directory_exists(self) -> None:
+        for n in (1, 2, 3):
+            self.rendered(f"node{n}", HASH_NEW)
+        result = self.start(check=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertCountEqual([call for call in self.calls() if call.startswith("module up")], [f"module up node{n} profiles=server check=True" for n in (1, 2, 3)])
+        self.assertNotIn("Would create", result.stdout)
+
     def test_check_mode_refuses_what_a_run_would_refuse(self) -> None:
         self.running_cluster({"node1": HASH_OLD, "node2": HASH_NEW, "node3": HASH_NEW})
         self.nodes(node1="True", node2="False", node3="True")
@@ -468,10 +488,10 @@ class TaskStructureTest(unittest.TestCase):
 
     def test_a_turn_checks_before_it_starts_and_waits_only_afterwards(self) -> None:
         tasks = role_tasks("start_server.yml")
-        order = [task.get("ansible.builtin.include_tasks") or next(key for key in task if key.startswith("community.docker")) for task in tasks]
-        self.assertEqual(order, ["server_recreate_check.yml", "community.docker.docker_compose_v2", "server_ready.yml"])
-        self.assertEqual(tasks[1]["community.docker.docker_compose_v2"]["profiles"], ["server"])
-        self.assertIn("not ansible_check_mode", tasks[2]["when"])
+        order = [task.get("ansible.builtin.include_tasks") or next(key for key in task if key.startswith(("community.docker", "ansible.builtin."))) for task in tasks]
+        self.assertEqual(order, ["server_recreate_check.yml", "ansible.builtin.stat", "ansible.builtin.debug", "community.docker.docker_compose_v2", "server_ready.yml"])
+        self.assertEqual(tasks[3]["community.docker.docker_compose_v2"]["profiles"], ["server"])
+        self.assertIn("not ansible_check_mode", tasks[4]["when"])
 
     def test_the_turns_loop_over_the_servers_in_the_play_and_run_for_one_host_each(self) -> None:
         (task,) = role_tasks("start_servers.yml")
