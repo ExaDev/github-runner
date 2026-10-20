@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
+# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
 # With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
 #
@@ -16,6 +16,10 @@ subnet_prefix=172.31.250
 headscale_ip="${subnet_prefix}.10"
 node_count=3
 etcd_image=gcr.io/etcd-development/etcd:v3.5.21
+# The Docker daemon each host_network node runs in, standing in for a VM with an address on the LAN.
+dind_image=docker:27.5.1-dind
+# Set by scenario_host_network: every node's containers are then on that node's own daemon, reached through a Docker context per node.
+host_network=0
 busybox_image=busybox:1.37
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
@@ -35,11 +39,11 @@ fail() {
 diagnose() {
   local index
   for index in $(seq 1 "$node_count"); do
-    docker inspect "$(container "$index")" >/dev/null 2>&1 || continue
+    docker_on "$index" inspect "$(container "$index")" >/dev/null 2>&1 || continue
     echo "----- $(container "$index"): tailscale status"
-    docker exec "$(container "$index")" tailscale status </dev/null 2>&1 | head -n 20 || true
+    docker_on "$index" exec "$(container "$index")" tailscale status </dev/null 2>&1 | head -n 20 || true
     echo "----- $(container "$index"): last log lines"
-    docker logs --tail 60 "$(container "$index")" 2>&1 | cut -c1-400 || true
+    docker_on "$index" logs --tail 60 "$(container "$index")" 2>&1 | cut -c1-400 || true
   done
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
@@ -58,6 +62,14 @@ fi
 node_name() { echo "grtest-node$1"; }
 node_ip() { echo "${subnet_prefix}.$((10 + $1))"; }
 container() { echo "grtest-node$1-k3s"; }
+vm() { echo "grtest-vm$1"; }
+
+# The docker CLI for node $1's daemon: the machine's own, or with host_network that node's own daemon through its context.
+docker_on() {
+  local index="$1"
+  shift
+  if [ "$host_network" = 1 ]; then docker --context "$(vm "$index")" "$@"; else docker "$@"; fi
+}
 
 teardown() {
   for index in $(seq 1 "$node_count"); do
@@ -69,6 +81,10 @@ teardown() {
     docker compose --project-directory "${work}/headscale" -f "${work}/headscale/docker-compose.yml" down -v >/dev/null 2>&1 || true
   fi
   docker rm -f grtest-headscale grtest-hs-existing grtest-etcdctl >/dev/null 2>&1 || true
+  for index in $(seq 1 "$node_count"); do
+    docker rm -f -v "$(vm "$index")" >/dev/null 2>&1 || true
+    docker context rm -f "$(vm "$index")" >/dev/null 2>&1 || true
+  done
   docker network rm "$network" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
@@ -185,7 +201,7 @@ run_role() {
   if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the role changed the current Docker context"; fi
 }
 
-kubectl_on() { docker exec -i "$(container "$1")" kubectl "${@:2}"; }
+kubectl_on() { docker_on "$1" exec -i "$(container "$1")" kubectl "${@:2}"; }
 
 assert_cluster() {
   local expected_members nodes members index other ip route
@@ -200,8 +216,8 @@ assert_cluster() {
   log "Checking the servers were chosen automatically (all three) and etcd has three members"
   nodes=$(kubectl_on 1 get nodes -l node-role.kubernetes.io/etcd=true --no-headers | wc -l | tr -d ' ')
   [ "$nodes" = "$node_count" ] || fail "expected ${node_count} etcd nodes, found ${nodes}"
-  docker rm -f grtest-etcdctl >/dev/null 2>&1 || true
-  members=$(docker run --rm --name grtest-etcdctl --network "container:$(container 1)" --volumes-from "$(container 1)" --entrypoint etcdctl "$etcd_image" \
+  docker_on 1 rm -f grtest-etcdctl >/dev/null 2>&1 || true
+  members=$(docker_on 1 run --rm --name grtest-etcdctl --network "container:$(container 1)" --volumes-from "$(container 1)" --entrypoint etcdctl "$etcd_image" \
     --endpoints https://127.0.0.1:2379 --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
     --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key \
     member list -w simple)
@@ -251,7 +267,7 @@ EOF
   for index in $(seq 1 "$node_count"); do
     while IFS=, read -r _ other ip; do
       [ "$other" = "$(node_name "$index")" ] && continue
-      route=$(docker exec "$(container "$index")" ip route get "$ip" </dev/null)
+      route=$(docker_on "$index" exec "$(container "$index")" ip route get "$ip" </dev/null)
       echo "$route" | grep -q 'tailscale0' || fail "$(node_name "$index") routes ${ip} outside the mesh: ${route}"
     done <<< "$pods"
   done
@@ -270,7 +286,7 @@ reaches() {
 
 started_at() {
   local index
-  for index in $(seq 1 "$node_count"); do docker inspect --format '{{.State.StartedAt}}' "$(container "$index")"; done | tr '\n' ' '
+  for index in $(seq 1 "$node_count"); do docker_on "$index" inspect --format '{{.State.StartedAt}}' "$(container "$index")"; done | tr '\n' ' '
 }
 
 scenario_cluster() {
@@ -294,6 +310,150 @@ scenario_cluster() {
     if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the recovery playbook changed the current Docker context"; fi
     assert_cluster
   fi
+}
+
+# host_network: each node gets a Docker daemon of its own, a docker:dind container on the shared test network at the node's address, standing in for a VM with an address on the LAN, and a Docker context the role pins for it. The work directory is mounted at the same path inside each, so the Compose project's bind mounts, which the daemon resolves, find the files the role writes on this machine.
+start_vms() {
+  local index
+  for index in $(seq 1 "$node_count"); do
+    docker run -d --privileged --name "$(vm "$index")" --hostname "$(vm "$index")" --network "$network" --ip "$(node_ip "$index")" \
+      -e DOCKER_TLS_CERTDIR= -v "${work}:${work}" "$dind_image" --host=tcp://0.0.0.0:2375 --host=unix:///var/run/docker.sock >/dev/null
+    docker context create "$(vm "$index")" --docker "host=tcp://$(node_ip "$index"):2375" >/dev/null
+  done
+  for index in $(seq 1 "$node_count"); do
+    local deadline=$((SECONDS + 120))
+    until docker --context "$(vm "$index")" info >/dev/null 2>&1; do
+      [ "$SECONDS" -lt "$deadline" ] || fail "the Docker daemon in $(vm "$index") did not start"
+      sleep 1
+    done
+  done
+}
+
+# A Headscale server on this machine's Docker, at a fixed address on the test network, with a policy that lets the nodes register, reach each other and route pods; prints the API key and a join key on two lines.
+start_headscale_for_host_network() {
+  local fixtures="${repo_root}/tests/mesh/fixtures/headscale-existing"
+  mkdir -p "${work}/hs-host-network"
+  sed -e "s#^server_url: .*#server_url: http://${headscale_ip}:8080#" -e 's#^  base_domain: .*#  base_domain: mesh.grtest.internal#' \
+    "${fixtures}/config.yaml" > "${work}/hs-host-network/config.yaml"
+  cat > "${work}/hs-host-network/policy.hujson" <<'POLICY'
+{
+  "tagOwners": {"tag:github-runner-node": []},
+  "autoApprovers": {"routes": {"10.42.0.0/16": ["tag:github-runner-node"]}},
+  "grants": [{"src": ["tag:github-runner-node", "10.42.0.0/16"], "dst": ["tag:github-runner-node", "10.42.0.0/16"], "ip": ["*"]}],
+}
+POLICY
+  docker run -d --name grtest-hs-existing --network "$network" --ip "$headscale_ip" \
+    -v "${work}/hs-host-network:/etc/headscale:ro" "headscale/headscale:v$(sed -n 's/^github_runner_cluster_headscale_version: "\(.*\)"$/\1/p' "${repo_root}/roles/github_runner_cluster/defaults/main.yml")" serve >/dev/null
+  until docker exec grtest-hs-existing headscale health >/dev/null 2>&1; do sleep 1; done
+  docker exec grtest-hs-existing headscale apikeys create --expiration 1d | tail -n 1
+  # 90 days: the headscale_existing provider refuses a join key that expires within 14.
+  docker exec grtest-hs-existing headscale preauthkeys create --reusable --tags tag:github-runner-node --expiration 90d | tail -n 1
+}
+
+write_host_network_inventory() {
+  local api_key="$1" join_key="$2" index
+  for index in $(seq 1 "$node_count"); do
+    mkdir -p "${work}/$(node_name "$index")"
+    printf 'services:\n  k3s:\n    container_name: %s\n' "$(container "$index")" > "${work}/$(node_name "$index")/compose.grtest.yml"
+  done
+  {
+    echo "all:"
+    echo "  vars:"
+    echo "    ansible_connection: local"
+    echo "    ansible_python_interpreter: $(command -v python3)"
+    echo "  children:"
+    echo "    github_runner_cluster:"
+    echo "      vars:"
+    echo "        github_runner_cluster_mesh: headscale_existing"
+    echo "        github_runner_cluster_tailnet_domain: mesh.grtest.internal"
+    echo "        github_runner_cluster_headscale_url: http://${headscale_ip}:8080"
+    echo "        github_runner_cluster_headscale_api_key: ${api_key}"
+    echo "        github_runner_cluster_headscale_join_key: ${join_key}"
+    echo "        github_runner_cluster_compose_files: [compose.grtest.yml]"
+    echo "        github_runner_cluster_network_mode: host"
+    echo "        github_runner_cluster_lan_cidr: ${subnet_prefix}.0/24"
+    echo "        github_runner_cluster_k3s_token: ${k3s_token}"
+    echo "      hosts:"
+    for index in $(seq 1 "$node_count"); do
+      echo "        $(node_name "$index"):"
+      echo "          github_runner_cluster_dir: ${work}/$(node_name "$index")"
+      echo "          github_runner_cluster_compose_project: $(node_name "$index")"
+      echo "          github_runner_cluster_container_name: $(container "$index")"
+      echo "          github_runner_cluster_docker_context: $(vm "$index")"
+    done
+  } > "${work}/inventory.yml"
+}
+
+# With host networking, every node's Tailscale client must reach every other node directly at that node's daemon's own address (its stand-in LAN address), not through a relay, and the node container must publish no port.
+assert_direct_paths() {
+  local index other status deadline
+  for index in $(seq 1 "$node_count"); do
+    [ "$(docker_on "$index" inspect --format '{{.HostConfig.NetworkMode}}' "$(container "$index")")" = host ] || fail "$(container "$index") is not on the host network"
+    [ -z "$(docker_on "$index" port "$(container "$index")")" ] || fail "$(container "$index") publishes ports: $(docker_on "$index" port "$(container "$index")")"
+    for other in $(seq 1 "$node_count"); do
+      [ "$index" = "$other" ] && continue
+      deadline=$((SECONDS + 120))
+      # tailscale ping keeps pinging until a direct path answers, or gives up and says the connection is relayed.
+      until status=$(docker_on "$index" exec "$(container "$index")" tailscale ping --c 10 "$(node_name "$other")" </dev/null 2>&1) && echo "$status" | grep -q "via $(node_ip "$other"):"; do
+        [ "$SECONDS" -lt "$deadline" ] || fail "$(node_name "$index") reaches $(node_name "$other") only indirectly: ${status}"
+        sleep 5
+      done
+      echo "  $(node_name "$index") -> $(node_name "$other"): $(echo "$status" | tail -n 1)"
+    done
+  done
+  log "Every node reaches every other directly at its daemon's address"
+}
+
+scenario_host_network() {
+  local keys api_key join_key before after
+  [ "$(uname -s)" = Linux ] || fail "the host_network scenario reaches each node's Docker daemon at its address on the test network, which only Linux routes to"
+  host_network=1
+  reset_environment
+  start_vms
+  keys=$(start_headscale_for_host_network)
+  api_key=$(echo "$keys" | sed -n 1p)
+  join_key=$(echo "$keys" | sed -n 2p)
+  write_host_network_inventory "$api_key" "$join_key"
+  run_role
+  assert_cluster
+  assert_direct_paths
+  log "Rerunning the role, which must not restart any node"
+  before=$(started_at)
+  run_role
+  after=$(started_at)
+  [ "$before" = "$after" ] || fail "rerunning the role restarted a node container: ${before} -> ${after}"
+  move_between_networks
+}
+
+# After node $1's container was recreated, the API can still show its echo pod at an address its new sandbox no longer has; replacing the pod makes assert_cluster's rollout wait for the node's kubelet and probe the pod's real address.
+replace_echo_pod() {
+  kubectl_on 1 delete pod -l app=grtest-echo --field-selector "spec.nodeName=$(node_name "$1")" --timeout=300s || fail "the echo pod on $(node_name "$1") was not replaced"
+}
+
+# Moves running nodes between the host and the bridge network through the role, so its guard reads a real cluster: two nodes in one run must be refused before anything changes, and one node must move to the bridge network and back keeping its mesh address and etcd membership.
+move_between_networks() {
+  local output before mesh_address
+  log "Moving two nodes to the bridge network in one run must be refused before anything changes"
+  before=$(started_at)
+  if output=$(ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" --limit "$(node_name 2),$(node_name 3)" -e github_runner_cluster_network_mode=bridge 2>&1); then
+    echo "$output"
+    fail "the role moved two nodes between networks in one run"
+  fi
+  echo "$output" | grep -q "to another network at once" || { echo "$output"; fail "the role failed for another reason than moving two nodes at once"; }
+  [ "$(started_at)" = "$before" ] || fail "a refused move restarted a node container"
+  mesh_address=$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)
+  log "Moving $(node_name 3) to the bridge network through the role's guard"
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" --limit "$(node_name 3)" -e github_runner_cluster_network_mode=bridge || fail "the role refused or failed to move a node of a healthy cluster to the bridge network"
+  [ "$(docker_on 3 inspect --format '{{.HostConfig.NetworkMode}}' "$(container 3)")" != host ] || fail "$(container 3) is still on the host network"
+  replace_echo_pod 3
+  assert_cluster
+  [ "$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)" = "$mesh_address" ] || fail "$(node_name 3) changed its mesh address when it moved to the bridge network"
+  log "Moving $(node_name 3) back to the host network"
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" --limit "$(node_name 3)" || fail "the role refused or failed to move a node back to the host network"
+  replace_echo_pod 3
+  assert_cluster
+  assert_direct_paths
+  [ "$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)" = "$mesh_address" ] || fail "$(node_name 3) changed its mesh address when it moved back to the host network"
 }
 
 # One node and only the settings the role reads before its first check fails, for the scenarios that expect it to stop before touching the host.
@@ -410,6 +570,7 @@ for scenario in "${scenarios[@]}"; do
   case "$scenario" in
     hosted | in_cluster) scenario_cluster "$scenario" ;;
     existing) scenario_existing ;;
+    host_network) scenario_host_network ;;
     compose_faulty) scenario_compose_faulty ;;
     context_checks) scenario_context_checks ;;
     # Re-checks a cluster a previous run kept with GRTEST_KEEP=1 and the same GRTEST_WORK, without rebuilding it.

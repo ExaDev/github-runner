@@ -41,6 +41,7 @@ jobs:
           - {scenario: compose_faulty, compose: v2.38.2}
           - {scenario: in_cluster, compose: v5.5.1, pin: true}
           - {scenario: context_checks, compose: v5.5.1}
+          - {scenario: host_network, compose: v5.5.1}
     steps:
       - uses: actions/checkout@v7
 
