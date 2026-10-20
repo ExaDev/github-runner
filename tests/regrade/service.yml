@@ -1,0 +1,17 @@
+---
+# Runs the cluster role's regrade_service.yml for one server through the role itself, for tests/unit/test_cluster_regrade.py, against whatever docker the test puts first on the PATH. The facts the role's earlier tasks publish are given here.
+- name: Run the regrade service tasks
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    github_runner_cluster_effective_node_role: server
+    github_runner_cluster_dir: /srv/github-runner
+    github_runner_cluster_docker_cli_context: ""
+    github_runner_cluster_docker_cli_environment: {}
+    github_runner_cluster_compose_file_list: [docker-compose.yml]
+  tasks:
+    - name: Include the role's regrade service tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: regrade_service

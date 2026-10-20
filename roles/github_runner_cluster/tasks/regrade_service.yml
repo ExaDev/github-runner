@@ -1,0 +1,79 @@
+---
+# Runs the regrade service beside this server's k3s container when github_runner_cluster_regrade is true, and removes it when it is not. Run for a server host, after the servers have been started; tasks/regrade.yml has already checked the settings.
+
+- name: Run the regrade service
+  when: github_runner_cluster_regrade | bool
+  block:
+    - name: Create the regrade service's directory
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_dir }}/regrade"
+        state: directory
+        mode: "0755"
+
+    - name: Place the regrade service's image build context and scripts
+      # Copied on every run, so a collection upgrade reaches the host. The directory is mounted into the service rather than built into its image, so a changed script takes effect when the service is created again, below.
+      ansible.builtin.copy:
+        src: "regrade/{{ item.name }}"
+        dest: "{{ github_runner_cluster_dir }}/regrade/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {name: Dockerfile, mode: "0644"}
+        - {name: fleet-regrade.sh, mode: "0755"}
+        - {name: fleet-regrade-core.sh, mode: "0644"}
+        - {name: fleet-regrade-docker.sh, mode: "0644"}
+      register: github_runner_cluster_regrade_scripts
+
+    - name: Template the regrade service's settings
+      ansible.builtin.template:
+        src: regrade.env.j2
+        dest: "{{ github_runner_cluster_dir }}/regrade/fleet-regrade.env"
+        mode: "0644"
+      register: github_runner_cluster_regrade_settings
+
+    - name: Start the regrade service
+      # recreate: always when a script or the settings changed, since the service reads both once, at its start, and Compose sees no change in a mounted directory's contents. A service nothing changed for is left running.
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_cluster_dir }}"
+        project_name: "{{ github_runner_cluster_compose_project }}"
+        profiles: ["regrade"]
+        services: ["regrade"]
+        cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
+        files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
+        recreate: "{{ 'always' if github_runner_cluster_regrade_scripts.changed or github_runner_cluster_regrade_settings.changed else 'auto' }}"
+        state: present
+
+- name: Stop regrading
+  when: not (github_runner_cluster_regrade | bool)
+  block:
+    - name: Read the level this server's k3s started at
+      # Read-only, so it runs under --check too. Absent while the container is not running, or has never been regraded and so has an older entrypoint.
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ github_runner_cluster_node_container }}", cat, /run/regrade-level]
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
+      register: github_runner_cluster_regrade_level
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail if the server is stepped down
+      # Without the service nothing steps it back up, and the entrypoint would keep starting it at the level it was left at. Fatal for the whole play, so that no other host removes its service while one server is still stepped down: the refusal is then the same on every host.
+      any_errors_fatal: true
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_cluster_regrade is false, but {{ inventory_hostname }} is running at the level
+          {{ github_runner_cluster_regrade_level.stdout | trim }}, below full, and the regrade service is what steps it back up. Run
+          `docker compose exec regrade fleet-regrade up` in {{ github_runner_cluster_dir }} until it reports full (status shows the
+          level), then run again. Nothing was changed.
+      when:
+        - github_runner_cluster_regrade_level.rc == 0
+        - github_runner_cluster_regrade_level.stdout | trim != 'full'
+
+    - name: Remove the regrade service's container
+      ansible.builtin.command:
+        argv: [docker, rm, --force, "{{ github_runner_cluster_compose_project }}-regrade-1"]
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
+      register: github_runner_cluster_regrade_removed
+      changed_when: github_runner_cluster_regrade_removed.rc == 0
+      failed_when:
+        - github_runner_cluster_regrade_removed.rc != 0
+        - "'No such container' not in github_runner_cluster_regrade_removed.stderr"

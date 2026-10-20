@@ -111,6 +111,9 @@ jobs:
           ansible-galaxy collection build --output-path "${RUNNER_TEMP}/collection"
           tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
           tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
+          for file in Dockerfile fleet-regrade.sh fleet-regrade-core.sh fleet-regrade-docker.sh; do
+            tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx "roles/github_runner_cluster/files/regrade/${file}"
+          done
 
   unit-tests:
     name: Unit tests (shard ${{ matrix.shard }})

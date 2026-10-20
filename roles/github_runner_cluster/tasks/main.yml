@@ -52,6 +52,9 @@
 - name: Check etcd's heartbeat interval and election timeout
   ansible.builtin.include_tasks: etcd_timing.yml
 
+- name: Check the memory-pressure regrading settings
+  ansible.builtin.include_tasks: regrade.yml
+
 - name: Fail if the k3s token is not set
   ansible.builtin.fail:
     msg: >-
@@ -124,6 +127,9 @@
       # See tasks/start_servers.yml for why, and for what a server's turn checks before Compose may recreate its container.
       ansible.builtin.include_tasks: start_servers.yml
 
+    - name: Run the regrade service beside this server, or remove it
+      ansible.builtin.include_tasks: regrade_service.yml
+
     - name: Check the runtime and this node's container are up
       ansible.builtin.include_tasks: end_checks.yml
       when: ansible_facts['system'] == 'Darwin'
@@ -179,8 +185,8 @@
   when: github_runner_cluster_wait_for_nodes | bool
   block:
     - name: Wait for every node to report Ready
-      # --all, not a --limit-scoped single node: once a server/agent has joined, this must wait for it too, not just this host's own control-plane node.
-      ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
+      # Every node, not a --limit-scoped single node: once a server/agent has joined, this must wait for it too, not just this host's own control-plane node. Except a server that memory-pressure regrading has stepped down (see the README), which carries the level label and does not run a kubelet at etcd-only, so it is not Ready by design.
+      ansible.builtin.command: kubectl wait --for=condition=Ready node --selector '!{{ github_runner_cluster_regrade_level_label }}' --timeout=120s
       environment:
         KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
       changed_when: false
@@ -193,12 +199,21 @@
       changed_when: false
       register: github_runner_cluster_node_readiness
 
+    - name: Read which nodes memory-pressure regrading has stepped down
+      # Not Ready by design at etcd-only, and nothing a stale registration explains: clearing its node-password Secret would be a change nobody asked for.
+      ansible.builtin.command:
+        argv: [kubectl, get, nodes, --selector, "{{ github_runner_cluster_regrade_level_label }}", -o, 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}']
+      environment:
+        KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
+      changed_when: false
+      register: github_runner_cluster_nodes_stepped_down
+
     # Only the hosts whose node is missing or not Ready: clearing a Ready node's Node object makes the cluster evict every pod on it, so a single unreachable host must not take the registrations of healthy ones with it.
     - name: Pick the non-bootstrap hosts whose node has not rejoined
       ansible.builtin.set_fact:
         github_runner_cluster_rejoin_hosts: >-
           {{ github_runner_cluster_topology.hosts | dict2items | rejectattr('value.bootstrap')
-             | rejectattr('value.node_name', 'in', github_runner_cluster_node_readiness.stdout_lines | select('search', ' True$') | map('split', ' ') | map('first') | list)
+             | rejectattr('value.node_name', 'in', github_runner_cluster_node_readiness.stdout_lines | select('search', ' True$') | map('split', ' ') | map('first') | list + github_runner_cluster_nodes_stepped_down.stdout_lines)
              | map(attribute='key') | list }}
 
     - name: Clear the stale node-password secret of each host that has not rejoined
@@ -220,7 +235,7 @@
       loop: "{{ github_runner_cluster_rejoin_hosts | select('in', github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'agent') | map(attribute='key') | list) | list }}"
 
     - name: Retry waiting for every node to report Ready now that any stale registration is cleared
-      ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=120s
+      ansible.builtin.command: kubectl wait --for=condition=Ready node --selector '!{{ github_runner_cluster_regrade_level_label }}' --timeout=120s
       environment:
         KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
       changed_when: false
