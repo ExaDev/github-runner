@@ -605,7 +605,8 @@ EOF
   log "Memory pressure on $(node_name 2) steps it down a level at a time, and no other server steps with it"
   # The watcher reads its pressure from files in place of the kernel's, so the test controls it. It runs in the service container, with the service's own settings but for the times, which are seconds here, so it has the service's Lease, Docker access and kubectl.
   regrade_on 2 sh -c 'cp /usr/local/lib/fleet-regrade/fleet-regrade.env /tmp/pressure.env && printf "SAMPLE_SECONDS=1\nSUSTAIN_SECONDS=3\nCOOLDOWN_SECONDS=5\n" >> /tmp/pressure.env && printf "some avg10=0.00 avg60=0.00 avg300=50.00 total=1\n" > /tmp/psi && printf "MemTotal: 1000000 kB\nMemAvailable: 1000 kB\n" > /tmp/meminfo'
-  docker exec -d "$(regrade_container 2)" sh -c 'FLEET_REGRADE_ENV=/tmp/pressure.env PSI_FILE=/tmp/psi MEMINFO_FILE=/tmp/meminfo exec fleet-regrade watch >/tmp/watch.log 2>&1'
+  # shellcheck disable=SC2016 # The expansion is for the shell in the service container, whose process becomes the watcher through exec, so the pid it records is the watcher's.
+  docker exec -d "$(regrade_container 2)" sh -c 'echo $$ > /tmp/watch.pid; FLEET_REGRADE_ENV=/tmp/pressure.env PSI_FILE=/tmp/psi MEMINFO_FILE=/tmp/meminfo exec fleet-regrade watch >/tmp/watch.log 2>&1'
   deadline=$((SECONDS + 900))
   until at_level 2 etcd-only; do
     stepped=$(stepped_nodes)
@@ -637,9 +638,9 @@ EOF
   [ "$(level_of 3)" = full ] || fail "$(node_name 3) changed level"
 
   log "Rerunning the role with a server stepped down changes nothing, and turning regrading off is refused"
-  before=$(started_at)
-  run_role
-  [ "$before" = "$(started_at)" ] || fail "rerunning the role restarted a node while $(node_name 2) was stepped down"
+  # Judged by the role's own recap, not by the containers' start times: after a server was stopped and started a container can restart by itself under the strain, which says nothing about the role.
+  output=$(run_role 2>&1) || { echo "$output"; fail "the role failed with $(node_name 2) stepped down"; }
+  [ "$(grep -cE '^grtest-node[0-9]+ +: .* changed=0 ' <<< "$output")" = "$node_count" ] || { echo "$output" | tail -n 20; fail "rerunning the role changed something while $(node_name 2) was stepped down"; }
   [ "$(level_of 2)" = etcd-only ] || fail "the role moved $(node_name 2) off etcd-only"
   regrade=false
   write_inventory hosted
@@ -663,7 +664,7 @@ EOF
   regrade_on 2 cat /tmp/watch.log
   regrade_on 2 cat /tmp/watch.log | grep -F 'step up etcd-only -> control-plane' >/dev/null || fail "the watcher did not step up through control-plane first"
   # shellcheck disable=SC2016 # The substitution is for the shell in the service container, which holds the watcher.
-  regrade_on 2 sh -c 'kill $(pidof fleet-regrade)' || true
+  regrade_on 2 sh -c 'kill "$(cat /tmp/watch.pid)"' || fail "the watcher on $(node_name 2) could not be stopped"
   wait_for "$(node_name 2) to be Ready and schedulable" 300 node_is 1 2 Ready
   [ -z "$(level_label 2)" ] || fail "the level label is still on the Node at full"
   [ "$(etcd_member_ids 1)" = "$ids" ] || fail "the etcd members changed after stepping up"
