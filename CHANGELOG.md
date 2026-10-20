@@ -1,3 +1,16 @@
+# [2.5.0](https://github.com/ExaDev/github-runner/compare/v2.4.0...v2.5.0) (2026-10-20)
+
+
+### Bug Fixes
+
+* **cluster:** describe a new Tailscale join key in characters the API accepts ([a6d2bee](https://github.com/ExaDev/github-runner/commit/a6d2bee73a15578a554a666e047b3837c04ea74e)), closes [#118](https://github.com/ExaDev/github-runner/issues/118)
+* **cluster:** wait for the join host after k3s's own tailscale up ([6fae111](https://github.com/ExaDev/github-runner/commit/6fae111180da549e0d4f42b8cf10024acc964c39)), closes [#116](https://github.com/ExaDev/github-runner/issues/116)
+
+
+### Features
+
+* **cluster:** run a second cluster beside the first on the same Docker hosts ([2c103a9](https://github.com/ExaDev/github-runner/commit/2c103a9cc78810949202de5f04d6d689937aa006)), closes [#113](https://github.com/ExaDev/github-runner/issues/113)
+
 # [2.4.0](https://github.com/ExaDev/github-runner/compare/v2.3.0...v2.4.0) (2026-10-20)
 
 
