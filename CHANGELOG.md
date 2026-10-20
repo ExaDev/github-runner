@@ -1,3 +1,10 @@
+# [2.2.0](https://github.com/ExaDev/github-runner/compare/v2.1.0...v2.2.0) (2026-10-20)
+
+
+### Features
+
+* **cluster:** make etcd's heartbeat and election timeouts configurable ([0811f20](https://github.com/ExaDev/github-runner/commit/0811f20f61bf98eba9dbb50834c2b2fc20d8892d))
+
 # [2.1.0](https://github.com/ExaDev/github-runner/compare/v2.0.1...v2.1.0) (2026-10-20)
 
 
