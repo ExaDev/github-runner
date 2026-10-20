@@ -1,0 +1,34 @@
+---
+# macOS hosts only. The checks that close a run on a host that reboots: the container runtime answers and the node's k3s container is running, so a converge that leaves either down fails here instead of reporting success. Needs runtime.yml to have run, and goes after the Compose project is started.
+
+- name: Read whether the container runtime is up
+  ansible.builtin.include_tasks: runtime_probe.yml
+
+- name: Fail unless the container runtime is up
+  ansible.builtin.fail:
+    msg: "{{ github_runner_cluster_runtime_down_message }}"
+  when:
+    - not github_runner_cluster_runtime_up | bool
+    - not ansible_check_mode
+
+- name: Read the state of this node's k3s container
+  # docker ps rather than docker inspect, so that a container that does not exist reads as no state at all and fails below with the message, not with docker's own.
+  ansible.builtin.command:
+    argv: [docker, ps, --all, --filter, "name=^/{{ github_runner_cluster_node_container }}$", --format, "{{ '{{' }}.State{{ '}}' }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_node_container_state
+  changed_when: false
+  check_mode: false
+  # Not answering is a failure above, except under --check, where a runtime this run would have started is still down.
+  when: github_runner_cluster_runtime_up | bool
+
+- name: Fail unless this node's k3s container is running
+  ansible.builtin.fail:
+    msg: >-
+      The k3s container {{ github_runner_cluster_node_container }} on {{ inventory_hostname }} is not running (its state is
+      {{ github_runner_cluster_node_container_state.stdout | trim | default('absent', true) }}). Read its output with
+      `docker logs {{ github_runner_cluster_node_container }}` on the host.
+  when:
+    - github_runner_cluster_runtime_up | bool
+    - github_runner_cluster_node_container_state.stdout | trim != 'running'
+    - not ansible_check_mode

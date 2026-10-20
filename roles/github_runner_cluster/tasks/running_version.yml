@@ -16,10 +16,7 @@
     if [ "$state" = running ]; then
       docker exec "$container" k3s --version
     fi
-  environment: "{{ github_runner_cluster_docker_cli_environment | combine({'container': github_runner_cluster_running_container}) }}"
-  vars:
-    github_runner_cluster_running_container: >-
-      {{ github_runner_cluster_container_name if github_runner_cluster_effective_node_role == 'server' else 'github-runner-k3s-agent' }}
+  environment: "{{ github_runner_cluster_docker_cli_environment | combine({'container': github_runner_cluster_node_container}) }}"
   register: github_runner_cluster_running_own
   changed_when: false
   check_mode: false

@@ -1,0 +1,120 @@
+---
+# macOS hosts only (main.yml includes it nowhere else). Makes the container runtime come back after a reboot, and stops the run, with a message that says what to do, when the runtime is not up. The node's own container already restarts with the runtime (restart: unless-stopped in docker-compose.yml), so the runtime is the only thing a reboot leaves stopped.
+#
+# On a Colima host with github_runner_cluster_runtime_autostart on, it starts the profile if it is stopped, installs a per-user launchd agent that starts it at every login (a property list in the connecting user's ~/Library/LaunchAgents) and loads that agent into the user's login session. Docker Desktop cannot be started by the role, so there it only checks. The agent runs as the connecting user and the role never uses become for it, since a LaunchAgent belongs to the user whose login session loads it.
+#
+# Publishes github_runner_cluster_effective_runtime ({kind, colima_profile}), github_runner_cluster_runtime_environment (what docker and colima run with), github_runner_cluster_runtime_down_message and github_runner_cluster_runtime_up, for end_checks.yml.
+
+- name: Work out which container runtime this host runs
+  ansible.builtin.set_fact:
+    github_runner_cluster_effective_runtime: >-
+      {{ github_runner_cluster_docker_cli_context
+         | exadev.github_runner.cluster_container_runtime(github_runner_cluster_runtime, github_runner_cluster_colima_profile) }}
+
+- name: Publish the environment and the failure message the runtime tasks use
+  ansible.builtin.set_fact:
+    # The PATH is what the agent gets too, so a run that works here is the run the agent repeats at login.
+    github_runner_cluster_runtime_environment: >-
+      {{ github_runner_cluster_docker_cli_environment | combine({'PATH': github_runner_cluster_runtime_path}) }}
+    github_runner_cluster_runtime_down_message: >-
+      {{
+        {
+          'colima': 'Colima profile ' ~ github_runner_cluster_effective_runtime.colima_profile ~ ' is not running on ' ~ inventory_hostname ~ '. Start it with `colima start --profile ' ~ github_runner_cluster_effective_runtime.colima_profile ~ '`, or leave github_runner_cluster_runtime_autostart on so this role starts it and keeps it starting at login.',
+          'docker_desktop': 'Docker Desktop is not running on ' ~ inventory_hostname ~ ', and this role cannot start it. Open Docker Desktop, and turn on Settings > General > Start Docker Desktop when you sign in to your computer so that it comes back after a reboot.',
+          'other': 'The container runtime is not running on ' ~ inventory_hostname ~ ' (`docker info` failed). Start it, and set it to start at login so that it comes back after a reboot.'
+        }[github_runner_cluster_effective_runtime.kind]
+      }}
+
+- name: Read whether the container runtime is up
+  ansible.builtin.include_tasks: runtime_probe.yml
+
+- name: Keep a Colima profile running across reboots
+  when:
+    - github_runner_cluster_effective_runtime.kind == 'colima'
+    - github_runner_cluster_runtime_autostart | bool
+  block:
+    - name: Start the Colima profile if it is stopped
+      # --activate=false keeps the profile from making its Docker context the host's current one, which the role promises never to change (see Docker contexts in the README). Starting a profile that already runs would do nothing, but this only runs when the runtime did not answer. Skipped under --check, which reports the start as skipped, not as a failure.
+      ansible.builtin.command:
+        argv: [colima, start, --profile, "{{ github_runner_cluster_effective_runtime.colima_profile }}", --activate=false]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when: not github_runner_cluster_runtime_up | bool
+
+    - name: Create the connecting user's LaunchAgents directory
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents"
+        state: directory
+        mode: "0755"
+
+    - name: Install the launchd agent that starts the Colima profile at login
+      # The label is per profile, so two profiles on one host get two agents. plutil rejects a malformed property list before it replaces the installed one, since launchd would otherwise fail to load the agent at the next login with nobody watching. The task's environment gives plutil the same PATH as the agent.
+      ansible.builtin.template:
+        src: colima-launchd.plist.j2
+        dest: "{{ github_runner_cluster_runtime_agent_plist }}"
+        mode: "0644"
+        validate: plutil -lint %s
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      register: github_runner_cluster_runtime_agent
+
+    - name: Read whether the user has a login session to load the agent into
+      # gui/<uid> exists only while that user is logged in at the console. Without it the agent cannot be loaded now, and launchd loads it at the next login, which is all it is for.
+      ansible.builtin.command:
+        argv: [launchctl, print, "gui/{{ ansible_facts['user_uid'] }}"]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      register: github_runner_cluster_runtime_session
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Read whether the agent is loaded
+      ansible.builtin.command:
+        argv: [launchctl, print, "gui/{{ ansible_facts['user_uid'] }}/{{ github_runner_cluster_runtime_launchd_label }}"]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      register: github_runner_cluster_runtime_loaded
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Unload the agent so that its new definition is read
+      # launchd keeps the definition it loaded, whatever the file says now.
+      ansible.builtin.command:
+        argv: [launchctl, bootout, "gui/{{ ansible_facts['user_uid'] }}/{{ github_runner_cluster_runtime_launchd_label }}"]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_runtime_agent is changed
+        - github_runner_cluster_runtime_session.rc == 0
+        - github_runner_cluster_runtime_loaded.rc == 0
+
+    - name: Load the agent into the user's login session
+      # Loading runs it once (RunAtLoad), which finds the profile already started above and does nothing.
+      ansible.builtin.command:
+        argv:
+          - launchctl
+          - bootstrap
+          - "gui/{{ ansible_facts['user_uid'] }}"
+          - "{{ github_runner_cluster_runtime_agent_plist }}"
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_runtime_session.rc == 0
+        - github_runner_cluster_runtime_loaded.rc != 0 or github_runner_cluster_runtime_agent is changed
+
+    - name: Say that the agent waits for the next login
+      ansible.builtin.debug:
+        msg: >-
+          The connecting user has no login session on {{ inventory_hostname }}, so launchd cannot load
+          {{ github_runner_cluster_runtime_launchd_label }} now. It is installed and loads at the next login.
+      when: github_runner_cluster_runtime_session.rc != 0
+
+    - name: Read whether the container runtime is up now
+      ansible.builtin.include_tasks: runtime_probe.yml
+
+- name: Fail unless the container runtime is up
+  # Not under --check: a check run that would have started the runtime has not started it, so the runtime still being down is no verdict on the host.
+  ansible.builtin.fail:
+    msg: "{{ github_runner_cluster_runtime_down_message }}"
+  when:
+    - not github_runner_cluster_runtime_up | bool
+    - not ansible_check_mode

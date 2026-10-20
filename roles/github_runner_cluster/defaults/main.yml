@@ -124,6 +124,21 @@ github_runner_cluster_compose_file_list: >-
 github_runner_cluster_docker_context: ""
 # The node's k3s container, as docker-compose.yml names it. The headscale_in_cluster provider runs commands inside it; override it only alongside an extra Compose file that renames the container.
 github_runner_cluster_container_name: github-runner-k3s
+# The node's k3s container as this host runs it: the server's, or the agent's, which docker-compose.yml names differently. Derived, never set directly.
+github_runner_cluster_node_container: "{{ github_runner_cluster_container_name if github_runner_cluster_effective_node_role == 'server' else 'github-runner-k3s-agent' }}"
+
+# macOS hosts only (Linux hosts are never touched): whether the role makes the container runtime come back after a reboot. On a Colima host it installs a per-user launchd agent that starts the Colima profile at login, loads it, and starts the profile at once if it is stopped. true (the default) does that for Colima hosts and nothing for the others: the role cannot start Docker Desktop, whose start-at-login setting is documented in the README. false installs nothing and leaves an agent from an earlier run as it is. Either way the end checks fail unless the runtime is up and the node's container is running.
+github_runner_cluster_runtime_autostart: true
+# Which container runtime a macOS host runs: auto takes it from the Docker context the role drives (colima or colima-<profile> is Colima, desktop-linux is Docker Desktop, anything else is other), colima, docker_desktop and other say so for a host whose context does not tell (DOCKER_HOST set, a context with another name).
+github_runner_cluster_runtime: auto
+# The Colima profile to start. Empty takes it from the Docker context (colima is the default profile, colima-<profile> another) and falls back to the default profile when the context names none.
+github_runner_cluster_colima_profile: ""
+# The PATH the agent runs colima with, and the role runs colima and docker with on a macOS host: both Homebrew prefixes (Apple Silicon and Intel), since launchd gives an agent only the system PATH and colima starts limactl and docker from the one it is given.
+github_runner_cluster_runtime_path: "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Derived, never set directly: the agent's launchd label, one per Colima profile.
+github_runner_cluster_runtime_launchd_label: "com.exadev.github-runner.colima.{{ github_runner_cluster_effective_runtime.colima_profile }}"
+# Derived, never set directly: where the agent's property list lives, in the connecting user's own LaunchAgents directory.
+github_runner_cluster_runtime_agent_plist: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ github_runner_cluster_runtime_launchd_label }}.plist"
 
 # The directory on the target host the role manages as this host's Compose project: it copies the collection's docker-compose.yml and k3s/ build context there, templates .env there, and k3s writes the kubeconfig to its kubeconfig/ subdirectory. Needs no checkout of anything on the host. The default reads HOME from the target's gathered facts, so it is the connecting user's home on that host, not the control node's.
 github_runner_cluster_dir: "{{ ansible_facts['env']['HOME'] }}/{{ github_runner_cluster_dir_name }}"

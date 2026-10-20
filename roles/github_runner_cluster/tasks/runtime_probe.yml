@@ -1,0 +1,15 @@
+---
+# Reads whether the container runtime this host's Docker context points at answers, and publishes github_runner_cluster_runtime_up. Read-only, so it runs under --check too. Needs github_runner_cluster_runtime_environment from runtime.yml. A daemon that is down is an answer here, not a failure: the callers decide what to do about it.
+
+- name: Read whether the container runtime answers
+  ansible.builtin.command:
+    argv: [docker, info, --format, "{{ '{{' }}.ServerVersion{{ '}}' }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Publish whether the container runtime answers
+  ansible.builtin.set_fact:
+    github_runner_cluster_runtime_up: "{{ github_runner_cluster_runtime_probe.rc == 0 }}"

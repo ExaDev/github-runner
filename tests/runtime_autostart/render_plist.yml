@@ -1,0 +1,20 @@
+# Renders the cluster role's launchd agent for a Colima profile (templates/colima-launchd.plist.j2) with the role's defaults, the runtime the role works out from a Docker context, and a home directory, writing it to plist_output, for tests/unit/test_runtime_autostart.py. Role variables are passed as extra variables, which outrank the defaults file loaded here.
+- name: Render the Colima launchd agent
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../../roles/github_runner_cluster/defaults/main.yml
+  vars:
+    docker_context: colima
+    ansible_facts:
+      env:
+        HOME: /Users/example
+    github_runner_cluster_effective_runtime: >-
+      {{ docker_context | exadev.github_runner.cluster_container_runtime(github_runner_cluster_runtime, github_runner_cluster_colima_profile) }}
+  tasks:
+    - name: Write the property list
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_cluster/templates/colima-launchd.plist.j2') }}"
+        dest: "{{ plist_output }}"
+        mode: "0644"
