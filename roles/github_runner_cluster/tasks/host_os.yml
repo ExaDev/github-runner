@@ -1,0 +1,10 @@
+---
+# Makes ansible_facts['system'], the kernel name (Darwin on a Mac), available to the conditions that decide whether a host is a Mac, whatever the caller gathered. A play with gather_facts: false (the integration tests', or a caller that gathers only what it needs) leaves ansible_facts without it, and a condition that read an absent fact would fail the run on every host. Only the platform subset is read, the cheapest that holds it, and not at all when the caller already gathered it. Read-only, so it runs under --check too.
+
+- name: Read which operating system this host runs
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - platform
+  when: "'system' not in ansible_facts"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import plistlib
 import re
 import shutil
@@ -20,11 +21,12 @@ ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / "roles" / "github_runner_cluster"
 RENDER = ROOT / "tests" / "runtime_autostart" / "render_plist.yml"
 RUN = ROOT / "tests" / "runtime_autostart" / "run.yml"
+HOST_OS = ROOT / "tests" / "runtime_autostart" / "host_os.yml"
 ANSIBLE_PLAYBOOK = os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook")
 DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
 UID = 501
 HOME = "/Users/example"
-DARWIN_ONLY = "ansible_facts['os_family'] == 'Darwin'"
+DARWIN_ONLY = "ansible_facts['system'] == 'Darwin'"
 
 
 def ansible_env() -> dict[str, str]:
@@ -85,6 +87,20 @@ class GuardTest(unittest.TestCase):
                 for include in includes:
                     self.assertEqual(include["when"], DARWIN_ONLY)
 
+    def test_the_operating_system_is_read_before_either_condition_uses_it(self) -> None:
+        tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
+        order = [task.get("ansible.builtin.include_tasks") for task in tasks]
+        self.assertLess(order.index("host_os.yml"), order.index("runtime.yml"))
+        self.assertNotIn("when", tasks[order.index("host_os.yml")])
+
+    def test_the_runtime_tasks_gather_the_user_and_environment_they_use_when_the_caller_did_not(self) -> None:
+        tasks = yaml.safe_load((ROLE / "tasks" / "runtime.yml").read_text())
+        gather = tasks[0]["ansible.builtin.setup"]
+        self.assertEqual(gather["gather_subset"], ["!all", "!min", "user", "env"])
+        self.assertEqual(tasks[0]["when"], "'user_uid' not in ansible_facts or 'env' not in ansible_facts")
+        used = (ROLE / "tasks" / "runtime.yml").read_text() + (ROLE / "defaults" / "main.yml").read_text()
+        self.assertEqual(set(re.findall(r"ansible_facts\['(\w+)'\]", used)) - {"system"}, {"user_uid", "env"})
+
     def test_the_runtime_is_up_before_anything_reads_the_daemon(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
         order = [task.get("ansible.builtin.include_tasks") or task.get("ansible.builtin.command") for task in tasks]
@@ -99,6 +115,30 @@ class GuardTest(unittest.TestCase):
             steps = [step.get("ansible.builtin.include_tasks") or ("compose" if "community.docker.docker_compose_v2" in step else None) for step in block["block"]]
             with self.subTest(role=role):
                 self.assertLess(steps.index("compose"), steps.index("end_checks.yml"))
+
+
+@unittest.skipIf(shutil.which(ANSIBLE_PLAYBOOK) is None, "ansible-playbook is not installed")
+class NoGatheredFactsTest(unittest.TestCase):
+    """The mesh integration tests' plays gather no facts, so the macOS condition must not depend on any the caller gathered."""
+
+    def run_play(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as work:
+            return subprocess.run([ANSIBLE_PLAYBOOK, str(HOST_OS), *extra], capture_output=True, text=True, check=False, env=ansible_env(), cwd=work)
+
+    def test_the_play_uses_the_condition_main_yml_uses(self) -> None:
+        play = yaml.safe_load(HOST_OS.read_text())[0]
+        self.assertIn(DARWIN_ONLY, play["tasks"][1]["ansible.builtin.debug"]["msg"])
+
+    def test_the_condition_evaluates_after_the_role_reads_the_operating_system(self) -> None:
+        result = self.run_play()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"mac={platform.system() == 'Darwin'}", result.stdout)
+
+    def test_the_same_play_fails_without_those_tasks(self) -> None:
+        # What every mesh scenario hit before the role read the operating system itself.
+        result = self.run_play("-e", "read_host_os=false")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no attribute 'system'", result.stdout + result.stderr)
 
 
 class PlistTest(unittest.TestCase):
@@ -239,9 +279,9 @@ class RoleTest(unittest.TestCase):
         for flag in flags:
             (self.stub / flag).write_text("")
 
-    def run_role(self, *extra: str, tasks: str = "runtime,end_checks", context: str = "colima", os_family: str = "Darwin", **variables: Any) -> subprocess.CompletedProcess[str]:
+    def run_role(self, *extra: str, tasks: str = "runtime,end_checks", context: str = "colima", system: str = "Darwin", **variables: Any) -> subprocess.CompletedProcess[str]:
         host = {
-            "runtime_os_family": os_family,
+            "runtime_system": system,
             "runtime_uid": UID,
             "runtime_home": str(self.home),
             "runtime_tasks": tasks,
@@ -374,7 +414,7 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(self.changes(), [])
 
     def test_a_linux_host_is_not_touched(self) -> None:
-        result = self.run_role(os_family="Debian")
+        result = self.run_role(system="Linux")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.calls(), [])
         self.assertFalse((self.home / "Library").exists())

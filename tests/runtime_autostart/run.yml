@@ -1,4 +1,4 @@
-# Runs the cluster role's runtime tasks (runtime.yml, then end_checks.yml, or one of them) through the role itself, as tasks/main.yml includes them on a macOS host, for tests/unit/test_runtime_autostart.py. The host's facts are stood in for by extra variables (runtime_os_family, runtime_uid, runtime_home), and the docker, colima, launchctl and plutil it calls are the test's stubs on PATH. The condition is the one tasks/main.yml puts on both includes, which the test checks is still there.
+# Runs the cluster role's runtime tasks (runtime.yml, then end_checks.yml, or one of them) through the role itself, as tasks/main.yml includes them on a macOS host, for tests/unit/test_runtime_autostart.py. The host's facts are stood in for by extra variables (runtime_system, runtime_uid, runtime_home), and the docker, colima, launchctl and plutil it calls are the test's stubs on PATH. The condition is the one tasks/main.yml puts on both includes, which the test checks is still there.
 - name: Run the cluster role's runtime tasks
   hosts: all
   connection: local
@@ -7,7 +7,7 @@
     - name: Stand in for the host's facts
       ansible.builtin.set_fact:
         ansible_facts:
-          os_family: "{{ runtime_os_family }}"
+          system: "{{ runtime_system }}"
           user_uid: "{{ runtime_uid }}"
           env:
             HOME: "{{ runtime_home }}"
@@ -17,4 +17,4 @@
         name: exadev.github_runner.github_runner_cluster
         tasks_from: "{{ item }}"
       loop: "{{ (runtime_tasks | default('runtime,end_checks')).split(',') | map('regex_replace', '$', '.yml') | list }}"
-      when: ansible_facts['os_family'] == 'Darwin'
+      when: ansible_facts['system'] == 'Darwin'

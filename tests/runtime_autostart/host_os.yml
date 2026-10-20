@@ -1,0 +1,15 @@
+# Evaluates the condition tasks/main.yml puts on the macOS includes in a play that gathers no facts at all, as the mesh integration tests' plays do, after the role's own host_os.yml tasks (unless read_host_os is false, which shows what the condition does without them), for tests/unit/test_runtime_autostart.py. The condition is the one the test checks tasks/main.yml still uses.
+- name: Evaluate the macOS condition without gathered facts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Read the operating system, as tasks/main.yml does
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: host_os
+      when: read_host_os | default(true) | bool
+
+    - name: Evaluate the condition
+      ansible.builtin.debug:
+        msg: "mac={{ ansible_facts['system'] == 'Darwin' }}"
