@@ -20,6 +20,10 @@ AFTER_SECONDS = 120
 PRUNE_AFTER_SECONDS = 600
 PRUNE_LABEL = "github-runner.exadev.io/removable"
 REMOVABLE = {PRUNE_LABEL: "true"}
+ETCD = "node-role.kubernetes.io/etcd"
+CONTROL_PLANE = "node-role.kubernetes.io/control-plane"
+# What a cluster needs to tolerate losing one voter; the script's own constant is min_etcd_voters.
+QUORUM_VOTERS = 3
 
 # Answers `kubectl get nodes -o json` from a file and records every `kubectl patch`; FAKE_PATCH_EXIT sets the patch's exit status.
 FAKE_KUBECTL = textwrap.dedent(
@@ -253,10 +257,22 @@ class NodeRecoveryTest(PassCase):
 class NodePruneTest(PassCase):
     """The opt-in prune pass, which deletes a labelled node that stayed Unknown for NODE_RECOVERY_PRUNE_AFTER_SECONDS."""
 
-    def run_prune(self, nodes: list[dict[str, object]], **kwargs: object) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
+    @staticmethod
+    def servers(count: int) -> list[dict[str, object]]:
+        """Ready control-plane nodes that are etcd voters."""
+        return [node(f"server-{i}", "True", 3600, labels={CONTROL_PLANE: "true", ETCD: "true"}) for i in range(count)]
+
+    def run_prune(
+        self, nodes: list[dict[str, object]], voters: int = QUORUM_VOTERS, **kwargs: object
+    ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
+        """Runs a pass with pruning on, in a cluster that also has the given number of Ready etcd voters (enough for quorum unless told otherwise)."""
         env = {"NODE_RECOVERY_PRUNE_AFTER_SECONDS": str(PRUNE_AFTER_SECONDS), "NODE_RECOVERY_PRUNE_LABEL": PRUNE_LABEL}
         env.update(kwargs.pop("env", {}))  # type: ignore[arg-type]
-        return self.run_pass(nodes, **kwargs, **env)  # type: ignore[arg-type]
+        servers = self.servers(voters)
+        current = kwargs.pop("current", None)
+        if current is not None:
+            kwargs["current"] = [*current, *servers]  # type: ignore[misc]
+        return self.run_pass([*nodes, *servers], **kwargs, **env)  # type: ignore[arg-type]
 
     def test_deletes_a_labelled_node_unknown_for_longer_than_the_prune_threshold(self) -> None:
         dead = node("dead", "Unknown", PRUNE_AFTER_SECONDS + 30, taints=[UNREACHABLE, OURS], labels=REMOVABLE)
@@ -331,6 +347,45 @@ class NodePruneTest(PassCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Not deleting server", result.stderr)
                 self.assertEqual(self.deleted(), ["agent"], "the refusal must not stop the other nodes being pruned")
+
+    def test_deletes_with_exactly_the_voters_quorum_needs_and_with_more(self) -> None:
+        for voters in (QUORUM_VOTERS, QUORUM_VOTERS + 1, QUORUM_VOTERS + 2):
+            with self.subTest(voters=voters):
+                self.deletes_file.unlink(missing_ok=True)
+                result, _ = self.run_prune([node("dead", "Unknown", PRUNE_AFTER_SECONDS + 30, labels=REMOVABLE)], voters=voters)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.deleted(), ["dead"])
+
+    def test_refuses_to_delete_below_the_voters_quorum_needs_and_fails_the_pass(self) -> None:
+        for voters in range(QUORUM_VOTERS):
+            with self.subTest(voters=voters):
+                self.deletes_file.unlink(missing_ok=True)
+                result, _ = self.run_prune([node("dead", "Unknown", PRUNE_AFTER_SECONDS + 30, labels=REMOVABLE)], voters=voters)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"Not deleting dead: only {voters} Ready etcd members would remain", result.stderr)
+                self.assertEqual(self.deletes(), [])
+
+    def test_a_non_voting_agent_is_not_counted_as_a_voter(self) -> None:
+        agents = [node(f"agent-{i}", "True", 3600) for i in range(QUORUM_VOTERS)]
+        self.run_prune([node("dead", "Unknown", PRUNE_AFTER_SECONDS + 30, labels=REMOVABLE), *agents], voters=QUORUM_VOTERS - 1)
+        self.assertEqual(self.deletes(), [])
+
+    def test_the_candidate_alone_does_not_make_up_the_voters(self) -> None:
+        self.run_prune([node("dead", "Unknown", PRUNE_AFTER_SECONDS + 30, labels=REMOVABLE)], voters=QUORUM_VOTERS - 1)
+        self.assertEqual(self.deletes(), [])
+
+    def test_an_etcd_member_that_is_not_ready_is_not_counted(self) -> None:
+        down = node("server-down", "Unknown", 5, labels={CONTROL_PLANE: "true", ETCD: "true"})
+        result, _ = self.run_prune([node("dead", "Unknown", PRUNE_AFTER_SECONDS + 30, labels=REMOVABLE), down], voters=QUORUM_VOTERS - 1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.deletes(), [])
+
+    def test_a_refusal_for_the_voters_does_not_stop_the_other_passes(self) -> None:
+        result, patches = self.run_prune(
+            [node("dead", "Unknown", PRUNE_AFTER_SECONDS + 30, labels=REMOVABLE), node("sleeping", "Unknown", AFTER_SECONDS + 30)], voters=QUORUM_VOTERS - 1
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual([p["name"] for p in patches], ["sleeping"])
 
     def test_leaves_a_node_that_recovered_between_the_listing_and_the_delete(self) -> None:
         listed = node("back", "Unknown", PRUNE_AFTER_SECONDS + 30, labels=REMOVABLE)
