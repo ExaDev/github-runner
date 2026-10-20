@@ -29,6 +29,7 @@ build_ignore:
   - .env*
   - .gitignore
   - .yamllint
+  - .shellcheckrc
   - AGENTS.md
   - CLAUDE.md
   - .ansible
