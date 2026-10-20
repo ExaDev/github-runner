@@ -70,7 +70,8 @@
             tags: ["{{ github_runner_cluster_mesh_tag }}"]
       # 90 days: comfortably under this tailnet's own observed maxKeyDuration (180 days), and short enough that a compromised key doesn't stay valid indefinitely - rotation itself is the manual step documented above.
       expirySeconds: 7776000
-      description: "github-runner fleet vpn-auth join key (Ansible-managed)"
+      # Letters, digits, spaces and hyphens only: the API refuses a description with any other character ("keys: description had invalid characters"), parentheses, commas and colons included.
+      description: "github-runner fleet vpn-auth join key Ansible-managed"
     status_code: [200]
   delegate_to: localhost
   no_log: true
