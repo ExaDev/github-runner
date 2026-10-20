@@ -344,6 +344,7 @@ class EntrypointTest(unittest.TestCase):
                 'vpn_auth="name=tailscale,joinKey=example"',
                 'mesh_ip="100.64.0.1"',
                 'etcd_timing_flags=""',
+                'api_port_flags=""',
                 assignments(["regrade_level_file", "regrade_started_file", "regrade_flags"]),
                 function_source("set_regrade_flags"),
                 function_source("mesh_server_args"),
