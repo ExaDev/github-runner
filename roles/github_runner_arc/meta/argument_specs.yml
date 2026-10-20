@@ -392,7 +392,7 @@ argument_specs:
         description: Memory runner pods may use across every node. Required for an autoscaled profile.
       github_runner_arc_autoscaler_max_ceiling:
         type: int
-        description: The autoscaler's ceiling, unless the autoscaled profile sets sizing.
+        description: An upper bound on the ceiling the autoscaler works out from the nodes each poll, unless the autoscaled profile sets sizing, which gives the bound instead. Unset leaves the ceiling unbounded.
       github_runner_arc_autoscaler_floor:
         type: int
         description: The autoscaler's floor, equal to the autoscaled profile's maxRunners.

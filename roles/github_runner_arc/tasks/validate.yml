@@ -156,12 +156,14 @@
   ansible.builtin.fail:
     msg: >-
       The autoscaled pool ({{ github_runner_arc_fleet.autoscaled | map(attribute='label') | join(', ') }}) needs
-      github_runner_arc_autoscaler_usable_budget_gi, github_runner_arc_autoscaler_floor and, unless one of its profiles sets
-      sizing, github_runner_arc_autoscaler_max_ceiling, all whole numbers, with the floor no higher than the ceiling.
+      github_runner_arc_autoscaler_usable_budget_gi and github_runner_arc_autoscaler_floor as whole numbers, and any bound on
+      its ceiling (github_runner_arc_autoscaler_max_ceiling, or the sizing of one of its profiles) as a whole number no lower
+      than the floor.
   vars:
     # arc_profiles already rejects more than one autoscaled profile setting sizing, so this is at most one profile.
     github_runner_arc_sized: "{{ github_runner_arc_fleet.autoscaled | selectattr('sizing', 'defined') | selectattr('sizing', 'ne', none) | list }}"
-    github_runner_arc_ceiling: "{{ (github_runner_arc_sized | first).sizing.max_runners if github_runner_arc_sized | length > 0 else (github_runner_arc_autoscaler_max_ceiling | default('')) }}"
+    # The bound on the ceiling the autoscaler works out from the nodes each poll; empty is no bound.
+    github_runner_arc_ceiling: "{{ (github_runner_arc_sized | first).sizing.max_runners if github_runner_arc_sized | length > 0 else (github_runner_arc_autoscaler_max_ceiling | default('', true)) }}"
     # A measured ceiling is only known once the cluster is read, so install_platform.yml checks the floor against it then.
     github_runner_arc_ceiling_measured: "{{ (github_runner_arc_sized | first).sizing.measured | default(false) if github_runner_arc_sized | length > 0 else false }}"
   when:
@@ -170,7 +172,7 @@
     - >-
       github_runner_arc_autoscaler_usable_budget_gi | default('') | string is not match('^[0-9]+$')
       or github_runner_arc_autoscaler_floor | default('') | string is not match('^[0-9]+$')
-      or (not github_runner_arc_ceiling_measured
+      or (not github_runner_arc_ceiling_measured and github_runner_arc_ceiling | string | length > 0
           and (github_runner_arc_ceiling | string is not match('^[0-9]+$')
                or (github_runner_arc_autoscaler_floor | int) > (github_runner_arc_ceiling | int)))
 
