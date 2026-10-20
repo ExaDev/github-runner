@@ -65,6 +65,18 @@ class ManifestTest(unittest.TestCase):
         manifests = render(github_runner_arc_node_recovery_prune_after_seconds=PRUNE_AFTER_SECONDS)
         self.assertEqual(manifests["ClusterRole"]["rules"], [{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list", "patch", "delete"]}])
 
+    def test_the_pod_is_unpinned_when_pruning_is_off(self) -> None:
+        pod = render()["Deployment"]["spec"]["template"]["spec"]
+        self.assertNotIn("affinity", pod)
+        self.assertNotIn("node-role.kubernetes.io/control-plane", [t.get("key") for t in pod["tolerations"]])
+
+    def test_the_pod_that_can_delete_nodes_runs_only_on_control_plane_nodes(self) -> None:
+        pod = render(github_runner_arc_node_recovery_prune_after_seconds=PRUNE_AFTER_SECONDS)["Deployment"]["spec"]["template"]["spec"]
+        required = pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+        self.assertEqual(required["nodeSelectorTerms"], [{"matchExpressions": [{"key": "node-role.kubernetes.io/control-plane", "operator": "Exists"}]}])
+        self.assertIn({"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"}, pod["tolerations"])
+        self.assertEqual(len([t for t in pod["tolerations"] if t.get("tolerationSeconds") == 10]), 2, "the eviction tolerations stay")
+
     def test_the_threshold_and_label_reach_the_watcher_as_strings(self) -> None:
         env = container_env(render(github_runner_arc_node_recovery_prune_after_seconds=PRUNE_AFTER_SECONDS))
         self.assertEqual((env["NODE_RECOVERY_PRUNE_AFTER_SECONDS"], env["NODE_RECOVERY_PRUNE_LABEL"]), (str(PRUNE_AFTER_SECONDS), PRUNE_LABEL))

@@ -51,7 +51,17 @@ spec:
     spec:
       serviceAccountName: {{ name | to_json }}
       priorityClassName: {{ github_runner_arc_platform_priority_class_name | to_json }}
-      # Unpinned, like the rest of the platform. When the watcher's own node stops, a short toleration gets it evicted within seconds of the node being marked unreachable, so its ReplicaSet starts a replacement elsewhere long before the threshold passes; the default five minutes would leave no watcher running for longer than the threshold it enforces. The old pod stays Terminating until the new watcher taints its node.
+{% if prune %}
+      # While pruning is on the pod's ServiceAccount token can delete nodes, so it runs only on control-plane nodes: a token read from a lower-trust worker could be used against the API directly, past the script's own checks. The control-plane taint is tolerated for the same reason.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+{% endif %}
+      # Otherwise unpinned, like the rest of the platform. When the watcher's own node stops, a short toleration gets it evicted within seconds of the node being marked unreachable, so its ReplicaSet starts a replacement elsewhere long before the threshold passes; the default five minutes would leave no watcher running for longer than the threshold it enforces. The old pod stays Terminating until the new watcher taints its node.
       tolerations:
         - key: node.kubernetes.io/unreachable
           operator: Exists
@@ -61,6 +71,11 @@ spec:
           operator: Exists
           effect: NoExecute
           tolerationSeconds: 10
+{% if prune %}
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+{% endif %}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

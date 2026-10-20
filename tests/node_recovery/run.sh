@@ -250,7 +250,16 @@ log "Phase 4: with pruning on, the stopped worker's Node is deleted once it has 
 kubectl get node "$doomed_node" -o json | jq -e --arg l "$removable_label" '.metadata.labels[$l] == "true"' >/dev/null || fail "${doomed_node} does not carry ${removable_label}"
 render_manifests -e github_runner_arc_node_recovery_prune_after_seconds="$prune_after_seconds"
 kubectl apply -f "$work/recovery.yaml" >/dev/null
+# The earlier phases pinned the watcher to a worker. With pruning on the role confines it to control-plane nodes, because its token can then delete nodes; drop the pin so the role's own placement decides.
+kubectl -n "$platform_namespace" patch deployment node-recovery --type=json -p '[{"op": "remove", "path": "/spec/template/spec/nodeSelector"}]' >/dev/null
 kubectl -n "$platform_namespace" rollout status deployment/node-recovery --timeout=120s >/dev/null
+watcher_on_control_plane() {
+  local nodes
+  nodes="$(kubectl -n "$platform_namespace" get pods -l app.kubernetes.io/name=node-recovery -o json \
+    | jq -r '.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running") | .spec.nodeName')"
+  [ "$nodes" = "${cluster}-control-plane" ]
+}
+wait_for 60 "the watcher to run on the control-plane node alone" watcher_on_control_plane
 check_can yes delete nodes
 check_can no create nodes
 node_gone() { ! kubectl get node "$1" >/dev/null 2>&1; }
