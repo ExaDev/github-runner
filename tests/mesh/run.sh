@@ -185,8 +185,8 @@ EOF
 
 run_role() {
   log "Running the cluster role"
-  # Returns the playbook's own status, which a caller testing it (compose_faulty) relies on, errexit being off there.
-  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" || return
+  # Returns the playbook's own status, which a caller testing it (compose_faulty) relies on, errexit being off there. Any arguments go to ansible-playbook.
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" "$@" || return
   if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the role changed the current Docker context"; fi
 }
 
@@ -309,6 +309,53 @@ started_at() {
   for index in $(seq 1 "$node_count"); do docker inspect --format '{{.State.StartedAt}}' "$(container "$index")"; done | tr '\n' ' '
 }
 
+started_of() { docker inspect --format '{{.State.StartedAt}}' "$(container "$1")"; }
+
+# The containers the role says it would recreate, in container-name order, one space after each; empty when none. Under --check the role's check before its Compose step reports a server whose Compose configuration hash differs from the running container's, so an empty answer on a cluster the role has just started also shows the hash it renders is the one Compose put on the container. The message is joined onto one line first, since the playbook's output format may fold it.
+would_recreate() {
+  local output
+  output=$(ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/recreate_check.yml" --check "$@" 2>&1) || { echo "$output" >&2; return 1; }
+  { echo "$output" | tr '\n' ' ' | tr -s ' ' | grep -o 'Compose would recreate grtest-node[0-9]*-k3s' || true; } | sed 's/^Compose would recreate //' | sort -u | tr '\n' ' '
+}
+
+# A joined server's container is recreated because its Compose configuration changed. Its node must rejoin without anyone deleting its node-password Secret, because /etc/rancher/node is a volume that outlives the container, and no other node's container may restart. The change is a label, in a Compose file named only through github_runner_cluster_compose_files; the other nodes get an empty one, so their configuration is unchanged.
+recreate_a_joined_server() {
+  local target=2 index drift password_before password_after secret_before secret_after
+  local -a started_before=() started_after=()
+  drift='{"github_runner_cluster_compose_files": ["compose.grtest.yml", "compose.grtest-drift.yml"]}'
+  log "A cluster the role has just started must have nothing to recreate"
+  [ -z "$(would_recreate)" ] || fail "the role would recreate a container it has just started: $(would_recreate)"
+  for index in $(seq 1 "$node_count"); do
+    if [ "$index" = "$target" ]; then
+      printf 'services:\n  k3s:\n    labels:\n      grtest.drift: "1"\n' > "${work}/$(node_name "$index")/compose.grtest-drift.yml"
+    else
+      printf 'services: {}\n' > "${work}/$(node_name "$index")/compose.grtest-drift.yml"
+    fi
+    started_before+=("$(started_of "$index")")
+  done
+  log "Changing $(node_name "$target")'s Compose configuration: the role must say it would recreate that container, and only that one"
+  [ "$(would_recreate -e "$drift")" = "$(container "$target") " ] || fail "expected the role to report $(container "$target") alone, it reported: $(would_recreate -e "$drift")"
+  secret_before=$(kubectl_on 1 get secret -n kube-system "$(node_name "$target").node-password.k3s" -o jsonpath='{.metadata.uid}')
+  [ -n "$secret_before" ] || fail "$(node_name "$target") has no node-password Secret"
+  password_before=$(docker exec "$(container "$target")" cat /etc/rancher/node/password </dev/null | cksum)
+  run_role -e "$drift"
+  for index in $(seq 1 "$node_count"); do started_after+=("$(started_of "$index")"); done
+  for index in $(seq 1 "$node_count"); do
+    if [ "$index" = "$target" ]; then
+      [ "${started_before[$((index - 1))]}" != "${started_after[$((index - 1))]}" ] || fail "the role did not recreate $(container "$index")"
+    else
+      [ "${started_before[$((index - 1))]}" = "${started_after[$((index - 1))]}" ] || fail "the role restarted $(container "$index"), which it had no reason to"
+    fi
+  done
+  assert_cluster
+  secret_after=$(kubectl_on 1 get secret -n kube-system "$(node_name "$target").node-password.k3s" -o jsonpath='{.metadata.uid}')
+  [ "$secret_before" = "$secret_after" ] || fail "$(node_name "$target")'s node-password Secret was deleted and made again"
+  password_after=$(docker exec "$(container "$target")" cat /etc/rancher/node/password </dev/null | cksum)
+  [ "$password_before" = "$password_after" ] || fail "the recreated container generated a new node password"
+  [ -z "$(would_recreate -e "$drift")" ] || fail "the role would still recreate: $(would_recreate -e "$drift")"
+  log "$(container "$target") was recreated, kept its node password and rejoined"
+}
+
 scenario_cluster() {
   local scenario="$1"
   reset_environment
@@ -333,6 +380,7 @@ scenario_cluster() {
     assert_cluster
     assert_etcd_timing
   fi
+  recreate_a_joined_server
   if [ "$scenario" = in_cluster ]; then
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
     ansible_run -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml" \
