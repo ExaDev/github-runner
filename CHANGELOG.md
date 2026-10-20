@@ -1,3 +1,20 @@
+# [2.1.0](https://github.com/ExaDev/github-runner/compare/v2.0.1...v2.1.0) (2026-10-20)
+
+
+### Bug Fixes
+
+* **cluster:** read the host's operating system instead of assuming gathered facts ([e7a3d83](https://github.com/ExaDev/github-runner/commit/e7a3d8300727879de54e718db7cc6610e83bb67a))
+* **heartbeat:** judge a node Ready by its Ready condition ([276bee6](https://github.com/ExaDev/github-runner/commit/276bee6f3b15d30b1faf715934212958ea9033b7))
+
+
+### Features
+
+* **cluster:** derive the container runtime from the Docker context ([a6b4bf8](https://github.com/ExaDev/github-runner/commit/a6b4bf8390926f1a643572a945885a217393c937))
+* **cluster:** start Colima at login on macOS hosts and check the runtime ([a9dd023](https://github.com/ExaDev/github-runner/commit/a9dd023ada8a1d53b120734654324c0277797d4a))
+* **examples:** add a scheduled workflow that runs fleet-alert.sh off the fleet ([5a28c7f](https://github.com/ExaDev/github-runner/commit/5a28c7f285d4f43b6e13a7acb038c293705f2bc6))
+* **heartbeat:** add fleet-alert.sh to announce a fleet that has been down ([9324f94](https://github.com/ExaDev/github-runner/commit/9324f94c68129f956b27f242bb63bdebfd77d980))
+* **heartbeat:** publish not-Ready nodes and when each problem began ([36eae9b](https://github.com/ExaDev/github-runner/commit/36eae9bf76fa87d00cc92002af29d7ec7eca2a32))
+
 ## [2.0.1](https://github.com/ExaDev/github-runner/compare/v2.0.0...v2.0.1) (2026-10-19)
 
 
