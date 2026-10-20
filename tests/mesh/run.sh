@@ -15,6 +15,8 @@ network=grtest-mesh
 subnet_prefix=172.31.250
 headscale_ip="${subnet_prefix}.10"
 node_count=3
+# Whether the inventory turns memory-pressure regrading on; the regrade scenario sets it.
+regrade=false
 etcd_image=gcr.io/etcd-development/etcd:v3.5.21
 busybox_image=busybox:1.37
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
@@ -65,7 +67,7 @@ container() { echo "grtest-node$1-k3s"; }
 teardown() {
   for index in $(seq 1 "$node_count"); do
     if [ -f "${work}/$(node_name "$index")/docker-compose.yml" ]; then
-      docker compose --project-directory "${work}/$(node_name "$index")" -f "${work}/$(node_name "$index")/docker-compose.yml" --profile server down -v --rmi local >/dev/null 2>&1 || true
+      docker compose --project-directory "${work}/$(node_name "$index")" -f "${work}/$(node_name "$index")/docker-compose.yml" --profile server --profile regrade down -v --rmi local >/dev/null 2>&1 || true
     fi
   done
   if [ -f "${work}/headscale/docker-compose.yml" ]; then
@@ -165,6 +167,7 @@ EOF
     echo "        github_runner_cluster_k3s_token: ${k3s_token}"
     echo "        github_runner_cluster_etcd_heartbeat_interval: ${etcd_heartbeat_ms}"
     echo "        github_runner_cluster_etcd_election_timeout: ${etcd_election_ms}"
+    echo "        github_runner_cluster_regrade: ${regrade}"
     if [ "$pin_context" = 1 ]; then
       echo "        github_runner_cluster_docker_context: ${grtest_pinned_context}"
     fi
@@ -510,6 +513,178 @@ EOF
   log "It did"
 }
 
+# --- Memory-pressure regrading (github_runner_cluster_regrade) ---
+
+regrade_container() { echo "grtest-node$1-regrade-1"; }
+# Runs a command in a node's regrade service.
+regrade_on() { docker exec -i "$(regrade_container "$1")" "${@:2}"; }
+# The level a node's regrade service reports.
+level_of() { regrade_on "$1" fleet-regrade status | sed -n 's/^level: \([^ ]*\) .*/\1/p'; }
+node_status() { kubectl_on "$1" get node "$(node_name "$2")" --no-headers 2>/dev/null | awk '{print $2}'; }
+node_password_hash() { docker exec "$(container "$1")" sha256sum /etc/rancher/node/password </dev/null | cut -d' ' -f1; }
+level_label() { kubectl_on 1 get node "$(node_name "$1")" -o jsonpath='{.metadata.labels.github-runner\.exadev\.com/regrade-level}'; }
+service_started_at() {
+  local index
+  for index in $(seq 1 "$node_count"); do docker inspect --format '{{.State.StartedAt}}' "$(regrade_container "$index")"; done | tr '\n' ' '
+}
+
+# The ids of the etcd members, read with a throwaway etcdctl that shares a running node's network and volumes, as assert_cluster does.
+etcd_member_ids() {
+  docker rm -f grtest-etcdctl >/dev/null 2>&1 || true
+  docker run --rm --name grtest-etcdctl --network "container:$(container "$1")" --volumes-from "$(container "$1")" --entrypoint etcdctl "$etcd_image" \
+    --endpoints https://127.0.0.1:2379 --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
+    --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key \
+    member list -w simple </dev/null | awk -F', ' '{print $1}' | sort | tr '\n' ' '
+}
+
+# Runs a check until it passes, failing the scenario after the given number of seconds.
+wait_for() {
+  local description="$1" deadline=$((SECONDS + $2))
+  shift 2
+  until "$@"; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "timed out waiting for ${description}"
+    sleep 3
+  done
+}
+
+# A write to the cluster, under a name of its own each time: a write the API server committed but did not answer is not repeated under the same name.
+write_marker() { kubectl_on 1 create configmap "grtest-vote-${RANDOM}" --from-literal=a=1 >/dev/null; }
+at_level() { [ "$(level_of "$1")" = "$2" ]; }
+node_is() { [ "$(node_status "$1" "$2")" = "$3" ]; }
+
+# The numbers of the nodes whose regrade service reports a level below full.
+stepped_nodes() {
+  local index
+  for index in $(seq 1 "$node_count"); do
+    [ "$(level_of "$index")" = full ] || printf '%s ' "$index"
+  done
+}
+
+scenario_regrade() {
+  local index ids password before after stepped deadline output
+  regrade=true
+  reset_environment
+  prepare_nodes hosted
+  write_inventory hosted
+  run_role
+  assert_cluster
+
+  log "Every server runs the regrade service, at full"
+  for index in $(seq 1 "$node_count"); do
+    [ "$(docker inspect --format '{{.State.Running}}' "$(regrade_container "$index")")" = true ] || fail "$(regrade_container "$index") is not running"
+    wait_for "$(node_name "$index")'s regrade service to see its level" 120 at_level "$index" full
+  done
+
+  log "Rerunning the role must restart neither the nodes nor the services"
+  before="$(started_at)$(service_started_at)"
+  run_role
+  after="$(started_at)$(service_started_at)"
+  [ "$before" = "$after" ] || fail "rerunning the role restarted a container: ${before} -> ${after}"
+
+  ids=$(etcd_member_ids 1)
+  password=$(node_password_hash 2)
+  echo "etcd members: ${ids}"
+
+  log "A step is refused while another server holds the cluster-wide lease"
+  kubectl_on 1 apply -f - <<EOF
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata: {name: fleet-regrade, namespace: kube-system}
+spec: {holderIdentity: grtest-other, leaseDurationSeconds: 3600, acquireTime: "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)", renewTime: "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)"}
+EOF
+  if regrade_on 2 fleet-regrade down >"${work}/held.log" 2>&1; then cat "${work}/held.log"; fail "a step ran with the lease held by another server"; fi
+  grep -F 'the lease is held by grtest-other' "${work}/held.log" >/dev/null || { cat "${work}/held.log"; fail "the refusal did not name the lease holder"; }
+  [ "$(level_of 2)" = full ] || fail "$(node_name 2) changed level without the lease"
+  kubectl_on 1 delete lease fleet-regrade --namespace kube-system >/dev/null
+
+  log "Memory pressure on $(node_name 2) steps it down a level at a time, and no other server steps with it"
+  # The watcher reads its pressure from files in place of the kernel's, so the test controls it. It runs in the service container, with the service's own settings but for the times, which are seconds here, so it has the service's Lease, Docker access and kubectl.
+  regrade_on 2 sh -c 'cp /usr/local/lib/fleet-regrade/fleet-regrade.env /tmp/pressure.env && printf "SAMPLE_SECONDS=1\nSUSTAIN_SECONDS=3\nCOOLDOWN_SECONDS=5\n" >> /tmp/pressure.env && printf "some avg10=0.00 avg60=0.00 avg300=50.00 total=1\n" > /tmp/psi && printf "MemTotal: 1000000 kB\nMemAvailable: 1000 kB\n" > /tmp/meminfo'
+  docker exec -d "$(regrade_container 2)" sh -c 'FLEET_REGRADE_ENV=/tmp/pressure.env PSI_FILE=/tmp/psi MEMINFO_FILE=/tmp/meminfo exec fleet-regrade watch >/tmp/watch.log 2>&1'
+  deadline=$((SECONDS + 900))
+  until at_level 2 etcd-only; do
+    stepped=$(stepped_nodes)
+    [ "$stepped" = "" ] || [ "$stepped" = "2 " ] || fail "another server stepped while $(node_name 2) did: ${stepped}"
+    [ "$SECONDS" -lt "$deadline" ] || { regrade_on 2 cat /tmp/watch.log || true; fail "$(node_name 2) did not reach etcd-only"; }
+    sleep 2
+  done
+  regrade_on 2 cat /tmp/watch.log
+  regrade_on 2 cat /tmp/watch.log | grep -F 'step down full -> control-plane' >/dev/null || fail "the watcher did not step down through control-plane first"
+
+  log "At etcd-only the server keeps its seat: the same members, healthy, and its Node still registered"
+  wait_for "$(node_name 2)'s Node to report NotReady" 240 node_is 1 2 NotReady,SchedulingDisabled
+  [ "$(etcd_member_ids 1)" = "$ids" ] || fail "the etcd members changed: $(etcd_member_ids 1) (was ${ids})"
+  [ "$(level_label 2)" = etcd-only ] || fail "the Node does not carry the level label"
+  kubectl_on 1 get node "$(node_name 2)" -o jsonpath='{.metadata.labels}' | grep -F 'node-role.kubernetes.io/etcd' >/dev/null || fail "the Node lost its etcd role label"
+  if docker exec "$(container 2)" sh -c 'for p in /proc/[0-9]*; do cat "$p/comm"; done' | grep -Fx containerd >/dev/null; then fail "$(node_name 2) still runs containerd at etcd-only"; fi
+  [ "$(node_password_hash 2)" = "$password" ] || fail "$(node_name 2)'s node password changed"
+
+  log "The stepped-down server still votes: the cluster takes writes with the third server stopped"
+  docker stop "$(container 3)" >/dev/null
+  wait_for "a write through $(node_name 1) with $(node_name 3) stopped" 180 write_marker
+  docker start "$(container 3)" >/dev/null
+  wait_for "$(node_name 3) to be Ready again" 600 node_is 1 3 Ready
+
+  log "While $(node_name 2) is stepped down no other server steps"
+  if regrade_on 3 fleet-regrade down >"${work}/peer.log" 2>&1; then cat "${work}/peer.log"; fail "$(node_name 3) stepped while $(node_name 2) was stepped down"; fi
+  grep -F "etcd-voting nodes not ready: $(node_name 2)" "${work}/peer.log" >/dev/null || { cat "${work}/peer.log"; fail "the refusal did not name the stepped-down server"; }
+  [ "$(level_of 3)" = full ] || fail "$(node_name 3) changed level"
+
+  log "Rerunning the role with a server stepped down changes nothing, and turning regrading off is refused"
+  before=$(started_at)
+  run_role
+  [ "$before" = "$(started_at)" ] || fail "rerunning the role restarted a node while $(node_name 2) was stepped down"
+  [ "$(level_of 2)" = etcd-only ] || fail "the role moved $(node_name 2) off etcd-only"
+  regrade=false
+  write_inventory hosted
+  if output=$(run_role 2>&1); then echo "$output"; fail "the role removed the service of a stepped-down server"; fi
+  echo "$output" | grep -F 'is running at the level etcd-only' >/dev/null || { echo "$output"; fail "the refusal did not name the level"; }
+  for index in $(seq 1 "$node_count"); do
+    docker inspect "$(regrade_container "$index")" >/dev/null 2>&1 || fail "$(regrade_container "$index") was removed in spite of the refusal, which is the whole play's"
+  done
+  regrade=true
+  write_inventory hosted
+
+  log "The pressure passes: the watcher steps back up by itself, one level at a time, to the same node"
+  regrade_on 2 sh -c 'printf "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\n" > /tmp/psi && printf "MemTotal: 1000000 kB\nMemAvailable: 900000 kB\n" > /tmp/meminfo'
+  deadline=$((SECONDS + 900))
+  until at_level 2 full; do
+    stepped=$(stepped_nodes)
+    [ "$stepped" = "" ] || [ "$stepped" = "2 " ] || fail "another server stepped while $(node_name 2) stepped up: ${stepped}"
+    [ "$SECONDS" -lt "$deadline" ] || { regrade_on 2 cat /tmp/watch.log || true; fail "$(node_name 2) did not step back up to full"; }
+    sleep 2
+  done
+  regrade_on 2 cat /tmp/watch.log
+  regrade_on 2 cat /tmp/watch.log | grep -F 'step up etcd-only -> control-plane' >/dev/null || fail "the watcher did not step up through control-plane first"
+  # shellcheck disable=SC2016 # The substitution is for the shell in the service container, which holds the watcher.
+  regrade_on 2 sh -c 'kill $(pidof fleet-regrade)' || true
+  wait_for "$(node_name 2) to be Ready and schedulable" 300 node_is 1 2 Ready
+  [ -z "$(level_label 2)" ] || fail "the level label is still on the Node at full"
+  [ "$(etcd_member_ids 1)" = "$ids" ] || fail "the etcd members changed after stepping up"
+  [ "$(node_password_hash 2)" = "$password" ] || fail "$(node_name 2)'s node password changed"
+  assert_cluster
+
+  log "By hand, a server goes down a level and up again through the same lease"
+  regrade_on 3 fleet-regrade down
+  [ "$(level_of 3)" = control-plane ] || fail "$(node_name 3) did not step down by hand"
+  wait_for "$(node_name 3) to be cordoned" 60 node_is 1 3 Ready,SchedulingDisabled
+  [ "$(level_label 3)" = control-plane ] || fail "the Node does not carry the level label at control-plane"
+  regrade_on 3 fleet-regrade up
+  wait_for "$(node_name 3) to be schedulable again" 120 node_is 1 3 Ready
+  [ "$(level_of 3)" = full ] || fail "$(node_name 3) did not step up by hand"
+  [ -z "$(level_label 3)" ] || fail "the level label is still on the Node at full"
+
+  log "With every server at full, turning regrading off removes the services and leaves the nodes running"
+  before=$(started_at)
+  regrade=false
+  write_inventory hosted
+  run_role
+  [ "$before" = "$(started_at)" ] || fail "turning regrading off restarted a node"
+  for index in $(seq 1 "$node_count"); do
+    if docker inspect "$(regrade_container "$index")" >/dev/null 2>&1; then fail "$(regrade_container "$index") is still there"; fi
+  done
+}
+
 scenarios=("$@")
 [ "${#scenarios[@]}" -gt 0 ] || scenarios=(existing hosted in_cluster)
 for scenario in "${scenarios[@]}"; do
@@ -517,6 +692,7 @@ for scenario in "${scenarios[@]}"; do
   case "$scenario" in
     hosted | in_cluster) scenario_cluster "$scenario" ;;
     existing) scenario_existing ;;
+    regrade) scenario_regrade ;;
     compose_faulty) scenario_compose_faulty ;;
     context_checks) scenario_context_checks ;;
     # Re-checks a cluster a previous run kept with GRTEST_KEEP=1 and the same GRTEST_WORK, without rebuilding it.
