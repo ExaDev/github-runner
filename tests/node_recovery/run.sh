@@ -243,7 +243,8 @@ check_can yes delete nodes
 check_can no create nodes
 node_gone() { ! kubectl get node "$1" >/dev/null 2>&1; }
 wait_for $((prune_after_seconds + poll_seconds + margin_seconds)) "${doomed_node}'s Node to be deleted" node_gone "$doomed_node"
-pruned_line="$(kubectl -n "$platform_namespace" logs deploy/node-recovery | grep "Deleted ${doomed_node}:" | head -1)"
+# Every pod the Deployment still has: a rollout can leave the previous one terminating beside the one that deleted the Node.
+pruned_line="$(kubectl -n "$platform_namespace" logs -l app.kubernetes.io/name=node-recovery --tail=-1 | grep "Deleted ${doomed_node}:" | head -1 || true)"
 [ -n "$pruned_line" ] || fail "the watcher's log has no line for the deletion of ${doomed_node}"
 pruned_after="$(sed -E 's/.*not reporting for ([0-9]+)s.*/\1/' <<< "$pruned_line")"
 [ "$pruned_after" -ge "$prune_after_seconds" ] || fail "${doomed_node} was deleted after ${pruned_after}s, before the ${prune_after_seconds}s threshold"
