@@ -18,7 +18,7 @@ ANNOTATION = "github-runner.exadev/out-of-service-applied-at"
 OUT_OF_SERVICE = "node.kubernetes.io/out-of-service"
 AFTER_SECONDS = 120
 PRUNE_AFTER_SECONDS = 600
-PRUNE_LABEL = "github-runner.exadev/removable"
+PRUNE_LABEL = "github-runner.exadev.io/removable"
 REMOVABLE = {PRUNE_LABEL: "true"}
 
 # Answers `kubectl get nodes -o json` from a file and records every `kubectl patch`; FAKE_PATCH_EXIT sets the patch's exit status.

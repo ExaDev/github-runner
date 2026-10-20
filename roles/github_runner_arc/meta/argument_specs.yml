@@ -353,7 +353,7 @@ argument_specs:
           - Setting it also gives the watcher's ClusterRole the delete verb on nodes, a cluster-wide permission. Servers and etcd members are never deleted.
       github_runner_arc_node_recovery_prune_label:
         type: str
-        default: github-runner.exadev/removable
+        default: github-runner.exadev.io/removable
         description: The label key a node must carry, with the value true, to be pruned. A Kubernetes qualified name.
       github_runner_arc_node_recovery_image:
         type: str
