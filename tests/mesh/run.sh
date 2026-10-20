@@ -19,6 +19,9 @@ etcd_image=gcr.io/etcd-development/etcd:v3.5.21
 busybox_image=busybox:1.37
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
+# etcd's timing for every server, in milliseconds: a heartbeat interval and an election timeout of ten times it, above k3s's own defaults and so told apart from them, and above etcd's required five times.
+etcd_heartbeat_ms=500
+etcd_election_ms=$((etcd_heartbeat_ms * 10))
 work="${GRTEST_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/grtest-mesh.XXXXXX")}"
 k3s_token="grtest-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 # The Docker CLI configuration the ansible-playbook runs see when the context is pinned; see tests/lib/docker_context.sh.
@@ -161,6 +164,8 @@ EOF
     echo "        github_runner_cluster_headscale_compose_files: [${work}/headscale-grtest.yml]"
     echo "        github_runner_cluster_compose_files: [compose.grtest.yml]"
     echo "        github_runner_cluster_k3s_token: ${k3s_token}"
+    echo "        github_runner_cluster_etcd_heartbeat_interval: ${etcd_heartbeat_ms}"
+    echo "        github_runner_cluster_etcd_election_timeout: ${etcd_election_ms}"
     if [ "$pin_context" = 1 ]; then
       echo "        github_runner_cluster_docker_context: ${grtest_pinned_context}"
     fi
@@ -258,6 +263,16 @@ EOF
   log "Pod-to-pod traffic crosses the mesh"
 }
 
+# Every server's etcd must have been started with the timing the inventory sets: k3s writes the --etcd-arg values into the config file it starts etcd from.
+assert_etcd_timing() {
+  local index config
+  for index in $(seq 1 "$node_count"); do
+    config=$(docker exec "$(container "$index")" cat /var/lib/rancher/k3s/server/db/etcd/config </dev/null) || fail "$(node_name "$index") has no etcd config file"
+    echo "$config" | grep -Eq "^heartbeat-interval:.*\\b${etcd_heartbeat_ms}\\b" || { echo "$config"; fail "$(node_name "$index") does not run etcd with a ${etcd_heartbeat_ms} ms heartbeat interval"; }
+    echo "$config" | grep -Eq "^election-timeout:.*\\b${etcd_election_ms}\\b" || { echo "$config"; fail "$(node_name "$index") does not run etcd with a ${etcd_election_ms} ms election timeout"; }
+  done
+}
+
 # Whether a pod reaches another pod's echo server, allowing the mesh time to converge: after a node restarts, its peers take a while to learn its new endpoints and routes again.
 reaches() {
   local _
@@ -280,6 +295,8 @@ scenario_cluster() {
   write_inventory "$scenario"
   run_role
   assert_cluster
+  log "Checking every server's etcd runs with the timing the inventory sets"
+  assert_etcd_timing
   log "Rerunning the role, which must not restart any node"
   local before after
   before=$(started_at)
@@ -287,6 +304,14 @@ scenario_cluster() {
   after=$(started_at)
   [ "$before" = "$after" ] || fail "rerunning the role restarted a node container: ${before} -> ${after}"
   assert_cluster
+  assert_etcd_timing
+  if [ "$scenario" = hosted ]; then
+    # A restart starts k3s's temporary etcd against the initialised datastore, which every --etcd-arg also reaches; the timing flags must not break it. The joined server is restarted, not the bootstrap one the Headscale server runs beside.
+    log "Restarting a joined server against its initialised datastore, with the etcd timing set"
+    docker restart "$(container 2)" >/dev/null
+    assert_cluster
+    assert_etcd_timing
+  fi
   if [ "$scenario" = in_cluster ]; then
     log "Cold-restarting the bootstrap server, which cannot rejoin a three-server cluster on its own, then recovering it"
     ansible_run -i "${work}/inventory.yml" "${repo_root}/playbooks/recover_in_cluster_mesh.yml" \
