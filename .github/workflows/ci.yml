@@ -111,14 +111,38 @@ jobs:
           ansible-galaxy collection build --output-path "${RUNNER_TEMP}/collection"
           tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
           tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
-      - name: Unit-test the cluster role's server selection
-        # Ubuntu's ansible package, installed above, puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record.
+
+  unit-tests:
+    name: Unit tests (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    # Each module is run on its own by discovery, dealt out by size so that the shards take about the same amount of work: the tests that run Ansible playbooks cost a process each, and the suite no longer fits one job.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ansible pkg-config
+      - name: Unit-test the collection
+        # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record. A module is a shard's when its position in the list of modules, largest first, leaves this shard's index modulo the number of shards.
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
         run: |
           set -euo pipefail
           export PATH="/usr/bin:${PATH}" ANSIBLE_PLAYBOOK=/usr/bin/ansible-playbook
           ansible-playbook --version | head -n 1
           python3 -c 'import ansible.release; print("ansible-core", ansible.release.__version__)'
-          python3 -m unittest discover -s tests/unit -v
+          mapfile -t modules < <(find tests/unit -maxdepth 1 -name 'test_*.py' -printf '%s %p\n' | LC_ALL=C sort -k1,1nr -k2,2 | cut -d' ' -f2- | awk -v shard="$SHARD" -v shards="$SHARDS" '(NR - 1) % shards == shard')
+          echo "Shard ${SHARD} of ${SHARDS}: ${#modules[@]} module(s)"
+          for module in "${modules[@]}"; do
+            python3 -m unittest discover -s tests/unit -p "$(basename "$module")" -v
+          done
 
   ansible-lint:
     name: ansible-lint
@@ -204,7 +228,7 @@ jobs:
 
   required-checks:
     name: Required Checks
-    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, ansible-lint, collection-build, commitlint, commitlint-pr-title]
+    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, unit-tests, ansible-lint, collection-build, commitlint, commitlint-pr-title]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
     runs-on: ubuntu-latest
