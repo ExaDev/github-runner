@@ -112,6 +112,21 @@
           and ([github_runner_arc_node_recovery_after_seconds, github_runner_arc_node_recovery_poll_seconds]
                | map('string') | reject('match', '^[1-9][0-9]*$') | list | length > 0)
         }}
+    - msg: github_runner_arc_node_recovery_prune_after_seconds must be empty or a whole number of seconds greater than github_runner_arc_node_recovery_after_seconds, so a node is tainted before it is deleted.
+      failed: >-
+        {{
+          github_runner_arc_node_recovery_enabled | bool
+          and github_runner_arc_node_recovery_prune_after_seconds | string | length > 0
+          and (github_runner_arc_node_recovery_prune_after_seconds | string is not match('^[1-9][0-9]*$')
+               or github_runner_arc_node_recovery_prune_after_seconds | int <= github_runner_arc_node_recovery_after_seconds | int)
+        }}
+    - msg: github_runner_arc_node_recovery_prune_label must be a Kubernetes label key, such as example.com/removable.
+      failed: >-
+        {{
+          github_runner_arc_node_recovery_enabled | bool
+          and github_runner_arc_node_recovery_prune_after_seconds | string | length > 0
+          and github_runner_arc_node_recovery_prune_label | string is not match('^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$')
+        }}
     - msg: github_runner_arc_runner_reaper_max_job_seconds must be a whole number of seconds, at least 1, and github_runner_arc_runner_reaper_completed_grace_seconds a whole number of seconds.
       failed: >-
         {{

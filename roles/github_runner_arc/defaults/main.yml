@@ -175,6 +175,10 @@ github_runner_arc_node_recovery_enabled: true
 github_runner_arc_node_recovery_after_seconds: 120
 # How often the watcher checks the nodes. A taint lands at most this long after the threshold passes.
 github_runner_arc_node_recovery_poll_seconds: 15
+# Opt-in pruning of nodes that went away for good. Empty turns it off, which also leaves the watcher without permission to delete a Node. A whole number of seconds, greater than github_runner_arc_node_recovery_after_seconds, makes the watcher delete the Node object of a node that has been Unknown that long and carries github_runner_arc_node_recovery_prune_label with the value true, so a node that does not return, such as a Raspberry Pi agent that was unplugged, stops being listed. A k3s agent that does return registers itself again. There is no default delay, since how long a node may be away before it is given up is the fleet's own decision. Servers, etcd members and any node without the label are never deleted. This is a cluster-wide delete on nodes, granted to the watcher's ServiceAccount only while this is set.
+github_runner_arc_node_recovery_prune_after_seconds: ""
+# The label a node must carry, with the value true, to be pruned. Set it on the nodes that may go (for a k3s agent, --node-label on its command line, which it applies again each time it registers), never on a server.
+github_runner_arc_node_recovery_prune_label: github-runner.exadev/removable
 # Image the watcher runs. Pulled without a pull Secret, so it must be public.
 github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:2.1.0"
 

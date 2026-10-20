@@ -345,6 +345,16 @@ argument_specs:
         type: int
         default: 15
         description: How often the node recovery watcher checks the nodes.
+      github_runner_arc_node_recovery_prune_after_seconds:
+        type: str
+        default: ""
+        description:
+          - Empty turns pruning off. A whole number of seconds, greater than github_runner_arc_node_recovery_after_seconds, makes the watcher delete the Node object of a node that has been Unknown that long and carries github_runner_arc_node_recovery_prune_label with the value true.
+          - Setting it also gives the watcher's ClusterRole the delete verb on nodes, a cluster-wide permission. Servers and etcd members are never deleted.
+      github_runner_arc_node_recovery_prune_label:
+        type: str
+        default: github-runner.exadev/removable
+        description: The label key a node must carry, with the value true, to be pruned. A Kubernetes qualified name.
       github_runner_arc_node_recovery_image:
         type: str
         description: Image the node recovery watcher runs, pulled without a pull Secret.
