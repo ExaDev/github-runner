@@ -5,10 +5,14 @@
   # First, so that a pinned context that does not exist, or one set alongside DOCKER_HOST, stops the run before anything touches the host.
   ansible.builtin.include_tasks: docker_context.yml
 
+- name: Read which operating system this host runs
+  # Before the macOS conditions below, which cannot assume the caller gathered facts.
+  ansible.builtin.include_tasks: host_os.yml
+
 - name: Make the container runtime come back after a reboot, and check it is up
   # macOS only: the runtime is Colima or Docker Desktop there, a Linux VM that stays stopped after a reboot until something starts it, while Linux hosts run Docker as a system service. Before anything reads the daemon, since the version checks below fail on one that is down. See tasks/runtime.yml.
   ansible.builtin.include_tasks: runtime.yml
-  when: ansible_facts['os_family'] == 'Darwin'
+  when: ansible_facts['system'] == 'Darwin'
 
 - name: Read this host's Docker Compose version
   # Before anything that runs Compose (the mesh providers start Compose projects too), for the check below. The CLI plugin's own version, which no Docker context or daemon changes; it still runs with the pinned context, like every docker command in the role. Read-only, so it runs under --check as well.
@@ -115,7 +119,7 @@
 
     - name: Check the runtime and this node's container are up
       ansible.builtin.include_tasks: end_checks.yml
-      when: ansible_facts['os_family'] == 'Darwin'
+      when: ansible_facts['system'] == 'Darwin'
 
 - name: Join as a k3s agent
   when: github_runner_cluster_effective_node_role == "agent"
@@ -138,7 +142,7 @@
 
     - name: Check the runtime and this node's container are up
       ansible.builtin.include_tasks: end_checks.yml
-      when: ansible_facts['os_family'] == 'Darwin'
+      when: ansible_facts['system'] == 'Darwin'
 
     - name: End the role here, since an agent host has no API of its own to wait on
       ansible.builtin.meta: end_role

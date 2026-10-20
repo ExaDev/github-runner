@@ -5,6 +5,16 @@
 #
 # Publishes github_runner_cluster_effective_runtime ({kind, colima_profile}), github_runner_cluster_runtime_environment (what docker and colima run with), github_runner_cluster_runtime_down_message and github_runner_cluster_runtime_up, for end_checks.yml.
 
+- name: Read the connecting user and its environment
+  # The user id the launchd domain is named after and the home directory the agent lives in. A caller that gathered facts already has both; one that did not (host_os.yml reads only the platform) gets just these two subsets.
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - user
+      - env
+  when: "'user_uid' not in ansible_facts or 'env' not in ansible_facts"
+
 - name: Work out which container runtime this host runs
   ansible.builtin.set_fact:
     github_runner_cluster_effective_runtime: >-
