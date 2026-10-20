@@ -437,8 +437,9 @@ class RoleTasksTest(unittest.TestCase):
     def test_the_service_runs_on_servers_after_the_node_is_started(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
         [block] = [task for task in tasks if "block" in task and task.get("when") == 'github_runner_cluster_effective_node_role == "server"']
-        steps = [step.get("ansible.builtin.include_tasks") or ("compose" if "community.docker.docker_compose_v2" in step else None) for step in block["block"]]
-        self.assertLess(steps.index("compose"), steps.index("regrade_service.yml"))
+        steps = [step.get("ansible.builtin.include_tasks") for step in block["block"]]
+        self.assertLess(steps.index("start_servers.yml"), steps.index("regrade_service.yml"))
+        self.assertLess(steps.index("regrade_service.yml"), steps.index("end_checks.yml"))
         [agent] = [task for task in tasks if "block" in task and task.get("when") == 'github_runner_cluster_effective_node_role == "agent"']
         self.assertNotIn("regrade_service.yml", [step.get("ansible.builtin.include_tasks") for step in agent["block"]])
 
