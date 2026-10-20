@@ -131,8 +131,7 @@ apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
   - role: worker
-  - role: worker
-  # Registers with the removable label every time its kubelet starts, as a k3s agent does with --node-label.
+  # The second worker, kind's name for it being worker2: it registers with the removable label every time its kubelet starts, as a k3s agent does with --node-label.
   - role: worker
     kubeadmConfigPatches:
       - |
@@ -140,6 +139,7 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "${removable_label}=true"
+  - role: worker
 EOF
 kind create cluster --name "$cluster" --config "$work/kind.yaml" --kubeconfig "$KUBECONFIG" --wait 180s >/dev/null
 server_version="$(kubectl version -o json | jq -r '.serverVersion.gitVersion')"
