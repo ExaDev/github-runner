@@ -132,6 +132,25 @@ class FleetOrgsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("configured more than once", result.stdout)
 
+    # Two clusters in one inventory, localhost in the first and other-host in the second, as the playbooks resolve github_runner_cluster_group for the first cluster's play.
+    TWO_CLUSTERS = LOCALHOST_INVENTORY.replace("[local]", "[cluster_a]") + "[cluster_b]\nother-host ansible_connection=local\n"
+
+    def test_an_org_split_across_two_clusters_is_accepted_and_each_cluster_sees_its_own_sets(self) -> None:
+        result, facts, _ = run(BASE | {"github_runner_cluster_group": "cluster_a", "github_runner_arc_orgs": orgs()}, self.TWO_CLUSTERS, {"other-host": {"github_runner_arc_orgs": [org | {"scale_set_profiles": [{"suffix": "-builder", "namespace": "builder-runners", "max_runners": 1}]} for org in orgs()]}})
+        self.assertEqual(result.returncode, 0, result.stdout[-3000:])
+        self.assertEqual(namespaces(facts), ["example-runners"])
+
+    def test_one_scale_set_on_two_clusters_is_refused(self) -> None:
+        result, _, _ = run(BASE | {"github_runner_cluster_group": "cluster_a", "github_runner_arc_orgs": orgs()}, self.TWO_CLUSTERS, {"other-host": {"github_runner_arc_orgs": orgs(namespace="other-runners")}})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("example-org on localhost and example-org on other-host, which installs into another cluster, both register scale set 'example-org-runners'", result.stdout)
+
+    def test_the_same_org_on_two_hosts_of_one_cluster_is_a_duplicate(self) -> None:
+        inventory = "[cluster_a]\nlocalhost ansible_connection=local\nother-host ansible_connection=local\n"
+        result, _, _ = run(BASE | {"github_runner_cluster_group": "cluster_a", "github_runner_arc_orgs": orgs()}, inventory, {"other-host": {"github_runner_arc_orgs": orgs(namespace="other-runners")}})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("for one cluster, on other-host (as 'example-org') and on localhost", result.stdout)
+
     # An autoscaled profile on the host that installs the platform, so the pool settings are checked.
     AUTOSCALED = BASE | {
         "github_runner_arc_heartbeat_gist_id": "0123abcd",
