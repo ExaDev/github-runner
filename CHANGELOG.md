@@ -1,3 +1,9 @@
+## [2.7.9](https://github.com/ExaDev/github-runner/compare/v2.7.8...v2.7.9) (2026-10-21)
+
+### Tests
+
+* **mesh:** check a server stepped down to etcd-only gives the Lease back ([d976df7](https://github.com/ExaDev/github-runner/commit/d976df767612daa1f0ff9f1e4dbaac3fbeb51bec))
+
 ## [2.7.8](https://github.com/ExaDev/github-runner/compare/v2.7.7...v2.7.8) (2026-10-21)
 
 ### Bug Fixes
