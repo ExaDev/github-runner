@@ -1,3 +1,9 @@
+## [2.7.6](https://github.com/ExaDev/github-runner/compare/v2.7.5...v2.7.6) (2026-10-21)
+
+### Tests
+
+* **cluster:** stop two recreate tests assuming which server takes the first turn ([fe5065d](https://github.com/ExaDev/github-runner/commit/fe5065d7374c070fa4b4d17dc7d2d6f9a015f656))
+
 ## [2.7.5](https://github.com/ExaDev/github-runner/compare/v2.7.4...v2.7.5) (2026-10-20)
 
 ### Bug Fixes
