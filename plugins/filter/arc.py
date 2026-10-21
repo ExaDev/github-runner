@@ -609,7 +609,7 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
 def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, Any]:
     """Expand github_runner_arc_orgs entries into one record per scale-set profile, and check them.
 
-    Pass every org configured anywhere in the inventory, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile setting its own sizing) see the whole fleet.
+    Pass every org that installs into one cluster, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile setting its own sizing) see the whole cluster; arc_cluster_profiles gathers them from the inventory.
 
     Args:
         require_app_id: whether each org must set app_id. The role needs it only when it writes the App Secret; otherwise the App's id is in the existing App Secret, and an app_id that is set is only checked against it.
@@ -640,7 +640,7 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
         if org.get("private_key") is not None and org.get("private_key_op_reference") is not None:
             errors.append(f"{org_name}: set private_key or private_key_op_reference, not both (the 1Password adapter fills private_key from the reference)")
         if org_name.lower() in seen_orgs:
-            errors.append(f"Org '{org_name}' is configured more than once in github_runner_arc_orgs across the inventory (also as '{seen_orgs[org_name.lower()]}'). Each org's Helm releases must be installed from exactly one host; remove the duplicate.")
+            errors.append(f"Org '{org_name}' is configured more than once in github_runner_arc_orgs (also as '{seen_orgs[org_name.lower()]}'). Each org's Helm releases in a cluster must be installed from one entry on one host; remove the duplicate.")
             continue
         seen_orgs[org_name.lower()] = org_name
         org_profiles = org.get("scale_set_profiles")
@@ -669,6 +669,61 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
     if len(sized_autoscaled) > 1:
         errors.append(f"At most one autoscaled scale-set profile may set sizing, because it derives the shared pool's ceiling; found {', '.join(profile['label'] for profile in sized_autoscaled)}")
     return {"errors": errors, "profiles": profiles, "autoscaled": autoscaled}
+
+
+def _is_list(value: Any) -> bool:
+    """Return whether value is a list in the YAML sense: a sequence that is not a string."""
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def arc_cluster_profiles(orgs_by_host: Mapping[str, Any], cluster: Sequence[str] | None = None) -> dict[str, Any]:
+    """Expand and check the orgs of every host that installs into one cluster, and check their scale sets against the hosts of every other cluster.
+
+    The hosts of one cluster share its controller, namespaces and autoscaled pool, so an org is installed into a cluster from one host, and arc_profiles' checks apply across all of them. A host of another cluster (another cluster group, with a controller of its own) may install the same org, since each cluster's releases and namespaces are its own, but not the same scale set: GitHub gives an org's scale set name to one controller at a time, so a second cluster's listener would contend with the first for it.
+
+    Args:
+        orgs_by_host: each inventory host's github_runner_arc_orgs, by host name, in inventory order. cluster: the names of the hosts that install into the same cluster as the host being checked, or None when that is not known, which treats every host as one cluster.
+
+    Returns:
+        arc_profiles' result for the orgs of the cluster's hosts (see arc_profiles; app_id is not required, since only each host's own check knows whether it writes the App Secret), with errors that also name an org configured on two of the cluster's hosts and a scale set registered from both this cluster and another.
+    """
+    members = set(orgs_by_host) if cluster is None else set(cluster)
+    errors: list[str] = []
+    cluster_orgs: list[Any] = []
+    installers: dict[str, tuple[str, str]] = {}
+    for host, orgs in orgs_by_host.items():
+        if host not in members:
+            continue
+        if not _is_list(orgs):
+            errors.append(f"{host}: github_runner_arc_orgs must be a list")
+            continue
+        for org in orgs:
+            name = _text(org, "name") if isinstance(org, Mapping) else ""
+            installer = installers.get(name.lower()) if name else None
+            # The same org twice on one host is arc_profiles' own check, so it is passed on for that.
+            if installer is not None and installer[0] != host:
+                errors.append(f"Org '{name}' is configured more than once in github_runner_arc_orgs for one cluster, on {installer[0]} (as '{installer[1]}') and on {host}. Each org's Helm releases in a cluster must be installed from one host; move its scale_set_profiles onto one of them.")
+                continue
+            if name:
+                installers.setdefault(name.lower(), (host, name))
+            cluster_orgs.append(org)
+    result = arc_profiles(cluster_orgs, require_app_id=False)
+    # Another cluster's hosts are checked in full by that cluster's own validation, so only the scale sets that expand are compared here.
+    registered: dict[tuple[str, str], tuple[str, str]] = {}
+    elsewhere: list[tuple[str, dict[str, Any]]] = []
+    for host, orgs in orgs_by_host.items():
+        if not _is_list(orgs):
+            continue
+        for profile in arc_profiles(orgs, require_app_id=False)["profiles"]:
+            if host in members:
+                registered.setdefault((profile["org_name"].lower(), profile["release"]), (host, profile["label"]))
+            else:
+                elsewhere.append((host, profile))
+    for host, profile in elsewhere:
+        match = registered.get((profile["org_name"].lower(), profile["release"]))
+        if match is not None:
+            errors.append(f"{match[1]} on {match[0]} and {profile['label']} on {host}, which installs into another cluster, both register scale set '{profile['release']}' for org '{profile['org_name']}'. GitHub gives a scale set name to one controller at a time; uninstall it from one cluster before installing it in the other, or give one of them a different suffix or release_name.")
+    return {**result, "errors": errors + result["errors"]}
 
 
 def _pinned_image_errors(where: str, image: Any) -> list[str]:
@@ -1458,6 +1513,7 @@ class FilterModule:
         """Return the filters this plugin provides."""
         return {
             "arc_profiles": arc_profiles,
+            "arc_cluster_profiles": arc_cluster_profiles,
             "arc_max_runners": arc_max_runners,
             "arc_measured_max_runners": arc_measured_max_runners,
             "arc_upgrade_blocker": arc_upgrade_blocker,
