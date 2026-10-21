@@ -34,7 +34,7 @@ PLAYBOOK = textwrap.dedent(
 )
 
 ORG = {"name": "ExampleOrg", "image": "ghcr.io/actions/actions-runner:2.338.0"}
-PROFILE = {"app_secret": "example-github-app", "scale_set_labels": ["example-pool"]}
+PROFILE = {"app_secret": "example-github-app", "release": "example-release", "scale_set_labels": ["example-pool"]}
 
 
 def render(source: str) -> dict[str, Any]:
@@ -73,6 +73,7 @@ class PullSecretSourceTest(unittest.TestCase):
             [
                 "githubConfigUrl=https://github.com/ExampleOrg",
                 "githubConfigSecret=example-github-app",
+                "runnerScaleSetName=example-release",
                 "template.spec.containers[0].image=ghcr.io/actions/actions-runner:2.338.0",
                 "scaleSetLabels[0]=example-pool",
             ],

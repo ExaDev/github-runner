@@ -109,7 +109,7 @@
       data: "{{ github_runner_arc_job_started_data }}"
 
 - name: Install/upgrade the scale-set release for {{ profile.label }}
-  # runnerScaleSetName is left to default to the release name: it is the scale set's registration identity on GitHub, so two releases sharing it make the second one's listener crash-loop registering a duplicate. scaleSetLabels is the pooling mechanism instead: an extra label every profile's runners carry alongside their own unique one, so runs-on: <label> matches every profile sharing it. A profile sets its own runs_on_label to stay out of the shared pool, or scale_set_labels to choose the whole list (empty sets none, leaving jobs to target the release name).
+  # runnerScaleSetName is set to the release name in github_runner_arc_scale_set_set_values, over any values file: it is the scale set's registration identity on GitHub, so two releases sharing it make the second one's listener crash-loop registering a duplicate. scaleSetLabels is the pooling mechanism instead: an extra label every profile's runners carry alongside their own unique one, so runs-on: <label> matches every profile sharing it. A profile sets its own runs_on_label to stay out of the shared pool, or scale_set_labels to choose the whole list (empty sets none, leaving jobs to target the release name).
   kubernetes.core.helm:
     name: "{{ profile.release }}"
     chart_ref: oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
