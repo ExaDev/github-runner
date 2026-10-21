@@ -1,3 +1,9 @@
+## [2.7.7](https://github.com/ExaDev/github-runner/compare/v2.7.6...v2.7.7) (2026-10-21)
+
+### Bug Fixes
+
+* **cluster:** write the kubeconfig with a permission mode, not the API port ([f841b5d](https://github.com/ExaDev/github-runner/commit/f841b5d6135d33eae527dcd0d515aab9d11c8d45))
+
 ## [2.7.6](https://github.com/ExaDev/github-runner/compare/v2.7.5...v2.7.6) (2026-10-21)
 
 ### Tests
