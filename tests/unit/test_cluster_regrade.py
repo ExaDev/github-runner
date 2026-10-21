@@ -393,7 +393,7 @@ class EntrypointTest(unittest.TestCase):
     def test_the_arguments_without_a_record_are_what_they_were_before(self) -> None:
         self.assertEqual(
             self.server_args(None),
-            ["--disable=traefik", "--disable-network-policy", "--write-kubeconfig-mode=6443", "--vpn-auth=name=tailscale,joinKey=example", "--resolv-conf=/etc/k3s-resolv.conf", "--node-ip=100.64.0.1", "--cluster-init"],
+            ["--disable=traefik", "--disable-network-policy", "--write-kubeconfig-mode=644", "--vpn-auth=name=tailscale,joinKey=example", "--resolv-conf=/etc/k3s-resolv.conf", "--node-ip=100.64.0.1", "--cluster-init"],
         )
 
     def test_the_flags_are_empty_until_the_start_that_reads_the_level(self) -> None:

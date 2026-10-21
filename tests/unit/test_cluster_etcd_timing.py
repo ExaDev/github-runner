@@ -222,10 +222,10 @@ class EntrypointTest(unittest.TestCase):
                 self.assertEqual([arg for arg in self.server_args(builder, K3S_ETCD_HEARTBEAT_INTERVAL="", K3S_ETCD_ELECTION_TIMEOUT="") if "etcd" in arg], [])
 
     def test_the_arguments_without_the_variables_are_what_they_were_before(self) -> None:
-        self.assertEqual(self.server_args("direct_server_args"), ["--disable=traefik", "--disable-network-policy", "--write-kubeconfig-mode=6443"])
+        self.assertEqual(self.server_args("direct_server_args"), ["--disable=traefik", "--disable-network-policy", "--write-kubeconfig-mode=644"])
         self.assertEqual(
             self.server_args("mesh_server_args"),
-            ["--disable=traefik", "--disable-network-policy", "--write-kubeconfig-mode=6443", "--vpn-auth=name=tailscale,joinKey=example", "--resolv-conf=/etc/k3s-resolv.conf", "--node-ip=100.64.0.1", "--cluster-init"],
+            ["--disable=traefik", "--disable-network-policy", "--write-kubeconfig-mode=644", "--vpn-auth=name=tailscale,joinKey=example", "--resolv-conf=/etc/k3s-resolv.conf", "--node-ip=100.64.0.1", "--cluster-init"],
         )
 
     def test_the_agent_command_line_does_not_take_them(self) -> None:
