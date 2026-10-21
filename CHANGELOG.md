@@ -1,3 +1,10 @@
+## [2.7.8](https://github.com/ExaDev/github-runner/compare/v2.7.7...v2.7.8) (2026-10-21)
+
+### Bug Fixes
+
+* **arc:** check orgs per cluster and refuse a scale set registered from two clusters ([26230fe](https://github.com/ExaDev/github-runner/commit/26230fe055f910775d6112fd1d23215381ff71eb)), closes [#130](https://github.com/ExaDev/github-runner/issues/130)
+* **arc:** name every scale set after its release whatever a values file says ([73cde13](https://github.com/ExaDev/github-runner/commit/73cde13d5ffb69c49862d8a2c4c8b6c60bd92803))
+
 ## [2.7.7](https://github.com/ExaDev/github-runner/compare/v2.7.6...v2.7.7) (2026-10-21)
 
 ### Bug Fixes
