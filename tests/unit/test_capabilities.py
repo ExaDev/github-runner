@@ -868,6 +868,84 @@ class CapabilityStoreExternalsLayoutTest(unittest.TestCase):
         assert_every_mount_has_its_volume(self, spec)
 
 
+class CapabilityStoreValidationTest(unittest.TestCase):
+    """What a profile with capability_store needs is reported by validation, with the messages the render reports, so that it fails before anything is installed."""
+
+    UNPINNED = {"tools": {"image": "ghcr.io/example/toolcache-node:22"}, "libraries": {"sysroot_image": "ghcr.io/example/sysroot-libpq:16"}}
+
+    def profile(self, store: bool = True, names: list[str] | None = None, **settings: Any) -> dict[str, Any]:
+        return expanded({"max_runners": 1, "capability_store": store, "capabilities": names or [], **settings})
+
+    def catalogue_errors(self, profile: dict[str, Any], catalogue: dict[str, Any]) -> list[str]:
+        errors: list[str] = arc.arc_capability_errors([profile], catalogue)
+        return errors
+
+    def store_errors(self, profile: dict[str, Any], catalogue: dict[str, Any], store_path: str = "/opt/capability-store", registry_cache: bool = False) -> list[str]:
+        errors: list[str] = arc.arc_capability_store_errors([profile], catalogue, store_path, TOOL_CACHE, SYSROOT, HOOKS_DIR, NODE_CACHE, registry_cache)
+        return errors
+
+    def render_errors(self, names: list[str], catalogue: dict[str, Any], store: dict[str, str] = STORE) -> list[str]:
+        errors: list[str] = arc.arc_capability_pod(DEFAULT_VALUES, names, catalogue, TOOL_CACHE, SYSROOT, NODE_CACHE, NODE_CACHE_HOST, 1001, 1001, HOOKS_DIR, CONFIGMAP, store)["errors"]
+        return errors
+
+    def test_a_capability_image_not_pinned_by_digest_is_a_validation_error_with_the_stores_profile_and_the_renders_message(self) -> None:
+        for name, catalogue in (("tool", {"tools": self.UNPINNED["tools"]}), ("library", {"libraries": self.UNPINNED["libraries"]})):
+            with self.subTest(name):
+                capability = next(iter(catalogue))
+                errors = self.catalogue_errors(self.profile(names=[capability]), catalogue)
+                self.assertEqual(errors, [f"Example: {message}" for message in self.render_errors([capability], catalogue)])
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn("pinned by digest", errors[0])
+
+    def test_a_profile_without_the_store_needs_no_digest_and_a_digest_passes(self) -> None:
+        self.assertEqual(self.catalogue_errors(self.profile(store=False, names=["tools", "libraries"]), self.UNPINNED), [])
+        self.assertEqual(self.catalogue_errors(self.profile(names=["node", "mpi", "libpq"]), STORE_CATALOGUE), [])
+
+    def test_each_unpinned_capability_of_a_profile_is_reported_once_and_hooks_need_no_digest(self) -> None:
+        catalogue = {**self.UNPINNED, "hook": {"job_started_hook": "true"}}
+        errors = self.catalogue_errors(self.profile(names=["tools", "hook", "libraries"]), catalogue)
+        self.assertEqual(len(errors), 2, errors)
+        self.assertIn("capability tools's", errors[0])
+        self.assertIn("capability libraries's", errors[1])
+
+    def test_a_store_path_inside_the_tool_cache_is_a_validation_error_with_the_renders_message(self) -> None:
+        inside = f"{TOOL_CACHE}/store"
+        expected = self.render_errors(["node"], STORE_CATALOGUE, {**STORE, "path": inside})
+        self.assertEqual(len(expected), 1, expected)
+        self.assertEqual(self.store_errors(self.profile(names=["node"]), STORE_CATALOGUE, inside), [f"Example: {message}" for message in expected])
+
+    def test_the_store_path_is_checked_against_every_directory_the_capabilities_mount(self) -> None:
+        for what, path in (("tool cache", f"{TOOL_CACHE}/x"), ("sysroot", SYSROOT), ("job-started hooks", f"{HOOKS_DIR}/x"), ("node cache", "/"), ("node cache", f"{NODE_CACHE}/store")):
+            with self.subTest(what=what, path=path):
+                self.assertEqual(len(self.store_errors(self.profile(names=["node"]), STORE_CATALOGUE, path)), 1)
+        self.assertEqual(self.store_errors(self.profile(names=["node"]), STORE_CATALOGUE), [])
+
+    def test_a_profile_that_holds_nothing_in_the_store_or_does_not_use_it_needs_no_separate_path(self) -> None:
+        inside = f"{TOOL_CACHE}/store"
+        self.assertEqual(self.store_errors(self.profile(names=["pnpm-store"]), STORE_CATALOGUE, inside), [])
+        self.assertEqual(self.store_errors(self.profile(store=False, names=["node"]), STORE_CATALOGUE, inside), [])
+
+    def dind_profile(self, image: str, **settings: Any) -> dict[str, Any]:
+        result = arc.arc_profiles([{"name": "Example", "image": image, "scale_set_profiles": [{"max_runners": 1, "capability_store": True, **settings}]}], require_app_id=False)
+        self.assertEqual(result["errors"], [])
+        profile: dict[str, Any] = result["profiles"][0]
+        return profile
+
+    def test_an_unpinned_runner_image_is_a_validation_error_for_the_dind_externals_the_registry_cache_writes_out(self) -> None:
+        profile = self.dind_profile("ghcr.io/example/runner:2", container_mode="dind")
+        errors = self.store_errors(profile, {}, registry_cache=True)
+        values = {"template": {"spec": {"initContainers": [{"name": "init-dind-externals", "image": "ghcr.io/example/runner:2"}]}}}
+        self.assertEqual(errors, [f"Example: {message}" for message in arc.arc_capability_store_externals(values, STORE, 1001, 1001)["errors"]])
+        self.assertEqual(len(errors), 1, errors)
+
+    def test_a_digest_pinned_runner_image_or_no_registry_cache_or_no_dind_leaves_the_externals_unchecked(self) -> None:
+        self.assertEqual(self.store_errors(self.dind_profile(RUNNER_IMAGE, container_mode="dind"), {}, registry_cache=True), [])
+        self.assertEqual(self.store_errors(self.dind_profile("ghcr.io/example/runner:2", container_mode="dind"), {}, registry_cache=False), [])
+        self.assertEqual(self.store_errors(self.dind_profile("ghcr.io/example/runner:2"), {}, registry_cache=True), [])
+        # A values file's own dind wiring is not known here; the render checks its externals copy.
+        self.assertEqual(self.store_errors(self.dind_profile("ghcr.io/example/runner:2", values_file="values.yaml", container_mode="dind"), {}, registry_cache=True), [])
+
+
 class CapabilityStoreImageContractTest(unittest.TestCase):
     """The applets the store image must provide, as the defaults and the README state them, are exactly the ones the init containers that run it use."""
 

@@ -29,6 +29,20 @@
     github_runner_arc_capability_problems: "{{ github_runner_arc_local.profiles | exadev.github_runner.arc_capability_errors(github_runner_arc_capabilities) }}"
   when: github_runner_arc_capability_problems | length > 0
 
+# What a profile with capability_store needs of this host's settings, which the same filters check at render time (install_scale_set_profile.yml), after the controller, the pruner and earlier profiles have been applied. The catalogue is valid here, which these checks read.
+- name: Fail when a profile's capability store settings do not fit the role's mount paths and images
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_capability_store_problems }}"
+  vars:
+    github_runner_arc_capability_store_problems: >-
+      {{
+        github_runner_arc_local.profiles
+        | exadev.github_runner.arc_capability_store_errors(
+            github_runner_arc_capabilities, github_runner_arc_capability_store_path, github_runner_arc_tool_cache_path, github_runner_arc_sysroot_path,
+            github_runner_arc_job_started_hooks_dir, github_runner_arc_node_cache_path, github_runner_arc_registry_cache_enabled | bool)
+      }}
+  when: github_runner_arc_capability_store_problems | length > 0
+
 - name: Fail on invalid node cache settings
   ansible.builtin.fail:
     msg: "{{ github_runner_arc_node_cache_problems }}"
