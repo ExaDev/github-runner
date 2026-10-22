@@ -1361,6 +1361,7 @@ def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[s
     """Return the init containers that put a profile's tool-cache and system-library payloads in the store and give the pod its view of them, with the store entries the pod uses."""
     root = store["path"].rstrip("/")
     copies: list[dict[str, Any]] = []
+    copied: set[str] = set()
     tool_keys: list[str] = []
     sysroot_keys: list[str] = []
     for name in names:
@@ -1372,7 +1373,10 @@ def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[s
         key = arc_capability_store_key(image, _STORE_KIND_TOOL_CACHE if is_tool else _STORE_KIND_SYSROOT)
         assert key is not None
         payload = _TOOL_IMAGE_PAYLOAD if is_tool else _SYSROOT_IMAGE_PAYLOAD
-        copies.append(_capability_store_copy_container(f"{_CAPABILITY_CONTAINER_PREFIX}{name}", image, payload, key, store, runner_user, runner_group))
+        # Two capabilities on one image name one entry, so only the first copies it: a second copy would write the same bytes again to be deleted at publishing.
+        if key not in copied:
+            copied.add(key)
+            copies.append(_capability_store_copy_container(f"{_CAPABILITY_CONTAINER_PREFIX}{name}", image, payload, key, store, runner_user, runner_group))
         (tool_keys if is_tool else sysroot_keys).append(key)
     # Two capabilities may name one image, and the merge links each entry's files into the merged directory, so an entry named twice would be linked over itself (cp reports the same file). Each entry stays at its last position, where its files win over the earlier entries' as they did when every capability was copied into the pod in order, so the merged entry's name, a hash of the order, is that of the order that merges the same files.
     sysroot_keys = list(reversed(list(dict.fromkeys(reversed(sysroot_keys)))))

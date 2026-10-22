@@ -812,6 +812,20 @@ class CapabilityStorePodTest(unittest.TestCase):
         self.assertEqual(merge["command"][6:], [KEY_C, KEY_B])
         self.assertNotEqual(merge["command"][5], self.merge_of(["a", "b"], catalogue)["command"][5])
 
+    def test_two_capabilities_on_one_image_get_one_copy_container_for_the_entry_and_the_first_names_it(self) -> None:
+        for field, payload in (("image", "/toolcache"), ("sysroot_image", "/sysroot")):
+            with self.subTest(field):
+                image = f"ghcr.io/example/shared:1@sha256:{DIGEST_A}"
+                catalogue = {"first": {field: image}, "second": {field: image}, "third": {field: f"ghcr.io/example/other:1@sha256:{DIGEST_B}"}}
+                result = store_pod(DEFAULT_VALUES, ["first", "second", "third"], catalogue)
+                self.assertEqual(result["errors"], [])
+                containers = result["values"]["template"]["spec"]["initContainers"]
+                copies = [container for container in containers if container["name"].startswith("capability-") and not container["name"].startswith("capability-store-")]
+                self.assertEqual([container["name"] for container in copies], ["capability-first", "capability-third"])
+                self.assertEqual(copies[0]["command"][6:], [payload, "capability-first"])
+                publish = next(container for container in containers if container["name"] == "capability-store-publish")
+                self.assertEqual(publish["command"][4:], ["/opt/capability-store", f"{'toolcache' if field == 'image' else 'sysroot'}-{DIGEST_A}", f"{'toolcache' if field == 'image' else 'sysroot'}-{DIGEST_B}"])
+
     def test_one_image_used_for_a_tool_cache_and_a_sysroot_is_two_entries_each_copied_from_its_own_payload(self) -> None:
         image = f"ghcr.io/example/both:1@sha256:{DIGEST_A}"
         result = store_pod(DEFAULT_VALUES, ["tools", "libraries"], {"tools": {"image": image}, "libraries": {"sysroot_image": image}})
