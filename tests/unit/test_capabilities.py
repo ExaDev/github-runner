@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugins" / "filter" / "arc.py"
 RENDER = ROOT / "tests" / "capabilities" / "render.yml"
@@ -682,6 +684,23 @@ class CapabilityStoreSettingsTest(unittest.TestCase):
     def test_an_entry_is_named_for_its_images_digest_and_payload_kind_and_an_unpinned_image_has_no_name(self) -> None:
         self.assertEqual(arc.arc_capability_store_key(f"ghcr.io/example/x:1@sha256:{DIGEST_A}", "toolcache"), KEY_A)
         self.assertIsNone(arc.arc_capability_store_key("ghcr.io/example/x:1", "toolcache"))
+
+
+class CapabilityStoreArgumentSpecTest(unittest.TestCase):
+    """The role's argument specification declares the store's settings with the defaults the role has."""
+
+    ROLE = ROOT / "roles" / "github_runner_arc"
+
+    def test_every_capability_store_default_is_declared_with_its_default_and_the_profile_key_is_described(self) -> None:
+        defaults = yaml.safe_load((self.ROLE / "defaults" / "main.yml").read_text())
+        specification = yaml.safe_load((self.ROLE / "meta" / "argument_specs.yml").read_text())["argument_specs"]["main"]["options"]
+        names = sorted(name for name in defaults if name.startswith("github_runner_arc_capability_store_"))
+        self.assertEqual(names, ["github_runner_arc_capability_store_host_path", "github_runner_arc_capability_store_image", "github_runner_arc_capability_store_path"])
+        for name in names:
+            with self.subTest(name):
+                self.assertEqual(specification[name]["default"], defaults[name])
+                self.assertEqual(specification[name]["type"], "str")
+        self.assertIn("capability_store", " ".join(specification["github_runner_arc_orgs"]["description"]))
 
 
 class CapabilityStorePodTest(unittest.TestCase):
