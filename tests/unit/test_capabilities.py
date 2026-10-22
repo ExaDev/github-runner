@@ -749,6 +749,25 @@ class CapabilityStorePodTest(unittest.TestCase):
         merged = [next(container for container in containers if container["name"] == "capability-store-sysroot")["command"][5] for containers in (first, second)]
         self.assertNotEqual(merged[0], merged[1])
 
+    def merge_of(self, names: list[str], catalogue: dict[str, Any]) -> dict[str, Any]:
+        """The sysroot merge's container for names."""
+        result = store_pod(DEFAULT_VALUES, names, catalogue)
+        self.assertEqual(result["errors"], [])
+        return next(container for container in result["values"]["template"]["spec"]["initContainers"] if container["name"] == "capability-store-sysroot")
+
+    def test_two_system_library_capabilities_on_one_image_merge_that_entry_once_into_the_entry_one_would(self) -> None:
+        image = f"ghcr.io/example/libs:1@sha256:{DIGEST_B}"
+        once = self.merge_of(["first"], {"first": {"sysroot_image": image}})
+        twice = self.merge_of(["first", "second"], {"first": {"sysroot_image": image}, "second": {"sysroot_image": image}})
+        self.assertEqual(twice["command"][5:], [once["command"][5], KEY_B])
+
+    def test_a_system_library_entry_named_again_keeps_its_last_position_so_its_files_still_win(self) -> None:
+        # a, b, a merges b's files and then a's, so a's win a shared file, as the per-pod copies in that order did: the entries are [b, a], never [a, b], which would let b's win.
+        catalogue = {"a": {"sysroot_image": f"ghcr.io/example/a:1@sha256:{DIGEST_B}"}, "b": {"sysroot_image": f"ghcr.io/example/b:1@sha256:{DIGEST_C}"}, "again": {"sysroot_image": f"ghcr.io/example/a:1@sha256:{DIGEST_B}"}}
+        merge = self.merge_of(["a", "b", "again"], catalogue)
+        self.assertEqual(merge["command"][6:], [KEY_C, KEY_B])
+        self.assertNotEqual(merge["command"][5], self.merge_of(["a", "b"], catalogue)["command"][5])
+
     def test_one_image_used_for_a_tool_cache_and_a_sysroot_is_two_entries_each_copied_from_its_own_payload(self) -> None:
         image = f"ghcr.io/example/both:1@sha256:{DIGEST_A}"
         result = store_pod(DEFAULT_VALUES, ["tools", "libraries"], {"tools": {"image": image}, "libraries": {"sysroot_image": image}})
@@ -1182,6 +1201,24 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         spec = arc.arc_capability_store_externals(DIND_VALUES, STORE, 1001, 1001)["values"]["template"]["spec"]
         containers = {container["name"]: container for container in spec["initContainers"]}
         self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["init-dind-externals"], containers["capability-store-publish-externals"], KEY_RUNNER, externals, {"/opt/capability-store": str(self.root), "/home/runner/externals": str(externals)})
+
+    def test_two_capabilities_on_one_system_library_image_link_that_entry_into_the_merge_once(self) -> None:
+        # busybox's cp -alf of one entry into the merge twice fails on the second as the same file, so the pod never started; GNU cp tolerates it, so the test records each cp call and requires one for the entry.
+        image = f"ghcr.io/example/libs:1@sha256:{DIGEST_B}"
+        (self.root / KEY_B / "lib").mkdir(parents=True)
+        (self.root / KEY_B / "lib/libfoo.so.1").write_text("foo")
+        spec = store_pod(DEFAULT_VALUES, ["first", "second"], {"first": {"sysroot_image": image}, "second": {"sysroot_image": image}})["values"]["template"]["spec"]
+        merge = next(container for container in spec["initContainers"] if container["name"] == "capability-store-sysroot")
+        bin_dir = self.work / "cp-bin"
+        bin_dir.mkdir()
+        recorder = bin_dir / "cp"
+        recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CP_LOG"\nexec ' + str(shutil.which("cp")) + ' "$@"\n')
+        recorder.chmod(0o755)
+        log = self.work / "cp.log"
+        completed = self.run_with_env(merge, "pod-1", {"/opt/capability-store": str(self.root)}, {"PATH": f"{bin_dir}:{os.environ['PATH']}", "CP_LOG": str(log)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(len([line for line in log.read_text().splitlines() if f"{self.root}/{KEY_B}/." in line]), 1)
+        self.assertEqual(self.layout(self.root / merge["command"][5]), {"lib": "<dir>", "lib/libfoo.so.1": "foo"})
 
     def test_a_sysroot_merge_rerun_after_a_partial_merge_publishes_only_the_libraries(self) -> None:
         (self.root / KEY_B / "lib").mkdir(parents=True)
