@@ -1199,23 +1199,30 @@ def _runner_security_context(runner_user: int, runner_group: int) -> dict[str, A
     return {"runAsUser": int(runner_user), "runAsGroup": int(runner_group), "runAsNonRoot": True, "allowPrivilegeEscalation": False}
 
 
+# Copies an image's payload to this pod's own incoming directory, unless the store already holds the entry. The destination is removed first so that a rerun after a copy killed part-way starts from nothing: cp -R onto an existing directory would nest the payload under it and keep the partial copy, and publishing would then rename that mixed tree.
+_COPY_SCRIPT = (
+    '[ -d "$1/$2" ] && exit 0; incoming="$1/' + _CAPABILITY_STORE_INCOMING + '/$2.$POD_UID.$4";'
+    ' rm -rf "$incoming" && cp -R "$3" "$incoming"'
+)
+
+
 def _capability_store_copy_container(name: str, image: str, payload: str, key: str, store: Mapping[str, Any], runner_user: int, runner_group: int) -> dict[str, Any]:
-    """Return the init container that copies an image's payload into the store's incoming directory, unless the store already holds it. It runs the capability's own image, so it may use only what the image contract promises: a POSIX sh, its test builtin and cp. cp -R onto a path that does not exist creates it as the copy, so no mkdir is needed."""
+    """Return the init container that copies an image's payload into the store's incoming directory, unless the store already holds it. It runs the capability's own image, so it may use only what the image contract promises: a POSIX sh, its test builtin, rm and cp. It removes this pod's own destination first, since the kubelet reruns a pod's init containers after a sandbox change and a copy killed part-way leaves the destination behind, and cp -R onto a directory that exists nests the payload inside it and keeps the partial first copy. cp -R onto a path that does not exist creates it as the copy, so no mkdir is needed."""
     root = store["path"].rstrip("/")
     return {
         "name": name,
         "image": image,
-        "command": ["/bin/sh", "-c", '[ -d "$1/$2" ] || cp -R "$3" "$1/' + _CAPABILITY_STORE_INCOMING + '/$2.$POD_UID.$4"', "copy-to-capability-store", root, key, payload, name],
+        "command": ["/bin/sh", "-c", _COPY_SCRIPT, "copy-to-capability-store", root, key, payload, name],
         "env": [dict(_POD_UID_ENV)],
         "securityContext": _runner_security_context(runner_user, runner_group),
         "volumeMounts": [{"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"]}],
     }
 
 
-# Publishes each key's copies from this pod: a rename onto <store>/<key> for the first, and deletion for a copy whose key another pod published first. Then fails unless every key is in the store, so a pod never starts on an entry that is not there.
+# Publishes each key's copies from this pod: a rename onto <store>/<key> for the first, and deletion for a copy whose key another pod published first. Then fails unless every key is in the store, so a pod never starts on an entry that is not there. Every copy is flushed to disk (sync, which writes out every file's data and every directory's entries) before its rename: a rename that reaches the disk ahead of the data it names leaves, after a power loss or crash, an entry that exists but holds empty files, and since an entry is named for an image digest and never revalidated, every later pod would use it. With the data written first, an entry that exists is complete whatever the crash, and a rename that did not reach the disk leaves no entry, which the next pod copies again. A completeness marker the readers check was left out: it would restate what the order of writes already guarantees, and cost every pod a check at its start.
 _PUBLISH_SCRIPT = (
     'root=$1; shift; for key in "$@"; do'
-    ' for incoming in "$root/' + _CAPABILITY_STORE_INCOMING + '/$key.$POD_UID".*; do [ -e "$incoming" ] || continue; mv -T "$incoming" "$root/$key" 2>/dev/null || rm -rf "$incoming"; done;'
+    ' for incoming in "$root/' + _CAPABILITY_STORE_INCOMING + '/$key.$POD_UID".*; do [ -e "$incoming" ] || continue; sync || exit 1; mv -T "$incoming" "$root/$key" 2>/dev/null || rm -rf "$incoming"; done;'
     ' [ -d "$root/$key" ] || { echo "capability store: $key is not in $root after publishing" >&2; exit 1; };'
     ' done'
 )
@@ -1233,12 +1240,12 @@ def _capability_store_publish_container(name: str, keys: Sequence[str], store: M
     }
 
 
-# Builds the merged sysroot from the system-library entries in the profile's order, as hard links (cp -l) so it costs no data, later entries' files replacing earlier ones' (cp -f) as the per-pod copies did, then publishes it like any other entry.
+# Builds the merged sysroot from the system-library entries in the profile's order, as hard links (cp -l) so it costs no data, later entries' files replacing earlier ones' (cp -f) as the per-pod copies did, then flushes and publishes it like any other entry, rebuilding from nothing when this pod's own earlier partial merge is found.
 _SYSROOT_MERGE_SCRIPT = (
     'root=$1; merged=$2; shift 2; [ -d "$root/$merged" ] && exit 0;'
-    ' incoming="$root/' + _CAPABILITY_STORE_INCOMING + '/$merged.$POD_UID.merge"; mkdir "$incoming" || exit 1;'
+    ' incoming="$root/' + _CAPABILITY_STORE_INCOMING + '/$merged.$POD_UID.merge"; rm -rf "$incoming" && mkdir "$incoming" || exit 1;'
     ' for key in "$@"; do cp -alf "$root/$key/." "$incoming/" || exit 1; done;'
-    ' mv -T "$incoming" "$root/$merged" 2>/dev/null || rm -rf "$incoming";'
+    ' sync || exit 1; mv -T "$incoming" "$root/$merged" 2>/dev/null || rm -rf "$incoming";'
     ' [ -d "$root/$merged" ] || { echo "capability store: $merged is not in $root after publishing" >&2; exit 1; }'
 )
 

@@ -818,6 +818,95 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertFalse((self.root / DIGEST_A / f"{DIGEST_A}.pod-2.capability-node").exists())
         self.assertEqual(list((self.root / ".incoming").iterdir()), [])
 
+    def layout(self, directory: Path) -> dict[str, str]:
+        """Return every path under directory with what it holds (a file's content, a link's target, a directory's marker), so two trees compare by layout and content."""
+        return {str(path.relative_to(directory)): path.readlink().as_posix() if path.is_symlink() else path.read_text() if path.is_file() else "<dir>" for path in sorted(directory.rglob("*"))}
+
+    def fake_sync(self, exit_status: int) -> dict[str, str]:
+        """Return an environment whose sync records whether the copy was still unpublished when it ran, in sync.log, and exits with exit_status. It takes the copy's and the entry's paths from the environment, since the test sets them for it."""
+        bin_dir = self.work / "fake-bin"
+        bin_dir.mkdir(exist_ok=True)
+        script = bin_dir / "sync"
+        script.write_text('#!/bin/sh\n{ [ -d "$SYNC_INCOMING" ] && printf "incoming " || printf "no-incoming "; [ -d "$SYNC_ENTRY" ] && echo published || echo unpublished; } >> "$SYNC_LOG"\nexit ' + str(exit_status) + "\n")
+        script.chmod(0o755)
+        return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "SYNC_LOG": str(self.work / "sync.log")}
+
+    def run_with_env(self, container: dict[str, Any], uid: str, rewrite: dict[str, str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        command = [rewrite.get(argument, argument) for argument in container["command"]]
+        return subprocess.run(command, env={**os.environ, "POD_UID": uid, **env}, capture_output=True, text=True, check=False)
+
+    def test_a_copy_is_flushed_to_disk_before_it_is_renamed_into_the_store(self) -> None:
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
+        containers = self.containers(["node"])
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
+        self.assertEqual(self.run_container(containers["capability-node"], "pod-1", rewrite).returncode, 0)
+        env = {**self.fake_sync(0), "SYNC_INCOMING": str(self.root / ".incoming" / f"{DIGEST_A}.pod-1.capability-node"), "SYNC_ENTRY": str(self.root / DIGEST_A)}
+        published = self.run_with_env(containers["capability-store-publish"], "pod-1", rewrite, env)
+        self.assertEqual(published.returncode, 0, published.stderr)
+        self.assertEqual((self.work / "sync.log").read_text(), "incoming unpublished\n")
+        self.assertEqual((self.root / DIGEST_A / "node/22.0.0/x64/bin/node").read_text(), "binary")
+
+    def test_a_copy_that_cannot_be_flushed_is_not_published(self) -> None:
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
+        containers = self.containers(["node"])
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
+        self.assertEqual(self.run_container(containers["capability-node"], "pod-1", rewrite).returncode, 0)
+        env = {**self.fake_sync(1), "SYNC_INCOMING": "unused", "SYNC_ENTRY": "unused"}
+        published = self.run_with_env(containers["capability-store-publish"], "pod-1", rewrite, env)
+        self.assertNotEqual(published.returncode, 0)
+        self.assertFalse((self.root / DIGEST_A).exists())
+
+    def test_a_merged_sysroot_is_flushed_to_disk_before_it_is_renamed_into_the_store(self) -> None:
+        for digest, files in ((DIGEST_B, {"lib/libmpi.so": "mpi"}), (DIGEST_C, {"lib/libpq.so": "pq"})):
+            for relative, content in files.items():
+                (self.root / digest / relative).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / digest / relative).write_text(content)
+        merge = self.containers(["mpi", "libpq"])["capability-store-sysroot"]
+        merged = merge["command"][5]
+        env = {**self.fake_sync(0), "SYNC_INCOMING": str(self.root / ".incoming" / f"{merged}.pod-1.merge"), "SYNC_ENTRY": str(self.root / merged)}
+        completed = self.run_with_env(merge, "pod-1", {"/opt/capability-store": str(self.root)}, env)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual((self.work / "sync.log").read_text(), "incoming unpublished\n")
+        self.assertTrue((self.root / merged / "lib/libpq.so").is_file())
+
+    def assert_rerun_after_a_partial_copy_publishes_the_source_layout(self, copy: dict[str, Any], publish: dict[str, Any], key: str, source: Path, rewrite: dict[str, str]) -> None:
+        """Leave what a copy killed part-way leaves in the pod's own destination, run the copy twice (the kubelet reruns a pod's init containers after a sandbox change), publish, and require the entry to hold exactly the source's layout and content."""
+        debris = self.root / ".incoming" / f"{key}.pod-1.{copy['name']}"
+        (debris / "bin").mkdir(parents=True)
+        (debris / "bin/partial").write_text("half a file")
+        (debris / source.name).mkdir()
+        (debris / source.name / "stale").write_text("nested by a copy onto an existing destination")
+        for _ in range(2):
+            completed = self.run_container(copy, "pod-1", rewrite)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        published = self.run_container(publish, "pod-1", rewrite)
+        self.assertEqual(published.returncode, 0, published.stderr)
+        self.assertEqual(self.layout(self.root / key), self.layout(source))
+        self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_a_capability_copy_rerun_after_a_partial_copy_publishes_exactly_the_payloads_layout(self) -> None:
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary", "node/22.0.0/x64.complete": ""})
+        containers = self.containers(["node"])
+        self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["capability-node"], containers["capability-store-publish"], DIGEST_A, toolcache, {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)})
+
+    def test_the_dind_externals_copy_rerun_after_a_partial_copy_publishes_exactly_the_externals_layout(self) -> None:
+        externals = self.payload("externals", {"node20/bin/node": "binary", "node20/lib/libnode.so": "library"})
+        spec = arc.arc_capability_store_externals(DIND_VALUES, STORE, 1001, 1001)["values"]["template"]["spec"]
+        containers = {container["name"]: container for container in spec["initContainers"]}
+        self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["init-dind-externals"], containers["capability-store-publish-externals"], DIGEST_RUNNER, externals, {"/opt/capability-store": str(self.root), "/home/runner/externals": str(externals)})
+
+    def test_a_sysroot_merge_rerun_after_a_partial_merge_publishes_only_the_libraries(self) -> None:
+        (self.root / DIGEST_B / "lib").mkdir(parents=True)
+        (self.root / DIGEST_B / "lib/libmpi.so").write_text("mpi")
+        merge = self.containers(["mpi"])["capability-store-sysroot"]
+        merged = merge["command"][5]
+        debris = self.root / ".incoming" / f"{merged}.pod-1.merge"
+        (debris / "lib").mkdir(parents=True)
+        (debris / "lib/partial").write_text("half a file")
+        completed = self.run_container(merge, "pod-1", {"/opt/capability-store": str(self.root)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.layout(self.root / merged), {"lib": "<dir>", "lib/libmpi.so": "mpi"})
+
     def test_publishing_fails_when_the_entry_is_neither_copied_nor_in_the_store(self) -> None:
         containers = self.containers(["node"])
         published = self.run_container(containers["capability-store-publish"], "pod-1", {"/opt/capability-store": str(self.root)})
