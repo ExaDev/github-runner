@@ -839,22 +839,124 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertEqual(self.run_container(merge, "pod-2", {"/opt/capability-store": str(self.root)}).returncode, 0)
         self.assertEqual(list((self.root / ".incoming").iterdir()), [])
 
-    def test_the_tool_cache_links_each_version_into_the_pods_own_directory_with_its_marker(self) -> None:
-        (self.root / DIGEST_A / "node/22.0.0/x64/bin").mkdir(parents=True)
-        (self.root / DIGEST_A / "node/22.0.0/x64/bin/node").write_text("binary")
-        (self.root / DIGEST_A / "node/22.0.0/x64.complete").write_text("")
+    def tool_tree(self, files: dict[str, str] | None = None) -> Path:
+        """Fill the store's entry for the node capability with a tool tree shaped like the Actions tool cache's Node.js, as a store entry is after publishing, and return its <arch> directory."""
+        arch = self.root / DIGEST_A / "node/22.0.0/x64"
+        for relative, content in (files or {"bin/node": "binary", "lib/node_modules/npm/bin/npm-cli.js": "npm", "lib/node_modules/npm/package.json": "{}", "include/node/node.h": "header", "dir with space/a file": "spaced", ".hidden/file": "hidden"}).items():
+            (arch / relative).parent.mkdir(parents=True, exist_ok=True)
+            (arch / relative).write_text(content)
+        (arch / "bin/node").chmod(0o755)
+        (arch / "empty").mkdir()
+        (arch / "bin/npm").symlink_to("../lib/node_modules/npm/bin/npm-cli.js")
+        (arch / "bin/absolute").symlink_to("/absolute/target")
+        (arch / "libdir").symlink_to("lib")
+        (arch.parent / "x64.complete").write_text("")
+        return arch
+
+    def link_tool_cache(self, cache: Path, uid: str = "pod-1") -> None:
+        link = self.containers(["node"])["capability-store-tool-cache"]
+        completed = self.run_container(link, uid, {"/opt/capability-store": str(self.root), TOOL_CACHE: str(cache)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def snapshot(self, directory: Path) -> dict[str, str]:
+        """Return every path under directory with what it holds (a file's content, a link's target, a directory's name), so a change anywhere shows."""
+        return {str(path.relative_to(directory)): path.readlink().as_posix() if path.is_symlink() else path.read_text() if path.is_file() else "<dir>" for path in sorted(directory.rglob("*"))}
+
+    def test_the_tool_cache_rebuilds_each_tool_tree_as_directories_holding_a_link_to_each_store_file_and_the_marker(self) -> None:
+        arch = self.tool_tree()
         cache = self.work / "toolcache-pod"
         cache.mkdir()
-        link = self.containers(["node"])["capability-store-tool-cache"]
-        completed = self.run_container(link, "pod-1", {"/opt/capability-store": str(self.root), TOOL_CACHE: str(cache)})
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertTrue((cache / "node/22.0.0/x64").is_symlink())
-        self.assertEqual((cache / "node/22.0.0/x64/bin/node").read_text(), "binary")
+        self.link_tool_cache(cache)
+        tree = cache / "node/22.0.0/x64"
+        self.assertTrue(tree.is_dir() and not tree.is_symlink())
+        for directory in ("bin", "lib/node_modules/npm", "include/node", "dir with space", ".hidden", "empty"):
+            self.assertTrue((tree / directory).is_dir() and not (tree / directory).is_symlink(), directory)
+        for file, content in (("lib/node_modules/npm/package.json", "{}"), ("include/node/node.h", "header"), ("dir with space/a file", "spaced"), (".hidden/file", "hidden")):
+            self.assertEqual((tree / file).readlink(), arch / file, file)
+            self.assertEqual((tree / file).read_text(), content)
         self.assertTrue((cache / "node/22.0.0/x64.complete").is_file())
         self.assertFalse((cache / "node/22.0.0/x64.complete").is_symlink())
-        # The version directory is the pod's own, so a setup action can add an architecture beside the link without touching the store.
-        (cache / "node/22.0.0/arm64").mkdir()
-        self.assertFalse((self.root / DIGEST_A / "node/22.0.0/arm64").exists())
+
+    def test_a_job_can_create_replace_and_remove_files_and_directories_in_a_tool_tree_and_the_store_is_unchanged(self) -> None:
+        arch = self.tool_tree()
+        before = self.snapshot(self.root)
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        tree = cache / "node/22.0.0/x64"
+        # What npm install -g and corepack enable do: create a package directory and a shim beside the launcher, replace an installed package's file, remove another.
+        (tree / "lib/node_modules/added").mkdir()
+        (tree / "lib/node_modules/added/index.js").write_text("added")
+        (tree / "bin/shim").symlink_to("../lib/node_modules/added/index.js")
+        (tree / "lib/node_modules/npm/package.json").unlink()
+        (tree / "lib/node_modules/npm/package.json").write_text('{"version": "2"}')
+        (tree / "include/node/node.h").unlink()
+        (tree / "empty/inside").write_text("created")
+        self.assertEqual((tree / "lib/node_modules/npm/package.json").read_text(), '{"version": "2"}')
+        self.assertFalse((tree / "include/node/node.h").exists())
+        self.assertEqual(self.snapshot(self.root), before)
+        self.assertEqual((arch / "include/node/node.h").read_text(), "header")
+
+    def test_a_launcher_is_a_copy_and_not_a_link_so_the_program_finds_its_own_tree_in_the_pod(self) -> None:
+        self.tool_tree()
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        launcher = cache / "node/22.0.0/x64/bin/node"
+        self.assertTrue(launcher.is_file() and not launcher.is_symlink())
+        self.assertEqual(launcher.read_text(), "binary")
+        self.assertTrue(os.access(launcher, os.X_OK))
+        # A program that locates its tree from its resolved executable path sees the pod's tree.
+        self.assertEqual(launcher.resolve(), launcher.parent.resolve() / launcher.name)
+        # A file elsewhere in the tree stays a link.
+        self.assertTrue((cache / "node/22.0.0/x64/lib/node_modules/npm/package.json").is_symlink())
+
+    def test_a_link_in_the_store_is_copied_so_its_relative_target_resolves_inside_the_pods_tree(self) -> None:
+        self.tool_tree()
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        tree = cache / "node/22.0.0/x64"
+        self.assertEqual((tree / "bin/npm").readlink(), Path("../lib/node_modules/npm/bin/npm-cli.js"))
+        self.assertEqual((tree / "bin/absolute").readlink(), Path("/absolute/target"))
+        self.assertEqual((tree / "libdir").readlink(), Path("lib"))
+        self.assertEqual((tree / "libdir").resolve(), (tree / "lib").resolve())
+        self.assertEqual((tree / "libdir/node_modules/npm/package.json").read_text(), "{}")
+
+    def test_linking_the_tool_cache_again_leaves_the_same_tree(self) -> None:
+        self.tool_tree()
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        first = self.snapshot(cache)
+        self.link_tool_cache(cache)
+        self.assertEqual(self.snapshot(cache), first)
+
+    def test_every_tool_version_and_architecture_of_every_entry_is_linked_beside_the_others(self) -> None:
+        self.tool_tree()
+        other = self.root / DIGEST_B / "python/3.12.0/x64"
+        (other / "bin").mkdir(parents=True)
+        (other / "bin/python3").write_text("python")
+        (other.parent / "x64.complete").write_text("")
+        (self.root / DIGEST_A / "node/22.0.0/arm64/bin").mkdir(parents=True)
+        (self.root / DIGEST_A / "node/22.0.0/arm64/bin/node").write_text("arm")
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        link = dict(self.containers(["node"])["capability-store-tool-cache"])
+        link["command"] = [*link["command"], DIGEST_B]
+        completed = self.run_container(link, "pod-1", {"/opt/capability-store": str(self.root), TOOL_CACHE: str(cache)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual((cache / "python/3.12.0/x64/bin/python3").read_text(), "python")
+        self.assertEqual((cache / "node/22.0.0/arm64/bin/node").read_text(), "arm")
+        self.assertTrue((cache / "node/22.0.0/x64/bin/node").is_file())
+        self.assertFalse((cache / "node/22.0.0/arm64.complete").exists())
+
+    def test_linking_fails_when_an_entry_cannot_be_linked(self) -> None:
+        self.tool_tree()
+        cache = self.work / "toolcache-pod"
+        cache.write_text("a file where the tool cache directory should be")
+        link = self.containers(["node"])["capability-store-tool-cache"]
+        self.assertNotEqual(self.run_container(link, "pod-1", {"/opt/capability-store": str(self.root), TOOL_CACHE: str(cache)}).returncode, 0)
 
 
 if __name__ == "__main__":
