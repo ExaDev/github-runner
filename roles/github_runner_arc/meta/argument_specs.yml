@@ -12,7 +12,8 @@ argument_specs:
         default: []
         description:
           - Orgs whose runner scale sets this host installs. Each entry has name, app_id (needed only when the role writes the App Secret; otherwise the existing Secret supplies it), image, private_key or private_key_op_reference, and optionally installation_id and app_secret_name (the App Secret's name, default <org>-github-app).
-          - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, capabilities, tolerations, autoscale, sizing and burst.
+          - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, capabilities, capability_store, tolerations, autoscale, sizing and burst.
+          - capability_store, a boolean (default false), makes the profile's runner pods copy each tool-cache and system-library capability's payload, and the runner's externals for a Docker-in-Docker sidecar the values write out, once per node into the capability store (github_runner_arc_capability_store_host_path) instead of into every pod's own volumes, and mount the result read-only. Every image those copies come from must be pinned by digest, and the store needs the node cache pruner, so a profile that sets it is refused while github_runner_arc_node_cache_size_limit_gib is 0. A job that can reach a privileged Docker daemon can write to the store, so give it only to a profile whose workflows are all of one trust level.
           - max_runners, when set, is the release's maxRunners and takes precedence over its values file and its sizing.
           - scale_set_labels replaces runs_on_label with the whole list of scaleSetLabels; an empty list sets none, so jobs target the release name.
           - tolerations is a list of Kubernetes tolerations for the profile's runner pods, for nodes the eligibility label selects that also carry a taint to keep other workloads off. Measured sizing counts a node whose only repelling taints these match, as the pods can be placed there; without them it leaves such a node out. With burst they come before burst.tolerations.
@@ -44,10 +45,22 @@ argument_specs:
         type: str
         default: /var/lib/github-runner/node-cache
         description: The directory on each node under which every profile's node cache lives, in a directory of its own named <namespace>/<release>. It must be an absolute path with no colon, no repeated slash and no trailing slash, at least three levels deep, whose last component ends with node-cache, and not a system directory or inside one. A symbolic link at or above it defeats the validation.
+      github_runner_arc_capability_store_host_path:
+        type: str
+        default: /var/lib/github-runner/capability-store
+        description: The directory on each node that holds the capability store of the profiles with capability_store, one entry per image payload, written once per node. It must be an absolute path with no colon or line break, no repeated slash and no trailing slash, at least three levels deep, whose last component is capability-store or ends with -capability-store, not a system directory or inside one, and neither equal to, inside nor containing github_runner_arc_node_cache_host_path. A symbolic link at or above it defeats the validation. The node cache pruner removes the entries no scale set or pod uses, as root, only while some profile has capability_store; once none has, the entries stay until the operator deletes the directory on each node.
+      github_runner_arc_capability_store_path:
+        type: str
+        default: /opt/capability-store
+        description: Where the store's root is mounted in the profiles' init containers, and under which the runner container mounts, read-only, each entry its pod uses as <path>/<key>. An absolute directory other than / with no colon or line break, which for a profile whose capabilities have a payload in the store may not equal, contain or sit inside the tool cache path, the sysroot path, the job-started hooks directory or the node cache path.
+      github_runner_arc_capability_store_image:
+        type: str
+        default: docker.io/library/busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+        description: The image the store's own init containers run (creating the root, flushing and publishing a copy, merging the sysroot, linking the tool cache). It must be pinned by digest (name@sha256:<64 hex digits>), since one of them runs as root on a hostPath, and its sh, mkdir, chmod, chown, sync, mv, cp, find and rm must be busybox's or GNU's, mv -T refusing to move onto a directory that is not empty.
       github_runner_arc_node_cache_size_limit_gib:
         type: int
         default: 20
-        description: The most gibibytes one profile's node cache may hold on a node before the pruner empties it, which it does only while no runner pod of the profile runs on the node. The limit is per profile, so a node's worst case is the sum over the profiles with a cache on it, times the hard limit factor. 0 installs no pruner; a negative value, a leading zero, a fraction or more than 1073741824 is an error.
+        description: The most gibibytes one profile's node cache may hold on a node before the pruner empties it, which it does only while no runner pod of the profile runs on the node. The limit is per profile, so a node's worst case is the sum over the profiles with a cache on it, times the hard limit factor. 0 installs no pruner, which a profile with capability_store cannot do without, since the pruner removes the store's unused entries; a negative value, a leading zero, a fraction or more than 1073741824 is an error.
       github_runner_arc_node_cache_hard_limit_factor:
         type: int
         default: 2
