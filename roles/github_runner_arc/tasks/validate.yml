@@ -57,6 +57,22 @@
       {{ github_runner_arc_local.profiles | selectattr('capability_store') | map(attribute='label') | join(', ') }} use the capability store, which needs the node cache pruner to remove the entries no scale set uses, but github_runner_arc_node_cache_size_limit_gib is 0, which installs no pruner
   when: github_runner_arc_node_cache_size_limit_gib | int == 0 and github_runner_arc_local.profiles | selectattr('capability_store') | list | length > 0
 
+# The pruner runs only on the nodes carrying github_runner_arc_node_label_key, and it is installed while the size limit is above zero and a profile has a node cache or uses the capability store (see decide_node_cache_pruner.yml), so the key is needed on exactly that condition. The install tasks assert it as well, but only after the controller and platform are applied.
+- name: Fail when the node cache pruner is wanted but github_runner_arc_node_label_key is not set
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_arc_node_label_key must be set, because the node cache pruner runs only on the nodes carrying that label and is installed while github_runner_arc_node_cache_size_limit_gib is above 0
+      for {{ github_runner_arc_pruner_reasons | join(' and ') }}
+  vars:
+    github_runner_arc_pruner_node_caches: "{{ github_runner_arc_fleet.profiles | exadev.github_runner.arc_node_cache_profiles(github_runner_arc_capabilities) | map(attribute='target') | list }}"
+    github_runner_arc_pruner_stores: "{{ github_runner_arc_fleet.profiles | selectattr('capability_store') | map(attribute='label') | list }}"
+    github_runner_arc_pruner_reasons: >-
+      {{
+        (['a node cache (' ~ (github_runner_arc_pruner_node_caches | join(', ')) ~ ')'] if github_runner_arc_pruner_node_caches | length > 0 else [])
+        + (['the capability store (' ~ (github_runner_arc_pruner_stores | join(', ')) ~ ')'] if github_runner_arc_pruner_stores | length > 0 else [])
+      }}
+  when: github_runner_arc_node_cache_size_limit_gib | int > 0 and github_runner_arc_node_label_key | length == 0 and github_runner_arc_pruner_reasons | length > 0
+
 - name: Fail on invalid registry cache settings
   ansible.builtin.fail:
     msg: "{{ github_runner_arc_registry_cache_problems }}"

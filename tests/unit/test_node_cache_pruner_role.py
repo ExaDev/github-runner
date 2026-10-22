@@ -565,6 +565,57 @@ class ValidationTest(unittest.TestCase):
         message = jinja2.Environment(undefined=jinja2.StrictUndefined).from_string(task["ansible.builtin.fail"]["msg"]).render(github_runner_arc_local=local)
         self.assertTrue(message.startswith("Example-store use the capability store"), message)
 
+    def pruner_label_key_outcome(self, **role_vars: Any) -> str | None:
+        """The message the pruner's label key check fails with for these variables, or None when it passes: the task's own vars, when and msg, rendered with the role's filters."""
+        import jinja2
+        from jinja2.nativetypes import NativeEnvironment
+
+        tasks = yaml.safe_load((ROLE / "tasks" / "validate.yml").read_text())
+        [task] = [task for task in tasks if task["name"] == "Fail when the node cache pruner is wanted but github_runner_arc_node_label_key is not set"]
+        defaults = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
+        variables: dict[str, Any] = {**defaults, **role_vars}
+        native = NativeEnvironment(undefined=jinja2.StrictUndefined)
+        text = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        for environment in (native, text):
+            environment.filters.update(arc.FilterModule().filters())
+        for name, template in task["vars"].items():
+            variables[name] = native.from_string(template.replace("exadev.github_runner.", "")).render(**variables)
+        if not native.from_string("{{ " + task["when"].replace("exadev.github_runner.", "") + " }}").render(**variables):
+            return None
+        return text.from_string(task["ansible.builtin.fail"]["msg"]).render(**variables).strip()
+
+    def test_the_pruner_needs_the_node_label_key_for_a_node_cache_or_the_store(self) -> None:
+        cached = {"namespace": "example-ns", "release": "example-runners", "target": "example-ns/example-runners", "capabilities": ["example-cache"], "capability_store": False, "label": "Example"}
+        stored = {"namespace": "store-ns", "release": "store-runners", "target": "store-ns/store-runners", "capabilities": [], "capability_store": True, "label": "Store"}
+        plain = {"namespace": "plain-ns", "release": "plain-runners", "target": "plain-ns/plain-runners", "capabilities": [], "capability_store": False, "label": "Plain"}
+        catalogue = {"example-cache": {"node_cache": {"init_image": "example.com/init@sha256:" + "0" * 64, "dirs": ["a"]}}}
+
+        def outcome(profiles: list[dict[str, Any]], key: str = "", limit: int = 20) -> str | None:
+            return self.pruner_label_key_outcome(
+                github_runner_arc_fleet={"profiles": profiles}, github_runner_arc_capabilities=catalogue, github_runner_arc_node_label_key=key, github_runner_arc_node_cache_size_limit_gib=limit
+            )
+
+        message = outcome([cached])
+        assert message is not None
+        self.assertIn("github_runner_arc_node_label_key must be set", message)
+        self.assertIn("github_runner_arc_node_cache_size_limit_gib", message)
+        self.assertIn("a node cache (example-ns/example-runners)", message)
+        self.assertNotIn("capability store", message)
+        message = outcome([stored])
+        assert message is not None
+        self.assertIn("the capability store (Store)", message)
+        self.assertNotIn("node cache (", message)
+        message = outcome([cached, stored, plain])
+        assert message is not None
+        self.assertIn("a node cache (example-ns/example-runners) and the capability store (Store)", message)
+        self.assertNotIn("Plain", message)
+        self.assertNotIn("plain-ns", message)
+        # No pruner is installed, so no label key is needed: a size limit of 0 (a store profile is refused separately), no profile that uses either, or the key set.
+        self.assertIsNone(outcome([cached], limit=0))
+        self.assertIsNone(outcome([plain]))
+        self.assertIsNone(outcome([]))
+        self.assertIsNone(outcome([cached, stored], key="example.com/ci"))
+
     def test_the_task_expression_gives_the_same_answer_under_ansible(self) -> None:
         cases = ({}, {"github_runner_arc_node_cache_host_path": "/var/lib"}, {"github_runner_arc_node_cache_hard_limit_factor": "08"}, {"github_runner_arc_node_cache_size_limit_gib": 1073741825})
         for role_vars in cases:
