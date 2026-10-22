@@ -769,6 +769,79 @@ class CapabilityStoreExternalsTest(unittest.TestCase):
         self.assertIn("pinned by digest", arc.arc_capability_store_externals(values, STORE, 1001, 1001)["errors"][0])
 
 
+RUNNER_IMAGE = f"ghcr.io/example/runner:2@sha256:{DIGEST_RUNNER}"
+# Docker-in-Docker the way the chart's Kubernetes 1.29 and later layout writes it, and the way a values file can: dind as a native sidecar, a container in initContainers whose restartPolicy is Always.
+DIND_SIDECAR_VALUES: dict[str, Any] = {
+    "template": {
+        "spec": {
+            "initContainers": [
+                {"name": "init-dind-externals", "image": RUNNER_IMAGE, "command": ["cp"], "args": ["-r", "/home/runner/externals/.", "/home/runner/tmpDir/"], "volumeMounts": [{"name": "dind-externals", "mountPath": "/home/runner/tmpDir"}]},
+                {"name": "dind", "image": "docker:dind", "restartPolicy": "Always", "volumeMounts": [{"name": "work", "mountPath": "/home/runner/_work"}, {"name": "dind-externals", "mountPath": "/home/runner/externals"}]},
+            ],
+            "containers": [{"name": "runner", "volumeMounts": [{"name": "work", "mountPath": "/home/runner/_work"}]}],
+            "volumes": [{"name": "work", "emptyDir": {}}, {"name": "dind-externals", "emptyDir": {}}],
+        }
+    }
+}
+
+
+def assert_every_mount_has_its_volume(test: unittest.TestCase, spec: dict[str, Any]) -> None:
+    """Fail unless every volumeMount of every container and init container names a volume of the pod, as the API server requires."""
+    volumes = {volume["name"] for volume in spec["volumes"]}
+    for container in [*spec.get("containers", []), *spec.get("initContainers", [])]:
+        for mount in container.get("volumeMounts", []):
+            test.assertIn(mount["name"], volumes, f"{container['name']} mounts {mount['name']}, which the pod does not define")
+
+
+class CapabilityStoreExternalsLayoutTest(unittest.TestCase):
+    """The dind sidecar's externals mount is rewritten wherever the dind container is, so no container keeps a mount of the removed volume."""
+
+    EXTERNALS_MOUNT = {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": DIGEST_RUNNER, "readOnly": True}
+
+    def dind(self, spec: dict[str, Any]) -> dict[str, Any]:
+        return next(container for container in [*spec["containers"], *spec["initContainers"]] if container["name"] == "dind")
+
+    def test_dind_as_an_ordinary_container_mounts_the_store_entry_and_every_mount_has_its_volume(self) -> None:
+        spec = arc.arc_capability_store_externals(DIND_VALUES, STORE, 1001, 1001)["values"]["template"]["spec"]
+        assert_every_mount_has_its_volume(self, spec)
+        self.assertIn(self.EXTERNALS_MOUNT, self.dind(spec)["volumeMounts"])
+
+    def test_dind_as_a_native_sidecar_mounts_the_store_entry_and_every_mount_has_its_volume(self) -> None:
+        result = arc.arc_capability_store_externals(DIND_SIDECAR_VALUES, STORE, 1001, 1001)
+        self.assertEqual(result["errors"], [])
+        spec = result["values"]["template"]["spec"]
+        assert_every_mount_has_its_volume(self, spec)
+        self.assertNotIn("dind-externals", [volume["name"] for volume in spec["volumes"]])
+        dind = self.dind(spec)
+        self.assertIn(self.EXTERNALS_MOUNT, dind["volumeMounts"])
+        self.assertEqual(dind["restartPolicy"], "Always")
+        # The copy and publish containers the function inserted mount the store and nothing of the removed volume, and the sidecar starts after both.
+        names = [container["name"] for container in spec["initContainers"]]
+        self.assertEqual(names, ["capability-store-prepare", "init-dind-externals", "capability-store-publish-externals", "dind"])
+
+    def test_the_registry_cache_wiring_then_the_store_leaves_every_mount_with_its_volume(self) -> None:
+        # The role's order: capabilities, then the registry cache (which writes the chart's dind sidecar out under initContainers), then the store's externals.
+        values = json.loads(json.dumps(DEFAULT_VALUES))
+        values["containerMode"] = {"type": "dind"}
+        values = store_pod(values, ["node", "mpi"])["values"]
+        cache = arc.arc_registry_cache([{"name": "hub", "host": "docker.io"}], "registry-cache", "registry-cache", "cluster.local", 5000)
+        self.assertEqual(cache["errors"], [])
+        wired = arc.arc_registry_cache_pod(values, cache, RUNNER_IMAGE, "registry-cache", "/home/runner/.buildx")
+        self.assertEqual(wired["errors"], [])
+        result = arc.arc_capability_store_externals(wired["values"], STORE, 1001, 1001)
+        self.assertEqual(result["errors"], [])
+        spec = result["values"]["template"]["spec"]
+        assert_every_mount_has_its_volume(self, spec)
+        self.assertNotIn("dind-externals", [volume["name"] for volume in spec["volumes"]])
+        self.assertIn("dind", [container["name"] for container in spec["initContainers"]])
+        self.assertIn(self.EXTERNALS_MOUNT, self.dind(spec)["volumeMounts"])
+        self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"].split()[-1], DIGEST_RUNNER)
+
+    def test_the_store_functions_leave_every_mount_with_its_volume_for_a_profile_without_dind(self) -> None:
+        spec = store_pod(DEFAULT_VALUES, ["node", "mpi", "libpq", "pnpm-store"])["values"]["template"]["spec"]
+        assert_every_mount_has_its_volume(self, spec)
+
+
 class CapabilityStoreImageContractTest(unittest.TestCase):
     """The applets the store image must provide, as the defaults and the README state them, are exactly the ones the init containers that run it use."""
 
