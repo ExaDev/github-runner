@@ -764,9 +764,11 @@ def _capability_entry_errors(name: Any, capability: Any) -> list[str]:
     where = f"github_runner_arc_capabilities.{name}"
     if not isinstance(name, str) or len(name) > _CAPABILITY_NAME_MAX_LENGTH or not _DNS_LABEL.match(name):
         return [f"{where}: a capability name must be lower-case letters, digits and '-', at most {_CAPABILITY_NAME_MAX_LENGTH} characters, since its init container is named {_CAPABILITY_CONTAINER_PREFIX}<name>"]
+    container = f"{_CAPABILITY_CONTAINER_PREFIX}{name}"
+    errors = [f"{where}: its init container would be named {container}, which is the name of one of the capability store's own init containers (a pod cannot have two with one name)"] if container in _CAPABILITY_STORE_CONTAINER_NAMES else []
     if not isinstance(capability, Mapping):
-        return [f"{where} must be a mapping"]
-    errors = [f"{where} has an unknown key '{key}'" for key in sorted(set(capability) - _CAPABILITY_KEYS)]
+        return [*errors, f"{where} must be a mapping"]
+    errors.extend(f"{where} has an unknown key '{key}'" for key in sorted(set(capability) - _CAPABILITY_KEYS))
     image = capability.get("image")
     sysroot_image = capability.get("sysroot_image")
     hook = capability.get("job_started_hook")
@@ -1126,6 +1128,8 @@ _CAPABILITY_STORE_PUBLISH = "capability-store-publish"
 _CAPABILITY_STORE_SYSROOT = "capability-store-sysroot"
 _CAPABILITY_STORE_TOOL_CACHE = "capability-store-tool-cache"
 _CAPABILITY_STORE_EXTERNALS_PUBLISH = "capability-store-publish-externals"
+# Every init container the role names itself with the store, in contrast to the capability-<name> ones its capabilities get. A capability whose container would be named one of these is refused (see _capability_entry_errors), whether or not its profile uses the store, since a profile may switch it on later.
+_CAPABILITY_STORE_CONTAINER_NAMES = frozenset({_CAPABILITY_STORE_PREPARE, _CAPABILITY_STORE_PUBLISH, _CAPABILITY_STORE_SYSROOT, _CAPABILITY_STORE_TOOL_CACHE, _CAPABILITY_STORE_EXTERNALS_PUBLISH})
 # The kinds of payload an entry holds, the first part of its name (see arc_capability_store_key): the tool cache of a tool image, the sysroot of a system-library image and the runner's externals for the dind sidecar.
 _STORE_KIND_TOOL_CACHE = "toolcache"
 _STORE_KIND_SYSROOT = "sysroot"

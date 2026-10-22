@@ -111,6 +111,31 @@ class CatalogueTest(unittest.TestCase):
                 errors = self.errors(catalogue)
                 self.assertTrue(any(message in error for error in errors), errors)
 
+    RESERVED = ("store-prepare", "store-publish", "store-sysroot", "store-tool-cache", "store-publish-externals")
+
+    def test_a_capability_named_like_one_of_the_stores_init_containers_is_an_error_with_the_store_on_or_off(self) -> None:
+        # capability-<name> would be the name of the store's own container, and the API server rejects a pod with two of one name.
+        for name in self.RESERVED:
+            for store in (True, False):
+                with self.subTest(name=name, store=store):
+                    errors: list[str] = arc.arc_capability_errors([expanded({"max_runners": 1, "capability_store": store, "capabilities": [name]})], {name: {"image": f"ghcr.io/example/x:1@sha256:{DIGEST_A}"}})
+                    self.assertEqual(len(errors), 1, errors)
+                    self.assertIn(f"github_runner_arc_capabilities.{name}", errors[0])
+                    self.assertIn(f"capability-{name}", errors[0])
+                    self.assertIn("capability store's own init containers", errors[0])
+
+    def test_a_reserved_name_is_an_error_for_every_kind_of_capability_and_a_non_mapping_entry(self) -> None:
+        for entry in ({"sysroot_image": f"ghcr.io/example/x:1@sha256:{DIGEST_A}"}, {"job_started_hook": "true"}, {"node_cache": {"init_image": BUSYBOX, "dirs": {"STORE": "pnpm"}}}, "not a mapping"):
+            with self.subTest(entry=entry):
+                errors = self.errors({"store-publish": entry})
+                self.assertTrue(any("capability-store-publish" in error for error in errors), errors)
+
+    def test_every_init_container_the_role_names_beside_the_capabilities_is_reserved(self) -> None:
+        # Render everything the store adds (the preparation, the publishing, the merge, the tool-cache links and the dind externals' publishing): each name that is not capability-<a capability's name> is one a capability's container could clash with.
+        spec = arc.arc_capability_store_externals(store_pod(DIND_VALUES, ["node", "mpi"])["values"], STORE, 1001, 1001)["values"]["template"]["spec"]
+        names = {container["name"] for container in spec["initContainers"] if container["name"].startswith("capability-")} - {"capability-node", "capability-mpi"}
+        self.assertEqual(names, {f"capability-{name}" for name in self.RESERVED})
+
     def test_bad_system_library_entries_are_errors(self) -> None:
         image = "ghcr.io/example/sysroot-openmpi:5.0.11"
         cases = {
