@@ -7,7 +7,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from ansible.module_utils.parsing.convert_bool import boolean
 
@@ -1171,7 +1171,7 @@ def arc_host_path_overlap_errors(node_cache_host_path: Any, capability_store_hos
 
 
 def arc_capability_store_path_errors(store_path: Any) -> list[str]:
-    """Return what is wrong with github_runner_arc_capability_store_path, where the store is mounted read-only on the runner container: empty when it is an absolute directory other than / with no colon or line break."""
+    """Return what is wrong with github_runner_arc_capability_store_path, under which the runner container mounts each store entry it uses, read-only, and the init containers mount the store's root: empty when it is an absolute directory other than / with no colon or line break."""
     if not isinstance(store_path, str) or not store_path.startswith("/") or store_path == "/" or any(character in store_path for character in ":\n\r"):
         return [f"the capability store path must be an absolute directory other than / with no ':' or line break (got {store_path!r})"]
     return []
@@ -1337,8 +1337,17 @@ def _ensure_store_prepared(spec: dict[str, Any], store: Mapping[str, Any], runne
     spec["initContainers"] = [_capability_store_prepare_container(store, runner_user, runner_group), *others]
 
 
-def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, store: Mapping[str, Any], runner_user: int, runner_group: int) -> tuple[list[dict[str, Any]], list[str], str | None]:
-    """Return the init containers that put a profile's tool-cache and system-library payloads in the store and give the pod its view of them, the store entries the pod uses, and the merged sysroot's entry (None without a system library)."""
+class _StoreInit(NamedTuple):
+    """What a pod's store init containers leave: the containers, every entry the pod uses (the annotation's list), the tool-cache entries its tool tree links into (the only entries the runner container mounts besides the merged sysroot), and the merged sysroot's entry (None without a system library)."""
+
+    containers: list[dict[str, Any]]
+    keys: list[str]
+    tool_keys: list[str]
+    merged: str | None
+
+
+def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[str, Any], tool_cache_path: str, store: Mapping[str, Any], runner_user: int, runner_group: int) -> _StoreInit:
+    """Return the init containers that put a profile's tool-cache and system-library payloads in the store and give the pod its view of them, with the store entries the pod uses."""
     root = store["path"].rstrip("/")
     copies: list[dict[str, Any]] = []
     tool_keys: list[str] = []
@@ -1374,14 +1383,14 @@ def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[s
             "securityContext": _runner_security_context(runner_user, runner_group),
             "volumeMounts": [{"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"], "readOnly": True}, {"name": _TOOL_CACHE_VOLUME, "mountPath": tool_cache_path}],
         })
-    return containers, keys + ([merged] if merged is not None else []), merged
+    return _StoreInit(containers, keys + ([merged] if merged is not None else []), list(dict.fromkeys(tool_keys)), merged)
 
 
 def arc_capability_store_errors(profiles: Sequence[Mapping[str, Any]], catalogue: Mapping[str, Any], store_path: Any, tool_cache_path: str, sysroot_path: str, hooks_dir: str, node_cache_path: str, registry_cache_enabled: bool) -> list[str]:
     """Check what a profile with capability_store needs of the role's settings, before anything is installed: the checks arc_capability_pod and arc_capability_store_externals make when they render, so that validation fails on them and not the install, which has by then applied the controller, the pruner and earlier profiles.
 
     Args:
-        profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. store_path: where the store is mounted on the runner container. tool_cache_path, sysroot_path, hooks_dir, node_cache_path: where the role mounts the tool cache, the sysroot, the job-started hooks and the node cache, which the store's path may not equal, contain or sit inside. registry_cache_enabled: whether the role writes the registry cache into the values, which writes the dind sidecar out with its externals copy for a profile with container_mode dind.
+        profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. store_path: where the store's root is mounted in the init containers, and under which the runner container mounts each entry it uses. tool_cache_path, sysroot_path, hooks_dir, node_cache_path: where the role mounts the tool cache, the sysroot, the job-started hooks and the node cache, which the store's path may not equal, contain or sit inside. registry_cache_enabled: whether the role writes the registry cache into the values, which writes the dind sidecar out with its externals copy for a profile with container_mode dind.
 
     Returns:
         The problems found, empty when there are none: for a profile that holds a tool-cache or system-library payload in the store, a store path that is not a directory of its own, and, for a profile in dind mode with the registry cache, a runner image not pinned by digest, since the externals copy's entry is named for it. A values file's own externals copy is checked when it is rendered, since its content is not known here.
@@ -1450,7 +1459,7 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     Each tool-cache capability becomes an init container, running its image as the runner's user, that copies the image's /toolcache payload into an emptyDir mounted on the runner container at tool_cache_path, which RUNNER_TOOL_CACHE names; the files then belong to the runner user, so a setup action can still add a version beside them. Each system-library capability likewise becomes an init container that copies the image's /sysroot payload into an emptyDir mounted at sysroot_path; several share it, later ones overwriting a file an earlier one also wrote. Hook capabilities, the path of any tool-cache capability that sets one, and the sysroot's environment (its search paths and the capabilities' env) go into a ConfigMap mounted at hooks_dir, whose dispatcher ACTIONS_RUNNER_HOOK_JOB_STARTED names. Everything is appended after what the values already hold, so a values file's own init containers, volumes, environment and mounts are kept. Lists are replaced wholesale when Helm merges values, which is why this edits the merged values rather than adding an overlay.
 
     Args:
-        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. sysroot_path: where the sysroot is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace. store: the profile's capability store settings ({host_path, path, image}: the store's root on the node, where it is mounted in the pod, and the digest-pinned busybox image that publishes and links its entries), or None when the profile copies into each pod. With the store, each tool-cache and system-library payload is copied into it once per node instead of into each pod (see arc_capability_store_externals for the store's layout): the tool cache stays the pod's own emptyDir, rebuilt as real directories holding links to the store's files (see _TOOL_CACHE_LINK_SCRIPT), the sysroot is the store's merged entry mounted read-only, and the pod template is annotated with the entries it uses.
+        values: the release's merged Helm values (the profile's values with the role's overlay over them). names: the profile's capabilities, in order; the init containers and hook scripts run in this order. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. tool_cache_path: where the tool cache is mounted on the runner container. sysroot_path: where the sysroot is mounted on the runner container. runner_user, runner_group: the runner container's user and group ids, which the init containers run as. hooks_dir: where the job-started ConfigMap is mounted on the runner container. hooks_configmap: the job-started ConfigMap's name, in the profile's namespace. store: the profile's capability store settings ({host_path, path, image}: the store's root on the node, where it is mounted in the pod, and the digest-pinned busybox image that publishes and links its entries), or None when the profile copies into each pod. With the store, each tool-cache and system-library payload is copied into it once per node instead of into each pod (see arc_capability_store_externals for the store's layout): the tool cache stays the pod's own emptyDir, rebuilt as real directories holding links to the store's files (see _TOOL_CACHE_LINK_SCRIPT), the sysroot is the store's merged entry mounted read-only, the runner container mounts, read-only, only the tool-cache entries the tool tree links into (each at <store path>/<key>) and that merged entry, never the store's root, and the pod template is annotated with the entries it uses.
 
     Returns:
         A dict with ``errors`` (empty when the values can carry the capabilities), ``values`` (the values with the capabilities added, or as given when there are none or errors) and ``hooks`` (the ConfigMap's data apart from the dispatcher, which the role adds from its own file; empty when the profile needs no ConfigMap).
@@ -1498,7 +1507,6 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     if use_store:
         assert store is not None
         volumes.append(_capability_store_volume(store))
-        mounts.append({"name": _CAPABILITY_STORE_VOLUME, "mountPath": store["path"], "readOnly": True})
     elif sysroot_capabilities:
         volumes.append({"name": _SYSROOT_VOLUME, "emptyDir": {}})
         mounts.append({"name": _SYSROOT_VOLUME, "mountPath": sysroot_path})
@@ -1523,13 +1531,15 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
     assert runner is not None
     if use_store:
         assert store is not None
-        store_containers, store_keys, merged = _capability_store_init_containers(names, catalogue, tool_cache_path, store, runner_user, runner_group)
-        if merged is not None:
-            mounts.append({"name": _CAPABILITY_STORE_VOLUME, "mountPath": sysroot_path, "subPath": merged, "readOnly": True})
-        init_containers = [_capability_store_prepare_container(store, runner_user, runner_group), *store_containers] + [
+        init = _capability_store_init_containers(names, catalogue, tool_cache_path, store, runner_user, runner_group)
+        # The runner container, which runs a job's steps, sees only the entries its own pod uses, each at <store>/<key> (where the tool tree's links point) and the merged sysroot at its own path, never the store's root: a job could otherwise read every other profile's payloads on its node. The init containers mount the root, since they copy and publish into it before any job runs.
+        mounts.extend({"name": _CAPABILITY_STORE_VOLUME, "mountPath": f"{store['path'].rstrip('/')}/{key}", "subPath": key, "readOnly": True} for key in init.tool_keys)
+        if init.merged is not None:
+            mounts.append({"name": _CAPABILITY_STORE_VOLUME, "mountPath": sysroot_path, "subPath": init.merged, "readOnly": True})
+        init_containers = [_capability_store_prepare_container(store, runner_user, runner_group), *init.containers] + [
             _node_cache_init_container(name, catalogue[name], node_cache_path, runner_user, runner_group) for name in names if catalogue[name].get("node_cache") is not None
         ]
-        _annotate_store_keys(result.setdefault("template", {}), store_keys)
+        _annotate_store_keys(result.setdefault("template", {}), init.keys)
         spec["initContainers"] = list(spec.get("initContainers") or []) + init_containers
         spec["volumes"] = list(spec.get("volumes") or []) + volumes
         runner["env"] = list(runner.get("env") or []) + env

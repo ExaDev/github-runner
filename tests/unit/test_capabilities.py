@@ -695,10 +695,53 @@ class CapabilityStorePodTest(unittest.TestCase):
         self.assertEqual(volumes["tool-cache"], {"name": "tool-cache", "emptyDir": {}})
         self.assertNotIn("sysroot", volumes)
         mounts = runner(result["values"])["volumeMounts"]
-        self.assertIn({"name": "capability-store", "mountPath": "/opt/capability-store", "readOnly": True}, mounts)
+        self.assertIn({"name": "capability-store", "mountPath": f"/opt/capability-store/{KEY_A}", "subPath": KEY_A, "readOnly": True}, mounts)
         self.assertIn({"name": "capability-store", "mountPath": SYSROOT, "subPath": merged, "readOnly": True}, mounts)
         self.assertIn({"name": "tool-cache", "mountPath": TOOL_CACHE}, mounts)
         self.assertEqual(template["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{KEY_A} {KEY_B} {KEY_C} {merged}")
+
+    def store_mounts(self, names: list[str], catalogue: dict[str, Any] = STORE_CATALOGUE) -> list[dict[str, Any]]:
+        """The runner container's mounts of the store volume."""
+        result = store_pod(DEFAULT_VALUES, names, catalogue)
+        self.assertEqual(result["errors"], [])
+        return [mount for mount in runner(result["values"])["volumeMounts"] if mount["name"] == "capability-store"]
+
+    def test_the_runner_container_mounts_only_the_entries_its_pod_uses_and_never_the_stores_root(self) -> None:
+        mounts = self.store_mounts(["node", "mpi", "libpq"])
+        merged = next(container for container in store_pod(DEFAULT_VALUES, ["node", "mpi", "libpq"])["values"]["template"]["spec"]["initContainers"] if container["name"] == "capability-store-sysroot")["command"][5]
+        # The tool entry, where the tool tree's links point, and the merged sysroot; not the system libraries' own entries, which the merge hard-linked from.
+        self.assertEqual(
+            mounts,
+            [
+                {"name": "capability-store", "mountPath": f"/opt/capability-store/{KEY_A}", "subPath": KEY_A, "readOnly": True},
+                {"name": "capability-store", "mountPath": SYSROOT, "subPath": merged, "readOnly": True},
+            ],
+        )
+        for mount in mounts:
+            self.assertEqual(mount["readOnly"], True)
+            self.assertIn("subPath", mount)
+            self.assertNotEqual(mount["mountPath"], "/opt/capability-store")
+
+    def test_the_tool_trees_links_resolve_through_the_runner_containers_mounts(self) -> None:
+        catalogue = {**STORE_CATALOGUE, "second": {"image": f"ghcr.io/example/toolcache-go:1@sha256:{DIGEST_B}"}}
+        spec = store_pod(DEFAULT_VALUES, ["node", "second"], catalogue)["values"]["template"]["spec"]
+        link = next(container for container in spec["initContainers"] if container["name"] == "capability-store-tool-cache")
+        # The links point at <root>/<key>/..., so the runner container must mount exactly each of those keys' directories at that path.
+        root, keys = link["command"][4], link["command"][6:]
+        self.assertEqual(keys, [KEY_A, f"toolcache-{DIGEST_B}"])
+        mounted = {mount["mountPath"]: mount["subPath"] for mount in runner({"template": {"spec": spec}})["volumeMounts"] if mount["name"] == "capability-store"}
+        self.assertEqual(mounted, {f"{root}/{key}": key for key in keys})
+
+    def test_a_profile_with_only_system_libraries_mounts_only_its_merged_sysroot(self) -> None:
+        mounts = self.store_mounts(["mpi", "libpq"])
+        self.assertEqual([mount["mountPath"] for mount in mounts], [SYSROOT])
+
+    def test_the_init_containers_that_write_to_the_store_still_mount_its_root(self) -> None:
+        spec = store_pod(DEFAULT_VALUES, ["node", "mpi"])["values"]["template"]["spec"]
+        for container in spec["initContainers"]:
+            if container["name"].startswith("capability-store-") or container["name"].startswith("capability-"):
+                mounts = [mount for mount in container.get("volumeMounts", []) if mount["name"] == "capability-store"]
+                self.assertEqual([mount["mountPath"] for mount in mounts], ["/opt/capability-store"], container["name"])
 
     def test_a_different_order_of_system_libraries_is_a_different_merged_sysroot(self) -> None:
         first = store_pod(DEFAULT_VALUES, ["mpi", "libpq"])["values"]["template"]["spec"]["initContainers"]
