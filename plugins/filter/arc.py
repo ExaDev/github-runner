@@ -1117,10 +1117,10 @@ def _node_cache_init_container(name: str, capability: Mapping[str, Any], node_ca
     }
 
 
-# --- The capability store: one copy per node of what every runner pod would otherwise copy at its start ---
+# --- The capability store: a shared copy per node of what every runner pod would otherwise copy at its start ---
 # A pod's tool-cache and system-library copies (and the runner's externals for the dind sidecar) are the same bytes on every pod of a profile, taken from digest-pinned images. With a profile's capability_store on, each image's payload is copied into <store>/<kind>-<digest> (by every pod that starts before the entry is published, the first publish winning, and by none after it), where <digest> is the image's sha256 digest and <kind> the payload it holds (see arc_capability_store_key), and pods mount the store read-only instead of writing their own copy. The store root is a hostPath of its own, apart from the node cache, whose last component names it.
 _CAPABILITY_STORE_HOST_PATH_NAME = re.compile(r"^(?:capability-store|[a-z0-9][a-z0-9-]*-capability-store)$")
-# A copy is written under <store>/.incoming/<key>.<pod uid>.<container> and published with one rename onto <store>/<key>: rename(2) onto a non-empty directory fails, so of two pods copying the same image at once the first rename wins and the other's copy is deleted, and a reader never sees a part-written entry, since an entry exists only once it is complete. The pod uid comes from the downward API and the container name keeps two copies of one image within a pod apart.
+# A copy is written under <store>/.incoming/<key>.<pod uid>.<container> and published with one rename onto <store>/<key>: rename(2) onto a non-empty directory fails, so of two pods copying the same image at once the first rename wins and the other's copy is deleted, and a reader never sees a part-written entry, since an entry exists only once it is complete. The pod uid comes from the downward API, which keeps one pod's copy apart from another's, and the container name only records which of the pod's copy containers wrote it.
 _CAPABILITY_STORE_INCOMING = ".incoming"
 _CAPABILITY_STORE_VOLUME = "capability-store"
 _CAPABILITY_STORE_PREPARE = "capability-store-prepare"
