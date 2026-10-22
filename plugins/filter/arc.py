@@ -1929,7 +1929,6 @@ class FilterModule:
             "arc_capability_store_externals": arc_capability_store_externals,
             "arc_capability_store_host_path_errors": arc_capability_store_host_path_errors,
             "arc_capability_store_path_errors": arc_capability_store_path_errors,
-            "arc_capability_store_key": arc_capability_store_key,
             "arc_capability_store_image_errors": arc_capability_store_image_errors,
             "arc_capability_store_namespaces": arc_capability_store_namespaces,
             "arc_host_path_overlap_errors": arc_host_path_overlap_errors,
