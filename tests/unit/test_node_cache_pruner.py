@@ -544,6 +544,27 @@ class StartupTest(unittest.TestCase):
                 self.assertIn(f"node-cache-pruner: {name} is required", completed.stderr)
                 self.assertFalse(self.calls.exists())
 
+    def test_a_store_root_without_namespaces_is_refused_before_the_store_or_the_cache_is_touched(self) -> None:
+        # Unset, empty and only whitespace all list no namespace, so no reference would be read and every entry would count as unused.
+        for label, overrides in (("unset", {}), ("empty", {"STORE_NAMESPACES": ""}), ("blank", {"STORE_NAMESPACES": "  "})):
+            with self.subTest(label):
+                store = Path(tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, store, True)
+                (store / KEY_A).mkdir()
+                (store / ".incoming" / f"{KEY_B}.pod-1.capability-node").mkdir(parents=True)
+                completed = self.start(STORE_ROOT=str(store), **overrides)
+                self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                self.assertIn("node-cache-pruner: STORE_NAMESPACES is required when STORE_ROOT is set", completed.stderr)
+                self.assertFalse(self.calls.exists(), "kubectl was called")
+                self.assertTrue((store / KEY_A).exists() and (store / ".incoming" / f"{KEY_B}.pod-1.capability-node").exists(), "the store was touched")
+                self.assertTrue((self.root / "arc-a" / "main" / "pnpm" / "blob").exists(), "the cache was touched")
+
+    def test_namespaces_without_a_store_root_and_neither_set_start_normally(self) -> None:
+        for label, overrides in (("neither", {}), ("namespaces only", {"STORE_NAMESPACES": "arc-a"})):
+            with self.subTest(label):
+                completed = self.start(**overrides)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_every_numeric_setting_accepts_its_maximum_and_refuses_one_more_and_anything_that_would_wrap(self) -> None:
         maximum = {"LIMIT_KIB": 1125899906842624, "LIMIT_GIB": 1073741824, "HARD_LIMIT_FACTOR": 1024, "CHECK_SECONDS": 86400}
         for name, largest in maximum.items():
