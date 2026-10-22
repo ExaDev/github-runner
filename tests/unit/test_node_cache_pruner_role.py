@@ -626,6 +626,43 @@ class ValidationTest(unittest.TestCase):
                 self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
                 self.assertEqual(json.loads(output.read_text()), self.problems(**role_vars))
 
+    def store_validation(self, profile: dict[str, Any], catalogue: dict[str, Any], **role_vars: Any) -> list[str]:
+        """The problems the store settings task of tasks/validate.yml finds for a profile, evaluated by Ansible with the role's defaults and constants, so the order of the arguments the task passes is exercised."""
+        tasks = yaml.safe_load((ROLE / "tasks" / "validate.yml").read_text())
+        [task] = [task for task in tasks if task["name"] == "Fail when a profile's capability store settings do not fit the role's mount paths and images"]
+        expression = task["vars"]["github_runner_arc_capability_store_problems"]
+        with tempfile.TemporaryDirectory() as work:
+            template, output = Path(work) / "problems.j2", Path(work) / "problems.json"
+            template.write_text("{{ (" + expression.strip().removeprefix("{{").removesuffix("}}") + ") | to_json }}")
+            completed = ansible(KEPT, kept_template=str(template), kept_output=str(output), github_runner_arc_local={"profiles": [profile]}, github_runner_arc_capabilities=catalogue, **role_vars)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            problems: list[str] = json.loads(output.read_text())
+            return problems
+
+    def test_the_capability_store_settings_are_checked_against_the_roles_paths_before_anything_is_installed(self) -> None:
+        digest = "ghcr.io/example/toolcache-node:22@sha256:" + "0" * 64
+
+        def profile(image: str, **settings: Any) -> dict[str, Any]:
+            result = arc.arc_profiles([{"name": "Example", "image": image, "scale_set_profiles": [{"max_runners": 1, "capability_store": True, **settings}]}], require_app_id=False)
+            assert result["errors"] == [], result["errors"]
+            found: dict[str, Any] = result["profiles"][0]
+            return found
+
+        tools = {"tools": {"image": digest}}
+        stored = profile("ghcr.io/example/runner:1", capabilities=["tools"])
+        self.assertEqual(self.store_validation(stored, tools), [])
+        inside = self.store_validation(stored, tools, github_runner_arc_capability_store_path="/opt/hostedtoolcache/store")
+        self.assertEqual(len(inside), 1, inside)
+        self.assertIn("overlaps the tool cache path /opt/hostedtoolcache", inside[0])
+        sysroot_inside = self.store_validation(profile("ghcr.io/example/runner:1", capabilities=["tools"]), tools, github_runner_arc_capability_store_path="/opt/sysroot")
+        self.assertIn("overlaps the sysroot path /opt/sysroot", sysroot_inside[0])
+        dind = profile("ghcr.io/example/runner:1", container_mode="dind")
+        self.assertEqual(self.store_validation(dind, {}), [])
+        unpinned = self.store_validation(dind, {}, github_runner_arc_registry_cache_enabled=True)
+        self.assertEqual(len(unpinned), 1, unpinned)
+        self.assertIn("init-dind-externals's image pinned by digest", unpinned[0])
+        self.assertEqual(self.store_validation(profile("ghcr.io/example/runner:1@sha256:" + "1" * 64, container_mode="dind"), {}, github_runner_arc_registry_cache_enabled=True), [])
+
     def test_the_defaults_are_valid(self) -> None:
         self.assertEqual(self.problems(), [])
 

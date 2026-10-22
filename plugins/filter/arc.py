@@ -538,7 +538,7 @@ def arc_runner_placement(profile: Mapping[str, Any], eligibility: Mapping[str, A
     return {"nodeSelector": dict(profile["node_selector"]), "affinity": {"nodeAffinity": node_affinity}, "tolerations": own_tolerations + burst["tolerations"]}
 
 
-def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
+def _expand_profile(org_name: str, runner_image: str, app_secret: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
     """Describe one scale-set profile of an org, or record why it cannot be described."""
     where = f"{org_name} scale_set_profiles[{index}]"
     if not isinstance(profile, Mapping):
@@ -591,6 +591,7 @@ def _expand_profile(org_name: str, app_secret: str, index: int, profile: Any, er
         # namespace/release joined for the autoscaler's own AUTOSCALER_TARGETS list (see scripts/autoscaler.sh): both are validated DNS labels below, so neither can itself contain '/', keeping each token unambiguous.
         "target": f"{namespace}/{release}",
         "app_secret": app_secret,
+        "runner_image": runner_image,
         "scale_set_labels": _scale_set_labels(profile, f"{org_lower}-runners", where, errors),
         "values_file": _text(profile, "values_file"),
         "node_selector": dict(node_selector),
@@ -623,7 +624,7 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
         orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes, and a profile without sizing may set burst with exclusive true to run on burst nodes only, with burst.max_runners as its maxRunners; see arc_runner_placement.
 
     Returns:
-        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, target (namespace/release, joined), app_secret, scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), capabilities (the names of the capabilities its runner pods carry, in order; see arc_capability_pod), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
+        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, target (namespace/release, joined), app_secret, runner_image (its org's image), scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), capabilities (the names of the capabilities its runner pods carry, in order; see arc_capability_pod), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
     """
     errors: list[str] = []
     profiles: list[dict[str, Any]] = []
@@ -656,7 +657,7 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
             continue
         app_secret = _optional_name(org, "app_secret_name", org_name, errors) or f"{org_name.lower()}-github-app"
         for profile_index, profile in enumerate(org_profiles):
-            expanded = _expand_profile(org_name, app_secret, profile_index, profile, errors)
+            expanded = _expand_profile(org_name, _text(org, "image"), app_secret, profile_index, profile, errors)
             if expanded is not None:
                 profiles.append(expanded)
     namespaces: dict[str, str] = {}
@@ -844,7 +845,7 @@ def arc_capability_errors(profiles: Sequence[Mapping[str, Any]], catalogue: Any)
         profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, a mapping of capability name to one of {image, path?} (a tool-cache capability: a pinned image holding a payload in the tool-cache layout under /toolcache, and optionally a <tool>/<version>[/<subdirectory>] to put on PATH at job start), {sysroot_image, env?} (a system-library capability: a pinned image holding a relocatable prefix under /sysroot, and optionally extra variables its libraries need, such as a relocation variable) or {job_started_hook} (a hook capability: a script the runner runs before each job).
 
     Returns:
-        The problems found, empty when there are none: invalid entries, a profile naming an undefined capability, and two of a profile's system-library capabilities setting one variable to different values.
+        The problems found, empty when there are none: invalid entries, a profile naming an undefined capability, two of a profile's system-library capabilities setting one variable to different values, and a profile with capability_store whose image or sysroot_image is not pinned by digest (arc_capability_store_errors checks the store's settings against the role's paths).
     """
     if not isinstance(catalogue, Mapping):
         return ["github_runner_arc_capabilities must be a mapping of capability name to capability"]
@@ -852,6 +853,8 @@ def arc_capability_errors(profiles: Sequence[Mapping[str, Any]], catalogue: Any)
     for profile in profiles:
         errors.extend(f"{profile['label']}: capability '{name}' is not defined in github_runner_arc_capabilities" for name in profile["capabilities"] if name not in catalogue)
         errors.extend(_sysroot_env_conflicts(profile["label"], profile["capabilities"], catalogue))
+        if profile["capability_store"]:
+            errors.extend(f"{profile['label']}: {message}" for message in _capability_store_digest_errors(profile["capabilities"], catalogue))
     return errors
 
 
@@ -1190,6 +1193,36 @@ def arc_capability_store_key(image: str, kind: str) -> str | None:
     return f"{kind}-{match.group(1)}" if match else None
 
 
+def _capability_store_digest_errors(names: Sequence[str], catalogue: Mapping[str, Any]) -> list[str]:
+    """Return one message for each of names that is a tool-cache or system-library capability whose image is not pinned by digest, which the capability store needs because it names the entry for the digest. A name the catalogue lacks, or an entry that is not a mapping or has no string image, is arc_capability_errors' to report."""
+    errors: list[str] = []
+    for name in names:
+        capability = catalogue.get(name)
+        if not isinstance(capability, Mapping):
+            continue
+        image = capability.get("image") if capability.get("image") is not None else capability.get("sysroot_image")
+        if isinstance(image, str) and _IMAGE_DIGEST.search(image) is None:
+            errors.append(f"capability {name}'s image must be pinned by digest (name@sha256:<64 hex digits>) for the capability store, since its store entry is named for the digest")
+    return errors
+
+
+def _capability_store_uses_entries(names: Sequence[str], catalogue: Mapping[str, Any]) -> bool:
+    """Return whether any of names is a tool-cache or system-library capability, the ones the store holds a payload for."""
+    return any(isinstance(catalogue.get(name), Mapping) and (catalogue[name].get("image") is not None or catalogue[name].get("sysroot_image") is not None) for name in names)
+
+
+def _capability_store_mount_errors(store_path: Any, others: Mapping[str, str]) -> list[str]:
+    """Return what is wrong with the store's mount path on the runner container: the rules of arc_capability_store_path_errors, or else that it overlaps one of the other mounted directories in others."""
+    return arc_capability_store_path_errors(store_path) or _overlap_errors("capability store path", store_path, others)
+
+
+def _capability_store_externals_image_errors(image: Any) -> list[str]:
+    """Return what is wrong with the image the dind sidecar's externals are copied from, which the store names its entry for: empty when it is pinned by digest."""
+    if arc_capability_store_key(str(image), _STORE_KIND_EXTERNALS) is None:
+        return [f"the capability store needs {_DIND_EXTERNALS_INIT}'s image pinned by digest (name@sha256:<64 hex digits>), since its store entry is named for the digest (got {image!r})"]
+    return []
+
+
 def _capability_store_merged_key(keys: Sequence[str]) -> str:
     """Return the store entry name of the sysroot merged from keys in their order: a hash of the ordered keys, so a different set or order of system libraries is a different entry, since a later one's file overwrites an earlier one's. Its prefix is not a payload kind's, so it cannot be the name of an image's entry."""
     return _CAPABILITY_STORE_MERGED_PREFIX + hashlib.sha256(" ".join(keys).encode()).hexdigest()
@@ -1344,6 +1377,28 @@ def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[s
     return containers, keys + ([merged] if merged is not None else []), merged
 
 
+def arc_capability_store_errors(profiles: Sequence[Mapping[str, Any]], catalogue: Mapping[str, Any], store_path: Any, tool_cache_path: str, sysroot_path: str, hooks_dir: str, node_cache_path: str, registry_cache_enabled: bool) -> list[str]:
+    """Check what a profile with capability_store needs of the role's settings, before anything is installed: the checks arc_capability_pod and arc_capability_store_externals make when they render, so that validation fails on them and not the install, which has by then applied the controller, the pruner and earlier profiles.
+
+    Args:
+        profiles: expanded profiles from arc_profiles. catalogue: github_runner_arc_capabilities, already checked by arc_capability_errors. store_path: where the store is mounted on the runner container. tool_cache_path, sysroot_path, hooks_dir, node_cache_path: where the role mounts the tool cache, the sysroot, the job-started hooks and the node cache, which the store's path may not equal, contain or sit inside. registry_cache_enabled: whether the role writes the registry cache into the values, which writes the dind sidecar out with its externals copy for a profile with container_mode dind.
+
+    Returns:
+        The problems found, empty when there are none: for a profile that holds a tool-cache or system-library payload in the store, a store path that is not a directory of its own, and, for a profile in dind mode with the registry cache, a runner image not pinned by digest, since the externals copy's entry is named for it. A values file's own externals copy is checked when it is rendered, since its content is not known here.
+    """
+    errors: list[str] = []
+    for profile in profiles:
+        if not profile["capability_store"]:
+            continue
+        messages: list[str] = []
+        if _capability_store_uses_entries(profile["capabilities"], catalogue):
+            messages.extend(_capability_store_mount_errors(store_path, {"tool cache path": tool_cache_path, "sysroot path": sysroot_path, "job-started hooks directory": hooks_dir, "node cache path": node_cache_path}))
+        if registry_cache_enabled and not profile["values_file"] and profile["settings"].get("container_mode") == "dind":
+            messages.extend(_capability_store_externals_image_errors(profile["runner_image"]))
+        errors.extend(f"{profile['label']}: {message}" for message in messages)
+    return errors
+
+
 def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str, Any] | None, runner_user: int, runner_group: int) -> dict[str, Any]:
     """Move a scale set's copy of the runner's externals for the dind sidecar into the capability store.
 
@@ -1364,9 +1419,11 @@ def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str
     copier = next((container for container in init_containers if container.get("name") == _DIND_EXTERNALS_INIT), None)
     if copier is None:
         return {"errors": [], "values": values}
-    key = arc_capability_store_key(str(copier.get("image", "")), _STORE_KIND_EXTERNALS)
-    if key is None:
-        return {"errors": [f"the capability store needs {_DIND_EXTERNALS_INIT}'s image pinned by digest (name@sha256:<64 hex digits>), since its store entry is named for the digest (got {copier.get('image')!r})"], "values": values}
+    image_errors = _capability_store_externals_image_errors(copier.get("image", ""))
+    if image_errors:
+        return {"errors": image_errors, "values": values}
+    key = arc_capability_store_key(copier["image"], _STORE_KIND_EXTERNALS)
+    assert key is not None
     index = init_containers.index(copier)
     replacement = [
         _capability_store_copy_container(_DIND_EXTERNALS_INIT, copier["image"], _RUNNER_EXTERNALS_DIR, key, store, runner_user, runner_group),
@@ -1417,14 +1474,9 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
         errors.extend(_sysroot_path_errors(sysroot_path, {"tool cache path": tool_cache_path, "job-started hooks directory": hooks_dir}))
     if node_cache_capabilities:
         errors.extend(_node_cache_path_errors(node_cache_path, node_cache_host_path, {"tool cache path": tool_cache_path, "sysroot path": sysroot_path, "job-started hooks directory": hooks_dir}))
-    if store is not None and (tool_capabilities or sysroot_capabilities):
-        store_path_errors = arc_capability_store_path_errors(store["path"])
-        errors.extend(store_path_errors or _overlap_errors("capability store path", store["path"], {"tool cache path": tool_cache_path, "sysroot path": sysroot_path, "job-started hooks directory": hooks_dir, "node cache path": node_cache_path}))
-        errors.extend(
-            f"capability {name}'s image must be pinned by digest (name@sha256:<64 hex digits>) for the capability store, since its store entry is named for the digest"
-            for name, capability in [*tool_capabilities, *sysroot_capabilities]
-            if arc_capability_store_key(capability.get("image") or capability["sysroot_image"], _STORE_KIND_TOOL_CACHE) is None
-        )
+    if store is not None and _capability_store_uses_entries(names, catalogue):
+        errors.extend(_capability_store_mount_errors(store["path"], {"tool cache path": tool_cache_path, "sysroot path": sysroot_path, "job-started hooks directory": hooks_dir, "node cache path": node_cache_path}))
+        errors.extend(_capability_store_digest_errors(names, catalogue))
     tool_paths = [capability["path"] for _, capability in tool_capabilities if capability.get("path") is not None]
     hooks: dict[str, str] = {}
     if tool_paths:
@@ -1850,6 +1902,7 @@ class FilterModule:
             "arc_runner_placement": arc_runner_placement,
             "arc_capability_errors": arc_capability_errors,
             "arc_capability_pod": arc_capability_pod,
+            "arc_capability_store_errors": arc_capability_store_errors,
             "arc_capability_store_externals": arc_capability_store_externals,
             "arc_capability_store_host_path_errors": arc_capability_store_host_path_errors,
             "arc_capability_store_path_errors": arc_capability_store_path_errors,
