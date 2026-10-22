@@ -785,6 +785,9 @@ DIND_SIDECAR_VALUES: dict[str, Any] = {
 }
 
 
+EXTERNALS_STORE_MOUNT = {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": DIGEST_RUNNER, "readOnly": True}
+
+
 def assert_every_mount_has_its_volume(test: unittest.TestCase, spec: dict[str, Any]) -> None:
     """Fail unless every volumeMount of every container and init container names a volume of the pod, as the API server requires."""
     volumes = {volume["name"] for volume in spec["volumes"]}
@@ -796,15 +799,13 @@ def assert_every_mount_has_its_volume(test: unittest.TestCase, spec: dict[str, A
 class CapabilityStoreExternalsLayoutTest(unittest.TestCase):
     """The dind sidecar's externals mount is rewritten wherever the dind container is, so no container keeps a mount of the removed volume."""
 
-    EXTERNALS_MOUNT = {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": DIGEST_RUNNER, "readOnly": True}
-
     def dind(self, spec: dict[str, Any]) -> dict[str, Any]:
         return next(container for container in [*spec["containers"], *spec["initContainers"]] if container["name"] == "dind")
 
     def test_dind_as_an_ordinary_container_mounts_the_store_entry_and_every_mount_has_its_volume(self) -> None:
         spec = arc.arc_capability_store_externals(DIND_VALUES, STORE, 1001, 1001)["values"]["template"]["spec"]
         assert_every_mount_has_its_volume(self, spec)
-        self.assertIn(self.EXTERNALS_MOUNT, self.dind(spec)["volumeMounts"])
+        self.assertIn(EXTERNALS_STORE_MOUNT, self.dind(spec)["volumeMounts"])
 
     def test_dind_as_a_native_sidecar_mounts_the_store_entry_and_every_mount_has_its_volume(self) -> None:
         result = arc.arc_capability_store_externals(DIND_SIDECAR_VALUES, STORE, 1001, 1001)
@@ -813,7 +814,7 @@ class CapabilityStoreExternalsLayoutTest(unittest.TestCase):
         assert_every_mount_has_its_volume(self, spec)
         self.assertNotIn("dind-externals", [volume["name"] for volume in spec["volumes"]])
         dind = self.dind(spec)
-        self.assertIn(self.EXTERNALS_MOUNT, dind["volumeMounts"])
+        self.assertIn(EXTERNALS_STORE_MOUNT, dind["volumeMounts"])
         self.assertEqual(dind["restartPolicy"], "Always")
         # The copy and publish containers the function inserted mount the store and nothing of the removed volume, and the sidecar starts after both.
         names = [container["name"] for container in spec["initContainers"]]
@@ -834,7 +835,7 @@ class CapabilityStoreExternalsLayoutTest(unittest.TestCase):
         assert_every_mount_has_its_volume(self, spec)
         self.assertNotIn("dind-externals", [volume["name"] for volume in spec["volumes"]])
         self.assertIn("dind", [container["name"] for container in spec["initContainers"]])
-        self.assertIn(self.EXTERNALS_MOUNT, self.dind(spec)["volumeMounts"])
+        self.assertIn(EXTERNALS_STORE_MOUNT, self.dind(spec)["volumeMounts"])
         self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"].split()[-1], DIGEST_RUNNER)
 
     def test_the_store_functions_leave_every_mount_with_its_volume_for_a_profile_without_dind(self) -> None:
@@ -1068,6 +1069,99 @@ class CapabilityStoreScriptTest(unittest.TestCase):
             self.assertEqual(published.returncode, 0, published.stderr)
         self.assertEqual(self.layout(self.root / DIGEST_A), self.layout(toolcache))
         self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_a_payload_whose_root_directory_is_read_only_is_copied_and_published_with_the_source_layout(self) -> None:
+        # A tool cache after chmod -R a-w has a root of mode 0555, which the copy keeps, and renaming a directory into another parent needs write permission on the directory itself.
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary", "node/22.0.0/x64.complete": ""})
+        externals = self.payload("externals", {"node20/bin/node": "binary"})
+        for source in (toolcache, externals):
+            self.make_read_only(source)
+        for copy_name, publish_name, key, source, mount in (
+            ("capability-node", "capability-store-publish", DIGEST_A, toolcache, "/toolcache"),
+            ("init-dind-externals", "capability-store-publish-externals", DIGEST_RUNNER, externals, "/home/runner/externals"),
+        ):
+            with self.subTest(copy=copy_name):
+                spec = arc.arc_capability_store_externals(store_pod(DIND_VALUES, ["node"])["values"], STORE, 1001, 1001)["values"]["template"]["spec"]
+                containers = {container["name"]: container for container in spec["initContainers"]}
+                rewrite = {"/opt/capability-store": str(self.root), mount: str(source)}
+                self.assertFalse(source.stat().st_mode & stat.S_IWUSR)
+                copied = self.run_container(containers[copy_name], "pod-1", rewrite)
+                self.assertEqual(copied.returncode, 0, copied.stderr)
+                published = self.run_container(containers[publish_name], "pod-1", rewrite)
+                self.assertEqual(published.returncode, 0, published.stderr)
+                self.assertEqual(self.layout(self.root / key), self.layout(source))
+                self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_a_rename_that_fails_for_another_reason_than_a_lost_race_reports_the_error_of_mv(self) -> None:
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
+        containers = self.containers(["node"])
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
+        self.assertEqual(self.run_container(containers["capability-node"], "pod-1", rewrite).returncode, 0)
+        # A store root the pod cannot write to: the entry cannot be created, which is no lost race.
+        self.root.chmod(0o555)
+        published = self.run_container(containers["capability-store-publish"], "pod-1", rewrite)
+        self.assertNotEqual(published.returncode, 0)
+        self.assertIn(f"{DIGEST_A} is not in", published.stderr)
+        self.assertIn("Permission denied", published.stderr)
+
+    def test_a_lost_publish_race_is_not_an_error_and_prints_nothing(self) -> None:
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
+        containers = self.containers(["node"])
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
+        for uid in ("pod-1", "pod-2"):
+            self.assertEqual(self.run_container(containers["capability-node"], uid, rewrite).returncode, 0)
+        for uid in ("pod-1", "pod-2"):
+            published = self.run_container(containers["capability-store-publish"], uid, rewrite)
+            self.assertEqual((published.returncode, published.stderr), (0, ""))
+
+    def test_a_sysroot_merged_from_entries_whose_root_is_read_only_is_published(self) -> None:
+        # The merge's destination takes the mode of the first entry's root (cp -a), and renaming it into the store needs write permission on it.
+        for digest, files in ((DIGEST_B, {"lib/libmpi.so": "mpi"}), (DIGEST_C, {"lib/libpq.so": "pq"})):
+            for relative, content in files.items():
+                (self.root / digest / relative).parent.mkdir(parents=True, exist_ok=True)
+                (self.root / digest / relative).write_text(content)
+            self.make_read_only(self.root / digest)
+        merge = self.containers(["mpi", "libpq"])["capability-store-sysroot"]
+        merged = merge["command"][5]
+        completed = self.run_container(merge, "pod-1", {"/opt/capability-store": str(self.root)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.layout(self.root / merged), {"lib": "<dir>", "lib/libmpi.so": "mpi", "lib/libpq.so": "pq"})
+        self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def store_entry_with_read_only_directories(self) -> tuple[Path, str]:
+        """Publish a system library's entry whose files are mode 0444 and whose directories are read-only, and return the file and the merged sysroot's entry name for it."""
+        library = self.root / DIGEST_B / "lib/libmpi.so"
+        library.parent.mkdir(parents=True)
+        library.write_text("mpi")
+        library.chmod(0o444)
+        self.make_read_only(self.root / DIGEST_B)
+        return library, self.containers(["mpi"])["capability-store-sysroot"]["command"][5]
+
+    def test_a_merge_that_loses_the_race_leaves_the_modes_of_the_entries_files_alone(self) -> None:
+        # The merge's files are hard links to the entry's, so making them writable would change the entry's own.
+        library, merged = self.store_entry_with_read_only_directories()
+        bin_dir = self.work / "race-bin"
+        bin_dir.mkdir()
+        sync = bin_dir / "sync"
+        sync.write_text('#!/bin/sh\nmkdir -p "$RACE_ENTRY"\n')
+        sync.chmod(0o755)
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "RACE_ENTRY": str(self.root / merged)}
+        completed = self.run_with_env(self.containers(["mpi"])["capability-store-sysroot"], "pod-1", {"/opt/capability-store": str(self.root)}, env)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(stat.S_IMODE(library.stat().st_mode), 0o444)
+        self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_a_merge_rerun_after_a_partial_merge_leaves_the_modes_of_the_entries_files_alone(self) -> None:
+        library, merged = self.store_entry_with_read_only_directories()
+        merge = self.containers(["mpi"])["capability-store-sysroot"]
+        # What a merge killed after its links and before its rename leaves: hard links into the entry under directories without owner write permission.
+        debris = self.root / ".incoming" / f"{merged}.pod-1.merge"
+        debris.mkdir()
+        subprocess.run(["cp", "-al", f"{self.root / DIGEST_B}/.", f"{debris}/"], check=True)
+        completed = self.run_container(merge, "pod-1", {"/opt/capability-store": str(self.root)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(stat.S_IMODE(library.stat().st_mode), 0o444)
+        self.assertEqual(self.layout(self.root / merged), {"lib": "<dir>", "lib/libmpi.so": "mpi"})
 
     def test_publishing_fails_when_the_entry_is_neither_copied_nor_in_the_store(self) -> None:
         containers = self.containers(["node"])
