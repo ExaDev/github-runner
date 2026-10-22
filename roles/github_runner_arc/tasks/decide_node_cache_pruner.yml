@@ -1,5 +1,5 @@
 ---
-# Decides which profiles have a node cache and whether the pruner runs, from the fleet and the capability catalogue. The pruner runs while the size limit is above zero and some profile has a node cache, and is removed otherwise, so it follows the fleet. A directory a removed capability leaves is emptied only while another profile keeps the pruner installed; once the pruner is gone, delete <github_runner_arc_node_cache_host_path> on each node by hand.
+# Decides which profiles have a node cache and whether the pruner runs, from the fleet and the capability catalogue. The pruner runs while the size limit is above zero and some profile has a node cache or uses the capability store, and is removed otherwise, so it follows the fleet. A directory a removed capability leaves is emptied only while another profile keeps the pruner installed; once the pruner is gone, delete <github_runner_arc_node_cache_host_path> on each node by hand.
 
 - name: "Node cache: find the profiles that carry a node-cache capability"
   ansible.builtin.set_fact:
