@@ -773,8 +773,24 @@ class CapabilityStoreScriptTest(unittest.TestCase):
     def setUp(self) -> None:
         self.work = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.work)
+        # Registered second so that it runs first: a tree with directories lacking owner write permission cannot be removed until it is writable again.
+        self.addCleanup(self.make_writable, self.work)
         self.root = self.work / "store"
         (self.root / ".incoming").mkdir(parents=True)
+
+    @staticmethod
+    def make_writable(directory: Path) -> None:
+        """Give every directory under directory (and itself) owner read, write and search permission, so that it can be removed."""
+        for path in [directory, *directory.rglob("*")]:
+            if path.is_dir() and not path.is_symlink():
+                path.chmod(0o755)
+
+    @staticmethod
+    def make_read_only(directory: Path) -> None:
+        """Remove owner write permission from every directory under directory (and itself), deepest first, as a Go module cache's directories are (mode 0555)."""
+        for path in sorted([directory, *directory.rglob("*")], key=lambda candidate: len(candidate.parts), reverse=True):
+            if path.is_dir() and not path.is_symlink():
+                path.chmod(0o555)
 
     def run_container(self, container: dict[str, Any], uid: str, rewrite: dict[str, str]) -> subprocess.CompletedProcess[str]:
         """Run an init container's command with sh, as pod uid, with its paths rewritten to the temporary ones."""
@@ -870,12 +886,15 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertTrue((self.root / merged / "lib/libpq.so").is_file())
 
     def assert_rerun_after_a_partial_copy_publishes_the_source_layout(self, copy: dict[str, Any], publish: dict[str, Any], key: str, source: Path, rewrite: dict[str, str]) -> None:
-        """Leave what a copy killed part-way leaves in the pod's own destination, run the copy twice (the kubelet reruns a pod's init containers after a sandbox change), publish, and require the entry to hold exactly the source's layout and content."""
+        """Leave what a copy killed part-way leaves in the pod's own destination (including a directory without owner write permission and content below it), run the copy twice (the kubelet reruns a pod's init containers after a sandbox change, and the second run finds the first's complete copy, whose own source may hold such directories), publish, and require the entry to hold exactly the source's layout and content."""
         debris = self.root / ".incoming" / f"{key}.pod-1.{copy['name']}"
         (debris / "bin").mkdir(parents=True)
         (debris / "bin/partial").write_text("half a file")
         (debris / source.name).mkdir()
         (debris / source.name / "stale").write_text("nested by a copy onto an existing destination")
+        (debris / "pkg/mod/cache").mkdir(parents=True)
+        (debris / "pkg/mod/cache/download").write_text("a Go module cache's read-only directory")
+        self.make_read_only(debris / "pkg")
         for _ in range(2):
             completed = self.run_container(copy, "pod-1", rewrite)
             self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -885,12 +904,14 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertEqual(list((self.root / ".incoming").iterdir()), [])
 
     def test_a_capability_copy_rerun_after_a_partial_copy_publishes_exactly_the_payloads_layout(self) -> None:
-        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary", "node/22.0.0/x64.complete": ""})
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary", "node/22.0.0/x64.complete": "", "go/pkg/mod/example@v1/file": "module"})
+        self.make_read_only(toolcache / "go")
         containers = self.containers(["node"])
         self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["capability-node"], containers["capability-store-publish"], DIGEST_A, toolcache, {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)})
 
     def test_the_dind_externals_copy_rerun_after_a_partial_copy_publishes_exactly_the_externals_layout(self) -> None:
-        externals = self.payload("externals", {"node20/bin/node": "binary", "node20/lib/libnode.so": "library"})
+        externals = self.payload("externals", {"node20/bin/node": "binary", "node20/lib/libnode.so": "library", "node20/read-only/file": "content"})
+        self.make_read_only(externals / "node20/read-only")
         spec = arc.arc_capability_store_externals(DIND_VALUES, STORE, 1001, 1001)["values"]["template"]["spec"]
         containers = {container["name"]: container for container in spec["initContainers"]}
         self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["init-dind-externals"], containers["capability-store-publish-externals"], DIGEST_RUNNER, externals, {"/opt/capability-store": str(self.root), "/home/runner/externals": str(externals)})
@@ -903,9 +924,43 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         debris = self.root / ".incoming" / f"{merged}.pod-1.merge"
         (debris / "lib").mkdir(parents=True)
         (debris / "lib/partial").write_text("half a file")
+        (debris / "share/doc").mkdir(parents=True)
+        (debris / "share/doc/readme").write_text("a read-only directory's content")
+        self.make_read_only(debris / "share")
         completed = self.run_container(merge, "pod-1", {"/opt/capability-store": str(self.root)})
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(self.layout(self.root / merged), {"lib": "<dir>", "lib/libmpi.so": "mpi"})
+
+    def test_a_sysroot_merge_that_loses_the_race_deletes_its_copy_even_when_it_holds_read_only_directories(self) -> None:
+        (self.root / DIGEST_B / "lib/private").mkdir(parents=True)
+        (self.root / DIGEST_B / "lib/private/libmpi.so").write_text("mpi")
+        self.make_read_only(self.root / DIGEST_B)
+        merge = self.containers(["mpi"])["capability-store-sysroot"]
+        merged = merge["command"][5]
+        # Another pod publishes the merged entry while this pod's sync runs, as two pods starting together on a node without it would.
+        bin_dir = self.work / "race-bin"
+        bin_dir.mkdir()
+        sync = bin_dir / "sync"
+        sync.write_text('#!/bin/sh\nmkdir -p "$RACE_ENTRY" && printf winner > "$RACE_ENTRY/marker"\n')
+        sync.chmod(0o755)
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "RACE_ENTRY": str(self.root / merged)}
+        completed = self.run_with_env(merge, "pod-1", {"/opt/capability-store": str(self.root)}, env)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.layout(self.root / merged), {"marker": "winner"})
+        self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_of_two_pods_publishing_one_image_the_loser_deletes_its_copy_even_when_it_holds_read_only_directories(self) -> None:
+        toolcache = self.payload("toolcache", {"go/pkg/mod/example@v1/file": "module", "go/bin/go": "binary"})
+        self.make_read_only(toolcache / "go")
+        containers = self.containers(["node"])
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
+        for uid in ("pod-1", "pod-2"):
+            self.assertEqual(self.run_container(containers["capability-node"], uid, rewrite).returncode, 0)
+        for uid in ("pod-1", "pod-2"):
+            published = self.run_container(containers["capability-store-publish"], uid, rewrite)
+            self.assertEqual(published.returncode, 0, published.stderr)
+        self.assertEqual(self.layout(self.root / DIGEST_A), self.layout(toolcache))
+        self.assertEqual(list((self.root / ".incoming").iterdir()), [])
 
     def test_publishing_fails_when_the_entry_is_neither_copied_nor_in_the_store(self) -> None:
         containers = self.containers(["node"])
