@@ -222,7 +222,9 @@ wait_for_log() {
   deadline=$(($(date +%s) + 900))
   until kubectl -n "$namespace" logs "$1" -c runner 2>/dev/null | grep -qx "$2"; do
     phase="$(kubectl -n "$namespace" get pod "$1" -o jsonpath='{.status.phase}')"
-    [ "$phase" != Failed ] && [ "$phase" != Succeeded ] || fail "the pod $1 ended before it printed $2"
+    if [ "$phase" = Failed ] || [ "$phase" = Succeeded ]; then
+      fail "the pod $1 ended before it printed $2"
+    fi
     [ "$(date +%s)" -lt "$deadline" ] || fail "the pod $1 did not print $2"
     sleep 5
   done
