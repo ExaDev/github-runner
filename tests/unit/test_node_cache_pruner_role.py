@@ -465,6 +465,38 @@ class ValidationTest(unittest.TestCase):
                 self.assertEqual(len(problems), 1, problems)
                 self.assertIn(message, problems[0])
 
+    def test_the_node_cache_and_the_capability_store_may_not_share_or_contain_a_directory(self) -> None:
+        store = "/var/lib/github-runner/capability-store"
+        cache = "/var/lib/github-runner/node-cache"
+        self.assertEqual(self.problems(github_runner_arc_node_cache_host_path=cache, github_runner_arc_capability_store_host_path=store), [])
+        for role_vars, shape in (
+            ({"github_runner_arc_node_cache_host_path": f"{store}/node-cache"}, "node cache inside the store"),
+            ({"github_runner_arc_capability_store_host_path": f"{cache}/capability-store"}, "store inside the node cache"),
+        ):
+            with self.subTest(shape):
+                problems = self.problems(**role_vars)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("github_runner_arc_node_cache_host_path", problems[0])
+                self.assertIn("github_runner_arc_capability_store_host_path", problems[0])
+                self.assertIn("neither inside the other", problems[0])
+
+    def test_the_same_directory_for_both_is_an_overlap(self) -> None:
+        # Each setting's own name rule rules out a shared path in the role, so the check is exercised directly as well as through the role.
+        for first, second in (("/srv/ci/shared", "/srv/ci/shared"), ("/srv/ci/shared/", "/srv/ci//shared")):
+            with self.subTest(first=first, second=second):
+                errors = arc.arc_host_path_overlap_errors(first, second)
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn("github_runner_arc_node_cache_host_path (" + first + ")", errors[0])
+                self.assertIn("github_runner_arc_capability_store_host_path (" + second + ")", errors[0])
+
+    def test_a_sibling_with_the_same_prefix_is_not_an_overlap(self) -> None:
+        self.assertEqual(arc.arc_host_path_overlap_errors("/srv/ci/node-cache", "/srv/ci/node-cache-2/capability-store"), [])
+        self.assertEqual(arc.arc_host_path_overlap_errors("/srv/ci/capability-store-2", "/srv/ci/capability-store"), [])
+
+    def test_a_value_that_is_not_a_path_is_left_to_its_own_check(self) -> None:
+        self.assertEqual(arc.arc_host_path_overlap_errors(None, "/srv/ci/capability-store"), [])
+        self.assertNotEqual(self.problems(github_runner_arc_node_cache_host_path=None), [])
+
     def test_a_profile_using_the_capability_store_is_refused_without_the_pruner(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "validate.yml").read_text())
         [task] = [task for task in tasks if task["name"] == "Fail when a profile uses the capability store without the pruner"]

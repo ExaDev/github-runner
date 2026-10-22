@@ -1088,6 +1088,20 @@ def arc_capability_store_host_path_errors(host_path: Any) -> list[str]:
     return [f"the capability store's host path {host_path} is inside {inside[0]}, which the node itself uses"] if inside else []
 
 
+def arc_host_path_overlap_errors(node_cache_host_path: Any, capability_store_host_path: Any) -> list[str]:
+    """Return an error when github_runner_arc_node_cache_host_path and github_runner_arc_capability_store_host_path are the same directory or one is inside the other, and none otherwise.
+
+    The pruner empties each as root and treats whatever it finds directly under a root as that root's own entries: a node cache inside the store is an unreferenced store entry and is deleted while pods use it, and a store inside the node cache is a profile directory the fleet no longer wants. A value that is not a string is reported by the setting's own check, so it is not compared here.
+    """
+    if not isinstance(node_cache_host_path, str) or not isinstance(capability_store_host_path, str):
+        return []
+    cache = _canonical_path(node_cache_host_path)
+    store = _canonical_path(capability_store_host_path)
+    if cache == store or cache.startswith(f"{store}/") or store.startswith(f"{cache}/"):
+        return [f"github_runner_arc_node_cache_host_path ({node_cache_host_path}) and github_runner_arc_capability_store_host_path ({capability_store_host_path}) must be separate directories, neither inside the other, since the pruner removes what it finds directly under each as root"]
+    return []
+
+
 def arc_capability_store_path_errors(store_path: Any) -> list[str]:
     """Return what is wrong with github_runner_arc_capability_store_path, where the store is mounted read-only on the runner container: empty when it is an absolute directory other than / with no colon or line break."""
     if not isinstance(store_path, str) or not store_path.startswith("/") or store_path == "/" or any(character in store_path for character in ":\n\r"):
@@ -1753,6 +1767,7 @@ class FilterModule:
             "arc_capability_store_key": arc_capability_store_key,
             "arc_capability_store_image_errors": arc_capability_store_image_errors,
             "arc_capability_store_namespaces": arc_capability_store_namespaces,
+            "arc_host_path_overlap_errors": arc_host_path_overlap_errors,
             "arc_node_cache_profiles": arc_node_cache_profiles,
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
             "arc_node_cache_root": arc_node_cache_root,
