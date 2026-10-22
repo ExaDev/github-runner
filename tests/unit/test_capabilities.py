@@ -1518,6 +1518,77 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         (version / "x64.complete").write_text("")
         return version
 
+    def linked_tool_names(self) -> Path:
+        """Fill the store's entry for the node capability with one tool whose version and tool are also reached through links, as an image aliasing node and nodejs, and 22 and 22.0.0, does: node/22.0.0 holds the real tree, node/22 is a link to it, and nodejs is a link to node. Returns the entry."""
+        entry = self.root / KEY_A
+        arch = entry / "node/22.0.0/x64"
+        (arch / "bin").mkdir(parents=True)
+        (arch / "bin/node").write_text("binary")
+        (arch / "README").write_text("readme")
+        (entry / "node/22.0.0/x64.complete").write_text("")
+        (entry / "node/22").symlink_to("22.0.0")
+        (entry / "nodejs").symlink_to("node")
+        return entry
+
+    def test_a_tool_or_version_directory_that_is_a_link_is_copied_as_the_link_and_not_rebuilt_as_a_second_tree(self) -> None:
+        entry = self.linked_tool_names()
+        before = self.snapshot(self.root)
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        # Both names are the pod's own links, and the only real tree is the one the store holds as real.
+        self.assertEqual((cache / "node/22").readlink(), Path("22.0.0"))
+        self.assertEqual((cache / "nodejs").readlink(), Path("node"))
+        self.assertTrue((cache / "node/22.0.0/x64").is_dir() and not (cache / "node/22.0.0").is_symlink())
+        self.assertEqual(sorted(path.name for path in cache.iterdir()), ["node", "nodejs"])
+        self.assertEqual(sorted(path.name for path in (cache / "node").iterdir()), ["22", "22.0.0"])
+        # A job's write through one name is seen through every other, and the store is unchanged.
+        (cache / "node/22.0.0/x64/created").write_text("created")
+        for name in ("node/22/x64", "nodejs/22/x64", "nodejs/22.0.0/x64"):
+            self.assertEqual((cache / name / "created").read_text(), "created", name)
+        self.assertEqual((cache / "nodejs/22/x64/bin/node").read_text(), "binary")
+        self.assertEqual(self.snapshot(self.root), before)
+        self.assertFalse((entry / "node/22.0.0/x64/created").exists())
+
+    def test_a_tool_directory_that_is_a_link_alone_and_a_version_directory_that_is_a_link_alone_are_each_copied_as_the_link(self) -> None:
+        for case, tool_link, version_link in (("tool", True, False), ("version", False, True)):
+            with self.subTest(case):
+                entry = self.linked_tool_names()
+                if not tool_link:
+                    (entry / "nodejs").unlink()
+                if not version_link:
+                    (entry / "node/22").unlink()
+                cache = self.work / f"toolcache-{case}"
+                cache.mkdir()
+                self.link_tool_cache(cache)
+                self.assertEqual((cache / "nodejs").is_symlink(), tool_link)
+                self.assertEqual((cache / "node/22").is_symlink(), version_link)
+                self.assertTrue((cache / "node/22.0.0").is_dir() and not (cache / "node/22.0.0").is_symlink())
+                shutil.rmtree(entry)
+                shutil.rmtree(cache)
+
+    def test_a_tool_or_version_link_that_is_absolute_is_copied_as_written(self) -> None:
+        entry = self.linked_tool_names()
+        (entry / "node/22").unlink()
+        (entry / "nodejs").unlink()
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        (entry / "node/22").symlink_to(cache / "node/22.0.0")
+        (entry / "nodejs").symlink_to(cache / "node")
+        self.link_tool_cache(cache)
+        self.assertEqual((cache / "node/22").readlink(), cache / "node/22.0.0")
+        self.assertEqual((cache / "nodejs").readlink(), cache / "node")
+        self.assertEqual((cache / "nodejs/22/x64/bin/node").read_text(), "binary")
+
+    def test_linking_again_over_a_tool_cache_with_tool_and_version_links_leaves_the_same_tree(self) -> None:
+        self.linked_tool_names()
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        first = self.snapshot(cache)
+        self.link_tool_cache(cache)
+        self.assertEqual(self.snapshot(cache), first)
+
     def test_an_arch_directory_that_is_a_link_is_copied_as_the_link_and_the_store_is_never_written_through_it(self) -> None:
         version = self.aliased_tool_tree("real")
         before = self.snapshot(self.root)
