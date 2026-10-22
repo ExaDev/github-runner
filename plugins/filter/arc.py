@@ -1113,7 +1113,7 @@ def _node_cache_init_container(name: str, capability: Mapping[str, Any], node_ca
 
 
 # --- The capability store: one copy per node of what every runner pod would otherwise copy at its start ---
-# A pod's tool-cache and system-library copies (and the runner's externals for the dind sidecar) are the same bytes on every pod of a profile, taken from digest-pinned images. With a profile's capability_store on, each image's payload is copied once per node into <store>/<digest>, where <digest> is the image's sha256 digest, and pods mount the store read-only instead of writing their own copy. The store root is a hostPath of its own, apart from the node cache, whose last component names it.
+# A pod's tool-cache and system-library copies (and the runner's externals for the dind sidecar) are the same bytes on every pod of a profile, taken from digest-pinned images. With a profile's capability_store on, each image's payload is copied once per node into <store>/<kind>-<digest>, where <digest> is the image's sha256 digest and <kind> the payload it holds (see arc_capability_store_key), and pods mount the store read-only instead of writing their own copy. The store root is a hostPath of its own, apart from the node cache, whose last component names it.
 _CAPABILITY_STORE_HOST_PATH_NAME = re.compile(r"^(?:capability-store|[a-z0-9][a-z0-9-]*-capability-store)$")
 # A copy is written under <store>/.incoming/<key>.<pod uid>.<container> and published with one rename onto <store>/<key>: rename(2) onto a non-empty directory fails, so of two pods copying the same image at once the first rename wins and the other's copy is deleted, and a reader never sees a part-written entry, since an entry exists only once it is complete. The pod uid comes from the downward API and the container name keeps two copies of one image within a pod apart.
 _CAPABILITY_STORE_INCOMING = ".incoming"
@@ -1123,6 +1123,11 @@ _CAPABILITY_STORE_PUBLISH = "capability-store-publish"
 _CAPABILITY_STORE_SYSROOT = "capability-store-sysroot"
 _CAPABILITY_STORE_TOOL_CACHE = "capability-store-tool-cache"
 _CAPABILITY_STORE_EXTERNALS_PUBLISH = "capability-store-publish-externals"
+# The kinds of payload an entry holds, the first part of its name (see arc_capability_store_key): the tool cache of a tool image, the sysroot of a system-library image and the runner's externals for the dind sidecar.
+_STORE_KIND_TOOL_CACHE = "toolcache"
+_STORE_KIND_SYSROOT = "sysroot"
+_STORE_KIND_EXTERNALS = "externals"
+_CAPABILITY_STORE_MERGED_PREFIX = "merged-sysroot-"
 # The annotation that lists the store entries a pod uses, separated by spaces, which the node cache pruner reads so that it never removes an entry a pod on its node still uses.
 _CAPABILITY_STORE_KEYS_ANNOTATION = "github-runner.exadev.io/capability-store-keys"
 _IMAGE_DIGEST = re.compile(r"@sha256:([0-9a-f]{64})$")
@@ -1176,15 +1181,18 @@ def arc_capability_store_image_errors(image: Any) -> list[str]:
     return [f"github_runner_arc_capability_store_image must be pinned by digest (name@sha256:<64 hex digits>), since its preparation container runs as root on a hostPath (got {image!r})"]
 
 
-def arc_capability_store_key(image: str) -> str | None:
-    """Return the store entry name of an image's payload, its sha256 digest in hex, or None when the image is not pinned by digest and so has no name that changes exactly when its content does."""
+def arc_capability_store_key(image: str, kind: str) -> str | None:
+    """Return the store entry name of the payload of kind that an image holds, <kind>-<sha256 digest in hex>, or None when the image is not pinned by digest and so has no name that changes exactly when its content does.
+
+    The kind is part of the name because one image can be used for more than one payload (a runner image is both a tool image and the source of the dind sidecar's externals): the entry is a copy of one directory of the image, so two kinds of one digest are two entries, and neither can be taken for the other.
+    """
     match = _IMAGE_DIGEST.search(image)
-    return match.group(1) if match else None
+    return f"{kind}-{match.group(1)}" if match else None
 
 
 def _capability_store_merged_key(keys: Sequence[str]) -> str:
-    """Return the store entry name of the sysroot merged from keys in their order: a hash of the ordered keys, so a different set or order of system libraries is a different entry, since a later one's file overwrites an earlier one's."""
-    return "sysroot-" + hashlib.sha256(" ".join(keys).encode()).hexdigest()
+    """Return the store entry name of the sysroot merged from keys in their order: a hash of the ordered keys, so a different set or order of system libraries is a different entry, since a later one's file overwrites an earlier one's. Its prefix is not a payload kind's, so it cannot be the name of an image's entry."""
+    return _CAPABILITY_STORE_MERGED_PREFIX + hashlib.sha256(" ".join(keys).encode()).hexdigest()
 
 
 def _capability_store_prepare_container(store: Mapping[str, Any], runner_user: int, runner_group: int) -> dict[str, Any]:
@@ -1304,11 +1312,12 @@ def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[s
         image = capability.get("image") or capability.get("sysroot_image")
         if image is None:
             continue
-        key = arc_capability_store_key(image)
+        is_tool = capability.get("image") is not None
+        key = arc_capability_store_key(image, _STORE_KIND_TOOL_CACHE if is_tool else _STORE_KIND_SYSROOT)
         assert key is not None
-        payload = _TOOL_IMAGE_PAYLOAD if capability.get("image") is not None else _SYSROOT_IMAGE_PAYLOAD
+        payload = _TOOL_IMAGE_PAYLOAD if is_tool else _SYSROOT_IMAGE_PAYLOAD
         copies.append(_capability_store_copy_container(f"{_CAPABILITY_CONTAINER_PREFIX}{name}", image, payload, key, store, runner_user, runner_group))
-        (tool_keys if capability.get("image") is not None else sysroot_keys).append(key)
+        (tool_keys if is_tool else sysroot_keys).append(key)
     keys = list(dict.fromkeys([*tool_keys, *sysroot_keys]))
     containers = copies + [_capability_store_publish_container(_CAPABILITY_STORE_PUBLISH, keys, store, runner_user, runner_group)]
     merged = _capability_store_merged_key(sysroot_keys) if sysroot_keys else None
@@ -1335,7 +1344,7 @@ def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[s
 def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str, Any] | None, runner_user: int, runner_group: int) -> dict[str, Any]:
     """Move a scale set's copy of the runner's externals for the dind sidecar into the capability store.
 
-    Applies to values that write the dind containers out (a values file, or the role's registry cache wiring), whose init container named init-dind-externals copies the runner image's externals into the volume named dind-externals, as the chart's own dind template does. That copy becomes a store entry named for the image's digest, published like a capability's, and every container that mounted the volume (the dind container, whether it is a container or a native sidecar under initContainers) mounts it read-only through a subPath of the store instead. Values without that init container, or a profile without the store, are returned as given.
+    Applies to values that write the dind containers out (a values file, or the role's registry cache wiring), whose init container named init-dind-externals copies the runner image's externals into the volume named dind-externals, as the chart's own dind template does. That copy becomes a store entry named for the image's digest and the kind externals, published like a capability's, and every container that mounted the volume (the dind container, whether it is a container or a native sidecar under initContainers) mounts it read-only through a subPath of the store instead. Values without that init container, or a profile without the store, are returned as given.
 
     Args:
         values: the release's rendered Helm values. store: the profile's capability store settings ({host_path, path, image}), or None when the profile does not use the store. runner_user, runner_group: the runner's user and group ids, which the copy and publish containers run as.
@@ -1352,7 +1361,7 @@ def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str
     copier = next((container for container in init_containers if container.get("name") == _DIND_EXTERNALS_INIT), None)
     if copier is None:
         return {"errors": [], "values": values}
-    key = arc_capability_store_key(str(copier.get("image", "")))
+    key = arc_capability_store_key(str(copier.get("image", "")), _STORE_KIND_EXTERNALS)
     if key is None:
         return {"errors": [f"the capability store needs {_DIND_EXTERNALS_INIT}'s image pinned by digest (name@sha256:<64 hex digits>), since its store entry is named for the digest (got {copier.get('image')!r})"], "values": values}
     index = init_containers.index(copier)
@@ -1411,7 +1420,7 @@ def arc_capability_pod(values: Mapping[str, Any], names: Sequence[str], catalogu
         errors.extend(
             f"capability {name}'s image must be pinned by digest (name@sha256:<64 hex digits>) for the capability store, since its store entry is named for the digest"
             for name, capability in [*tool_capabilities, *sysroot_capabilities]
-            if arc_capability_store_key(capability.get("image") or capability["sysroot_image"]) is None
+            if arc_capability_store_key(capability.get("image") or capability["sysroot_image"], _STORE_KIND_TOOL_CACHE) is None
         )
     tool_paths = [capability["path"] for _, capability in tool_capabilities if capability.get("path") is not None]
     hooks: dict[str, str] = {}

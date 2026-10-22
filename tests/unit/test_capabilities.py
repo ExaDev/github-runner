@@ -599,6 +599,11 @@ DIGEST_A = "a" * 64
 DIGEST_B = "b" * 64
 DIGEST_C = "c" * 64
 DIGEST_RUNNER = "d" * 64
+# The store entries of those digests: each is named for the kind of payload it holds as well as the image's digest.
+KEY_A = f"toolcache-{DIGEST_A}"
+KEY_B = f"sysroot-{DIGEST_B}"
+KEY_C = f"sysroot-{DIGEST_C}"
+KEY_RUNNER = f"externals-{DIGEST_RUNNER}"
 STORE = {"host_path": "/var/lib/example/capability-store", "path": "/opt/capability-store", "image": BUSYBOX}
 STORE_CATALOGUE: dict[str, Any] = {
     "node": {"image": f"ghcr.io/example/toolcache-node:22@sha256:{DIGEST_A}"},
@@ -649,9 +654,9 @@ class CapabilityStoreSettingsTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(len(arc.arc_capability_store_path_errors(path)), 1)
 
-    def test_an_entry_is_named_for_its_images_digest_and_an_unpinned_image_has_no_name(self) -> None:
-        self.assertEqual(arc.arc_capability_store_key(f"ghcr.io/example/x:1@sha256:{DIGEST_A}"), DIGEST_A)
-        self.assertIsNone(arc.arc_capability_store_key("ghcr.io/example/x:1"))
+    def test_an_entry_is_named_for_its_images_digest_and_payload_kind_and_an_unpinned_image_has_no_name(self) -> None:
+        self.assertEqual(arc.arc_capability_store_key(f"ghcr.io/example/x:1@sha256:{DIGEST_A}", "toolcache"), KEY_A)
+        self.assertIsNone(arc.arc_capability_store_key("ghcr.io/example/x:1", "toolcache"))
 
 
 class CapabilityStorePodTest(unittest.TestCase):
@@ -672,18 +677,18 @@ class CapabilityStorePodTest(unittest.TestCase):
         # The copy runs the capability's own image as the runner user, only when the store lacks the entry, into a name of its own under .incoming.
         copier = containers["capability-node"]
         self.assertEqual(copier["image"], STORE_CATALOGUE["node"]["image"])
-        self.assertEqual(copier["command"][3:], ["copy-to-capability-store", "/opt/capability-store", DIGEST_A, "/toolcache", "capability-node"])
+        self.assertEqual(copier["command"][3:], ["copy-to-capability-store", "/opt/capability-store", KEY_A, "/toolcache", "capability-node"])
         self.assertEqual(copier["securityContext"], {"runAsUser": 1001, "runAsGroup": 1001, "runAsNonRoot": True, "allowPrivilegeEscalation": False})
         self.assertEqual(copier["env"], [{"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}])
         self.assertEqual(containers["capability-mpi"]["command"][6], "/sysroot")
-        self.assertEqual(containers["capability-store-publish"]["command"][4:], ["/opt/capability-store", DIGEST_A, DIGEST_B, DIGEST_C])
+        self.assertEqual(containers["capability-store-publish"]["command"][4:], ["/opt/capability-store", KEY_A, KEY_B, KEY_C])
         self.assertEqual(containers["capability-store-publish"]["image"], BUSYBOX)
         # Only the preparation runs as root, with the two capabilities it needs.
         self.assertEqual(containers["capability-store-prepare"]["securityContext"]["capabilities"], {"drop": ["ALL"], "add": ["CHOWN", "DAC_OVERRIDE"]})
         merged = containers["capability-store-sysroot"]["command"][5]
-        self.assertRegex(merged, r"^sysroot-[0-9a-f]{64}$")
-        self.assertEqual(containers["capability-store-sysroot"]["command"][6:], [DIGEST_B, DIGEST_C])
-        self.assertEqual(containers["capability-store-tool-cache"]["command"][4:], ["/opt/capability-store", TOOL_CACHE, DIGEST_A])
+        self.assertRegex(merged, r"^merged-sysroot-[0-9a-f]{64}$")
+        self.assertEqual(containers["capability-store-sysroot"]["command"][6:], [KEY_B, KEY_C])
+        self.assertEqual(containers["capability-store-tool-cache"]["command"][4:], ["/opt/capability-store", TOOL_CACHE, KEY_A])
         self.assertEqual(containers["capability-store-tool-cache"]["volumeMounts"], [{"name": "capability-store", "mountPath": "/opt/capability-store", "readOnly": True}, {"name": "tool-cache", "mountPath": TOOL_CACHE}])
         volumes = {volume["name"]: volume for volume in spec["volumes"]}
         self.assertEqual(volumes["capability-store"], {"name": "capability-store", "hostPath": {"path": STORE["host_path"], "type": "DirectoryOrCreate"}})
@@ -693,13 +698,33 @@ class CapabilityStorePodTest(unittest.TestCase):
         self.assertIn({"name": "capability-store", "mountPath": "/opt/capability-store", "readOnly": True}, mounts)
         self.assertIn({"name": "capability-store", "mountPath": SYSROOT, "subPath": merged, "readOnly": True}, mounts)
         self.assertIn({"name": "tool-cache", "mountPath": TOOL_CACHE}, mounts)
-        self.assertEqual(template["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{DIGEST_A} {DIGEST_B} {DIGEST_C} {merged}")
+        self.assertEqual(template["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{KEY_A} {KEY_B} {KEY_C} {merged}")
 
     def test_a_different_order_of_system_libraries_is_a_different_merged_sysroot(self) -> None:
         first = store_pod(DEFAULT_VALUES, ["mpi", "libpq"])["values"]["template"]["spec"]["initContainers"]
         second = store_pod(DEFAULT_VALUES, ["libpq", "mpi"])["values"]["template"]["spec"]["initContainers"]
         merged = [next(container for container in containers if container["name"] == "capability-store-sysroot")["command"][5] for containers in (first, second)]
         self.assertNotEqual(merged[0], merged[1])
+
+    def test_one_image_used_for_a_tool_cache_and_a_sysroot_is_two_entries_each_copied_from_its_own_payload(self) -> None:
+        image = f"ghcr.io/example/both:1@sha256:{DIGEST_A}"
+        result = store_pod(DEFAULT_VALUES, ["tools", "libraries"], {"tools": {"image": image}, "libraries": {"sysroot_image": image}})
+        self.assertEqual(result["errors"], [])
+        containers = {container["name"]: container for container in result["values"]["template"]["spec"]["initContainers"]}
+        tools, libraries = containers["capability-tools"]["command"], containers["capability-libraries"]["command"]
+        self.assertEqual((tools[4:6], tools[6]), (["/opt/capability-store", f"toolcache-{DIGEST_A}"], "/toolcache"))
+        self.assertEqual((libraries[4:6], libraries[6]), (["/opt/capability-store", f"sysroot-{DIGEST_A}"], "/sysroot"))
+        self.assertEqual(containers["capability-store-publish"]["command"][4:], ["/opt/capability-store", f"toolcache-{DIGEST_A}", f"sysroot-{DIGEST_A}"])
+        self.assertEqual(containers["capability-store-sysroot"]["command"][6:], [f"sysroot-{DIGEST_A}"])
+        self.assertEqual(containers["capability-store-tool-cache"]["command"][6:], [f"toolcache-{DIGEST_A}"])
+        self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"].split()[:2], [f"toolcache-{DIGEST_A}", f"sysroot-{DIGEST_A}"])
+
+    def test_a_runner_image_that_is_also_a_tool_image_has_a_separate_entry_for_the_dind_externals(self) -> None:
+        values = store_pod(DIND_VALUES, ["runner-tools"], {"runner-tools": {"image": RUNNER_IMAGE}})["values"]
+        result = arc.arc_capability_store_externals(values, STORE, 1001, 1001)
+        self.assertEqual(result["errors"], [])
+        keys = result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"].split()
+        self.assertEqual(keys, [f"toolcache-{DIGEST_RUNNER}", f"externals-{DIGEST_RUNNER}"])
 
     def test_with_the_store_an_unpinned_capability_image_is_an_error(self) -> None:
         result = store_pod(DEFAULT_VALUES, ["untagged"])
@@ -741,11 +766,11 @@ class CapabilityStoreExternalsTest(unittest.TestCase):
         spec = template["spec"]
         self.assertEqual([container["name"] for container in spec["initContainers"]], ["capability-store-prepare", "init-dind-externals", "capability-store-publish-externals", "init-dind-mtu"])
         copier = spec["initContainers"][1]
-        self.assertEqual(copier["command"][3:], ["copy-to-capability-store", "/opt/capability-store", DIGEST_RUNNER, "/home/runner/externals", "init-dind-externals"])
+        self.assertEqual(copier["command"][3:], ["copy-to-capability-store", "/opt/capability-store", KEY_RUNNER, "/home/runner/externals", "init-dind-externals"])
         self.assertEqual([volume["name"] for volume in spec["volumes"]], ["work", "capability-store"])
         dind = next(container for container in spec["containers"] if container["name"] == "dind")
-        self.assertEqual(dind["volumeMounts"][1], {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": DIGEST_RUNNER, "readOnly": True})
-        self.assertEqual(template["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], DIGEST_RUNNER)
+        self.assertEqual(dind["volumeMounts"][1], {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": KEY_RUNNER, "readOnly": True})
+        self.assertEqual(template["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], KEY_RUNNER)
         self.assertEqual(DIND_VALUES["template"]["spec"]["volumes"][1]["name"], "dind-externals")
 
     def test_after_the_capabilities_the_store_is_prepared_once_and_the_annotation_keeps_both_lists(self) -> None:
@@ -757,7 +782,7 @@ class CapabilityStoreExternalsTest(unittest.TestCase):
         self.assertEqual(names[:3], ["capability-store-prepare", "init-dind-externals", "capability-store-publish-externals"])
         self.assertEqual(names.count("capability-store-prepare"), 1)
         self.assertEqual([volume["name"] for volume in spec["volumes"]].count("capability-store"), 1)
-        self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{DIGEST_A} {DIGEST_RUNNER}")
+        self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"], f"{KEY_A} {KEY_RUNNER}")
 
     def test_without_the_store_or_without_an_externals_copy_the_values_are_left_alone(self) -> None:
         self.assertIs(arc.arc_capability_store_externals(DIND_VALUES, None, 1001, 1001)["values"], DIND_VALUES)
@@ -785,7 +810,7 @@ DIND_SIDECAR_VALUES: dict[str, Any] = {
 }
 
 
-EXTERNALS_STORE_MOUNT = {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": DIGEST_RUNNER, "readOnly": True}
+EXTERNALS_STORE_MOUNT = {"name": "capability-store", "mountPath": "/home/runner/externals", "subPath": KEY_RUNNER, "readOnly": True}
 
 
 def assert_every_mount_has_its_volume(test: unittest.TestCase, spec: dict[str, Any]) -> None:
@@ -836,7 +861,7 @@ class CapabilityStoreExternalsLayoutTest(unittest.TestCase):
         self.assertNotIn("dind-externals", [volume["name"] for volume in spec["volumes"]])
         self.assertIn("dind", [container["name"] for container in spec["initContainers"]])
         self.assertIn(EXTERNALS_STORE_MOUNT, self.dind(spec)["volumeMounts"])
-        self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"].split()[-1], DIGEST_RUNNER)
+        self.assertEqual(result["values"]["template"]["metadata"]["annotations"]["github-runner.exadev.io/capability-store-keys"].split()[-1], KEY_RUNNER)
 
     def test_the_store_functions_leave_every_mount_with_its_volume_for_a_profile_without_dind(self) -> None:
         spec = store_pod(DEFAULT_VALUES, ["node", "mpi", "libpq", "pnpm-store"])["values"]["template"]["spec"]
@@ -925,7 +950,7 @@ class CapabilityStoreScriptTest(unittest.TestCase):
             published = self.run_container(containers["capability-store-publish"], uid, rewrite)
             self.assertEqual(published.returncode, 0, published.stderr)
             self.assertEqual(sorted(path.name for path in (self.root / ".incoming").iterdir()), [])
-        self.assertEqual((self.root / DIGEST_A / "node/22.0.0/x64/bin/node").read_text(), "binary")
+        self.assertEqual((self.root / KEY_A / "node/22.0.0/x64/bin/node").read_text(), "binary")
 
     def test_of_two_pods_copying_one_image_at_once_the_first_to_publish_wins_and_the_other_copy_is_deleted(self) -> None:
         toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
@@ -934,13 +959,26 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         # Both copy before either publishes, as two pods starting together on a node without the entry would.
         for uid in ("pod-1", "pod-2"):
             self.assertEqual(self.run_container(containers["capability-node"], uid, rewrite).returncode, 0)
-        (self.root / ".incoming" / f"{DIGEST_A}.pod-1.capability-node" / "marker").write_text("pod-1")
+        (self.root / ".incoming" / f"{KEY_A}.pod-1.capability-node" / "marker").write_text("pod-1")
         for uid in ("pod-1", "pod-2"):
             published = self.run_container(containers["capability-store-publish"], uid, rewrite)
             self.assertEqual(published.returncode, 0, published.stderr)
-        self.assertEqual((self.root / DIGEST_A / "marker").read_text(), "pod-1")
-        self.assertFalse((self.root / DIGEST_A / f"{DIGEST_A}.pod-2.capability-node").exists())
+        self.assertEqual((self.root / KEY_A / "marker").read_text(), "pod-1")
+        self.assertFalse((self.root / KEY_A / f"{KEY_A}.pod-2.capability-node").exists())
         self.assertEqual(list((self.root / ".incoming").iterdir()), [])
+
+    def test_one_image_used_for_a_tool_cache_and_a_sysroot_publishes_each_payload_under_its_own_entry(self) -> None:
+        image = f"ghcr.io/example/both:1@sha256:{DIGEST_A}"
+        spec = store_pod(DEFAULT_VALUES, ["tools", "libraries"], {"tools": {"image": image}, "libraries": {"sysroot_image": image}})["values"]["template"]["spec"]
+        containers = {container["name"]: container for container in spec["initContainers"]}
+        toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
+        sysroot = self.payload("sysroot", {"lib/libmpi.so": "library"})
+        rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache), "/sysroot": str(sysroot)}
+        for name in ("capability-tools", "capability-libraries", "capability-store-publish"):
+            completed = self.run_container(containers[name], "pod-1", rewrite)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.layout(self.root / f"toolcache-{DIGEST_A}"), self.layout(toolcache))
+        self.assertEqual(self.layout(self.root / f"sysroot-{DIGEST_A}"), self.layout(sysroot))
 
     def layout(self, directory: Path) -> dict[str, str]:
         """Return every path under directory with what it holds (a file's content, a link's target, a directory's marker), so two trees compare by layout and content."""
@@ -964,11 +1002,11 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         containers = self.containers(["node"])
         rewrite = {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)}
         self.assertEqual(self.run_container(containers["capability-node"], "pod-1", rewrite).returncode, 0)
-        env = {**self.fake_sync(0), "SYNC_INCOMING": str(self.root / ".incoming" / f"{DIGEST_A}.pod-1.capability-node"), "SYNC_ENTRY": str(self.root / DIGEST_A)}
+        env = {**self.fake_sync(0), "SYNC_INCOMING": str(self.root / ".incoming" / f"{KEY_A}.pod-1.capability-node"), "SYNC_ENTRY": str(self.root / KEY_A)}
         published = self.run_with_env(containers["capability-store-publish"], "pod-1", rewrite, env)
         self.assertEqual(published.returncode, 0, published.stderr)
         self.assertEqual((self.work / "sync.log").read_text(), "incoming unpublished\n")
-        self.assertEqual((self.root / DIGEST_A / "node/22.0.0/x64/bin/node").read_text(), "binary")
+        self.assertEqual((self.root / KEY_A / "node/22.0.0/x64/bin/node").read_text(), "binary")
 
     def test_a_copy_that_cannot_be_flushed_is_not_published(self) -> None:
         toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary"})
@@ -978,10 +1016,10 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         env = {**self.fake_sync(1), "SYNC_INCOMING": "unused", "SYNC_ENTRY": "unused"}
         published = self.run_with_env(containers["capability-store-publish"], "pod-1", rewrite, env)
         self.assertNotEqual(published.returncode, 0)
-        self.assertFalse((self.root / DIGEST_A).exists())
+        self.assertFalse((self.root / KEY_A).exists())
 
     def test_a_merged_sysroot_is_flushed_to_disk_before_it_is_renamed_into_the_store(self) -> None:
-        for digest, files in ((DIGEST_B, {"lib/libmpi.so": "mpi"}), (DIGEST_C, {"lib/libpq.so": "pq"})):
+        for digest, files in ((KEY_B, {"lib/libmpi.so": "mpi"}), (KEY_C, {"lib/libpq.so": "pq"})):
             for relative, content in files.items():
                 (self.root / digest / relative).parent.mkdir(parents=True, exist_ok=True)
                 (self.root / digest / relative).write_text(content)
@@ -1015,18 +1053,18 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         toolcache = self.payload("toolcache", {"node/22.0.0/x64/bin/node": "binary", "node/22.0.0/x64.complete": "", "go/pkg/mod/example@v1/file": "module"})
         self.make_read_only(toolcache / "go")
         containers = self.containers(["node"])
-        self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["capability-node"], containers["capability-store-publish"], DIGEST_A, toolcache, {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)})
+        self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["capability-node"], containers["capability-store-publish"], KEY_A, toolcache, {"/opt/capability-store": str(self.root), "/toolcache": str(toolcache)})
 
     def test_the_dind_externals_copy_rerun_after_a_partial_copy_publishes_exactly_the_externals_layout(self) -> None:
         externals = self.payload("externals", {"node20/bin/node": "binary", "node20/lib/libnode.so": "library", "node20/read-only/file": "content"})
         self.make_read_only(externals / "node20/read-only")
         spec = arc.arc_capability_store_externals(DIND_VALUES, STORE, 1001, 1001)["values"]["template"]["spec"]
         containers = {container["name"]: container for container in spec["initContainers"]}
-        self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["init-dind-externals"], containers["capability-store-publish-externals"], DIGEST_RUNNER, externals, {"/opt/capability-store": str(self.root), "/home/runner/externals": str(externals)})
+        self.assert_rerun_after_a_partial_copy_publishes_the_source_layout(containers["init-dind-externals"], containers["capability-store-publish-externals"], KEY_RUNNER, externals, {"/opt/capability-store": str(self.root), "/home/runner/externals": str(externals)})
 
     def test_a_sysroot_merge_rerun_after_a_partial_merge_publishes_only_the_libraries(self) -> None:
-        (self.root / DIGEST_B / "lib").mkdir(parents=True)
-        (self.root / DIGEST_B / "lib/libmpi.so").write_text("mpi")
+        (self.root / KEY_B / "lib").mkdir(parents=True)
+        (self.root / KEY_B / "lib/libmpi.so").write_text("mpi")
         merge = self.containers(["mpi"])["capability-store-sysroot"]
         merged = merge["command"][5]
         debris = self.root / ".incoming" / f"{merged}.pod-1.merge"
@@ -1040,9 +1078,9 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertEqual(self.layout(self.root / merged), {"lib": "<dir>", "lib/libmpi.so": "mpi"})
 
     def test_a_sysroot_merge_that_loses_the_race_deletes_its_copy_even_when_it_holds_read_only_directories(self) -> None:
-        (self.root / DIGEST_B / "lib/private").mkdir(parents=True)
-        (self.root / DIGEST_B / "lib/private/libmpi.so").write_text("mpi")
-        self.make_read_only(self.root / DIGEST_B)
+        (self.root / KEY_B / "lib/private").mkdir(parents=True)
+        (self.root / KEY_B / "lib/private/libmpi.so").write_text("mpi")
+        self.make_read_only(self.root / KEY_B)
         merge = self.containers(["mpi"])["capability-store-sysroot"]
         merged = merge["command"][5]
         # Another pod publishes the merged entry while this pod's sync runs, as two pods starting together on a node without it would.
@@ -1067,7 +1105,7 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         for uid in ("pod-1", "pod-2"):
             published = self.run_container(containers["capability-store-publish"], uid, rewrite)
             self.assertEqual(published.returncode, 0, published.stderr)
-        self.assertEqual(self.layout(self.root / DIGEST_A), self.layout(toolcache))
+        self.assertEqual(self.layout(self.root / KEY_A), self.layout(toolcache))
         self.assertEqual(list((self.root / ".incoming").iterdir()), [])
 
     def test_a_payload_whose_root_directory_is_read_only_is_copied_and_published_with_the_source_layout(self) -> None:
@@ -1077,8 +1115,8 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         for source in (toolcache, externals):
             self.make_read_only(source)
         for copy_name, publish_name, key, source, mount in (
-            ("capability-node", "capability-store-publish", DIGEST_A, toolcache, "/toolcache"),
-            ("init-dind-externals", "capability-store-publish-externals", DIGEST_RUNNER, externals, "/home/runner/externals"),
+            ("capability-node", "capability-store-publish", KEY_A, toolcache, "/toolcache"),
+            ("init-dind-externals", "capability-store-publish-externals", KEY_RUNNER, externals, "/home/runner/externals"),
         ):
             with self.subTest(copy=copy_name):
                 spec = arc.arc_capability_store_externals(store_pod(DIND_VALUES, ["node"])["values"], STORE, 1001, 1001)["values"]["template"]["spec"]
@@ -1101,7 +1139,7 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.root.chmod(0o555)
         published = self.run_container(containers["capability-store-publish"], "pod-1", rewrite)
         self.assertNotEqual(published.returncode, 0)
-        self.assertIn(f"{DIGEST_A} is not in", published.stderr)
+        self.assertIn(f"{KEY_A} is not in", published.stderr)
         self.assertIn("Permission denied", published.stderr)
 
     def test_a_lost_publish_race_is_not_an_error_and_prints_nothing(self) -> None:
@@ -1116,7 +1154,7 @@ class CapabilityStoreScriptTest(unittest.TestCase):
 
     def test_a_sysroot_merged_from_entries_whose_root_is_read_only_is_published(self) -> None:
         # The merge's destination takes the mode of the first entry's root (cp -a), and renaming it into the store needs write permission on it.
-        for digest, files in ((DIGEST_B, {"lib/libmpi.so": "mpi"}), (DIGEST_C, {"lib/libpq.so": "pq"})):
+        for digest, files in ((KEY_B, {"lib/libmpi.so": "mpi"}), (KEY_C, {"lib/libpq.so": "pq"})):
             for relative, content in files.items():
                 (self.root / digest / relative).parent.mkdir(parents=True, exist_ok=True)
                 (self.root / digest / relative).write_text(content)
@@ -1130,11 +1168,11 @@ class CapabilityStoreScriptTest(unittest.TestCase):
 
     def store_entry_with_read_only_directories(self) -> tuple[Path, str]:
         """Publish a system library's entry whose files are mode 0444 and whose directories are read-only, and return the file and the merged sysroot's entry name for it."""
-        library = self.root / DIGEST_B / "lib/libmpi.so"
+        library = self.root / KEY_B / "lib/libmpi.so"
         library.parent.mkdir(parents=True)
         library.write_text("mpi")
         library.chmod(0o444)
-        self.make_read_only(self.root / DIGEST_B)
+        self.make_read_only(self.root / KEY_B)
         return library, self.containers(["mpi"])["capability-store-sysroot"]["command"][5]
 
     def test_a_merge_that_loses_the_race_leaves_the_modes_of_the_entries_files_alone(self) -> None:
@@ -1157,7 +1195,7 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         # What a merge killed after its links and before its rename leaves: hard links into the entry under directories without owner write permission.
         debris = self.root / ".incoming" / f"{merged}.pod-1.merge"
         debris.mkdir()
-        subprocess.run(["cp", "-al", f"{self.root / DIGEST_B}/.", f"{debris}/"], check=True)
+        subprocess.run(["cp", "-al", f"{self.root / KEY_B}/.", f"{debris}/"], check=True)
         completed = self.run_container(merge, "pod-1", {"/opt/capability-store": str(self.root)})
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(stat.S_IMODE(library.stat().st_mode), 0o444)
@@ -1167,10 +1205,10 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         containers = self.containers(["node"])
         published = self.run_container(containers["capability-store-publish"], "pod-1", {"/opt/capability-store": str(self.root)})
         self.assertNotEqual(published.returncode, 0)
-        self.assertIn(f"{DIGEST_A} is not in", published.stderr)
+        self.assertIn(f"{KEY_A} is not in", published.stderr)
 
     def test_the_merged_sysroot_links_every_library_and_a_later_one_wins_a_shared_file(self) -> None:
-        for digest, files in ((DIGEST_B, {"lib/libmpi.so": "mpi", "include/shared.h": "from mpi"}), (DIGEST_C, {"lib/libpq.so": "pq", "include/shared.h": "from libpq"})):
+        for digest, files in ((KEY_B, {"lib/libmpi.so": "mpi", "include/shared.h": "from mpi"}), (KEY_C, {"lib/libpq.so": "pq", "include/shared.h": "from libpq"})):
             for relative, content in files.items():
                 (self.root / digest / relative).parent.mkdir(parents=True, exist_ok=True)
                 (self.root / digest / relative).write_text(content)
@@ -1179,14 +1217,14 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         completed = self.run_container(merge, "pod-1", {"/opt/capability-store": str(self.root)})
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual((self.root / merged / "include/shared.h").read_text(), "from libpq")
-        self.assertEqual((self.root / merged / "lib/libmpi.so").stat().st_ino, (self.root / DIGEST_B / "lib/libmpi.so").stat().st_ino)
+        self.assertEqual((self.root / merged / "lib/libmpi.so").stat().st_ino, (self.root / KEY_B / "lib/libmpi.so").stat().st_ino)
         # A second pod finds it published and does nothing.
         self.assertEqual(self.run_container(merge, "pod-2", {"/opt/capability-store": str(self.root)}).returncode, 0)
         self.assertEqual(list((self.root / ".incoming").iterdir()), [])
 
     def tool_tree(self, files: dict[str, str] | None = None) -> Path:
         """Fill the store's entry for the node capability with a tool tree shaped like the Actions tool cache's Node.js, as a store entry is after publishing, and return its <arch> directory."""
-        arch = self.root / DIGEST_A / "node/22.0.0/x64"
+        arch = self.root / KEY_A / "node/22.0.0/x64"
         for relative, content in (files or {"bin/node": "binary", "lib/node_modules/npm/bin/npm-cli.js": "npm", "lib/node_modules/npm/package.json": "{}", "include/node/node.h": "header", "dir with space/a file": "spaced", ".hidden/file": "hidden"}).items():
             (arch / relative).parent.mkdir(parents=True, exist_ok=True)
             (arch / relative).write_text(content)
@@ -1279,16 +1317,16 @@ class CapabilityStoreScriptTest(unittest.TestCase):
 
     def test_every_tool_version_and_architecture_of_every_entry_is_linked_beside_the_others(self) -> None:
         self.tool_tree()
-        other = self.root / DIGEST_B / "python/3.12.0/x64"
+        other = self.root / KEY_B / "python/3.12.0/x64"
         (other / "bin").mkdir(parents=True)
         (other / "bin/python3").write_text("python")
         (other.parent / "x64.complete").write_text("")
-        (self.root / DIGEST_A / "node/22.0.0/arm64/bin").mkdir(parents=True)
-        (self.root / DIGEST_A / "node/22.0.0/arm64/bin/node").write_text("arm")
+        (self.root / KEY_A / "node/22.0.0/arm64/bin").mkdir(parents=True)
+        (self.root / KEY_A / "node/22.0.0/arm64/bin/node").write_text("arm")
         cache = self.work / "toolcache-pod"
         cache.mkdir()
         link = dict(self.containers(["node"])["capability-store-tool-cache"])
-        link["command"] = [*link["command"], DIGEST_B]
+        link["command"] = [*link["command"], KEY_B]
         completed = self.run_container(link, "pod-1", {"/opt/capability-store": str(self.root), TOOL_CACHE: str(cache)})
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual((cache / "python/3.12.0/x64/bin/python3").read_text(), "python")
@@ -1355,7 +1393,7 @@ class CapabilityStoreScriptTest(unittest.TestCase):
                 self.root = self.work / "store"
                 (self.root / ".incoming").mkdir(parents=True)
                 self.tool_tree()
-                (self.root / DIGEST_A / "node/22.0.0/x64.complete").chmod(store_mode)
+                (self.root / KEY_A / "node/22.0.0/x64.complete").chmod(store_mode)
                 cache = self.work / "toolcache-pod"
                 cache.mkdir()
                 self.link_tool_cache(cache)
