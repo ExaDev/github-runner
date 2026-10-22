@@ -581,12 +581,15 @@ at_level() { [ "$(level_of "$1")" = "$2" ]; }
 lease_free() { [ "$(kubectl_on 1 get lease fleet-regrade --namespace kube-system -o 'jsonpath={.spec.holderIdentity}' 2>/dev/null; echo "/$?")" = /0 ]; }
 # Whether the regrade service of node $1 has logged, in the file $2 inside it, that it reached the level $3.
 logged_level() { regrade_on "$1" cat "$2" | grep -Fx "now at $3" >/dev/null; }
-# A step down to etcd-only gives the Lease back from another server's API, since the stepped-down server has none: once the step has finished the Lease is free, and the service never logged that it could not release it.
+# A step gives the Lease back once it has finished, and a step down to etcd-only does so from another server's API, since the stepped-down server has none: afterwards the Lease is free, and the service never logged that it could not release it. The service logs the end of a step before it releases the Lease, so a process stopped as soon as a level is reached can leave the Lease held until it expires.
 assert_released() {
-  wait_for "the Lease to be released after $(node_name "$1")'s step down to etcd-only" 120 lease_free
+  wait_for "the Lease to be released after $(node_name "$1")'s last step" 120 lease_free
   if regrade_on "$1" cat "$2" | grep -F 'lease could not be released' >/dev/null; then regrade_on "$1" cat "$2"; fail "$(node_name "$1") could not release the Lease"; fi
 }
 node_is() { [ "$(node_status "$1" "$2")" = "$3" ]; }
+# Whether the regrade service of node $1 can read the cluster's nodes as a step does, with the kubectl and kubeconfig of its own server's container and the API of another server. A recreated container has no kubeconfig until its k3s has written one, some seconds after the container starts, and a step before then is refused for it.
+# shellcheck disable=SC2016 # The expansions are for the shell in the service container, which sources the service's own settings and splits KUBECTL, a command of several words, on purpose.
+can_list_nodes() { regrade_on "$1" sh -c '. /usr/local/lib/fleet-regrade/fleet-regrade.env && $KUBECTL --kubeconfig "$KUBECONFIG_PATH" --server "$KUBE_SERVER" get nodes' >/dev/null 2>&1; }
 
 # The numbers of the nodes whose regrade service reports a level below full. A read that gives no level, or unknown, is not a step: a test node's k3s container can restart by itself under the strain, and its status then reads unknown or fails for a moment, which says nothing about whether the server stepped.
 stepped_nodes() {
@@ -696,6 +699,9 @@ EOF
     [ "$SECONDS" -lt "$deadline" ] || { regrade_on 2 cat /tmp/watch.log || true; fail "$(node_name 2) did not step back up to full"; }
     sleep 2
   done
+  # The level is recorded before the Node is made schedulable again and the Lease given back, so the watcher is stopped only once its last step has finished, or it would be stopped part-way and leave the Lease held for the next step.
+  wait_for "the watcher on $(node_name 2) to finish its step up to full" 300 logged_level 2 /tmp/watch.log full
+  assert_released 2 /tmp/watch.log
   regrade_on 2 cat /tmp/watch.log
   regrade_on 2 cat /tmp/watch.log | grep -F 'step up etcd-only -> control-plane' >/dev/null || fail "the watcher did not step up through control-plane first"
   # shellcheck disable=SC2016 # The substitution is for the shell in the service container, which holds the watcher.
@@ -723,6 +729,7 @@ EOF
   recreate_node 3
   [ "$before" != "$(docker inspect --format '{{.Id}}' "$(container 3)")" ] || fail "$(node_name 3)'s container was not recreated"
   wait_for "$(node_name 3) to be at etcd-only after a recreate" 300 at_level 3 etcd-only
+  wait_for "$(node_name 3)'s service to read the nodes through its recreated container" 300 can_list_nodes 3
   [ "$(level_label 3)" = etcd-only ] || fail "the Node lost its level label across the recreate"
   [ "$(node_password_hash 3)" = "$password" ] || fail "$(node_name 3)'s node password changed across the recreate"
   [ "$(etcd_member_ids 1)" = "$ids" ] || fail "the etcd members changed across the restart and the recreate"
