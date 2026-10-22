@@ -1144,10 +1144,13 @@ def _runner_security_context(runner_user: int, runner_group: int) -> dict[str, A
     return {"runAsUser": int(runner_user), "runAsGroup": int(runner_group), "runAsNonRoot": True, "allowPrivilegeEscalation": False}
 
 
+# Makes this pod's own incoming copy owner-writable, ahead of removing it. A copy can hold directories without write permission (a Go module cache's are mode 0555), and rm -rf cannot empty such a directory as the non-root runner user, so the init container would fail on every kubelet retry and the pod never start. chmod -R does not follow symbolic links, on busybox or GNU, so it changes nothing outside the copy; its failure on a copy that does not exist is silenced, and a copy it could not make removable fails the rm -rf after it.
+_MAKE_INCOMING_WRITABLE = 'chmod -R u+rwx "$incoming" 2>/dev/null;'
+
 # Copies an image's payload to this pod's own incoming directory, unless the store already holds the entry. The destination is removed first so that a rerun after a copy killed part-way starts from nothing: cp -R onto an existing directory would nest the payload under it and keep the partial copy, and publishing would then rename that mixed tree.
 _COPY_SCRIPT = (
     '[ -d "$1/$2" ] && exit 0; incoming="$1/' + _CAPABILITY_STORE_INCOMING + '/$2.$POD_UID.$4";'
-    ' rm -rf "$incoming" && cp -R "$3" "$incoming"'
+    " " + _MAKE_INCOMING_WRITABLE + ' rm -rf "$incoming" && cp -R "$3" "$incoming"'
 )
 
 
@@ -1167,7 +1170,7 @@ def _capability_store_copy_container(name: str, image: str, payload: str, key: s
 # Publishes each key's copies from this pod: a rename onto <store>/<key> for the first, and deletion for a copy whose key another pod published first. Then fails unless every key is in the store, so a pod never starts on an entry that is not there. Every copy is flushed to disk (sync, which writes out every file's data and every directory's entries) before its rename: a rename that reaches the disk ahead of the data it names leaves, after a power loss or crash, an entry that exists but holds empty files, and since an entry is named for an image digest and never revalidated, every later pod would use it. With the data written first, an entry that exists is complete whatever the crash, and a rename that did not reach the disk leaves no entry, which the next pod copies again. A completeness marker the readers check was left out: it would restate what the order of writes already guarantees, and cost every pod a check at its start.
 _PUBLISH_SCRIPT = (
     'root=$1; shift; for key in "$@"; do'
-    ' for incoming in "$root/' + _CAPABILITY_STORE_INCOMING + '/$key.$POD_UID".*; do [ -e "$incoming" ] || continue; sync || exit 1; mv -T "$incoming" "$root/$key" 2>/dev/null || rm -rf "$incoming"; done;'
+    ' for incoming in "$root/' + _CAPABILITY_STORE_INCOMING + '/$key.$POD_UID".*; do [ -e "$incoming" ] || continue; sync || exit 1; mv -T "$incoming" "$root/$key" 2>/dev/null || { ' + _MAKE_INCOMING_WRITABLE + ' rm -rf "$incoming"; }; done;'
     ' [ -d "$root/$key" ] || { echo "capability store: $key is not in $root after publishing" >&2; exit 1; };'
     ' done'
 )
@@ -1188,9 +1191,9 @@ def _capability_store_publish_container(name: str, keys: Sequence[str], store: M
 # Builds the merged sysroot from the system-library entries in the profile's order, as hard links (cp -l) so it costs no data, later entries' files replacing earlier ones' (cp -f) as the per-pod copies did, then flushes and publishes it like any other entry, rebuilding from nothing when this pod's own earlier partial merge is found.
 _SYSROOT_MERGE_SCRIPT = (
     'root=$1; merged=$2; shift 2; [ -d "$root/$merged" ] && exit 0;'
-    ' incoming="$root/' + _CAPABILITY_STORE_INCOMING + '/$merged.$POD_UID.merge"; rm -rf "$incoming" && mkdir "$incoming" || exit 1;'
+    ' incoming="$root/' + _CAPABILITY_STORE_INCOMING + '/$merged.$POD_UID.merge"; ' + _MAKE_INCOMING_WRITABLE + ' rm -rf "$incoming" && mkdir "$incoming" || exit 1;'
     ' for key in "$@"; do cp -alf "$root/$key/." "$incoming/" || exit 1; done;'
-    ' sync || exit 1; mv -T "$incoming" "$root/$merged" 2>/dev/null || rm -rf "$incoming";'
+    ' sync || exit 1; mv -T "$incoming" "$root/$merged" 2>/dev/null || { ' + _MAKE_INCOMING_WRITABLE + ' rm -rf "$incoming"; };'
     ' [ -d "$root/$merged" ] || { echo "capability store: $merged is not in $root after publishing" >&2; exit 1; }'
 )
 
