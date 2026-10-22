@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -766,6 +767,38 @@ class CapabilityStoreExternalsTest(unittest.TestCase):
         values = json.loads(json.dumps(DIND_VALUES))
         values["template"]["spec"]["initContainers"][0]["image"] = "ghcr.io/example/runner:2"
         self.assertIn("pinned by digest", arc.arc_capability_store_externals(values, STORE, 1001, 1001)["errors"][0])
+
+
+class CapabilityStoreImageContractTest(unittest.TestCase):
+    """The applets the store image must provide, as the defaults and the README state them, are exactly the ones the init containers that run it use."""
+
+    # Utilities a script could call; the shell's own builtins (echo, printf, test, [) are not among them, since the image's sh provides those.
+    UTILITIES = ("awk", "basename", "cat", "chgrp", "chmod", "chown", "cp", "cut", "date", "dd", "df", "dirname", "du", "find", "grep", "head", "ln", "ls", "mkdir", "mktemp", "mv", "readlink", "rm", "rmdir", "sed", "sort", "stat", "sync", "tail", "tar", "touch", "tr", "wc", "xargs")
+    STATEMENT = re.compile(r"Its ((?:\w+, )+\w+ and \w+) must be busybox's or GNU's")
+
+    @classmethod
+    def used(cls) -> set[str]:
+        """The utilities the store image's init containers run: sh itself, and each utility named as a word in their commands."""
+        spec = store_pod(DEFAULT_VALUES, ["node", "mpi", "libpq"])["values"]["template"]["spec"]
+        scripts = [container["command"][2] for container in spec["initContainers"] if container["image"] == STORE["image"]]
+        assert len(scripts) == 4, scripts
+        return {"sh", *(utility for utility in cls.UTILITIES if any(re.search(rf"(?<![\w./$-]){utility}(?![\w-])", script) for script in scripts))}
+
+    @classmethod
+    def stated(cls, text: str) -> set[str]:
+        match = cls.STATEMENT.search(text.replace("`", ""))
+        assert match is not None
+        return set(re.split(r", | and ", match.group(1)))
+
+    def test_the_defaults_name_exactly_the_applets_the_containers_use(self) -> None:
+        self.assertEqual(self.stated((ROOT / "roles" / "github_runner_arc" / "defaults" / "main.yml").read_text()), self.used())
+
+    def test_the_readme_names_exactly_the_applets_the_containers_use(self) -> None:
+        self.assertEqual(self.stated((ROOT / "roles" / "github_runner_arc" / "README.md").read_text()), self.used())
+
+    def test_the_applets_include_find_for_the_tool_cache_links_and_not_ln_which_no_script_uses(self) -> None:
+        self.assertIn("find", self.used())
+        self.assertNotIn("ln", self.used())
 
 
 class CapabilityStoreScriptTest(unittest.TestCase):
