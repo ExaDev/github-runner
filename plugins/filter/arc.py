@@ -1332,7 +1332,7 @@ def _capability_store_init_containers(names: Sequence[str], catalogue: Mapping[s
 def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str, Any] | None, runner_user: int, runner_group: int) -> dict[str, Any]:
     """Move a scale set's copy of the runner's externals for the dind sidecar into the capability store.
 
-    Applies to values that write the dind containers out (a values file, or the role's registry cache wiring), whose init container named init-dind-externals copies the runner image's externals into the volume named dind-externals, as the chart's own dind template does. That copy becomes a store entry named for the image's digest, published like a capability's, and the dind container mounts it read-only through a subPath of the store. Values without that init container, or a profile without the store, are returned as given.
+    Applies to values that write the dind containers out (a values file, or the role's registry cache wiring), whose init container named init-dind-externals copies the runner image's externals into the volume named dind-externals, as the chart's own dind template does. That copy becomes a store entry named for the image's digest, published like a capability's, and every container that mounted the volume (the dind container, whether it is a container or a native sidecar under initContainers) mounts it read-only through a subPath of the store instead. Values without that init container, or a profile without the store, are returned as given.
 
     Args:
         values: the release's rendered Helm values. store: the profile's capability store settings ({host_path, path, image}), or None when the profile does not use the store. runner_user, runner_group: the runner's user and group ids, which the copy and publish containers run as.
@@ -1359,11 +1359,13 @@ def arc_capability_store_externals(values: Mapping[str, Any], store: Mapping[str
     ]
     init_containers[index:index + 1] = replacement
     spec["volumes"] = [volume for volume in spec.get("volumes") or [] if volume.get("name") != _DIND_EXTERNALS_VOLUME]
-    for container in spec.get("containers") or []:
-        container["volumeMounts"] = [
-            {"name": _CAPABILITY_STORE_VOLUME, "mountPath": mount["mountPath"], "subPath": key, "readOnly": True} if mount.get("name") == _DIND_EXTERNALS_VOLUME else mount
-            for mount in container.get("volumeMounts") or []
-        ]
+    # The dind container is an ordinary container in the chart's layout before Kubernetes 1.29 and an init container with restartPolicy Always (a native sidecar) in the layout after it, which is also what the registry cache writes out, so both lists are rewritten. The copy and publish containers just inserted mount the store alone, so they carry no mount of the removed volume to rewrite.
+    for container in [*(spec.get("containers") or []), *init_containers]:
+        if "volumeMounts" in container:
+            container["volumeMounts"] = [
+                {"name": _CAPABILITY_STORE_VOLUME, "mountPath": mount["mountPath"], "subPath": key, "readOnly": True} if mount.get("name") == _DIND_EXTERNALS_VOLUME else mount
+                for mount in container["volumeMounts"]
+            ]
     spec["initContainers"] = init_containers
     _ensure_store_prepared(spec, store, runner_user, runner_group)
     _annotate_store_keys(template, [key])
