@@ -28,6 +28,8 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/grtest-capabilities.XXXXXX")"
 export KUBECONFIG="$work/kubeconfig"
 
 log() { echo "==> $*"; }
+# The number of lines in "$1", without padding: BSD wc (macOS) pads its count with spaces, which a string comparison does not ignore.
+line_count() { printf '%s\n' "$1" | wc -l | tr -d '[:space:]'; }
 fail() {
   echo "FAIL: $*" >&2
   kubectl -n "$namespace" get pods -o wide >&2 || true
@@ -347,7 +349,7 @@ kubectl -n "$namespace" apply -f "$work/store-pod-store-a.yaml" >/dev/null
 wait_for_log store-a STORE-STEP-DONE
 
 expected_entries="$(kubectl -n "$namespace" get pod store-a -o jsonpath='{.metadata.annotations.github-runner\.exadev\.io/capability-store-keys}' | tr ' ' '\n' | LC_ALL=C sort)"
-[ "$(printf '%s\n' "$expected_entries" | wc -l)" = 3 ] || fail "the pod's annotation does not list the tool, the library and the merged sysroot: '$expected_entries'"
+[ "$(line_count "$expected_entries")" = 3 ] || fail "the pod's annotation does not list the tool, the library and the merged sysroot: '$expected_entries'"
 [ "$(store_entries)" = "$expected_entries" ] || fail "the store holds '$(store_entries)', not exactly the entries the pod's annotation lists: '$expected_entries'"
 [ -z "$(docker exec "$node" ls -A "$store_host_path/.incoming")" ] || fail "a copy was left in the incoming directory after the pod published it"
 [ "$(docker exec "$node" stat -c %u "$store_host_path/.incoming")" = 1001 ] || fail "the incoming directory is not the runner user's"
@@ -359,7 +361,7 @@ kubectl -n "$namespace" apply -f "$work/store-pod-store-b.yaml" >/dev/null
 wait_for_log store-b STORE-STEP-DONE
 [ "$(store_state)" = "$state_before" ] || fail "the second pod changed the store, which it should only have read: $(diff <(echo "$state_before") <(store_state))"
 listings="$(for pod in store-a store-b; do kubectl -n "$namespace" logs "$pod" -c runner | sed -n 's/^STORE-LISTING-[A-Z]* //p'; done | sort -u)"
-[ "$(printf '%s\n' "$listings" | wc -l)" = 1 ] || fail "the two pods saw different content in the entry: $listings"
+[ "$(line_count "$listings")" = 1 ] || fail "the two pods saw different content in the entry: $listings"
 [ "$(kubectl -n "$namespace" get pod store-b -o jsonpath='{.metadata.annotations.github-runner\.exadev\.io/capability-store-keys}' | tr ' ' '\n' | LC_ALL=C sort)" = "$expected_entries" ] || fail "the two pods list different store entries"
 kubectl -n "$namespace" logs store-a -c runner | grep -q '^tool-cache find: ' || fail "@actions/tool-cache did not find the tool in the pod's tool cache"
 
