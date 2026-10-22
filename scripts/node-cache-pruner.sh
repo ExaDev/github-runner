@@ -25,10 +25,10 @@
 # - WANTED_CACHES: the profiles that have a cache, as <namespace>/<release> separated by spaces. When it is set, any other directory under the cache root is removed. Unset leaves every directory alone.
 # - CHECK_SECONDS: seconds between checks, a positive integer of at most MAX_CHECK_SECONDS (default when unset: 300).
 # - STORE_ROOT: where the node's capability store is mounted in this pod. Unset leaves the store alone, as on a fleet with no profile using it.
-# - STORE_NAMESPACES: the namespaces whose scale sets' templates and pods on this node are what keep an entry, separated by spaces: every namespace a pod that uses the store may run in, which includes a profile that has switched the store off or left the fleet while pods made from its old template run. An entry kept only by a pod in a namespace not listed here is removed.
+# - STORE_NAMESPACES: the namespaces whose scale sets' templates and pods on this node are what keep an entry, separated by spaces: every namespace a pod that uses the store may run in, which includes a profile that has switched the store off or left the fleet while pods made from its old template run. An entry kept only by a pod in a namespace not listed here is removed. Required (at least one namespace) when STORE_ROOT is set: with none, nothing would reference any entry and the whole store would be removed under running pods.
 # - PRUNE_ONCE: when "true", check once and exit, for tests.
 #
-# Start-up configuration errors, every one of them (a required variable missing, a number that is not a positive integer or is above its maximum), end the pruner with status 2 and a message on stderr that names the variable, before it does anything. The DaemonSet's pods then crash-loop with that message in their log. The role validates the numeric settings it templates with the same pattern and maxima, but a value changed some other way (an edited DaemonSet) reaches only this check.
+# Start-up configuration errors, every one of them (a required variable missing, STORE_ROOT set without STORE_NAMESPACES, a number that is not a positive integer or is above its maximum), end the pruner with status 2 and a message on stderr that names the variable, before it does anything. The DaemonSet's pods then crash-loop with that message in their log. The role validates the numeric settings it templates with the same pattern and maxima, but a value changed some other way (an edited DaemonSet) reaches only this check.
 set -uo pipefail
 
 # The pattern a positive integer setting must match, and the largest value each numeric setting may have. The role's validation (roles/github_runner_arc/tasks/validate.yml, with the values in vars/main.yml) uses the same pattern and maxima, and a test checks that the two agree.
@@ -63,6 +63,10 @@ require_positive_integer() {
 
 require_set NODE_NAME
 require_set HOST_CACHE_ROOT
+# A store with no namespaces to read references from has no references, so every entry would count as unused. The names are counted after dropping whitespace, since a value of only spaces lists none.
+if [ -n "${STORE_ROOT-}" ] && [ -z "$(printf %s "${STORE_NAMESPACES-}" | tr -d '[:space:]')" ]; then
+  configuration_error "STORE_NAMESPACES is required when STORE_ROOT is set"
+fi
 CACHE_ROOT="${CACHE_ROOT:-/host-node-cache}"
 CHECK_SECONDS="${CHECK_SECONDS-300}"
 PRUNE_ONCE="${PRUNE_ONCE:-false}"
