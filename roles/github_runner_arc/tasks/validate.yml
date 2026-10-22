@@ -44,6 +44,7 @@
         + (github_runner_arc_node_cache_host_path | exadev.github_runner.arc_node_cache_host_path_errors)
         + (github_runner_arc_node_cache_path | exadev.github_runner.arc_node_cache_path_errors)
         + (github_runner_arc_capability_store_host_path | exadev.github_runner.arc_capability_store_host_path_errors)
+        + (github_runner_arc_node_cache_host_path | exadev.github_runner.arc_host_path_overlap_errors(github_runner_arc_capability_store_host_path))
         + (github_runner_arc_capability_store_path | exadev.github_runner.arc_capability_store_path_errors)
         + (github_runner_arc_capability_store_image | exadev.github_runner.arc_capability_store_image_errors)
       }}
