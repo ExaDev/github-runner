@@ -305,8 +305,11 @@ refused() {
 refused sh -c 'echo changed >>"$1"' sh "$arch_dir/README.md"
 refused rm "$target"
 refused touch "$store/$key/job-file"
-refused mkdir "$store/job-entry"
+refused mkdir "$store/$key/job-dir"
 refused rm -rf "$store/$key"
+# The runner container sees only the entries its own pod uses, never the store's root: the store holds the system libraries' entries and the merged sysroot as well, and none of them is under the store path here, and nothing can be added beside the tool's entry.
+[ "$(ls -A "$store")" = "$key" ] || { echo "the store path holds '$(ls -A "$store")', not only the tool's entry '$key'"; exit 1; }
+if mkdir "$store/job-entry" 2>"$errors"; then echo "a directory could be added beside the tool's entry, and must not be"; exit 1; fi
 refused touch "$sysroot/job-file"
 refused rm "$sysroot/bin/psql"
 after="$(listing)"
