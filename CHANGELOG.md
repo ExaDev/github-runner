@@ -1,3 +1,63 @@
+## [2.8.0](https://github.com/ExaDev/github-runner/compare/v2.7.10...v2.8.0) (2026-10-22)
+
+### Features
+
+* **arc:** copy capability payloads once per node into a capability store ([d35960c](https://github.com/ExaDev/github-runner/commit/d35960cd2369aa7ca8dc81533579e26e7ffb060c))
+* **arc:** prune capability store entries no scale set or pod uses ([8da1713](https://github.com/ExaDev/github-runner/commit/8da17133d0a9b8758b4d0723271e76abd2cd7ace))
+
+### Bug Fixes
+
+* **arc:** check the capability store's settings in validation as well as at render ([543e66a](https://github.com/ExaDev/github-runner/commit/543e66a0049fc533261cc33fea1e56b59165298c))
+* **arc:** choose the capability store settings inside each filter call ([09ecadd](https://github.com/ExaDev/github-runner/commit/09ecaddaa6d4fba68b3723fe70c8dc86eec65006))
+* **arc:** copy a tool or version directory that is a link as the link in the pod's tool cache ([1bb2b62](https://github.com/ExaDev/github-runner/commit/1bb2b6266030029a0d384483c7dbf0b1d369c169))
+* **arc:** copy an aliased tool-cache arch directory as the link instead of linking to the store's ([2975f73](https://github.com/ExaDev/github-runner/commit/2975f737d68ff2666bd3e90584032ff7a96d4672))
+* **arc:** copy an image shared by two capabilities once into the store ([8b9c129](https://github.com/ExaDev/github-runner/commit/8b9c129c431782afaa79c0efd0c89391adf92400))
+* **arc:** flush capability store entries before publishing and rebuild a pod's partial copy on rerun ([5872044](https://github.com/ExaDev/github-runner/commit/5872044bc582647cdd6ab75c7d9c389eba137244))
+* **arc:** keep a pod's cached tool trees writable when the capability store is on ([ba28499](https://github.com/ExaDev/github-runner/commit/ba284995ab4324a12792b94180719c0689b111e8))
+* **arc:** keep capability store entries a departed profile's pods still use ([6d523ee](https://github.com/ExaDev/github-runner/commit/6d523eef14018857462b6d5931ddeb9657ef5a77))
+* **arc:** keep the pruner's capability store grants to the namespaces it reads ([7445765](https://github.com/ExaDev/github-runner/commit/7445765d48185bb6c8a9bc0596f1a1f1ea5c3989))
+* **arc:** make a pod's linked tool trees owner-writable whatever mode the store's directories have ([523cf4c](https://github.com/ExaDev/github-runner/commit/523cf4c48f72ce9ae8e57c06d7adca45e375fc14))
+* **arc:** merge a system-library entry once when two capabilities share its image ([5da86af](https://github.com/ExaDev/github-runner/commit/5da86afc25b920dc57bda45da910f2e214bcbd7d))
+* **arc:** mount only the store entries a pod uses on its runner container ([345c629](https://github.com/ExaDev/github-runner/commit/345c62948415836a12dd8298a2d4b27a9bb2a909))
+* **arc:** mount the store's externals entry in a dind native sidecar as well as a dind container ([d7ec22f](https://github.com/ExaDev/github-runner/commit/d7ec22f71f08e4fea43e5b27312fd823a1345880))
+* **arc:** name capability store entries for their payload kind as well as the image digest ([a048e89](https://github.com/ExaDev/github-runner/commit/a048e896c508a57d454bb0fecad447dee43791fb))
+* **arc:** prepare the capability store before the dind externals copy ([ff82dbd](https://github.com/ExaDev/github-runner/commit/ff82dbd233ad9e65efbda01fbedd1e0e94b39355))
+* **arc:** publish a payload whose root is read-only and say why a rename failed ([63bb70e](https://github.com/ExaDev/github-runner/commit/63bb70e119eea3645143fb151cdf6f4a156f0bd1))
+* **arc:** refuse a capability whose init container would take a store init container's name ([b4c6a29](https://github.com/ExaDev/github-runner/commit/b4c6a2940ee76b69db10360dcc9cb2b67c4e15b7))
+* **arc:** refuse a node cache and capability store that share or contain a directory ([fe8ba4e](https://github.com/ExaDev/github-runner/commit/fe8ba4e655fe871756603beb7b8c7e5058a1c68b))
+* **arc:** refuse to start the node cache pruner with a store root and no store namespaces ([9630e65](https://github.com/ExaDev/github-runner/commit/9630e6514806441532f5365de65287611f293a7d))
+* **arc:** remove a pod's capability store copy even when it holds read-only directories ([093428a](https://github.com/ExaDev/github-runner/commit/093428a5e73e7e526defb0bc5d4ad6a0bf89c6de))
+* **arc:** replace a read-only completeness marker when the tool cache is linked again ([99742c4](https://github.com/ExaDev/github-runner/commit/99742c4ce89a49f32d2bfb65a5b338dd8c0c6a33))
+* **arc:** validate the node label key when a node cache or the store needs the pruner ([44ac928](https://github.com/ExaDev/github-runner/commit/44ac9286e4a1199fca7fb2e03f6e16bbe8db68f6))
+
+### Code Refactoring
+
+* **arc:** stop registering the capability store key function as a filter no task uses ([55453d4](https://github.com/ExaDev/github-runner/commit/55453d4b9b966741553365a7d2af3c9058f045f1))
+
+### Documentation
+
+* **arc:** declare the capability store's profile key and settings in the argument specification ([ef229ca](https://github.com/ExaDev/github-runner/commit/ef229cad75d9fdb162452903459395ac6bb65b47))
+* **arc:** describe the kind test in its own section and its store case in the store section ([709c1df](https://github.com/ExaDev/github-runner/commit/709c1df5ba0640a0dbc83998fbe049c78b64e200))
+* **arc:** limit the store's dind externals copy to values that write the sidecar out ([fe8420f](https://github.com/ExaDev/github-runner/commit/fe8420f89343ff3604dbc77c7a5caefcd1b0b454))
+* **arc:** list exactly the applets the capability store image's scripts use ([126ec04](https://github.com/ExaDev/github-runner/commit/126ec0423ef534f405db417279519b8e4594694e))
+* **arc:** name the init containers that write to the store and the one that only reads it ([af05fa7](https://github.com/ExaDev/github-runner/commit/af05fa73a85dd4a9ffc79e7d21bea8b286bfcfe4))
+* **arc:** state chmod in the capability image and store image contracts ([60bb6d3](https://github.com/ExaDev/github-runner/commit/60bb6d3b1518939f29a79b4e30869d0131b058bf))
+* **arc:** state that a store switched off fleet-wide keeps its entries for the operator to delete ([eccceb6](https://github.com/ExaDev/github-runner/commit/eccceb6edac87cf2f5fe0840773db89feff896b8))
+* **arc:** state that the store's flush before publishing is host-wide and why that is accepted ([03e3997](https://github.com/ExaDev/github-runner/commit/03e3997ba4ba572c210062e0cc062eebaf0e372c))
+* **arc:** state the capability store's copy cost on a cold node and its disk footprint exactly ([d6fce81](https://github.com/ExaDev/github-runner/commit/d6fce8160057e8d2a6afa2532bbca563c55ea543))
+* **arc:** state the store's copy container, first-wave copying and burst nodes as the code has them ([bd1746d](https://github.com/ExaDev/github-runner/commit/bd1746d829edd7561a79a9ec83d26287e807d905))
+* **arc:** state the store's pruner, grants and dind limit as the code has them ([32a0341](https://github.com/ExaDev/github-runner/commit/32a0341475d31a10d0416f68e058c84d3eaf033a))
+* **tool-images:** list chmod among the applets the init containers run from busybox ([e610f49](https://github.com/ExaDev/github-runner/commit/e610f49087e697dd310c790dc11b25d66a633293))
+
+### Tests
+
+* **arc:** build the pruner image from the repository root ([0dcb312](https://github.com/ExaDev/github-runner/commit/0dcb312ece43d2400cbca90f23166ba7f08949ff))
+* **arc:** count lines in the capabilities test without relying on wc's padding ([ce282d0](https://github.com/ExaDev/github-runner/commit/ce282d0c7f05f61bc14132c12eb2077998c865b7))
+* **arc:** cover a tool alias that sorts before its target in the tool-cache link script ([824bc07](https://github.com/ExaDev/github-runner/commit/824bc070cba2a50e9e7f1a9198eaf2dfc92ac50d))
+* **arc:** fail the log wait only when the pod has ended ([1482d67](https://github.com/ExaDev/github-runner/commit/1482d67f052e09334a5d1a000ff471bcfb804b74))
+* **arc:** name the pruner test's store entries as the role does ([032fab6](https://github.com/ExaDev/github-runner/commit/032fab6dadbfcb500b011a755f22a54874ae9ff7))
+* **arc:** run two capability store pods and the pruner against real mounts in kind ([53e3072](https://github.com/ExaDev/github-runner/commit/53e30729197523a4d1725760a65b8f8ff34f5e6a))
+
 ## [2.7.10](https://github.com/ExaDev/github-runner/compare/v2.7.9...v2.7.10) (2026-10-22)
 
 ### Tests
