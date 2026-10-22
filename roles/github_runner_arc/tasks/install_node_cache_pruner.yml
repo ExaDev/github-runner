@@ -31,7 +31,7 @@
     msg: "{{ github_runner_arc_node_cache_legacy_access.left | join(' ') }}"
   when: github_runner_arc_node_cache_legacy_access.left | length > 0
 
-# The pruner's Roles and RoleBindings are found by the labels the role puts on them (all of them, so another software's objects are left alone) in every namespace. They are removed only when the pruner is, and found before the decision because the namespaces of those that exist are among the namespaces the capability store's references are read from (see decide_node_cache_pruner.yml). While it is installed a profile that has left the fleet keeps its grant, which is read-only (it lists pods and nothing else) and confined to that profile's own namespace, so staying is harmless, and it lets the pruner still check, and so clear, a directory the profile left. Bindings go before the roles they bind.
+# The pruner's Roles and RoleBindings are found by the labels the role puts on them (all of them, so another software's objects are left alone) in every namespace. A profile's own are removed only when the pruner is, and the capability store's also when the namespace they are in is no longer one the store's references are read from (see the removal below); all are found before the decision because the namespaces of those that exist are among the namespaces the capability store's references are read from (see decide_node_cache_pruner.yml). While it is installed a profile that has left the fleet keeps its grant, which is read-only (it lists pods and nothing else) and confined to that profile's own namespace, so staying is harmless, and it lets the pruner still check, and so clear, a directory the profile left. Bindings go before the roles they bind.
 - name: "Node cache: find the pruner's Roles and RoleBindings"
   kubernetes.core.k8s_info:
     api_version: rbac.authorization.k8s.io/v1
@@ -41,6 +41,19 @@
     - Role
     - RoleBinding
   register: github_runner_arc_node_cache_pruner_access
+
+# The API server refuses to create a Role in a Terminating namespace, and a profile that has left the fleet leaves its namespace to be deleted while its pruner Role is still listed above, so the capability store's Roles are not made there (see arc_capability_store_namespaces). Only the namespaces that could hold one are asked about, by name, so the credential needs get on Namespaces, which applying them below needs as well, and not list.
+- name: "Node cache: find the namespaces being deleted"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: "{{ ((github_runner_arc_fleet.profiles | map(attribute='namespace') | list) + (github_runner_arc_node_cache_pruner_access.results | map(attribute='resources') | flatten | map(attribute='metadata.namespace') | list)) | unique | sort }}"
+  register: github_runner_arc_terminating_lookup
+
+- name: "Node cache: note the namespaces being deleted"
+  ansible.builtin.set_fact:
+    github_runner_arc_terminating_namespaces: "{{ github_runner_arc_terminating_lookup.results | map(attribute='resources') | flatten | exadev.github_runner.arc_terminating_namespaces }}"
 
 - name: "Node cache: decide what the pruner needs"
   ansible.builtin.include_tasks: decide_node_cache_pruner.yml
@@ -93,13 +106,14 @@
   loop_control:
     label: "{{ item.kind }}/node-cache-pruner"
 
-- name: "Node cache: remove the pruner's access when the pruner is not wanted"
+# Without the pruner, all of its access goes. With it, a profile's own Role stays, as above, but the capability store's Role and binding go from every namespace the store's references are no longer read from: all of them once no profile uses the store, and one in a namespace being deleted. Bindings go before the roles they bind.
+- name: "Node cache: remove the access the pruner no longer needs"
   kubernetes.core.k8s:
     state: absent
     api_version: rbac.authorization.k8s.io/v1
     kind: "{{ item.kind }}"
     namespace: "{{ item.namespace }}"
     name: "{{ item.name }}"
-  loop: "{{ github_runner_arc_node_cache_pruner_access.results | map(attribute='resources') | flatten | exadev.github_runner.arc_node_cache_access_to_remove(github_runner_arc_node_cache_pruner_labels, github_runner_arc_node_cache_pruner_wanted | bool) }}"
+  loop: "{{ github_runner_arc_node_cache_pruner_access.results | map(attribute='resources') | flatten | exadev.github_runner.arc_node_cache_access_to_remove(github_runner_arc_node_cache_pruner_labels, github_runner_arc_node_cache_pruner_wanted | bool, github_runner_arc_capability_store_pruner_role, github_runner_arc_capability_store_namespaces) }}"
   loop_control:
     label: "{{ item.kind }}/{{ item.name }} in {{ item.namespace }}"

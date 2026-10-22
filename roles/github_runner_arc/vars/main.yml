@@ -50,6 +50,9 @@ github_runner_arc_node_cache_pruner_labels:
   app.kubernetes.io/part-of: github-runner
   app.kubernetes.io/managed-by: exadev.github_runner
 
+# The name of the Role and RoleBinding that let the node cache pruner list pods and scale sets in a namespace it reads the capability store's references from. The colon keeps it from ever colliding with a profile's Role, named for a Helm release name, which cannot hold one.
+github_runner_arc_capability_store_pruner_role: node-cache-pruner:capability-store
+
 # The pattern a numeric node cache setting must match and the largest value each may have, the same constants as scripts/node-cache-pruner.sh (which derives them from its arithmetic, in the comment there) so that the role refuses what the pruner would refuse and a value the pruner would crash on never reaches the DaemonSet. tests/unit/test_node_cache_pruner_role.py checks that the two agree.
 github_runner_arc_node_cache_positive_integer_pattern: '^[1-9][0-9]*$'
 github_runner_arc_node_cache_max_limit_gib: 1073741824

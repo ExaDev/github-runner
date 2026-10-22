@@ -57,15 +57,17 @@ def render(**role_vars: Any) -> list[dict[str, Any]]:
 
 
 def decide_everything(fleet_targets: list[str], **role_vars: Any) -> dict[str, Any]:
-    """Run the decision for a fleet of the given profile targets, each with the pnpm-store capability when its target is listed in with_cache, and using the capability store when it is listed in with_store. Roles are the pruner's Roles the cluster has, as (namespace, release) pairs."""
+    """Run the decision for a fleet of the given profile targets, each with the pnpm-store capability when its target is listed in with_cache, and using the capability store when it is listed in with_store. Roles are the pruner's Roles the cluster has, as (namespace, release) pairs, store_roles the namespaces holding the capability store's Role, and terminating the namespaces in phase Terminating."""
     with_cache = role_vars.pop("with_cache", fleet_targets)
     with_store = role_vars.pop("with_store", [])
     roles = role_vars.pop("roles", [])
+    store_roles = role_vars.pop("store_roles", [])
+    terminating = role_vars.pop("terminating", [])
     profiles = [{"namespace": target.split("/")[0], "release": target.split("/")[1], "target": target, "capabilities": ["pnpm-store" if target in with_cache else "node"], "capability_store": target in with_store} for target in fleet_targets]
-    found = {"results": [{"resources": [access("Role", namespace, release) for namespace, release in roles]}, {"resources": [access("RoleBinding", namespace, release) for namespace, release in roles]}]}
+    found = {"results": [{"resources": [*(access("Role", namespace, release) for namespace, release in roles), *(store_access("Role", namespace) for namespace in store_roles)]}, {"resources": [*(access("RoleBinding", namespace, release) for namespace, release in roles), *(store_access("RoleBinding", namespace) for namespace in store_roles)]}]}
     with tempfile.TemporaryDirectory() as work:
         output = Path(work) / "decision.json"
-        completed = ansible(DECIDE, decide_output=str(output), github_runner_arc_fleet={"profiles": profiles}, github_runner_arc_capabilities=CATALOGUE, github_runner_arc_node_cache_pruner_access=found, **role_vars)
+        completed = ansible(DECIDE, decide_output=str(output), github_runner_arc_fleet={"profiles": profiles}, github_runner_arc_capabilities=CATALOGUE, github_runner_arc_node_cache_pruner_access=found, github_runner_arc_terminating_namespaces=terminating, **role_vars)
         assert completed.returncode == 0, completed.stdout + completed.stderr
         decision: dict[str, Any] = json.loads(output.read_text())
         return decision
@@ -169,7 +171,33 @@ class CapabilityStoreNamespacesTest(unittest.TestCase):
     def test_only_roles_carrying_every_label_of_the_pruner_count(self) -> None:
         profiles = [{"namespace": "arc-a", "capability_store": True}]
         found = [access("Role", "arc-gone", "old"), access("Role", "other", "app", labels={"app.kubernetes.io/name": "node-cache-pruner"}), access("RoleBinding", "bound-only", "old")]
-        self.assertEqual(arc.arc_capability_store_namespaces(profiles, found, OWN_LABELS), ["arc-a", "arc-gone"])
+        self.assertEqual(arc.arc_capability_store_namespaces(profiles, found, OWN_LABELS, STORE_ROLE, []), ["arc-a", "arc-gone"])
+
+    def test_a_terminating_namespace_is_left_out_whether_it_is_a_profiles_or_one_a_departed_profile_left(self) -> None:
+        decision = decide_everything(["arc-a/main", "arc-b/builders"], with_store=["arc-a/main"], roles=[("arc-gone", "old")], terminating=["arc-b", "arc-gone"])
+        self.assertEqual(decision["store_namespaces"], ["arc-a"])
+
+    def test_the_stores_own_role_does_not_keep_its_namespace_in_the_list(self) -> None:
+        decision = decide_everything(["arc-a/main"], with_store=["arc-a/main"], roles=[("arc-a", "main")], store_roles=["arc-a", "arc-old"])
+        self.assertEqual(decision["store_namespaces"], ["arc-a"])
+
+    def test_only_namespaces_in_phase_terminating_are_reported_as_terminating(self) -> None:
+        namespaces = [namespace_object("arc-b", "Terminating"), namespace_object("arc-a", "Active"), namespace_object("arc-c", "Terminating")]
+        self.assertEqual(arc.arc_terminating_namespaces(namespaces), ["arc-b", "arc-c"])
+        self.assertEqual(arc.arc_terminating_namespaces([]), [])
+
+    def test_the_install_leaves_a_terminating_namespace_out_of_the_stores_roles_and_the_namespaces_read(self) -> None:
+        calls = install(["arc-a/main", "arc-b/builders"], with_store=["arc-a/main"], existing=[access("Role", "arc-gone", "old"), namespace_object("arc-b", "Terminating"), namespace_object("arc-gone", "Terminating"), namespace_object("arc-a", "Active")])
+        daemonset = next(call["definition"] for call in calls if (call.get("definition") or {}).get("kind") == "DaemonSet")
+        env = {item["name"]: item.get("value") for item in daemonset["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["STORE_NAMESPACES"], "arc-a")
+        store_roles = sorted(call["definition"]["metadata"]["namespace"] for call in calls if (call.get("definition") or {}).get("metadata", {}).get("name") == STORE_ROLE and call["definition"]["kind"] == "Role")
+        self.assertEqual(store_roles, ["arc-a"])
+
+    def test_the_install_asks_about_each_namespace_that_could_hold_a_store_role_by_name(self) -> None:
+        calls = install(["arc-a/main", "arc-b/builders"], with_store=["arc-a/main"], existing=[access("Role", "arc-gone", "old")])
+        asked = sorted(call["name"] for call in calls if call["module"] == "k8s_info" and call["kind"] == "Namespace")
+        self.assertEqual(asked, ["arc-a", "arc-b", "arc-gone"])
 
     def test_the_install_reads_the_pruners_roles_before_it_decides(self) -> None:
         calls = install(["arc-a/main", "arc-b/builders"], with_store=["arc-a/main"], existing=[access("Role", "arc-gone", "old"), access("RoleBinding", "arc-gone", "old")])
@@ -247,12 +275,23 @@ INSTALL_VARIABLES = {
 }
 
 
+STORE_ROLE = "node-cache-pruner:capability-store"
 OWN_LABELS = {"app.kubernetes.io/name": "node-cache-pruner", "app.kubernetes.io/part-of": "github-runner", "app.kubernetes.io/managed-by": "exadev.github_runner"}
 
 
 def access(kind: str, namespace: str, release: str, labels: dict[str, str] | None = None) -> dict[str, Any]:
     """A Role or RoleBinding of the pruner as the cluster returns it, with the role's own labels unless others are given."""
     return {"kind": kind, "metadata": {"namespace": namespace, "name": f"node-cache-pruner-{release}", "labels": OWN_LABELS if labels is None else labels}}
+
+
+def store_access(kind: str, namespace: str) -> dict[str, Any]:
+    """The capability store's Role or RoleBinding of the pruner in a namespace, as the cluster returns it."""
+    return {"kind": kind, "metadata": {"namespace": namespace, "name": STORE_ROLE, "labels": OWN_LABELS}}
+
+
+def namespace_object(name: str, phase: str) -> dict[str, Any]:
+    """A Namespace as the cluster returns it."""
+    return {"kind": "Namespace", "metadata": {"name": name}, "status": {"phase": phase}}
 
 
 def legacy_role(rules: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -278,7 +317,7 @@ def install_with_output(fleet_targets: list[str], with_cache: list[str] | None =
         log = Path(work) / "calls.jsonl"
         extra = Path(work) / "extra.json"
         extra.write_text(json.dumps({**INSTALL_VARIABLES, "github_runner_arc_fleet": {"profiles": profiles}, **role_vars}))
-        env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": os.pathsep.join([str(Path(work) / "stubs"), str(ROOT / "playbooks" / "collections")]), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false", "ANSIBLE_HOME": str(Path(work) / "home"), "STUB_LOG": str(log), "STUB_INFO": json.dumps({kind: [item for item in existing or [] if item["kind"] == kind] for kind in ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding")})}
+        env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": os.pathsep.join([str(Path(work) / "stubs"), str(ROOT / "playbooks" / "collections")]), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false", "ANSIBLE_HOME": str(Path(work) / "home"), "STUB_LOG": str(log), "STUB_INFO": json.dumps({kind: [item for item in existing or [] if item["kind"] == kind] for kind in ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding", "Namespace")})}
         completed = subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(INSTALL), "-e", f"@{extra}"], env=env, cwd=work, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
         assert completed.returncode == 0, completed.stdout + completed.stderr
         return ([json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []), completed.stdout
@@ -410,6 +449,23 @@ class InstallTasksTest(unittest.TestCase):
         calls = install(list(self.FLEET), existing=existing)
         self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [])
 
+    def test_the_stores_access_goes_from_every_namespace_once_no_profile_uses_the_store_while_a_profiles_own_stays(self) -> None:
+        existing = [*(access(kind, "arc-a", "main") for kind in ("Role", "RoleBinding")), *(store_access(kind, namespace) for kind in ("Role", "RoleBinding") for namespace in ("arc-a", "arc-gone"))]
+        calls = install(list(self.FLEET), existing=existing)
+        self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [("RoleBinding", "arc-a", STORE_ROLE), ("RoleBinding", "arc-gone", STORE_ROLE), ("Role", "arc-a", STORE_ROLE), ("Role", "arc-gone", STORE_ROLE)])
+
+    def test_the_stores_access_stays_in_the_namespaces_the_store_is_read_from_and_goes_from_a_terminating_one(self) -> None:
+        existing = [*(access(kind, "arc-a", "main") for kind in ("Role", "RoleBinding")), *(store_access(kind, namespace) for kind in ("Role", "RoleBinding") for namespace in ("arc-a", "arc-c")), namespace_object("arc-c", "Terminating")]
+        calls = install(list(self.FLEET), with_store=["arc-a/main"], existing=existing)
+        self.assertEqual([removal for removal in removals(calls) if removal[1] is not None], [("RoleBinding", "arc-c", STORE_ROLE), ("Role", "arc-c", STORE_ROLE)])
+
+    def test_the_stores_access_is_removed_after_the_daemonset_stops_reading_the_namespace(self) -> None:
+        existing = [store_access(kind, "arc-a") for kind in ("Role", "RoleBinding")]
+        calls = install(list(self.FLEET), existing=existing)
+        daemonset = next(index for index, call in enumerate(calls) if (call.get("definition") or {}).get("kind") == "DaemonSet")
+        removed = next(index for index, call in enumerate(calls) if call.get("state") == "absent" and call.get("name") == STORE_ROLE)
+        self.assertLess(daemonset, removed)
+
     def test_only_objects_carrying_every_one_of_the_roles_labels_are_removed_with_the_pruner(self) -> None:
         foreign = [
             access("Role", "other", "app", labels={"app.kubernetes.io/name": "node-cache-pruner"}),
@@ -422,7 +478,7 @@ class InstallTasksTest(unittest.TestCase):
 
     def test_the_pruners_access_is_looked_up_by_all_of_its_labels_in_every_namespace(self) -> None:
         calls = install(list(self.FLEET))
-        lookups = [call for call in calls if call["module"] == "k8s_info" and not call["kind"].startswith("Cluster")]
+        lookups = [call for call in calls if call["module"] == "k8s_info" and call["kind"] in ("Role", "RoleBinding")]
         self.assertEqual([call["kind"] for call in lookups], ["Role", "RoleBinding"])
         self.assertTrue(all(call["namespace"] is None for call in lookups))
         self.assertTrue(all(sorted(call["label_selectors"]) == sorted(f"{key}={value}" for key, value in OWN_LABELS.items()) for call in lookups))

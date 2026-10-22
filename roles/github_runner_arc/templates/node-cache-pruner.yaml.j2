@@ -37,8 +37,8 @@ roleRef:
   kind: Role
   name: {{ (name ~ '-' ~ profile.release) | to_json }}
 {% endfor %}
-{# The capability store's references are read in every namespace a pod made from an earlier template may still run in, which includes a profile that has switched the store off or left the fleet, so this Role is per namespace, not per release. Its name has a colon, which a release name (a Helm release name) cannot have, so it never collides with a profile's Role. #}
-{% set store_name = name ~ ':capability-store' %}
+{# The capability store's references are read in every namespace a pod made from an earlier template may still run in, which includes a profile that has switched the store off or left the fleet, so this Role is per namespace, not per release. Its name is github_runner_arc_capability_store_pruner_role, which no profile's Role can have. #}
+{% set store_name = github_runner_arc_capability_store_pruner_role %}
 {% for namespace in github_runner_arc_capability_store_namespaces %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
