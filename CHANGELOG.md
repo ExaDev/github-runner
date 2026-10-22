@@ -1,3 +1,9 @@
+## [2.7.10](https://github.com/ExaDev/github-runner/compare/v2.7.9...v2.7.10) (2026-10-22)
+
+### Tests
+
+* **mesh:** wait for what a step needs before the regrade scenario takes it ([e052424](https://github.com/ExaDev/github-runner/commit/e052424809f2f326f412ba18c3f9896eda81f0be))
+
 ## [2.7.9](https://github.com/ExaDev/github-runner/compare/v2.7.8...v2.7.9) (2026-10-21)
 
 ### Tests
