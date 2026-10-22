@@ -597,9 +597,10 @@ class StartupTest(unittest.TestCase):
 
 
 
-KEY_A = "a" * 64
-KEY_B = "b" * 64
-KEY_C = "c" * 64
+# The shapes of the entry names the role produces: a tool cache, a merged sysroot and the dind sidecar's externals (see arc_capability_store_key and _capability_store_merged_key). A name sorts by its prefix, so the expected lists below are sorted rather than written in the order of the keys.
+KEY_A = "toolcache-" + "a" * 64
+KEY_B = "merged-sysroot-" + "b" * 64
+KEY_C = "externals-" + "c" * 64
 
 
 class CapabilityStorePrunerTest(unittest.TestCase):
@@ -635,12 +636,12 @@ class CapabilityStorePrunerTest(unittest.TestCase):
 
     def test_an_entry_an_unfinished_pod_on_this_node_lists_is_kept_after_its_template_moved_on(self) -> None:
         _, store = self.run_store([KEY_A, KEY_B, KEY_C], scale_sets=[{"namespace": "arc-a", "store_keys": [KEY_C]}], pods=[self.store_pod([KEY_A]), self.store_pod([KEY_B], phase="Pending", uid="pod-2")])
-        self.assertEqual(self.remaining(store), [KEY_A, KEY_B, KEY_C])
+        self.assertEqual(self.remaining(store), sorted([KEY_A, KEY_B, KEY_C]))
 
     def test_a_pod_in_a_namespace_that_left_the_store_profiles_keeps_its_entries_while_the_namespace_is_listed(self) -> None:
         # arc-gone has no scale set any more but a pod made from its old template runs on the node: the role lists the namespace for as long as the pruner holds a Role there.
         _, store = self.run_store([KEY_A, KEY_B], scale_sets=[{"namespace": "arc-a", "store_keys": [KEY_B]}], pods=[self.store_pod([KEY_A], namespace="arc-gone")], STORE_NAMESPACES="arc-a arc-gone")
-        self.assertEqual(self.remaining(store), [KEY_A, KEY_B])
+        self.assertEqual(self.remaining(store), sorted([KEY_A, KEY_B]))
 
     def test_a_pod_in_a_namespace_that_is_not_listed_keeps_nothing(self) -> None:
         # What the old scan did to arc-gone: the namespace dropped out of STORE_NAMESPACES and the entry went under the running pod.
