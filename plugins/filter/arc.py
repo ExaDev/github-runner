@@ -993,33 +993,38 @@ def arc_label_selectors(labels: Mapping[str, str]) -> list[str]:
     return [f"{key}={value}" for key, value in labels.items()]
 
 
-def arc_node_cache_access_to_remove(found: Sequence[Mapping[str, Any]], labels: Mapping[str, str], pruner_wanted: bool) -> list[dict[str, str]]:
+def arc_node_cache_access_to_remove(found: Sequence[Mapping[str, Any]], labels: Mapping[str, str], pruner_wanted: bool, store_role: str, store_namespaces: Sequence[str]) -> list[dict[str, str]]:
     """Return the Roles and RoleBindings of the node cache pruner to remove, as kind, namespace and name, bindings before the roles they bind.
 
-    While the pruner is wanted nothing is removed: a profile that has left the fleet keeps its grant, which only lists pods in that profile's own namespace, for as long as the pruner is installed, so staying is harmless and the pruner can still check, and so clear, a directory the profile left. When the pruner is not wanted every object found goes. Only an object carrying every one of labels is the role's own, so another software's object that shares one label is never removed.
+    While the pruner is wanted a profile that has left the fleet keeps its grant, which only lists pods in that profile's own namespace, for as long as the pruner is installed, so staying is harmless and the pruner can still check, and so clear, a directory the profile left. The capability store's grant (the object named store_role) is not kept the same way: it lists scale sets as well, and only the namespaces the pruner reads the store's references from (store_namespaces, empty while no profile uses the store) need it, so one anywhere else goes. When the pruner is not wanted every object found goes. Only an object carrying every one of labels is the role's own, so another software's object that shares one label is never removed.
 
     Args:
-        found: Roles and RoleBindings as the cluster returned them. labels: the labels the role puts on every object it creates for the pruner. pruner_wanted: whether the pruner is installed.
+        found: Roles and RoleBindings as the cluster returned them. labels: the labels the role puts on every object it creates for the pruner. pruner_wanted: whether the pruner is installed. store_role: the name of the Role and RoleBinding that grant the capability store's references. store_namespaces: the namespaces from arc_capability_store_namespaces.
     """
-    if pruner_wanted:
-        return []
     ours = [resource for resource in found if all((resource["metadata"].get("labels") or {}).get(key) == value for key, value in labels.items())]
+    if pruner_wanted:
+        ours = [resource for resource in ours if resource["metadata"]["name"] == store_role and resource["metadata"]["namespace"] not in store_namespaces]
     stale = [{"kind": resource["kind"], "namespace": resource["metadata"]["namespace"], "name": resource["metadata"]["name"]} for resource in ours]
     return sorted(stale, key=lambda item: (item["kind"] != "RoleBinding", item["namespace"], item["name"]))
 
 
-def arc_capability_store_namespaces(profiles: Sequence[Mapping[str, Any]], found: Sequence[Mapping[str, Any]], labels: Mapping[str, str]) -> list[str]:
+def arc_terminating_namespaces(namespaces: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return the names, sorted, of the Namespaces as the cluster returned them whose phase is Terminating, in which the API server refuses to create anything."""
+    return sorted(namespace["metadata"]["name"] for namespace in namespaces if namespace["status"]["phase"] == "Terminating")
+
+
+def arc_capability_store_namespaces(profiles: Sequence[Mapping[str, Any]], found: Sequence[Mapping[str, Any]], labels: Mapping[str, str], store_role: str, terminating: Sequence[str]) -> list[str]:
     """Return the namespaces the node cache pruner reads the capability store's references from, sorted, or none while no profile uses the store (the pruner then leaves the store alone).
 
-    A pod of a profile that has since switched the store off, or left the fleet, keeps running from the template it was made from and keeps using the entries that template named, so its namespace stays among them: the namespaces of every profile in the fleet, and of every Role the pruner has installed, which the role keeps for a profile that has left the fleet (see arc_node_cache_access_to_remove). An entry is then never removed under a pod because its profile stopped appearing in the fleet. Only a Role carrying every one of labels counts, so another software's objects are ignored.
+    A pod of a profile that has since switched the store off, or left the fleet, keeps running from the template it was made from and keeps using the entries that template named, so its namespace stays among them: the namespaces of every profile in the fleet, and of every per-profile Role the pruner has installed, which the role keeps for a profile that has left the fleet (see arc_node_cache_access_to_remove). An entry is then never removed under a pod because its profile stopped appearing in the fleet. The store's own Role (store_role) does not count, since it is what this list produces and a namespace would otherwise keep itself in it for ever. Only a Role carrying every one of labels counts, so another software's objects are ignored. A Terminating namespace is left out, since the API server refuses to create a Role in one and its pods are being deleted.
 
     Args:
-        profiles: expanded profiles from arc_profiles, each with its namespace and capability_store. found: the Roles and RoleBindings carrying the pruner's labels, as the cluster returned them. labels: the labels the role puts on every object it creates for the pruner.
+        profiles: expanded profiles from arc_profiles, each with its namespace and capability_store. found: the Roles and RoleBindings carrying the pruner's labels, as the cluster returned them. labels: the labels the role puts on every object it creates for the pruner. store_role: the name of the Role that grants the capability store's references. terminating: the names of the namespaces in phase Terminating, from arc_terminating_namespaces.
     """
     if not any(profile["capability_store"] for profile in profiles):
         return []
-    roles = [resource["metadata"]["namespace"] for resource in found if resource["kind"] == "Role" and all((resource["metadata"].get("labels") or {}).get(key) == value for key, value in labels.items())]
-    return sorted({profile["namespace"] for profile in profiles} | set(roles))
+    roles = [resource["metadata"]["namespace"] for resource in found if resource["kind"] == "Role" and resource["metadata"]["name"] != store_role and all((resource["metadata"].get("labels") or {}).get(key) == value for key, value in labels.items())]
+    return sorted(({profile["namespace"] for profile in profiles} | set(roles)) - set(terminating))
 
 
 def _node_cache_env(node_cache_path: str, capabilities: Sequence[tuple[str, Mapping[str, Any]]], errors: list[str]) -> list[dict[str, str]]:
@@ -1783,6 +1788,7 @@ class FilterModule:
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
             "arc_node_cache_root": arc_node_cache_root,
             "arc_node_cache_access_to_remove": arc_node_cache_access_to_remove,
+            "arc_terminating_namespaces": arc_terminating_namespaces,
             "arc_node_cache_legacy_access": arc_node_cache_legacy_access,
             "arc_label_selectors": arc_label_selectors,
             "arc_bounded_integer_errors": arc_bounded_integer_errors,

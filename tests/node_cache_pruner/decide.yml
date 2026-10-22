@@ -9,6 +9,8 @@
   vars:
     # The pruner's Roles and RoleBindings as the install tasks found them; a test gives the ones its cluster has.
     github_runner_arc_node_cache_pruner_access: {results: [{resources: []}, {resources: []}]}
+    # The namespaces in phase Terminating, as the install tasks found them.
+    github_runner_arc_terminating_namespaces: []
   tasks:
     - name: Decide
       ansible.builtin.include_tasks: ../../roles/github_runner_arc/tasks/decide_node_cache_pruner.yml
