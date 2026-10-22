@@ -1550,6 +1550,27 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertEqual(self.snapshot(self.root), before)
         self.assertFalse((entry / "node/22.0.0/x64/created").exists())
 
+    def test_a_tool_alias_that_sorts_before_its_target_is_copied_as_the_link_and_no_tree_is_made_through_it(self) -> None:
+        """The glob reaches lts/22/x64 through the links, and it sorts before node/22.0.0/x64, so the target is not built when the alias comes up: without the guard, making the alias's parent runs through the dangling copy of the link and the init container fails."""
+        entry = self.linked_tool_names()
+        (entry / "nodejs").unlink()
+        (entry / "lts").symlink_to("node")
+        (entry / "other/1.0/x64/bin").mkdir(parents=True)
+        (entry / "other/1.0/x64/bin/other").write_text("other")
+        (entry / "node/stable").symlink_to("../other/1.0")
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        self.assertEqual((cache / "lts").readlink(), Path("node"))
+        self.assertEqual((cache / "node/22").readlink(), Path("22.0.0"))
+        self.assertEqual((cache / "node/stable").readlink(), Path("../other/1.0"))
+        # Exactly one real tree for each of the two images' versions, and nothing made through an alias.
+        real = sorted(Path(directory).relative_to(cache).as_posix() for directory, names, _ in os.walk(cache) if Path(directory).name == "x64")
+        self.assertEqual(real, ["node/22.0.0/x64", "other/1.0/x64"])
+        self.assertEqual(sorted(path.name for path in cache.iterdir()), ["lts", "node", "other"])
+        self.assertEqual(sorted(path.name for path in (cache / "node").iterdir()), ["22", "22.0.0", "stable"])
+        self.assertEqual((cache / "lts/stable/x64/bin/other").read_text(), "other")
+
     def test_a_tool_directory_that_is_a_link_alone_and_a_version_directory_that_is_a_link_alone_are_each_copied_as_the_link(self) -> None:
         for case, tool_link, version_link in (("tool", True, False), ("version", False, True)):
             with self.subTest(case):
