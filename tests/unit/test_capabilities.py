@@ -1306,6 +1306,73 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertEqual((tree / "libdir").resolve(), (tree / "lib").resolve())
         self.assertEqual((tree / "libdir/node_modules/npm/package.json").read_text(), "{}")
 
+    def aliased_tool_tree(self, alias: str) -> Path:
+        """Fill the store's entry for the node capability with a tool whose <arch> directories are an alias of a real one (an image aliasing x64 and amd64), with the alias pointing at target, and return the version directory."""
+        version = self.root / KEY_A / "node/22.0.0"
+        (version / "real/bin").mkdir(parents=True)
+        (version / "real/bin/node").write_text("binary")
+        (version / "real/README").write_text("readme")
+        (version / "x64").symlink_to(alias)
+        (version / "x64.complete").write_text("")
+        return version
+
+    def test_an_arch_directory_that_is_a_link_is_copied_as_the_link_and_the_store_is_never_written_through_it(self) -> None:
+        version = self.aliased_tool_tree("real")
+        before = self.snapshot(self.root)
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        tree = cache / "node/22.0.0"
+        # The alias is the pod's own link, naming the pod's own directory beside it, and the marker for it is copied.
+        self.assertEqual((tree / "x64").readlink(), Path("real"))
+        self.assertEqual((tree / "x64/README").resolve(), (tree / "real/README").resolve())
+        self.assertEqual((tree / "x64/README").read_text(), "readme")
+        self.assertTrue((tree / "x64.complete").is_file() and not (tree / "x64.complete").is_symlink())
+        self.assertTrue((tree / "real").is_dir() and not (tree / "real").is_symlink())
+        self.assertEqual((tree / "real/bin/node").read_text(), "binary")
+        # A job can change the tool through either name, and the store is unchanged.
+        (tree / "x64/created").write_text("created")
+        self.assertEqual((tree / "real/created").read_text(), "created")
+        self.assertEqual(self.snapshot(self.root), before)
+        self.assertFalse((version / "real/created").exists())
+
+    def test_linking_again_over_an_aliased_tool_tree_leaves_the_same_tree(self) -> None:
+        self.aliased_tool_tree("real")
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        first = self.snapshot(cache)
+        self.link_tool_cache(cache)
+        self.assertEqual(self.snapshot(cache), first)
+
+    def test_an_alias_of_an_alias_and_each_alias_marker_are_copied(self) -> None:
+        version = self.aliased_tool_tree("real")
+        (version / "amd64").symlink_to("x64")
+        (version / "amd64.complete").write_text("")
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        tree = cache / "node/22.0.0"
+        self.assertEqual((tree / "amd64").readlink(), Path("x64"))
+        self.assertEqual((tree / "amd64/bin/node").read_text(), "binary")
+        self.assertTrue((tree / "amd64.complete").is_file())
+
+    def test_an_absolute_link_for_an_arch_directory_is_copied_as_written_and_not_into_the_store(self) -> None:
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        # One that names a path in the pod's own tool cache, as an image built for that path writes it, and one that names the store itself.
+        for target in (cache / "node/22.0.0/real", self.root / KEY_A / "node/22.0.0/real"):
+            with self.subTest(target=str(target)):
+                self.aliased_tool_tree(str(target))
+                before = self.snapshot(self.root)
+                self.link_tool_cache(cache)
+                self.assertEqual((cache / "node/22.0.0/x64").readlink(), target)
+                self.assertEqual((cache / "node/22.0.0/x64/bin/node").read_text(), "binary")
+                self.assertEqual(self.snapshot(self.root), before)
+                shutil.rmtree(self.root / KEY_A)
+                shutil.rmtree(cache)
+                cache.mkdir()
+
     def test_linking_the_tool_cache_again_leaves_the_same_tree(self) -> None:
         self.tool_tree()
         cache = self.work / "toolcache-pod"
