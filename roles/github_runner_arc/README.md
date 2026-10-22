@@ -222,7 +222,7 @@ A profile is the unit a workflow selects, so a set of capabilities becomes a nam
 
 A tool image is any image that has:
 
-- a POSIX `sh` and `cp` at `/bin/sh` and on its `PATH`, which the init container runs as `/bin/sh -c 'cp -R /toolcache/. "$1"/'`, with the tool-cache mount as `$1` (a profile with `capability_store: true` copies with `rm -rf` and `cp -R` instead, so the image needs `rm` as well);
+- a POSIX `sh` and `cp` at `/bin/sh` and on its `PATH`, which the init container runs as `/bin/sh -c 'cp -R /toolcache/. "$1"/'`, with the tool-cache mount as `$1` (a profile with `capability_store: true` copies with `chmod -R`, `rm -rf` and `cp -R` instead, so the image needs `rm` and `chmod` as well);
 - the tool under `/toolcache`, already in the Actions tool-cache layout: `/toolcache/<tool>/<version>/<arch>/` holding the tool, and an empty `/toolcache/<tool>/<version>/<arch>.complete` file beside that directory, which `@actions/tool-cache` requires before it treats an entry as present;
 - files readable, and directories searchable, by any user, since the copy runs as the runner's user.
 
@@ -250,7 +250,7 @@ and is declared as `{image: ghcr.io/example/toolcache-example-cli:1.2.3, path: e
 
 A system-library image is any image that has:
 
-- a POSIX `sh` and `cp` at `/bin/sh` and on its `PATH`, which the init container runs as `/bin/sh -c 'cp -R /sysroot/. "$1"/'`, with the sysroot mount as `$1` (a profile with `capability_store: true` also needs `rm`, as for a tool-cache image); `cp -R` keeps symbolic links as links, which a library's versioned names (`libfoo.so` to `libfoo.so.1`) rely on;
+- a POSIX `sh` and `cp` at `/bin/sh` and on its `PATH`, which the init container runs as `/bin/sh -c 'cp -R /sysroot/. "$1"/'`, with the sysroot mount as `$1` (a profile with `capability_store: true` also needs `rm` and `chmod`, as for a tool-cache image); `cp -R` keeps symbolic links as links, which a library's versioned names (`libfoo.so` to `libfoo.so.1`) rely on;
 - the payload under `/sysroot`, laid out as an install prefix: programs in `bin/`, shared libraries in `lib/` (not `lib64/` or a multiarch subdirectory, which the search paths do not include), headers in `include/`, pkg-config files in `lib/pkgconfig/` or `share/pkgconfig/`, and CMake packages anywhere CMake's search under a prefix finds them, such as `lib/cmake/<name>/`;
 - a payload that works from whatever directory it is copied to, given the search paths and the capability's `env`: it must not need its build prefix to exist. In practice that means pkg-config files that name their prefix relative to their own location (`prefix=${pcfiledir}/../..`, which pkg-config and pkgconf both expand), CMake packages that compute their paths relative to themselves (what `install(EXPORT)` generates), no libtool `.la` archives (they record absolute paths), and, for a library that records its install prefix in its binaries, an environment variable it reads to find its files elsewhere, set through `env`;
 - programs and libraries built for the runner image's own C library, on the same distribution release as the runner image or an older one, linking only libraries the runner image already has or the payload carries itself. The payload should not carry its own copy of a library the runner image has, such as the C library, OpenSSL or the C++ runtime: `LD_LIBRARY_PATH` puts the sysroot first for every step, so its copy would replace the image's for everything those steps run;

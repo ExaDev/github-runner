@@ -1210,7 +1210,7 @@ _COPY_SCRIPT = (
 
 
 def _capability_store_copy_container(name: str, image: str, payload: str, key: str, store: Mapping[str, Any], runner_user: int, runner_group: int) -> dict[str, Any]:
-    """Return the init container that copies an image's payload into the store's incoming directory, unless the store already holds it. It runs the capability's own image, so it may use only what the image contract promises: a POSIX sh, its test builtin, rm and cp. It removes this pod's own destination first, since the kubelet reruns a pod's init containers after a sandbox change and a copy killed part-way leaves the destination behind, and cp -R onto a directory that exists nests the payload inside it and keeps the partial first copy. cp -R onto a path that does not exist creates it as the copy, so no mkdir is needed."""
+    """Return the init container that copies an image's payload into the store's incoming directory, unless the store already holds it. It runs the capability's own image, so it may use only what the image contract promises: a POSIX sh, its test builtin, chmod, rm and cp. It makes this pod's own destination owner-writable and removes it first, since the kubelet reruns a pod's init containers after a sandbox change and a copy killed part-way leaves the destination behind, and cp -R onto a directory that exists nests the payload inside it and keeps the partial first copy. cp -R onto a path that does not exist creates it as the copy, so no mkdir is needed."""
     root = store["path"].rstrip("/")
     return {
         "name": name,
