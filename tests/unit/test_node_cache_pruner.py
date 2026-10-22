@@ -601,8 +601,8 @@ class CapabilityStorePrunerTest(unittest.TestCase):
         completed = subprocess.run(["bash", str(SCRIPT)], check=True, env=environment, capture_output=True, text=True)
         return Run(root, state, completed.stdout), store
 
-    def store_pod(self, keys: list[str], node: str = "node-a", phase: str = "Running", uid: str = "pod-1", from_call: int = 0) -> dict[str, Any]:
-        return {"name": f"runner-{uid}", "uid": uid, "namespace": "arc-a", "node": node, "phase": phase, "volumes": [], "store_keys": keys, "from_call": from_call}
+    def store_pod(self, keys: list[str], node: str = "node-a", phase: str = "Running", uid: str = "pod-1", from_call: int = 0, namespace: str = "arc-a") -> dict[str, Any]:
+        return {"name": f"runner-{uid}", "uid": uid, "namespace": namespace, "node": node, "phase": phase, "volumes": [], "store_keys": keys, "from_call": from_call}
 
     def remaining(self, store: Path) -> list[str]:
         return sorted(path.name for path in store.iterdir() if not path.name.startswith("."))
@@ -615,6 +615,16 @@ class CapabilityStorePrunerTest(unittest.TestCase):
     def test_an_entry_an_unfinished_pod_on_this_node_lists_is_kept_after_its_template_moved_on(self) -> None:
         _, store = self.run_store([KEY_A, KEY_B, KEY_C], scale_sets=[{"namespace": "arc-a", "store_keys": [KEY_C]}], pods=[self.store_pod([KEY_A]), self.store_pod([KEY_B], phase="Pending", uid="pod-2")])
         self.assertEqual(self.remaining(store), [KEY_A, KEY_B, KEY_C])
+
+    def test_a_pod_in_a_namespace_that_left_the_store_profiles_keeps_its_entries_while_the_namespace_is_listed(self) -> None:
+        # arc-gone has no scale set any more but a pod made from its old template runs on the node: the role lists the namespace for as long as the pruner holds a Role there.
+        _, store = self.run_store([KEY_A, KEY_B], scale_sets=[{"namespace": "arc-a", "store_keys": [KEY_B]}], pods=[self.store_pod([KEY_A], namespace="arc-gone")], STORE_NAMESPACES="arc-a arc-gone")
+        self.assertEqual(self.remaining(store), [KEY_A, KEY_B])
+
+    def test_a_pod_in_a_namespace_that_is_not_listed_keeps_nothing(self) -> None:
+        # What the old scan did to arc-gone: the namespace dropped out of STORE_NAMESPACES and the entry went under the running pod.
+        _, store = self.run_store([KEY_A, KEY_B], scale_sets=[{"namespace": "arc-a", "store_keys": [KEY_B]}], pods=[self.store_pod([KEY_A], namespace="arc-gone")])
+        self.assertEqual(self.remaining(store), [KEY_B])
 
     def test_a_finished_pod_or_one_on_another_node_keeps_nothing(self) -> None:
         _, store = self.run_store([KEY_A, KEY_B], pods=[self.store_pod([KEY_A], phase="Succeeded"), self.store_pod([KEY_B], node="node-b", uid="pod-2")])

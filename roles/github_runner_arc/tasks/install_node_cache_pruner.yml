@@ -31,6 +31,17 @@
     msg: "{{ github_runner_arc_node_cache_legacy_access.left | join(' ') }}"
   when: github_runner_arc_node_cache_legacy_access.left | length > 0
 
+# The pruner's Roles and RoleBindings are found by the labels the role puts on them (all of them, so another software's objects are left alone) in every namespace. They are removed only when the pruner is, and found before the decision because the namespaces of those that exist are among the namespaces the capability store's references are read from (see decide_node_cache_pruner.yml). While it is installed a profile that has left the fleet keeps its grant, which is read-only (it lists pods and nothing else) and confined to that profile's own namespace, so staying is harmless, and it lets the pruner still check, and so clear, a directory the profile left. Bindings go before the roles they bind.
+- name: "Node cache: find the pruner's Roles and RoleBindings"
+  kubernetes.core.k8s_info:
+    api_version: rbac.authorization.k8s.io/v1
+    kind: "{{ item }}"
+    label_selectors: "{{ github_runner_arc_node_cache_pruner_labels | exadev.github_runner.arc_label_selectors }}"
+  loop:
+    - Role
+    - RoleBinding
+  register: github_runner_arc_node_cache_pruner_access
+
 - name: "Node cache: decide what the pruner needs"
   ansible.builtin.include_tasks: decide_node_cache_pruner.yml
 
@@ -81,17 +92,6 @@
     - {api_version: v1, kind: ServiceAccount}
   loop_control:
     label: "{{ item.kind }}/node-cache-pruner"
-
-# The pruner's Roles and RoleBindings are found by the labels the role puts on them (all of them, so another software's objects are left alone) in every namespace. They are removed only when the pruner is. While it is installed a profile that has left the fleet keeps its grant, which is read-only (it lists pods and nothing else) and confined to that profile's own namespace, so staying is harmless, and it lets the pruner still check, and so clear, a directory the profile left. Bindings go before the roles they bind.
-- name: "Node cache: find the pruner's Roles and RoleBindings"
-  kubernetes.core.k8s_info:
-    api_version: rbac.authorization.k8s.io/v1
-    kind: "{{ item }}"
-    label_selectors: "{{ github_runner_arc_node_cache_pruner_labels | exadev.github_runner.arc_label_selectors }}"
-  loop:
-    - Role
-    - RoleBinding
-  register: github_runner_arc_node_cache_pruner_access
 
 - name: "Node cache: remove the pruner's access when the pruner is not wanted"
   kubernetes.core.k8s:
