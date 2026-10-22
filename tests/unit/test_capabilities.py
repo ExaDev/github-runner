@@ -1147,6 +1147,27 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertEqual(self.snapshot(cache), first)
         self.assertTrue((cache / "node/22.0.0/x64/lib/deep/er").stat().st_mode & stat.S_IWUSR)
 
+    def test_linking_again_replaces_a_completeness_marker_that_is_read_only(self) -> None:
+        # The marker is copied as the store holds it, so a read-only one in the store is read-only in the pod, and a rerun must still replace it; a marker the pod's copy alone lost write permission on is the same case.
+        for store_mode, pod_mode in ((0o444, None), (0o644, 0o444)):
+            with self.subTest(store_mode=oct(store_mode), pod_mode=pod_mode and oct(pod_mode)):
+                self.work = Path(tempfile.mkdtemp(dir=self.work))
+                self.root = self.work / "store"
+                (self.root / ".incoming").mkdir(parents=True)
+                self.tool_tree()
+                (self.root / DIGEST_A / "node/22.0.0/x64.complete").chmod(store_mode)
+                cache = self.work / "toolcache-pod"
+                cache.mkdir()
+                self.link_tool_cache(cache)
+                marker = cache / "node/22.0.0/x64.complete"
+                if pod_mode is not None:
+                    marker.chmod(pod_mode)
+                self.assertFalse(marker.stat().st_mode & stat.S_IWUSR)
+                first = self.snapshot(cache)
+                self.link_tool_cache(cache)
+                self.assertEqual(self.snapshot(cache), first)
+                self.assertTrue(marker.is_file() and not marker.is_symlink())
+
     def test_the_pods_directories_keep_the_stores_modes_when_those_are_writable(self) -> None:
         arch = self.tool_tree()
         (arch / "bin").chmod(0o750)
