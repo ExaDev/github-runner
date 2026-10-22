@@ -54,14 +54,8 @@ log "Building the reference libpq system-library image"
 docker build -q -t "$library_image" "$repo_root/tool-images/libpq" >/dev/null
 
 log "Building the node cache pruner's image"
-# The autoscaler image's Dockerfile copies several scripts, of which the pruner needs only its own; a context holding that one keeps the build small, and the Dockerfile's other COPY lines are satisfied by empty files that nothing here runs.
-pruner_context="$work/pruner-context"
-mkdir -p "$pruner_context/autoscaler" "$pruner_context/scripts"
-cp "$repo_root/autoscaler/Dockerfile" "$pruner_context/autoscaler/Dockerfile"
-for path in autoscaler/loop.sh scripts/autoscaler.sh scripts/autoscaler-ceiling.jq scripts/psi-reporter.sh scripts/node-cache-pruner.sh; do
-  cp "$repo_root/$path" "$pruner_context/$path"
-done
-docker build -q -f "$pruner_context/autoscaler/Dockerfile" -t "$pruner_image" "$pruner_context" >/dev/null
+# The repository root is the context: the Dockerfile copies only the files it names, so the image is the same whichever other files the context holds, and a COPY line added to it needs no change here.
+docker build -q -f "$repo_root/autoscaler/Dockerfile" -t "$pruner_image" "$repo_root" >/dev/null
 
 log "Creating kind cluster ${cluster} and its registry"
 # A registry on the host's loopback that the nodes reach by its container name over the kind network, as kind's local registry guide has it (https://kind.sigs.k8s.io/docs/user/local-registry/): a pod's image reference names localhost:<port>, and each node's containerd maps that host to the container.
