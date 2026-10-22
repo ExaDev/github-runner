@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -1094,6 +1095,67 @@ class CapabilityStoreScriptTest(unittest.TestCase):
         self.assertEqual((cache / "node/22.0.0/arm64/bin/node").read_text(), "arm")
         self.assertTrue((cache / "node/22.0.0/x64/bin/node").is_file())
         self.assertFalse((cache / "node/22.0.0/arm64.complete").exists())
+
+    def read_only_tool_tree(self) -> Path:
+        """Return the store's <arch> directory of a tool tree whose directories, at several depths and including <arch> itself, lack owner write permission, as a Go module cache's do (mode 0555), holding a file and a link at the deepest level."""
+        arch = self.tool_tree()
+        (arch / "lib/deep/er").mkdir(parents=True)
+        (arch / "lib/deep/er/file").write_text("deep")
+        (arch / "lib/deep/er/link").symlink_to("file")
+        self.make_read_only(arch)
+        return arch
+
+    def test_a_tool_tree_the_store_holds_read_only_is_linked_and_every_directory_in_the_pod_is_writable(self) -> None:
+        self.read_only_tool_tree()
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        tree = cache / "node/22.0.0/x64"
+        directories = [tree, *(path for path in tree.rglob("*") if path.is_dir() and not path.is_symlink())]
+        self.assertGreater(len(directories), 6)
+        for directory in directories:
+            self.assertTrue(directory.stat().st_mode & stat.S_IWUSR, directory)
+        self.assertEqual((tree / "lib/deep/er/link").readlink(), Path("file"))
+        self.assertEqual((tree / "lib/deep/er/file").read_text(), "deep")
+
+    def test_a_job_can_change_a_directory_the_store_holds_read_only_and_the_store_is_unchanged(self) -> None:
+        arch = self.read_only_tool_tree()
+        before = self.snapshot(self.root)
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        deepest = cache / "node/22.0.0/x64/lib/deep/er"
+        (deepest / "created").write_text("created")
+        (deepest / "file").unlink()
+        (deepest / "file").write_text("replaced")
+        (deepest / "link").unlink()
+        (cache / "node/22.0.0/x64/lib/new").mkdir()
+        self.assertEqual((deepest / "file").read_text(), "replaced")
+        self.assertEqual(self.snapshot(self.root), before)
+        self.assertEqual((arch / "lib/deep/er/file").read_text(), "deep")
+        self.assertFalse((arch / "lib/deep/er/created").exists())
+
+    def test_linking_again_over_a_pod_tree_whose_directories_were_left_read_only_converges(self) -> None:
+        self.read_only_tool_tree()
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        first = self.snapshot(cache)
+        # What a run killed after it built the directories and before it made them writable leaves.
+        self.make_read_only(cache / "node")
+        self.link_tool_cache(cache)
+        self.assertEqual(self.snapshot(cache), first)
+        self.assertTrue((cache / "node/22.0.0/x64/lib/deep/er").stat().st_mode & stat.S_IWUSR)
+
+    def test_the_pods_directories_keep_the_stores_modes_when_those_are_writable(self) -> None:
+        arch = self.tool_tree()
+        (arch / "bin").chmod(0o750)
+        cache = self.work / "toolcache-pod"
+        cache.mkdir()
+        self.link_tool_cache(cache)
+        tree = cache / "node/22.0.0/x64"
+        for relative in (".", "bin", "lib", "lib/node_modules/npm", "empty"):
+            self.assertEqual(stat.S_IMODE((tree / relative).stat().st_mode), stat.S_IMODE((arch / relative).stat().st_mode), relative)
 
     def test_linking_fails_when_an_entry_cannot_be_linked(self) -> None:
         self.tool_tree()
