@@ -39,6 +39,7 @@ services:
     environment:
       - K3S_TOKEN=${K3S_TOKEN:?K3S_TOKEN must be set in .env - an arbitrary shared secret for node-join auth, unrelated to GitHub}
       - K3S_KUBECONFIG_OUTPUT=/output/kubeconfig.yaml
+      # Not the mode the kubeconfig gets: k3s/node-entrypoint.sh passes --write-kubeconfig-mode, which k3s takes over this variable. It stays because the variable is part of the service's configuration, whose hash Compose compares to decide whether to recreate a container, so removing it would recreate every running server.
       - K3S_KUBECONFIG_MODE=666
       - K3S_TLS_SAN_LIST=${K3S_TLS_SAN_LIST:?K3S_TLS_SAN_LIST must be set in .env - a space-separated list of every server node's own Tailscale hostname, including this one's}
       # Not :?required here, unlike the agent's: the bootstrap server of a cluster that runs its own Headscale starts once before the key exists (see K3S_MESH_SELF_HOSTED_HEALTH_URL). k3s/node-entrypoint.sh fails fast for every other server without one, and the Ansible role checks it before templating .env.

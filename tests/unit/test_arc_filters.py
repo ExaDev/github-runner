@@ -172,6 +172,56 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(arc.arc_profiles([org(profiles=[profile])])["profiles"][0]["settings"], profile)
 
 
+class ClusterProfilesTest(unittest.TestCase):
+    # One org whose scale sets are split across two clusters: the default set on node-a, the builder set on node-b.
+    SPLIT = {"node-a": [org(profiles=[{"max_runners": 1}])], "node-b": [org(profiles=[{"suffix": "-builder", "max_runners": 1}])]}
+
+    def test_an_org_may_be_installed_into_two_clusters(self) -> None:
+        result = arc.arc_cluster_profiles(self.SPLIT, ["node-a"])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([profile["release"] for profile in result["profiles"]], ["example-runners"])
+
+    def test_only_the_clusters_own_hosts_are_expanded(self) -> None:
+        result = arc.arc_cluster_profiles(self.SPLIT, ["node-b"])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([profile["release"] for profile in result["profiles"]], ["example-runners-builder"])
+
+    def test_an_org_on_two_hosts_of_one_cluster_names_both_hosts(self) -> None:
+        result = arc.arc_cluster_profiles(self.SPLIT, ["node-a", "node-b"])
+        self.assertEqual(result["errors"], ["Org 'Example' is configured more than once in github_runner_arc_orgs for one cluster, on node-a (as 'Example') and on node-b. Each org's Helm releases in a cluster must be installed from one host; move its scale_set_profiles onto one of them."])
+
+    def test_an_unknown_cluster_counts_every_host_as_one(self) -> None:
+        result = arc.arc_cluster_profiles(self.SPLIT)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("for one cluster, on node-a (as 'Example') and on node-b", result["errors"][0])
+
+    def test_the_same_org_twice_on_one_host_is_still_an_error(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org("Example"), org("example")]}, ["node-a"])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("configured more than once in github_runner_arc_orgs (also as 'Example')", result["errors"][0])
+
+    def test_one_scale_set_registered_from_two_clusters_is_an_error(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org(profiles=[{"max_runners": 1}])], "node-b": [org("example", [{"namespace": "elsewhere", "max_runners": 1}])]}, ["node-a"])
+        self.assertEqual(result["errors"], ["Example on node-a and example on node-b, which installs into another cluster, both register scale set 'example-runners' for org 'example'. GitHub gives a scale set name to one controller at a time; uninstall it from one cluster before installing it in the other, or give one of them a different suffix or release_name."])
+
+    def test_another_orgs_scale_set_of_the_same_name_is_not_a_conflict(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org(profiles=[{"release_name": "ci", "max_runners": 1}])], "node-b": [org("Other", [{"release_name": "ci", "max_runners": 1}])]}, ["node-a"])
+        self.assertEqual(result["errors"], [])
+
+    def test_another_clusters_invalid_orgs_are_left_to_its_own_check(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org()], "node-b": [org("Other", []), {"name": "Broken"}]}, ["node-a"])
+        self.assertEqual(result["errors"], [])
+
+    def test_the_clusters_checks_span_its_hosts(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org(profiles=[{"namespace": "shared", "max_runners": 1}])], "node-b": [org("Other", [{"namespace": "shared", "max_runners": 1}])]}, ["node-a", "node-b"])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("both map to namespace 'shared'", result["errors"][0])
+
+    def test_a_hosts_orgs_must_be_a_list(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": "Example"}, ["node-a"])
+        self.assertEqual(result["errors"], ["node-a: github_runner_arc_orgs must be a list"])
+
+
 class MaxRunnersTest(unittest.TestCase):
     def test_the_tighter_resource_bounds_pods_per_node(self) -> None:
         # CPU allows 8 / 1 = 8 per node; memory allows 16 / 3 = 5, so memory is the bound.

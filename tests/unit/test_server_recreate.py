@@ -313,6 +313,11 @@ class StartServersTest(RoleTestCase):
             self.rendered(name, HASH_NEW)
         self.nodes(**{name: "True" for name in hashes})
 
+    def registered_nodes(self) -> dict[str, str]:
+        """The nodes the stub holds as registered, each with its Ready condition, whatever order they registered in."""
+        words = (self.stub / "cluster.nodes").read_text().split()
+        return dict(zip(words[::2], words[1::2], strict=True))
+
     def turns_do_not_overlap(self) -> None:
         """Every server's calls in the log lie wholly before or wholly after every other's, whichever went first."""
         spans = sorted((min(self.events(f"node{n}")), max(self.events(f"node{n}"))) for n in (1, 2, 3))
@@ -330,7 +335,7 @@ class StartServersTest(RoleTestCase):
         ups = [call for call in self.calls() if call.startswith("module up")]
         # Which server goes first is the order the hosts' results arrive in, so only the set is fixed.
         self.assertCountEqual(ups, [f"module up node{n} profiles=server check=False" for n in (1, 2, 3)])
-        self.assertEqual((self.stub / "cluster.nodes").read_text().split(), ["node1", "True", "node2", "True", "node3", "True"])
+        self.assertEqual(self.registered_nodes(), {"node1": "True", "node2": "True", "node3": "True"})
 
     def test_a_server_is_ready_again_before_the_next_servers_turn_begins(self) -> None:
         # Each recreate takes its node out of Ready until the role has waited for it, so a turn that began before the wait would find that node not Ready and refuse: the run passing shows the turns do not overlap, and the log shows the order.
@@ -358,7 +363,8 @@ class StartServersTest(RoleTestCase):
         self.rendered("node2", HASH_NEW)
         self.rendered("node3", HASH_NEW)
         self.nodes(node1="True")
-        result = self.start()
+        # Only the bootstrap server takes a turn: the others' turns come in no fixed order, and one that came first would register itself before node1's turn and leave node1 a peer to wait for.
+        result = self.start(limit="node1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([call for call in self.calls() if call.startswith("module up node1")], ["module up node1 profiles=server check=False"])
         self.assertEqual([call for call in self.calls() if " kubectl get lease " in call], [])

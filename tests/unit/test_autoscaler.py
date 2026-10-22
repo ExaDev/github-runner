@@ -66,11 +66,27 @@ FAKE_KUBECTL = textwrap.dedent(
         sys.stdout.write(json.dumps({"items": state["pods"].get(namespace, [])}))
         sys.exit(0)
     if args[:2] == ["top", "pod"]:
+        # As the real kubectl does: a pod placed on a node with no metrics yet fails the whole namespace.
         if state["top_pod_fails"]:
             sys.exit(1)
         namespace = args[args.index("-n") + 1]
-        for name, mib in state["top"].get(namespace, {}).items():
+        measured = state["top"].get(namespace, {})
+        for pod in state["pods"].get(namespace, []):
+            name = pod.get("metadata", {}).get("name")
+            if pod.get("spec", {}).get("nodeName") and name not in measured:
+                sys.stderr.write("error: Metrics not available for pod %s/%s, age: 5s\\n" % (namespace, name))
+                sys.exit(1)
+        for name, mib in measured.items():
             sys.stdout.write("%s 10m %dMi\\n" % (name, mib))
+        sys.exit(0)
+    if args[:2] == ["get", "--raw"] and args[2].startswith("/apis/metrics.k8s.io/v1beta1/namespaces/"):
+        # The metrics API's own list: only the pods metrics-server has sampled, and an error only when the API itself is down.
+        if state["top_pod_fails"]:
+            sys.stderr.write("Error from server (ServiceUnavailable): the server is currently unable to handle the request\\n")
+            sys.exit(1)
+        namespace = args[2].split("/")[5]
+        items = [{"metadata": {"name": name, "namespace": namespace}, "containers": [{"name": "runner", "usage": {"cpu": "10m", "memory": "%dMi" % mib}}]} for name, mib in state["top"].get(namespace, {}).items()]
+        sys.stdout.write(json.dumps({"kind": "PodMetricsList", "items": items}))
         sys.exit(0)
     if args[:2] == ["get", "ephemeralrunner"]:
         runner = state["runners"].get(args[2])
@@ -266,12 +282,12 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("would patch", result.stdout)
 
-    def test_a_scale_set_with_no_ephemeral_runners_counts_as_zero_runners(self) -> None:
+    def test_a_scale_set_with_no_ephemeral_runners_counts_as_zero_runners_and_keeps_one_slot(self) -> None:
         result = self.poll({"ns-a": [UNSCHEDULABLE_POD]}, running=None)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("R_total=0", result.stdout)
         for namespace in NAMESPACES:
-            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to 0", result.stdout)
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to 1", result.stdout)
 
     def test_a_failing_memory_measurement_fails_safe_for_every_target(self) -> None:
         result = self.poll({}, top_pod_fails=True)
@@ -550,6 +566,70 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("rebalance:", result.stdout)
 
+    @staticmethod
+    def runner_pod(name: str, node: str | None = "node", phase: str = "Running", limit: str | None = "7Gi") -> dict[str, object]:
+        """A runner pod as the pod list gives it: placed on node (None for not yet placed), with a memory limit unless limit is None."""
+        resources = {"limits": {"memory": limit}} if limit is not None else {}
+        spec: dict[str, object] = {"containers": [{"name": "runner", "resources": resources}]}
+        if node is not None:
+            spec["nodeName"] = node
+        return {"metadata": {"name": name}, "spec": spec, "status": {"phase": phase, "conditions": [{"type": "PodScheduled", "status": "True"}]}}
+
+    def test_a_runner_pod_with_no_metrics_yet_neither_fails_safe_nor_lowers_the_pool(self) -> None:
+        pods = {"ns-a": [self.runner_pod("old"), self.runner_pod("new")], "ns-b": [self.runner_pod("other")]}
+        result = self.poll(pods, top={"ns-a": {"old": 900}, "ns-b": {"other": 600}}, max_runners={"ns-a": 3, "ns-b": 3}, ceiling=6)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("FAIL-SAFE", result.stderr)
+        self.assertIn("usage=1500MiB", result.stdout)
+        self.assertIn("unmeasured_pods=1 assumed=7168MiB", result.stdout)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_an_unmeasured_pod_is_counted_at_its_limit_before_the_pool_is_raised(self) -> None:
+        # Four new 7Gi pods leave 5Gi of the 33Gi budget at their limits, less than a pod's room; one leaves 26Gi.
+        four = {"ns-a": [self.runner_pod(f"new-{n}") for n in range(4)]}
+        held = self.poll(four, max_runners={"ns-a": 2, "ns-b": 2}, configmap={"raise-confirm-count": "1"})
+        self.assertEqual(held.returncode, 0, held.stderr)
+        self.assertIn("unmeasured_pods=4 assumed=28672MiB", held.stdout)
+        self.assertNotIn("would patch", held.stdout)
+        self.assertIn("have no metrics yet", json.loads(self.stored("status.json") or "{}")["mode"])
+        one = {"ns-a": [self.runner_pod("new")]}
+        # The held poll reset the confirmation count, so this one starts it again on the way to a raise.
+        self.poll(one, max_runners={"ns-a": 2, "ns-b": 2})
+        self.assertEqual(json.loads(self.stored("status.json") or "{}")["mode"], "watching: headroom confirmed for 1/2 polls")
+
+    def test_an_unmeasured_pod_with_no_limit_is_counted_at_its_scale_sets_limit(self) -> None:
+        result = self.poll({"ns-a": [self.runner_pod("new", limit=None)]})
+        self.assertIn("unmeasured_pods=1 assumed=7168MiB", result.stdout)
+
+    def test_a_pod_not_yet_placed_or_already_finished_is_not_unmeasured(self) -> None:
+        pods = {"ns-a": [self.runner_pod("waiting", node=None, phase="Pending"), self.runner_pod("done", phase="Succeeded"), self.runner_pod("broke", phase="Failed")]}
+        result = self.poll(pods)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unmeasured_pods=0 assumed=0MiB", result.stdout)
+
+    def test_an_unmeasured_pods_limit_in_another_unit_is_converted(self) -> None:
+        result = self.poll({"ns-a": [self.runner_pod("new", limit="7516192768")]})
+        self.assertIn("unmeasured_pods=1 assumed=7168MiB", result.stdout)
+
+    def test_the_metrics_api_failing_still_fails_safe_and_says_why(self) -> None:
+        result = self.poll({}, top_pod_fails=True)
+        self.assertIn("FAIL-SAFE: the metrics API failed for ns-a (Error from server (ServiceUnavailable)", result.stderr)
+
+    def test_lowering_never_takes_a_scale_set_with_nothing_running_to_zero(self) -> None:
+        # The fail-safe lowers towards a floor of 3: the set running three keeps them, and the idle one keeps one slot instead of none.
+        result = self.poll({}, top_pod_fails=True, ephemeral={"ns-a": ["Running"] * 3, "ns-b": []})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.patched_maximums(result), {"ns-b": 1})
+        for reason in ({"nodes": [{"name": "node", "labels": [], "mem": "95%"}]}, {"pods": {"ns-a": [UNSCHEDULABLE_POD]}}):
+            with self.subTest(reason):
+                lowered = self.poll(reason.get("pods", {}), nodes=reason.get("nodes"), ephemeral={"ns-a": ["Running"] * 3, "ns-b": []})  # type: ignore[arg-type]
+                self.assertEqual(self.patched_maximums(lowered), {"ns-b": 1})
+
+    def test_a_scale_set_left_at_zero_is_given_a_slot_back_by_rebalancing(self) -> None:
+        result = self.poll(self.FULL_POOL, ceiling=6, max_runners={"ns-a": 0, "ns-b": 6}, ephemeral={"ns-a": [], "ns-b": ["Running"] * 2}, configmap={"rebalance-confirm-count": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.patched_maximums(result), {"ns-a": 1, "ns-b": 5})
+
     def test_a_record_larger_than_one_argument_may_be_is_still_stored(self) -> None:
         # More bytes than the kernel accepts for all arguments together (and far more than one argument may hold), so it can reach kubectl only through a file.
         entry_bytes = 4096
@@ -804,7 +884,7 @@ class CeilingProgramTest(unittest.TestCase):
             for name, value in (("templates", template), ("nodes", {"items": nodes}), ("pods", {"items": pods})):
                 Path(work, name).write_text(json.dumps(value))
             out = subprocess.run(
-                ["jq", "-c", "--slurpfile", "templates", f"{work}/templates", "--slurpfile", "nodes", f"{work}/nodes", "--argjson", "pooled", json.dumps([cls.POOLED]), "-f", str(CEILING_PROGRAM), f"{work}/pods"],
+                ["jq", "-c", "--slurpfile", "templates", f"{work}/templates", "--slurpfile", "nodes", f"{work}/nodes", "--argjson", "pooled", json.dumps([cls.POOLED]), "-L", str(CEILING_PROGRAM.parent), "-f", str(CEILING_PROGRAM), f"{work}/pods"],
                 capture_output=True, text=True, check=True,
             )
         result: dict[str, object] = json.loads(out.stdout)

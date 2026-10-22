@@ -145,6 +145,8 @@ install_tailscale_up_wait() {
 
 # Sets server_args to the arguments of `k3s server` on the mesh.
 #
+# --write-kubeconfig-mode=644: k3s writes the admin kubeconfig to /output, which docker-compose.yml bind-mounts from the host's kubeconfig directory, and the role reads it there as the user it connects as, without become. On a host whose Docker runs containers as root the file is root's, so that user reads it through the permission bits for others; the role creates the directory 0700 for that user, which keeps every other local user out. k3s applies the mode each time it writes the file, at every start, and the flag takes precedence over K3S_KUBECONFIG_MODE in docker-compose.yml.
+#
 # --disable-network-policy: this fleet has no use for Kubernetes NetworkPolicy, and kube-router's enforcement chains sit directly in the FORWARD path every cross-node pod packet takes.
 #
 # --node-ip forces etcd's peer-advertise address onto this node's mesh IP. k3s builds etcd's --initial-cluster from config.PrivateIP, which is populated from --node-ip before --vpn-auth's own executor code rebuilds NodeIP from its Tailscale detection (traced through pkg/cli/server/server.go and pkg/executor/embed/embed.go). Without it PrivateIP stays the container's bridge IP, which no other machine can reach, and joining a second server failed with "MemberAdd request timed out". An --etcd-arg override is not a substitute: it also applies to the temporary etcd k3s starts on every restart to reconcile with its datastore, which has no TLS certificates for a 0.0.0.0:2380 listener and failed with "cannot listen on TLS for [::]:2380: KeyFile and CertFile are not presented".
@@ -159,7 +161,7 @@ install_tailscale_up_wait() {
 #
 # regrade_flags (set_regrade_flags above) are added last, and are empty at every level but etcd-only.
 mesh_server_args() {
-  set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443 \
+  set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=644 \
     --vpn-auth="$vpn_auth" \
     --resolv-conf=/etc/k3s-resolv.conf \
     --node-ip="$mesh_ip"
@@ -177,7 +179,7 @@ mesh_server_args() {
 
 # Sets server_args to the arguments of `k3s server` off the mesh, for a self-hosted bootstrap server whose Headscale server is not answering yet. No --vpn-auth, no --node-ip and no mesh resolver, so k3s and the Headscale static pod come up on the container's own network. No --cluster-init either: a fresh server starts on SQLite, and restarting it on the mesh with --cluster-init converts that to etcd with the mesh IP as etcd's peer address from the start, while an already-initialised server finds its etcd datastore regardless.
 direct_server_args() {
-  set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=6443
+  set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=644
   for flag in $api_port_flags; do set -- "$@" "$flag"; done
   for san in ${K3S_TLS_SAN_LIST:-}; do set -- "$@" --tls-san "$san"; done
   for flag in $etcd_timing_flags; do set -- "$@" "$flag"; done

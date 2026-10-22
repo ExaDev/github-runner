@@ -71,11 +71,17 @@
   ansible.builtin.include_tasks: instance_check.yml
 
 - name: Create this host's Compose project directory
+  # The kubeconfig directory is the connecting user's alone: the kubeconfig k3s writes into it holds the cluster's admin credentials, and is readable by others so that this user can read it where the container writes it as root (see --write-kubeconfig-mode in k3s/node-entrypoint.sh).
   ansible.builtin.file:
-    path: "{{ github_runner_cluster_dir }}/{{ item }}"
+    path: "{{ github_runner_cluster_dir }}/{{ item.path }}"
     state: directory
-    mode: "0755"
-  loop: ["", k3s, kubeconfig]
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "", mode: "0755"}
+    - {path: k3s, mode: "0755"}
+    - {path: kubeconfig, mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"
 
 - name: Place the collection's Compose file and k3s build context in it
   # Before the mesh step, since the headscale_in_cluster provider starts the bootstrap server's Compose project itself. Copied on every run, so a collection upgrade reaches the host. The entrypoint is bind-mounted read-only and run through /bin/sh, so its mode only matters to someone running it by hand.

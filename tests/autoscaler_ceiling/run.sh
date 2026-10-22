@@ -4,7 +4,8 @@
 # - the ceiling it works out equals the role's install-time measurement (plugins/filter/arc.py's arc_measured_max_runners) of the same nodes and pods, and a pool above it is lowered to it;
 # - a pod of another workload taking a runner's worth of cpu lowers the ceiling and the pool, and once it is gone the pool is raised back after the confirmation polls;
 # - a runner template the ceiling cannot be worked out from keeps the last ceiling and never raises the pool;
-# - a cordoned node is not counted, so the pool comes down to its running count.
+# - a runner pod placed on the node with no metrics (one whose image never pulls, so it never runs) is counted as unmeasured, where `kubectl top pod` fails the whole namespace, and does not fail the poll safe;
+# - a cordoned node is not counted, so the pool comes down to one slot per scale set, never to 0.
 #
 # The runner pod's cpu request is chosen from the node's free cpu so that cpu decides the ceiling, whatever size of node the cluster has.
 #
@@ -196,6 +197,18 @@ expect_log "above the ceiling ${expected}"
 expect_total "$expected"
 [ "$(status | jq -c --arg node "$node" '[.ceiling, .ceiling_measured, (.ceiling_nodes[] | select(.name == $node) | .runners)]')" = "[${expected},true,${expected}]" ] || fail "the status does not record the ceiling: $(status)"
 
+log "A runner pod with no metrics is unmeasured, not a reason to fail safe"
+kubectl run unmeasured -n "${pooled_namespaces[0]}" --labels=actions-ephemeral-runner=True --image=registry.invalid/never-pulled:0 --restart=Never --overrides "{\"spec\": {\"nodeSelector\": {\"${eligibility_label}\": \"true\"}, \"containers\": [{\"name\": \"unmeasured\", \"image\": \"registry.invalid/never-pulled:0\", \"resources\": {\"limits\": {\"memory\": \"${runner_memory}\"}}}]}}" >/dev/null
+kubectl wait --for=condition=PodScheduled pod/unmeasured -n "${pooled_namespaces[0]}" --timeout=60s >/dev/null || fail "the unmeasured pod was never placed"
+# The failure the autoscaler used to fail safe on, shown on this cluster.
+if kubectl top pod -n "${pooled_namespaces[0]}" --no-headers >/dev/null 2>&1; then
+  fail "kubectl top pod succeeded with a placed pod that has no metrics, so this check no longer shows what it guards against"
+fi
+poll
+expect_log "unmeasured_pods=1 assumed=$(( ${runner_memory%Mi} ))MiB"
+grep -qF "FAIL-SAFE" "$work/poll.log" && fail "a pod with no metrics failed the poll safe"
+kubectl delete pod unmeasured -n "${pooled_namespaces[0]}" --wait=true >/dev/null
+
 log "Another workload's pod taking a runner's cpu lowers the ceiling and the pool"
 kubectl run consumer -n "$other_namespace" --image=registry.k8s.io/pause:3.10 --restart=Never --overrides "{\"spec\": {\"containers\": [{\"name\": \"consumer\", \"image\": \"registry.k8s.io/pause:3.10\", \"resources\": {\"requests\": {\"cpu\": \"${runner_cpu}\"}}}]}}" >/dev/null
 kubectl wait --for=condition=Ready pod/consumer -n "$other_namespace" --timeout=180s >/dev/null || fail "the consumer pod never started"
@@ -233,11 +246,11 @@ done
 poll
 expect_log "ceiling=${expected} measured_ceiling=true"
 
-log "A cordoned node is not counted, so the pool comes down to its running count"
+log "A cordoned node is not counted, so the pool comes down to one slot per scale set"
 kubectl cordon "$node" >/dev/null
 poll
 expect_log "ceiling=0 measured_ceiling=true"
-expect_total 0
+expect_total "${#pooled_namespaces[@]}"
 [ "$(status | jq -r --arg node "$node" '.ceiling_nodes[] | select(.name == $node) | .not_counted')" = "is cordoned" ] || fail "the status does not say why the node is not counted: $(status)"
 kubectl uncordon "$node" >/dev/null
 

@@ -1,3 +1,54 @@
+## [2.7.9](https://github.com/ExaDev/github-runner/compare/v2.7.8...v2.7.9) (2026-10-21)
+
+### Tests
+
+* **mesh:** check a server stepped down to etcd-only gives the Lease back ([d976df7](https://github.com/ExaDev/github-runner/commit/d976df767612daa1f0ff9f1e4dbaac3fbeb51bec))
+
+## [2.7.8](https://github.com/ExaDev/github-runner/compare/v2.7.7...v2.7.8) (2026-10-21)
+
+### Bug Fixes
+
+* **arc:** check orgs per cluster and refuse a scale set registered from two clusters ([26230fe](https://github.com/ExaDev/github-runner/commit/26230fe055f910775d6112fd1d23215381ff71eb)), closes [#130](https://github.com/ExaDev/github-runner/issues/130)
+* **arc:** name every scale set after its release whatever a values file says ([73cde13](https://github.com/ExaDev/github-runner/commit/73cde13d5ffb69c49862d8a2c4c8b6c60bd92803))
+
+## [2.7.7](https://github.com/ExaDev/github-runner/compare/v2.7.6...v2.7.7) (2026-10-21)
+
+### Bug Fixes
+
+* **cluster:** write the kubeconfig with a permission mode, not the API port ([f841b5d](https://github.com/ExaDev/github-runner/commit/f841b5d6135d33eae527dcd0d515aab9d11c8d45))
+
+## [2.7.6](https://github.com/ExaDev/github-runner/compare/v2.7.5...v2.7.6) (2026-10-21)
+
+### Tests
+
+* **cluster:** stop two recreate tests assuming which server takes the first turn ([fe5065d](https://github.com/ExaDev/github-runner/commit/fe5065d7374c070fa4b4d17dc7d2d6f9a015f656))
+
+## [2.7.5](https://github.com/ExaDev/github-runner/compare/v2.7.4...v2.7.5) (2026-10-20)
+
+### Bug Fixes
+
+* **autoscaler:** count a runner pod with no metrics yet at its limit, keep a slot per set ([01d41fd](https://github.com/ExaDev/github-runner/commit/01d41fd6f1196774cb21ac5f22f13279b010a833)), closes [#134](https://github.com/ExaDev/github-runner/issues/134)
+
+### Documentation
+
+* **autoscaler:** describe unmeasured runner pods and the one-slot minimum ([082124d](https://github.com/ExaDev/github-runner/commit/082124d0b27ed40a7e31e1ad34b2d6dcb9205381)), closes [#134](https://github.com/ExaDev/github-runner/issues/134)
+
+### Tests
+
+* **autoscaler:** show a runner pod with no metrics on a real cluster ([ca182c0](https://github.com/ExaDev/github-runner/commit/ca182c04008e0183923d54f1aea8f527571b9b98)), closes [#134](https://github.com/ExaDev/github-runner/issues/134)
+
+## [2.7.4](https://github.com/ExaDev/github-runner/compare/v2.7.3...v2.7.4) (2026-10-20)
+
+### Bug Fixes
+
+* **cluster:** leave a level someone else changed for the cooldown ([8f9257e](https://github.com/ExaDev/github-runner/commit/8f9257eba71599db3d41516977a47e46c22f5d89))
+
+### Tests
+
+* **mesh:** count only a known reduced level as a server having stepped ([9c3d075](https://github.com/ExaDev/github-runner/commit/9c3d0756b10880711dc79bff463adae76ffdc555))
+* **mesh:** print what regrading recorded for each node when a scenario fails ([458a474](https://github.com/ExaDev/github-runner/commit/458a474236720ab8f16404e8d2614fa74ea43dc1))
+* **mesh:** wait for a level to read instead of asserting one read ([6bef0c6](https://github.com/ExaDev/github-runner/commit/6bef0c6d0d24b8b578f1b1e5f1e51525cfbeaa45))
+
 ## [2.7.3](https://github.com/ExaDev/github-runner/compare/v2.7.2...v2.7.3) (2026-10-20)
 
 ### Bug Fixes
