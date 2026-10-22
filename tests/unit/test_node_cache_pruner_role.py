@@ -56,17 +56,26 @@ def render(**role_vars: Any) -> list[dict[str, Any]]:
         return documents
 
 
-def decide(fleet_targets: list[str], **role_vars: Any) -> dict[str, Any]:
-    """Run the decision for a fleet of the given profile targets, each with the pnpm-store capability when its target is listed in with_cache, and using the capability store when it is listed in with_store."""
+def decide_everything(fleet_targets: list[str], **role_vars: Any) -> dict[str, Any]:
+    """Run the decision for a fleet of the given profile targets, each with the pnpm-store capability when its target is listed in with_cache, and using the capability store when it is listed in with_store. Roles are the pruner's Roles the cluster has, as (namespace, release) pairs."""
     with_cache = role_vars.pop("with_cache", fleet_targets)
     with_store = role_vars.pop("with_store", [])
+    roles = role_vars.pop("roles", [])
     profiles = [{"namespace": target.split("/")[0], "release": target.split("/")[1], "target": target, "capabilities": ["pnpm-store" if target in with_cache else "node"], "capability_store": target in with_store} for target in fleet_targets]
+    found = {"results": [{"resources": [access("Role", namespace, release) for namespace, release in roles]}, {"resources": [access("RoleBinding", namespace, release) for namespace, release in roles]}]}
     with tempfile.TemporaryDirectory() as work:
         output = Path(work) / "decision.json"
-        completed = ansible(DECIDE, decide_output=str(output), github_runner_arc_fleet={"profiles": profiles}, github_runner_arc_capabilities=CATALOGUE, **role_vars)
+        completed = ansible(DECIDE, decide_output=str(output), github_runner_arc_fleet={"profiles": profiles}, github_runner_arc_capabilities=CATALOGUE, github_runner_arc_node_cache_pruner_access=found, **role_vars)
         assert completed.returncode == 0, completed.stdout + completed.stderr
         decision: dict[str, Any] = json.loads(output.read_text())
         return decision
+
+
+def decide(fleet_targets: list[str], **role_vars: Any) -> dict[str, Any]:
+    """The decision whether the pruner is wanted and for which node caches, see decide_everything."""
+    decision = decide_everything(fleet_targets, **role_vars)
+    del decision["store_namespaces"]
+    return decision
 
 
 class ManifestTest(unittest.TestCase):
@@ -142,6 +151,35 @@ class DecisionTest(unittest.TestCase):
         self.assertEqual(decide(["arc-a/main"], with_cache=[], with_store=["arc-a/main"]), {"wanted": True, "targets": []})
 
 
+class CapabilityStoreNamespacesTest(unittest.TestCase):
+    """The namespaces the pruner reads the store's references from: those a pod made from an earlier template may still run in, not only those of the profiles using the store now."""
+
+    def test_a_namespace_whose_profile_switched_the_store_off_is_still_read(self) -> None:
+        decision = decide_everything(["arc-a/main", "arc-b/builders"], with_store=["arc-a/main"])
+        self.assertEqual(decision["store_namespaces"], ["arc-a", "arc-b"])
+
+    def test_a_namespace_whose_profile_left_the_fleet_is_still_read_while_the_pruner_keeps_its_role(self) -> None:
+        decision = decide_everything(["arc-a/main"], with_store=["arc-a/main"], roles=[("arc-a", "main"), ("arc-gone", "old")])
+        self.assertEqual(decision["store_namespaces"], ["arc-a", "arc-gone"])
+
+    def test_no_namespace_is_read_while_no_profile_uses_the_store_so_the_store_is_left_alone(self) -> None:
+        decision = decide_everything(["arc-a/main", "arc-b/builders"], roles=[("arc-gone", "old")])
+        self.assertEqual(decision["store_namespaces"], [])
+
+    def test_only_roles_carrying_every_label_of_the_pruner_count(self) -> None:
+        profiles = [{"namespace": "arc-a", "capability_store": True}]
+        found = [access("Role", "arc-gone", "old"), access("Role", "other", "app", labels={"app.kubernetes.io/name": "node-cache-pruner"}), access("RoleBinding", "bound-only", "old")]
+        self.assertEqual(arc.arc_capability_store_namespaces(profiles, found, OWN_LABELS), ["arc-a", "arc-gone"])
+
+    def test_the_install_reads_the_pruners_roles_before_it_decides(self) -> None:
+        calls = install(["arc-a/main", "arc-b/builders"], with_store=["arc-a/main"], existing=[access("Role", "arc-gone", "old"), access("RoleBinding", "arc-gone", "old")])
+        daemonset = next(call["definition"] for call in calls if (call.get("definition") or {}).get("kind") == "DaemonSet")
+        env = {item["name"]: item.get("value") for item in daemonset["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["STORE_NAMESPACES"], "arc-a arc-b arc-gone")
+        store_roles = sorted(call["definition"]["metadata"]["namespace"] for call in calls if (call.get("definition") or {}).get("metadata", {}).get("name") == "node-cache-pruner:capability-store" and call["definition"]["kind"] == "Role")
+        self.assertEqual(store_roles, ["arc-a", "arc-b", "arc-gone"])
+
+
 class CapabilityStoreManifestTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -157,10 +195,19 @@ class CapabilityStoreManifestTest(unittest.TestCase):
         volumes = {volume["name"]: volume for volume in self.pod["volumes"]}
         self.assertEqual(volumes["capability-store"]["hostPath"], {"path": "/var/lib/github-runner/capability-store", "type": "DirectoryOrCreate"})
 
-    def test_only_a_namespace_that_uses_the_store_may_have_its_scale_sets_listed(self) -> None:
-        rules = {role["metadata"]["namespace"]: role["rules"] for role in self.documents if role["kind"] == "Role"}
-        self.assertIn({"apiGroups": ["actions.github.com"], "resources": ["autoscalingrunnersets"], "verbs": ["list"]}, rules["arc-a"])
-        self.assertEqual(rules["arc-b"], [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}])
+    def test_every_namespace_the_store_is_read_from_has_a_role_that_lists_pods_and_scale_sets_and_nothing_else(self) -> None:
+        store_roles = {role["metadata"]["namespace"]: role["rules"] for role in self.documents if role["kind"] == "Role" and role["metadata"]["name"] == "node-cache-pruner:capability-store"}
+        self.assertEqual(sorted(store_roles), ["arc-a"])
+        self.assertEqual(store_roles["arc-a"], [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}, {"apiGroups": ["actions.github.com"], "resources": ["autoscalingrunnersets"], "verbs": ["list"]}])
+        bindings = [binding for binding in self.documents if binding["kind"] == "RoleBinding" and binding["metadata"]["name"] == "node-cache-pruner:capability-store"]
+        self.assertEqual([binding["metadata"]["namespace"] for binding in bindings], ["arc-a"])
+        self.assertEqual(bindings[0]["roleRef"]["name"], "node-cache-pruner:capability-store")
+        self.assertEqual({key: bindings[0]["metadata"]["labels"].get(key) for key in OWN_LABELS}, OWN_LABELS)
+
+    def test_a_profiles_own_role_never_lists_scale_sets(self) -> None:
+        for role in self.documents:
+            if role["kind"] == "Role" and role["metadata"]["name"] != "node-cache-pruner:capability-store":
+                self.assertEqual(role["rules"], [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}], role["metadata"])
 
     def test_without_a_store_profile_the_pruner_neither_mounts_nor_prunes_the_store(self) -> None:
         documents = render()
@@ -221,7 +268,8 @@ def legacy_binding(subjects: list[dict[str, Any]] | None = None) -> dict[str, An
 
 def install_with_output(fleet_targets: list[str], with_cache: list[str] | None = None, existing: list[dict[str, Any]] | None = None, **role_vars: Any) -> tuple[list[dict[str, Any]], str]:
     """Run the role's pruner install tasks against the stand-in kubernetes.core, and return the module calls it recorded and the playbook's output. Each fleet profile carries the pnpm-store capability when its target is in with_cache (all of them when it is None)."""
-    profiles = [{"namespace": t.split("/")[0], "release": t.split("/")[1], "target": t, "capabilities": ["pnpm-store"] if with_cache is None or t in with_cache else ["node"], "capability_store": False} for t in fleet_targets]
+    with_store = role_vars.pop("with_store", [])
+    profiles = [{"namespace": t.split("/")[0], "release": t.split("/")[1], "target": t, "capabilities": ["pnpm-store"] if with_cache is None or t in with_cache else ["node"], "capability_store": t in with_store} for t in fleet_targets]
     with tempfile.TemporaryDirectory() as work:
         modules = Path(work) / "stubs" / "ansible_collections" / "kubernetes" / "core" / "plugins" / "modules"
         modules.mkdir(parents=True)

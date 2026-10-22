@@ -1063,6 +1063,20 @@ def arc_node_cache_access_to_remove(found: Sequence[Mapping[str, Any]], labels: 
     return sorted(stale, key=lambda item: (item["kind"] != "RoleBinding", item["namespace"], item["name"]))
 
 
+def arc_capability_store_namespaces(profiles: Sequence[Mapping[str, Any]], found: Sequence[Mapping[str, Any]], labels: Mapping[str, str]) -> list[str]:
+    """Return the namespaces the node cache pruner reads the capability store's references from, sorted, or none while no profile uses the store (the pruner then leaves the store alone).
+
+    A pod of a profile that has since switched the store off, or left the fleet, keeps running from the template it was made from and keeps using the entries that template named, so its namespace stays among them: the namespaces of every profile in the fleet, and of every Role the pruner has installed, which the role keeps for a profile that has left the fleet (see arc_node_cache_access_to_remove). An entry is then never removed under a pod because its profile stopped appearing in the fleet. Only a Role carrying every one of labels counts, so another software's objects are ignored.
+
+    Args:
+        profiles: expanded profiles from arc_profiles, each with its namespace and capability_store. found: the Roles and RoleBindings carrying the pruner's labels, as the cluster returned them. labels: the labels the role puts on every object it creates for the pruner.
+    """
+    if not any(profile["capability_store"] for profile in profiles):
+        return []
+    roles = [resource["metadata"]["namespace"] for resource in found if resource["kind"] == "Role" and all((resource["metadata"].get("labels") or {}).get(key) == value for key, value in labels.items())]
+    return sorted({profile["namespace"] for profile in profiles} | set(roles))
+
+
 def _node_cache_env(node_cache_path: str, capabilities: Sequence[tuple[str, Mapping[str, Any]]], errors: list[str]) -> list[dict[str, str]]:
     """Return the runner container's variables for a profile's node-cache capabilities: each dirs variable naming its subdirectory of the node cache, and each env variable as given. A variable that two capabilities set to different values is recorded in errors."""
     root = node_cache_path.rstrip("/")
@@ -1794,6 +1808,7 @@ class FilterModule:
             "arc_capability_store_path_errors": arc_capability_store_path_errors,
             "arc_capability_store_key": arc_capability_store_key,
             "arc_capability_store_image_errors": arc_capability_store_image_errors,
+            "arc_capability_store_namespaces": arc_capability_store_namespaces,
             "arc_node_cache_profiles": arc_node_cache_profiles,
             "arc_node_cache_host_path_errors": arc_node_cache_host_path_errors,
             "arc_node_cache_root": arc_node_cache_root,

@@ -5,11 +5,15 @@
   gather_facts: false
   vars_files:
     - ../../roles/github_runner_arc/defaults/main.yml
+    - ../../roles/github_runner_arc/vars/main.yml
+  vars:
+    # The pruner's Roles and RoleBindings as the install tasks found them; a test gives the ones its cluster has.
+    github_runner_arc_node_cache_pruner_access: {results: [{resources: []}, {resources: []}]}
   tasks:
     - name: Decide
       ansible.builtin.include_tasks: ../../roles/github_runner_arc/tasks/decide_node_cache_pruner.yml
     - name: Write the decision
       ansible.builtin.copy:
-        content: "{{ {'wanted': github_runner_arc_node_cache_pruner_wanted, 'targets': github_runner_arc_node_cache_profiles | map(attribute='target') | list} | to_json }}"
+        content: "{{ {'wanted': github_runner_arc_node_cache_pruner_wanted, 'targets': github_runner_arc_node_cache_profiles | map(attribute='target') | list, 'store_namespaces': github_runner_arc_capability_store_namespaces} | to_json }}"
         dest: "{{ decide_output }}"
         mode: "0644"

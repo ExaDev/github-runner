@@ -5,10 +5,10 @@
   ansible.builtin.set_fact:
     github_runner_arc_node_cache_profiles: "{{ github_runner_arc_fleet.profiles | exadev.github_runner.arc_node_cache_profiles(github_runner_arc_capabilities) }}"
 
-# The pruner also removes the capability store's entries that no scale set or pod uses, so it runs for a fleet with a store profile too.
-- name: "Node cache: find the namespaces of the profiles that use the capability store"
+# The pruner also removes the capability store's entries that no scale set or pod uses, so it runs for a fleet with a store profile too. Which entries are used is read from the scale sets and pods of every namespace a pod made from an earlier template may still run in, not only those of the profiles that use the store now (see arc_capability_store_namespaces); the list is empty, and the store left alone, while no profile uses it. It needs the pruner's Roles as the cluster has them (github_runner_arc_node_cache_pruner_access).
+- name: "Node cache: find the namespaces the capability store's references are read from"
   ansible.builtin.set_fact:
-    github_runner_arc_capability_store_namespaces: "{{ github_runner_arc_fleet.profiles | selectattr('capability_store') | map(attribute='namespace') | unique | list }}"
+    github_runner_arc_capability_store_namespaces: "{{ github_runner_arc_fleet.profiles | exadev.github_runner.arc_capability_store_namespaces(github_runner_arc_node_cache_pruner_access.results | map(attribute='resources') | flatten, github_runner_arc_node_cache_pruner_labels) }}"
 
 - name: "Node cache: decide whether the pruner is wanted"
   ansible.builtin.set_fact:

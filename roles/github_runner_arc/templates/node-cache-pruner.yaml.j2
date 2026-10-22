@@ -1,4 +1,4 @@
-{# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each fleet profile's namespace (so the pruner can list the pods it must not prune under, including those of a profile whose cache capability was removed while its directory remains, and nothing wider), and the DaemonSet. `github_runner_arc_fleet` is the fleet's expanded profiles, `github_runner_arc_node_cache_profiles` those with a node cache and `github_runner_arc_capability_store_namespaces` the namespaces of those that use the capability store, whose root the DaemonSet then mounts as well. #}
+{# The node cache pruner (see tasks/install_node_cache_pruner.yml): a ServiceAccount, a Role and RoleBinding in each fleet profile's namespace (so the pruner can list the pods it must not prune under, including those of a profile whose cache capability was removed while its directory remains, and nothing wider), and the DaemonSet. `github_runner_arc_fleet` is the fleet's expanded profiles, `github_runner_arc_node_cache_profiles` those with a node cache and `github_runner_arc_capability_store_namespaces` the namespaces the capability store's references are read from (empty while no profile uses the store), whose root the DaemonSet then mounts as well. #}
 {% set name = 'node-cache-pruner' %}
 {% set labels = github_runner_arc_node_cache_pruner_labels %}
 {% set platform = github_runner_arc_platform_namespace %}
@@ -17,16 +17,10 @@ metadata:
   namespace: {{ profile.namespace | to_json }}
   labels: {{ labels | to_json }}
 rules:
-  # list, to see whether a runner pod of this profile runs on the pruner's node, and which capability store entries the pods there use. Nothing else.
+  # list, to see whether a runner pod of this profile runs on the pruner's node. Nothing else.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list"]
-{% if profile.namespace in github_runner_arc_capability_store_namespaces %}
-  # list, to see which capability store entries the scale sets' pod templates in a namespace that uses the store list.
-  - apiGroups: ["actions.github.com"]
-    resources: ["autoscalingrunnersets"]
-    verbs: ["list"]
-{% endif %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -42,6 +36,40 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ (name ~ '-' ~ profile.release) | to_json }}
+{% endfor %}
+{# The capability store's references are read in every namespace a pod made from an earlier template may still run in, which includes a profile that has switched the store off or left the fleet, so this Role is per namespace, not per release. Its name has a colon, which a release name (a Helm release name) cannot have, so it never collides with a profile's Role. #}
+{% set store_name = name ~ ':capability-store' %}
+{% for namespace in github_runner_arc_capability_store_namespaces %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ store_name | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  # list, to see which capability store entries the unfinished pods on the pruner's node use, and which the scale sets' pod templates list. Nothing else.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: ["actions.github.com"]
+    resources: ["autoscalingrunnersets"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ store_name | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ platform | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ store_name | to_json }}
 {% endfor %}
 ---
 apiVersion: apps/v1
