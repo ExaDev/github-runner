@@ -14,6 +14,8 @@ from ansible.module_utils.parsing.convert_bool import boolean
 # Kubernetes namespace and Helm release names must be RFC 1123 DNS labels.
 _DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _DNS_LABEL_MAX_LENGTH = 63
+# Helm refuses a longer release name (maxReleaseNameLen in Helm's pkg/chart/v2/util/validate_name.go), leaving room under the DNS label limit for the suffixes charts add to it.
+_HELM_RELEASE_NAME_MAX_LENGTH = 53
 
 # Where a scale set registers: githubConfigUrl is this followed by the entry's scope, an account login (an organisation's runners) or login/repository (one repository's runners), as the gha-runner-scale-set chart's values.yaml documents it.
 _GITHUB_URL = "https://github.com/"
@@ -427,10 +429,10 @@ def _text(mapping: Mapping[str, Any], key: str) -> str:
     return "" if value is None else str(value)
 
 
-def _check_dns_label(kind: str, name: str, where: str, errors: list[str]) -> None:
-    """Record an error when name is not a valid Kubernetes DNS label."""
-    if len(name) > _DNS_LABEL_MAX_LENGTH or not _DNS_LABEL.match(name):
-        errors.append(f"{where}: the derived {kind} '{name}' is not a valid Kubernetes name (lower-case letters, digits and '-', at most {_DNS_LABEL_MAX_LENGTH} characters)")
+def _check_dns_label(kind: str, name: str, where: str, errors: list[str], max_length: int = _DNS_LABEL_MAX_LENGTH) -> None:
+    """Record an error when name is not a valid Kubernetes DNS label of at most max_length characters."""
+    if len(name) > max_length or not _DNS_LABEL.match(name):
+        errors.append(f"{where}: the derived {kind} '{name}' is not a valid Kubernetes name (lower-case letters, digits and '-', at most {max_length} characters)")
 
 
 def _optional_name(mapping: Mapping[str, Any], key: str, where: str, errors: list[str]) -> str:
@@ -638,7 +640,7 @@ def _expand_profile(org_name: str, repository: str, runner_image: str, app_secre
     if not expanded["values_file"] and profile.get("max_runners") is None and (sizing_result is None or autoscale):
         errors.append(f"{where}: a profile with no values_file needs max_runners{'' if autoscale else ' or sizing'}")
     _check_dns_label("namespace", expanded["namespace"], where, errors)
-    _check_dns_label("release name", expanded["release"], where, errors)
+    _check_dns_label("release name", expanded["release"], where, errors, _HELM_RELEASE_NAME_MAX_LENGTH)
     return expanded
 
 
