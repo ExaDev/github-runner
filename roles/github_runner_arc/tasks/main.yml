@@ -44,9 +44,9 @@
       loop: "{{ github_runner_arc_orgs }}"
       loop_control:
         loop_var: org
-        label: "{{ org.name }}"
+        label: "{{ org | exadev.github_runner.arc_scope }}"
       vars:
-        github_runner_arc_org_first_profile: "{{ github_runner_arc_local.profiles | selectattr('org_name', 'equalto', org.name) | first }}"
+        github_runner_arc_org_first_profile: "{{ github_runner_arc_local.profiles | selectattr('scope', 'equalto', org | exadev.github_runner.arc_scope) | first }}"
       when: github_runner_arc_manage_image_pull_secret | bool and github_runner_arc_image_pull_secret_source == 'app'
 
     - name: Label the eligible nodes
@@ -97,7 +97,7 @@
       loop: "{{ github_runner_arc_orgs }}"
       loop_control:
         loop_var: org
-        label: "{{ org.name }}"
+        label: "{{ org | exadev.github_runner.arc_scope }}"
 
     # Last, so the stamp says a run applied everything above, and only when the platform namespace exists. Records what was applied, not what is running: a pod that failed to start still leaves the stamp.
     - name: Record the collection version this run applied

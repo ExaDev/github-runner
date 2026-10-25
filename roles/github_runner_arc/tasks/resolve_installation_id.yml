@@ -1,28 +1,37 @@
 ---
-# Included once per org whose installation_id is not set, and records it in github_runner_arc_installation_ids under the org's name (see install_org.yml). Signs a short-lived App JWT with files/generate_app_jwt.py and finds this org's installation in GET /app/installations, using the org's own private_key.
+# Included once per github_runner_arc_orgs entry whose installation_id is not set, with `org` set to the entry, and records it in github_runner_arc_installation_ids under the entry's scope (plugins/filter/arc.py's arc_scope; see install_org.yml). Signs a short-lived App JWT with files/generate_app_jwt.py, using the entry's own private_key. An organisation scope finds the installation whose account.login is the organisation in GET /app/installations (account is a user or an organisation there, so a login matches either). A repository scope asks GET /repos/{owner}/{repo}/installation instead, which answers only when the App is installed where it can reach that repository, so an installation on the account that leaves the repository out fails here rather than as a listener that cannot register.
 #
 # Runs entirely on the control node: nothing here needs the target host, and delegating keeps the temporary key file off it.
 #
 # No delegate_facts anywhere, deliberately: with it unset, a delegated task's facts attach to inventory_hostname, which is what install_org.yml reads. delegate_facts: true would send them to localhost instead, which once left the deployed App Secret's installation_id empty.
 - name: Resolve the installation ID via a signed App JWT
   delegate_to: localhost
+  vars:
+    github_runner_arc_resolve_scope: "{{ org | exadev.github_runner.arc_scope }}"
+    github_runner_arc_resolved_installation_id: >-
+      {{
+        (github_runner_arc_resolve_repository_installation.json.id | string
+         if github_runner_arc_resolve_repository_installation.status == 200 else '')
+        if org.repository | default('', true) | length > 0 else
+        (github_runner_arc_resolve_installations.json | selectattr('account.login', 'equalto', org.name) | map(attribute='id') | map('string') | first | default(''))
+      }}
   # Read-only apart from a temp file it removes again, and the org's secrets need the result, so it runs under --check too.
   check_mode: false
   block:
-    - name: Create a temporary file for the private key of {{ org.name }}
+    - name: Create a temporary file for the private key of {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.tempfile:
         state: file
         suffix: ".pem"
       register: github_runner_arc_resolve_private_key_tempfile
 
-    - name: Write the private key to the temporary file for {{ org.name }}
+    - name: Write the private key to the temporary file for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.copy:
         content: "{{ org.private_key }}"
         dest: "{{ github_runner_arc_resolve_private_key_tempfile.path }}"
         mode: "0600"
       no_log: true
 
-    - name: Sign an App JWT for {{ org.name }}
+    - name: Sign an App JWT for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.script:
         cmd: "generate_app_jwt.py {{ org.app_id | quote }} {{ github_runner_arc_resolve_private_key_tempfile.path | quote }}"
         executable: python3
@@ -30,7 +39,7 @@
       no_log: true
       register: github_runner_arc_resolve_jwt
 
-    - name: List the App's installations for {{ org.name }}
+    - name: List the App's installations for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.uri:
         url: https://api.github.com/app/installations?per_page=100
         headers:
@@ -39,20 +48,35 @@
           X-GitHub-Api-Version: "2022-11-28"
       no_log: true
       register: github_runner_arc_resolve_installations
+      when: org.repository | default('', true) | length == 0
 
-    - name: Fail if the App has no installation on {{ org.name }}
+    - name: Find the App's installation that reaches {{ github_runner_arc_resolve_scope }}
+      ansible.builtin.uri:
+        url: "https://api.github.com/repos/{{ org.name | urlencode }}/{{ org.repository | urlencode }}/installation"
+        headers:
+          Authorization: "Bearer {{ github_runner_arc_resolve_jwt.stdout | trim }}"
+          Accept: application/vnd.github+json
+          X-GitHub-Api-Version: "2022-11-28"
+        status_code: [200, 404]
+      no_log: true
+      register: github_runner_arc_resolve_repository_installation
+      when: org.repository | default('', true) | length > 0
+
+    - name: Fail if the App has no installation for {{ github_runner_arc_resolve_scope }}
       ansible.builtin.fail:
-        msg: "Could not resolve an installation id for {{ org.name }}. Is the GitHub App installed on that org?"
+        msg: >-
+          {{ ('Could not resolve an installation id for ' ~ github_runner_arc_resolve_scope ~ '. Is the GitHub App installed on '
+              ~ org.name ~ ', with ' ~ org.repository ~ ' among its repositories?')
+             if org.repository | default('', true) | length > 0 else
+             ('Could not resolve an installation id for ' ~ org.name ~ '. Is the GitHub App installed on that org?') }}
       when: github_runner_arc_resolved_installation_id | length == 0
-      vars:
-        github_runner_arc_resolved_installation_id: "{{ github_runner_arc_resolve_installations.json | selectattr('account.login', 'equalto', org.name) | map(attribute='id') | map('string') | first | default('') }}"
 
-    # Keyed by org, so that one org's resolved id can never stand in for another org's.
-    - name: Record the installation ID of {{ org.name }}
+    # Keyed by scope, so that one entry's resolved id can never stand in for another's, even of the same login.
+    - name: Record the installation ID of {{ github_runner_arc_resolve_scope }}
       ansible.builtin.set_fact:
-        github_runner_arc_installation_ids: "{{ github_runner_arc_installation_ids | default({}) | combine({org.name: github_runner_arc_resolve_installations.json | selectattr('account.login', 'equalto', org.name) | map(attribute='id') | map('string') | first}) }}"
+        github_runner_arc_installation_ids: "{{ github_runner_arc_installation_ids | default({}) | combine({github_runner_arc_resolve_scope: github_runner_arc_resolved_installation_id}) }}"
   always:
-    - name: Remove the private key temporary file for {{ org.name }}
+    - name: Remove the private key temporary file for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.file:
         path: "{{ github_runner_arc_resolve_private_key_tempfile.path }}"
         state: absent

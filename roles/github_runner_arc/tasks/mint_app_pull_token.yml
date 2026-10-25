@@ -3,11 +3,11 @@
 #
 # The App's credentials come from the org's own entry when the role writes the App Secret, or from that Secret in the org's first namespace when something else does. Signing and minting run on the control node, and like the installation id lookup they run under --check too: they change nothing in the cluster, and the check is only meaningful if the credential is real.
 
-- name: Resolve the installation ID of {{ org.name }}
+- name: Resolve the installation ID of {{ org | exadev.github_runner.arc_scope }}
   ansible.builtin.include_tasks: resolve_installation_id.yml
-  when: github_runner_arc_manage_secrets | bool and (org.installation_id | default('') | string) | length == 0 and org.name not in (github_runner_arc_installation_ids | default({}))
+  when: github_runner_arc_manage_secrets | bool and (org.installation_id | default('') | string) | length == 0 and (org | exadev.github_runner.arc_scope) not in (github_runner_arc_installation_ids | default({}))
 
-- name: Read the App Secret of {{ org.name }}
+- name: Read the App Secret of {{ org | exadev.github_runner.arc_scope }}
   kubernetes.core.k8s_info:
     kind: Secret
     namespace: "{{ github_runner_arc_org_first_profile.namespace }}"
@@ -16,12 +16,12 @@
   no_log: true
   when: not (github_runner_arc_manage_secrets | bool)
 
-- name: Take the App's credentials for {{ org.name }}
+- name: Take the App's credentials for {{ org | exadev.github_runner.arc_scope }}
   ansible.builtin.set_fact:
     github_runner_arc_mint_app: >-
       {{
         {'id': org.app_id | string,
-         'installation_id': (org.installation_id | default('') | string) or github_runner_arc_installation_ids[org.name],
+         'installation_id': (org.installation_id | default('') | string) or github_runner_arc_installation_ids[org | exadev.github_runner.arc_scope],
          'private_key': org.private_key}
         if github_runner_arc_manage_secrets | bool else
         {'id': github_runner_arc_mint_app_secret.resources[0].data.github_app_id | b64decode,
@@ -30,24 +30,24 @@
       }}
   no_log: true
 
-- name: Mint a packages read token from the App of {{ org.name }}
+- name: Mint a packages read token from the App of {{ org | exadev.github_runner.arc_scope }}
   delegate_to: localhost
   check_mode: false
   block:
-    - name: Create a temporary file for the private key of {{ org.name }}
+    - name: Create a temporary file for the private key of {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.tempfile:
         state: file
         suffix: ".pem"
       register: github_runner_arc_mint_private_key_tempfile
 
-    - name: Write the private key to the temporary file for {{ org.name }}
+    - name: Write the private key to the temporary file for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.copy:
         content: "{{ github_runner_arc_mint_app.private_key }}"
         dest: "{{ github_runner_arc_mint_private_key_tempfile.path }}"
         mode: "0600"
       no_log: true
 
-    - name: Sign an App JWT for {{ org.name }}
+    - name: Sign an App JWT for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.script:
         cmd: "generate_app_jwt.py {{ github_runner_arc_mint_app.id | quote }} {{ github_runner_arc_mint_private_key_tempfile.path | quote }}"
         executable: python3
@@ -56,7 +56,7 @@
       register: github_runner_arc_mint_jwt
 
     # Restricted to packages: read, whatever else the App may do. GitHub answers 422 when the App or this installation lacks the permission, which the next task reports.
-    - name: Mint the installation token for {{ org.name }}
+    - name: Mint the installation token for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.uri:
         url: "https://api.github.com/app/installations/{{ github_runner_arc_mint_app.installation_id }}/access_tokens"
         method: POST
@@ -72,26 +72,26 @@
       no_log: true
       register: github_runner_arc_mint_response
   always:
-    - name: Remove the private key temporary file for {{ org.name }}
+    - name: Remove the private key temporary file for {{ org | exadev.github_runner.arc_scope }}
       ansible.builtin.file:
         path: "{{ github_runner_arc_mint_private_key_tempfile.path }}"
         state: absent
       when: github_runner_arc_mint_private_key_tempfile.path is defined
 
-- name: Fail when GitHub refused the token for {{ org.name }}
+- name: Fail when GitHub refused the token for {{ org | exadev.github_runner.arc_scope }}
   ansible.builtin.fail:
     msg: >-
-      GitHub refused to mint a packages: read installation token from the App of {{ org.name }}
+      GitHub refused to mint a packages: read installation token from the App of {{ org | exadev.github_runner.arc_scope }}
       (HTTP {{ github_runner_arc_mint_response.status }}: {{ github_runner_arc_mint_response.json.message | default('no message') }}).
-      The App needs the packages: read permission, and the organisation must approve it on the App's installation.
+      The App needs the packages: read permission, and the account it is installed on (the organisation, or the user for a user's repository) must approve it on the App's installation.
   when: github_runner_arc_mint_response.status != 201
 
-- name: Record the pull token of {{ org.name }}
+- name: Record the pull token of {{ org | exadev.github_runner.arc_scope }}
   ansible.builtin.set_fact:
-    github_runner_arc_app_pull_tokens: "{{ github_runner_arc_app_pull_tokens | default({}) | combine({org.name: {'token': github_runner_arc_mint_response.json.token, 'expires_at': github_runner_arc_mint_response.json.expires_at}}) }}"
+    github_runner_arc_app_pull_tokens: "{{ github_runner_arc_app_pull_tokens | default({}) | combine({(org | exadev.github_runner.arc_scope): {'token': github_runner_arc_mint_response.json.token, 'expires_at': github_runner_arc_mint_response.json.expires_at}}) }}"
   no_log: true
 
-- name: Prove the token can read the image of {{ org.name }}
+- name: Prove the token can read the image of {{ org | exadev.github_runner.arc_scope }}
   ansible.builtin.include_tasks: verify_image_pull_one.yml
   when: github_runner_arc_verify_image_pull | bool
   loop: "{{ [org.image] | map('exadev.github_runner.arc_image_ref') | selectattr('registry', 'equalto', github_runner_arc_image_pull_registry) | list }}"
@@ -100,6 +100,6 @@
     label: "{{ image.registry }}/{{ image.repository }}:{{ image.reference }}"
   vars:
     github_runner_arc_pull_username: "{{ github_runner_arc_app_pull_token_username }}"
-    github_runner_arc_pull_password: "{{ github_runner_arc_app_pull_tokens[org.name].token }}"
-    github_runner_arc_pull_credential: "the packages: read token from the App of {{ org.name }}"
+    github_runner_arc_pull_password: "{{ github_runner_arc_app_pull_tokens[org | exadev.github_runner.arc_scope].token }}"
+    github_runner_arc_pull_credential: "the packages: read token from the App of {{ org | exadev.github_runner.arc_scope }}"
     github_runner_arc_pull_credential_hint: "Check the App has the packages: read permission, approved on its installation, and that the package is visible to it."

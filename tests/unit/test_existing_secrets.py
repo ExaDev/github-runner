@@ -54,7 +54,12 @@ def run(result: dict[str, Any], app_id: Any = None, manage_secrets: bool = False
     org: dict[str, Any] = {"name": "example-org", "image": "ghcr.io/example/runner:1", "app_secret_name": "example-github-app", "scale_set_profiles": [{"namespace": "example-runners", "max_runners": 1}]}
     if app_id is not None:
         org["app_id"] = app_id
-    play_vars = {"github_runner_arc_orgs": [org], "github_runner_arc_manage_secrets": manage_secrets, "github_runner_arc_existing_secrets": {"results": [result]}}
+    return run_entries([org], [result], manage_secrets)
+
+
+def run_entries(orgs: list[dict[str, Any]], results: list[dict[str, Any]], manage_secrets: bool = False) -> subprocess.CompletedProcess[str]:
+    """Run the checks against the App Secret lookup results of orgs' profiles, in profile order, at -vvv."""
+    play_vars = {"github_runner_arc_orgs": orgs, "github_runner_arc_manage_secrets": manage_secrets, "github_runner_arc_existing_secrets": {"results": results}}
     with tempfile.TemporaryDirectory() as directory:
         play = Path(directory) / "play.yml"
         play.write_text(PLAYBOOK.format(play_vars=json.dumps(play_vars)))
@@ -81,7 +86,7 @@ class ExistingSecretsTest(unittest.TestCase):
     def test_an_app_id_disagreeing_with_the_secret_fails(self) -> None:
         result = run(app_secret(FULL), app_id=999)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("App Secret example-runners/example-github-app of example-org holds github_app_id 123, but the org sets app_id 999. Correct or remove the org's app_id.", result.stdout)
+        self.assertIn("App Secret example-runners/example-github-app of example-org holds github_app_id 123, but its github_runner_arc_orgs entry sets app_id 999. Correct or remove the entry's app_id.", result.stdout)
         self.assert_nothing_leaked(result)
 
     def test_a_secret_missing_keys_fails_naming_them(self) -> None:
@@ -94,6 +99,17 @@ class ExistingSecretsTest(unittest.TestCase):
         result = run(app_secret(None))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Secret example-github-app does not exist in namespace example-runners.", result.stdout)
+
+    def test_each_entry_of_one_login_is_checked_against_its_own_app_id(self) -> None:
+        # The organisation's entry comes first and agrees with its Secret, so only a lookup by scope finds the repository entry's own app_id.
+        organisation = {"name": "example-org", "app_id": 123, "image": "ghcr.io/example/runner:1", "scale_set_profiles": [{"namespace": "example-runners", "max_runners": 1}]}
+        repository = {"name": "example-org", "repository": "example-repo", "app_id": 999, "image": "ghcr.io/example/runner:1", "scale_set_profiles": [{"namespace": "example-repo-runners", "max_runners": 1}]}
+        secrets = [app_secret(FULL) | {"item": ["example-runners", "example-org-github-app"]}, app_secret(FULL) | {"item": ["example-repo-runners", "example-org--example-repo-github-app"]}]
+        result = run_entries([organisation, repository], secrets)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("App Secret example-repo-runners/example-org--example-repo-github-app of example-org/example-repo holds github_app_id 123, but its github_runner_arc_orgs entry sets app_id 999.", result.stdout)
+        self.assertNotIn("App Secret example-runners/example-org-github-app of", result.stdout)
+        self.assert_nothing_leaked(result)
 
     def test_a_host_writing_its_app_secrets_does_not_check_their_contents(self) -> None:
         result = run(app_secret({"github_app_id": "123"}), app_id=999, manage_secrets=True)
