@@ -204,14 +204,18 @@ github_runner_arc_runner_reaper_image: "{{ github_runner_arc_image_pull_secret_r
 # A backstop that needs no GitHub call: activeDeadlineSeconds on every runner pod, after which the kubelet stops the pod whatever it is doing and ARC treats it as a failed runner. It counts from when the pod starts, including any time the runner waits idle for a job, so set it above the longest a runner may wait plus the longest job a fleet runs. Unset leaves the runner pods without one.
 github_runner_arc_runner_active_deadline_seconds:
 
-# GitHub App creation through the manifest flow (tasks/app_setup.yml, run by playbooks/github_app_setup.yml). The App needs only organisation self-hosted runner write access; add packages: read to the permissions if its installation token should also pull private packages, and actions: read if the runner reaper is on.
+# GitHub App creation through the manifest flow (tasks/app_setup.yml, run by playbooks/github_app_setup.yml). github_runner_arc_app_setup_org is the login of the account the App is registered and installed on: an organisation, or with github_runner_arc_app_setup_owner_type user a personal account.
 github_runner_arc_app_setup_org: ""
+# organization registers the App on the organisation (GitHub's organisation App settings), user on a personal account (the account's own App settings). A personal account has no organisation runners, so user needs github_runner_arc_app_setup_repository.
+github_runner_arc_app_setup_owner_type: organization
+# A repository of that account, for an App whose scale sets register in that repository alone (a github_runner_arc_orgs entry with repository). Empty means an App for the organisation's own scale sets.
+github_runner_arc_app_setup_repository: ""
 github_runner_arc_app_setup_name: ""
 github_runner_arc_app_setup_description: "Registers self-hosted GitHub Actions runners through Actions Runner Controller."
-# The App's homepage and the page GitHub redirects to with the one-time code. Empty means the organisation's GitHub page.
+# The App's homepage and the page GitHub redirects to with the one-time code. Empty means the account's GitHub page.
 github_runner_arc_app_setup_homepage_url: ""
-github_runner_arc_app_setup_permissions:
-  organization_self_hosted_runners: write
+# The App's permissions. Empty means what ARC documents for the scope (github_runner_arc_app_setup_scope_permissions in vars/main.yml): organisation self-hosted runners write for an organisation, repository administration write and metadata read for a repository. A value replaces them whole, so to add packages: read (the installation token also pulls private packages) or actions: read (the runner reaper is on) name the scope's own permissions beside it.
+github_runner_arc_app_setup_permissions: {}
 github_runner_arc_app_manifest_code: ""
 github_runner_arc_app_private_key_path: ""
 # How long phase 2 waits for the App to be installed: retries times delay seconds.
@@ -219,13 +223,15 @@ github_runner_arc_app_setup_install_retries: 40
 github_runner_arc_app_setup_install_delay: 15
 # The phase 2 command the manifest form and phase 1's instructions tell the person to run, without the code and key path, which the role appends. Its default runs this collection's playbook from a checkout; a playbook that wraps the flow names itself here, with whatever arguments it needs.
 github_runner_arc_app_setup_command: >-
-  ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org={{ github_runner_arc_app_setup_org }}
+  ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org={{ github_runner_arc_app_setup_org }}{{
+  ' -e github_runner_arc_app_setup_owner_type=' ~ github_runner_arc_app_setup_owner_type if github_runner_arc_app_setup_owner_type != 'organization' else '' }}{{
+  ' -e github_runner_arc_app_setup_repository=' ~ github_runner_arc_app_setup_repository if github_runner_arc_app_setup_repository | length > 0 else '' }}
   -e '{"github_runner_arc_app_setup_name": "{{ github_runner_arc_app_setup_name }}"}'
 # Whether phase 2 writes the App Secret (github_app_id, github_app_installation_id and github_app_private_key) into the cluster once the App is installed, through github_runner_arc_kubeconfig_path, creating the namespaces it needs. The cluster is reached, and the namespaces created, before the one-time code is used, so a broken cluster path costs only a rerun. false leaves the key in its file for the operator to store.
 github_runner_arc_app_setup_write_secret: false
-# The namespaces the App Secret is written into. Empty means those of the organisation's scale-set profiles in github_runner_arc_orgs.
+# The namespaces the App Secret is written into. Empty means those of the scale-set profiles of the github_runner_arc_orgs entry for the App's scope (the organisation, or with github_runner_arc_app_setup_repository that repository).
 github_runner_arc_app_setup_secret_namespaces: []
-# The App Secret's name. Empty means the organisation's app_secret_name in github_runner_arc_orgs, or <org>-github-app, as the role's install uses.
+# The App Secret's name. Empty means the app_secret_name of the github_runner_arc_orgs entry for the App's scope, or the name the role's install derives for that scope (<org>-github-app, or <owner>--<repository>-github-app).
 github_runner_arc_app_setup_secret_name: ""
 # Whether to keep the private key file once the App Secret holds the key. false removes it, so the key is on disk only until the Secret is written; a run that stops earlier, for example because nobody installed the App within the wait, leaves the file so the App can still be finished without a new code.
 github_runner_arc_app_setup_keep_private_key: false

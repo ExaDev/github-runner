@@ -14,7 +14,7 @@
 
 <h1>Create the &ldquo;{{ github_runner_arc_app_setup_name | e }}&rdquo; GitHub App</h1>
 
-<p>This page submits a pre-filled App manifest to GitHub for the <strong>{{ github_runner_arc_app_setup_org | e }}</strong> organisation. The button below is its only network action, and it goes to github.com.</p>
+<p>This page submits a pre-filled App manifest to GitHub for the <strong>{{ github_runner_arc_app_setup_org | e }}</strong> {{ 'personal account' if github_runner_arc_app_setup_owner_type == 'user' else 'organisation' }}, for the runners of {{ ('the ' ~ github_runner_arc_app_setup_scope ~ ' repository') | e if github_runner_arc_app_setup_repository | length > 0 else 'the organisation' }}. The button below is its only network action, and it goes to github.com.</p>
 
 <h2>Manifest</h2>
 <pre>{{ github_runner_arc_app_manifest | to_nice_json | e }}</pre>
@@ -22,15 +22,16 @@
 <h2>Steps</h2>
 <ol>
 <li>Check the manifest above, especially its permissions.</li>
-<li>Click &ldquo;Create GitHub App&rdquo;, signed in to GitHub as an owner of {{ github_runner_arc_app_setup_org | e }}, and confirm on GitHub's page.</li>
+<li>Click &ldquo;Create GitHub App&rdquo;, signed in to GitHub as {{ github_runner_arc_app_setup_org | e if github_runner_arc_app_setup_owner_type == 'user' else 'an owner of ' ~ (github_runner_arc_app_setup_org | e) }}, and confirm on GitHub's page.</li>
 <li>GitHub then redirects to <code>{{ github_runner_arc_app_manifest.redirect_url | e }}</code> with a <code>code</code> query parameter. Copy its value from the address bar.</li>
 <li>Run the second phase straight away, because the code works once and expires quickly:
 <pre>{{ github_runner_arc_app_setup_command | e }} -e github_runner_arc_app_manifest_code=&lt;code&gt; -e github_runner_arc_app_private_key_path=&lt;path for the key&gt;</pre>
 </li>
-<li>That run creates the App and waits while you install it on the organisation, at organisation level rather than on selected repositories.{% if github_runner_arc_app_setup_write_secret | bool %} It then writes the App Secret into the cluster{{ ' and removes the key file' if not (github_runner_arc_app_setup_keep_private_key | bool) else '' }}.{% endif %}</li>
+<li>That run creates the App and waits while you install it on {{ github_runner_arc_app_setup_org | e }}, {{ ('choosing ' ~ github_runner_arc_app_setup_repository ~ ' among its repositories (only that one is enough)') | e if github_runner_arc_app_setup_repository | length > 0 else 'at organisation level rather than on selected repositories' }}.{% if github_runner_arc_app_setup_write_secret | bool %} It then writes the App Secret into the cluster{{ ' and removes the key file' if not (github_runner_arc_app_setup_keep_private_key | bool) else '' }}.{% endif %}</li>
 </ol>
 
-<form id="manifest-form" action="https://github.com/organizations/{{ github_runner_arc_app_setup_org | urlencode }}/settings/apps/new?state={{ github_runner_arc_app_manifest_state | urlencode }}" method="post">
+{# GitHub's manifest flow takes a personal account's App at /settings/apps/new and an organisation's at /organizations/<org>/settings/apps/new (docs.github.com, Registering a GitHub App from a manifest). #}
+<form id="manifest-form" action="https://github.com/{{ 'settings' if github_runner_arc_app_setup_owner_type == 'user' else 'organizations/' ~ (github_runner_arc_app_setup_org | urlencode) ~ '/settings' }}/apps/new?state={{ github_runner_arc_app_manifest_state | urlencode }}" method="post">
 <input type="hidden" name="manifest" id="manifest-input">
 <button type="submit">Create GitHub App</button>
 </form>

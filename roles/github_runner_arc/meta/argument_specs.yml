@@ -11,8 +11,9 @@ argument_specs:
         elements: dict
         default: []
         description:
-          - Orgs whose runner scale sets this host installs. Each entry has name, app_id (needed only when the role writes the App Secret; otherwise the existing Secret supplies it), image, private_key or private_key_op_reference, and optionally installation_id and app_secret_name (the App Secret's name, default <org>-github-app).
-          - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, capabilities, capability_store, tolerations, autoscale, sizing and burst.
+          - Scopes whose runner scale sets this host installs. Each entry has name, app_id (needed only when the role writes the App Secret; otherwise the existing Secret supplies it), image, private_key or private_key_op_reference, and optionally repository, installation_id and app_secret_name (the App Secret's name, default <org>-github-app).
+          - Without repository an entry registers organisation runners in the organisation name names (githubConfigUrl https://github.com/<name>). With repository it registers repository runners in that one repository (https://github.com/<name>/<repository>), where name may be a user or an organisation; its derived names use <name>--<repository> (lower-cased, with any character a DNS label does not allow as '-') in place of <org>, and its App needs the repository-scope permissions. The scope (name, or name/repository) identifies an entry, so one login may have an organisation entry and any number of repository entries.
+          - Each entry's scale_set_profiles is a non-empty list of profiles, each with suffix and optionally namespace (default arc-runners-<org><suffix>), release_name (default <org>-runners<suffix>, at most 53 characters, Helm's limit), values_file, max_runners, min_runners, container_mode, resources, node_selector, runs_on_label, scale_set_labels, capabilities, capability_store, tolerations, autoscale, sizing and burst.
           - capability_store, a boolean (default false), makes the profile's runner pods copy each tool-cache and system-library capability's payload, and the runner's externals for a Docker-in-Docker sidecar the values write out, into the capability store (github_runner_arc_capability_store_host_path), which the pods of a node share, instead of into every pod's own volumes, and mount the result read-only. Every image those copies come from must be pinned by digest, and the store needs the node cache pruner, so a profile that sets it is refused while github_runner_arc_node_cache_size_limit_gib is 0 or github_runner_arc_node_label_key is empty, since the pruner runs only on the nodes carrying that label. A job that can reach a privileged Docker daemon can write to the store, so give it only to a profile whose workflows are all of one trust level.
           - max_runners, when set, is the release's maxRunners and takes precedence over its values file and its sizing.
           - scale_set_labels replaces runs_on_label with the whole list of scaleSetLabels; an empty list sets none, so jobs target the release name.
@@ -412,7 +413,16 @@ argument_specs:
       github_runner_arc_app_setup_org:
         type: str
         default: ""
-        description: Organisation the App setup creates the App on.
+        description: Login of the account the App setup creates the App on and waits for it to be installed on, an organisation or with github_runner_arc_app_setup_owner_type user a personal account.
+      github_runner_arc_app_setup_owner_type:
+        type: str
+        choices: [organization, user]
+        default: organization
+        description: Whether github_runner_arc_app_setup_org is an organisation or a personal account, which decides where GitHub's manifest flow registers the App. user needs github_runner_arc_app_setup_repository.
+      github_runner_arc_app_setup_repository:
+        type: str
+        default: ""
+        description: A repository of that account whose runners the App is for, matching a github_runner_arc_orgs entry with repository. Empty means the organisation's own runners.
       github_runner_arc_app_setup_name:
         type: str
         default: ""
@@ -423,10 +433,11 @@ argument_specs:
       github_runner_arc_app_setup_homepage_url:
         type: str
         default: ""
-        description: The App's homepage and redirect page. Empty means the organisation's GitHub page.
+        description: The App's homepage and redirect page. Empty means the account's GitHub page.
       github_runner_arc_app_setup_permissions:
         type: dict
-        description: The App's permissions.
+        default: {}
+        description: The App's permissions. Empty means those ARC documents for the scope (organisation self-hosted runners write for an organisation; repository administration write and metadata read for a repository); a value replaces them whole.
       github_runner_arc_app_manifest_code:
         type: str
         default: ""
@@ -448,11 +459,11 @@ argument_specs:
         type: list
         elements: str
         default: []
-        description: Namespaces the App Secret is written into. Empty means those of the organisation's scale-set profiles in github_runner_arc_orgs.
+        description: Namespaces the App Secret is written into. Empty means those of the scale-set profiles of the github_runner_arc_orgs entry for the App's scope.
       github_runner_arc_app_setup_secret_name:
         type: str
         default: ""
-        description: The App Secret's name. Empty means the organisation's app_secret_name in github_runner_arc_orgs, or <org>-github-app.
+        description: The App Secret's name. Empty means the app_secret_name of the github_runner_arc_orgs entry for the App's scope, or the name the role derives for that scope.
       github_runner_arc_app_setup_keep_private_key:
         type: bool
         default: false

@@ -285,6 +285,10 @@ class RepositoryScopeTest(unittest.TestCase):
         result = arc.arc_profiles([org("example-user/example-repo")])
         self.assertEqual(result["errors"], ["github_runner_arc_orgs[0].name must be an account login, without '/'; set repository for a repository's runners"])
 
+    def test_the_default_app_secret_name_follows_the_scope(self) -> None:
+        self.assertEqual(arc.arc_default_app_secret(org("Example")), "example-github-app")
+        self.assertEqual(arc.arc_default_app_secret(org("example-user", repository="Example.Repo")), "example-user--example-repo-github-app")
+
     def test_an_unset_or_null_repository_is_the_organisation_scope(self) -> None:
         self.assertEqual(arc.arc_scope(org("Example")), "Example")
         self.assertEqual(arc.arc_scope(org("Example", repository=None)), "Example")
