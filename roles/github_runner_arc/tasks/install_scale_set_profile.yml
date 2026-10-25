@@ -35,8 +35,8 @@
     github_runner_arc_pull_secret_vars: >-
       {{
         {'namespace': profile.namespace, 'username': github_runner_arc_app_pull_token_username,
-         'password': github_runner_arc_app_pull_tokens[org.name].token,
-         'annotations': {github_runner_arc_pull_token_expiry_annotation: github_runner_arc_app_pull_tokens[org.name].expires_at}}
+         'password': github_runner_arc_app_pull_tokens[org | exadev.github_runner.arc_scope].token,
+         'annotations': {github_runner_arc_pull_token_expiry_annotation: github_runner_arc_app_pull_tokens[org | exadev.github_runner.arc_scope].expires_at}}
         if github_runner_arc_image_pull_secret_source == 'app' else
         {'namespace': profile.namespace, 'username': github_runner_arc_ghcr_username, 'password': github_runner_arc_ghcr_token, 'annotations': {}}
       }}
