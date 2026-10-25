@@ -68,7 +68,7 @@ jq -n \
           {suffix: "", autoscale: ((env.AUTOSCALER_USABLE_BUDGET_GI // "") != "")}
           + (if (env.RUNNER_VALUES_FILE // "") != "" then {values_file: env.RUNNER_VALUES_FILE} else {max_runners: env.RUNNER_MAX_RUNNERS} end)
         ]
-      }]
+      } + opt("repository"; "RUNNER_REPOSITORY")]
       end
     ),
     github_runner_arc_values_dir: $repo_root,
