@@ -30,7 +30,7 @@
         | selectattr('github_runner_secrets_onepassword_item', 'defined')
         | selectattr('github_runner_secrets_onepassword_item', 'equalto', github_runner_secrets_onepassword_item)
         | map(attribute='github_runner_arc_orgs', default=[])
-        | list | flatten | selectattr('private_key_op_reference', 'defined') | unique(attribute='name'))
+        | list | flatten | selectattr('private_key_op_reference', 'defined') | unique(attribute='private_key_op_reference'))
         if 'arc' in github_runner_secrets_onepassword_consumers else []
       }}
 
@@ -46,7 +46,7 @@
   ansible.builtin.set_fact:
     github_runner_secrets_onepassword_orgs_to_read: >-
       {{ github_runner_secrets_onepassword_all_orgs
-         | rejectattr('name', 'in', (github_runner_secrets_onepassword_cached.org_private_keys | default({})).keys() | list) | list }}
+         | rejectattr('private_key_op_reference', 'in', (github_runner_secrets_onepassword_cached.org_private_keys | default({})).keys() | list) | list }}
 
 # A field missing from the item reads as empty rather than failing the read, so the item only needs the fields the play's roles use; the checks below and the roles' own checks name any that is missing.
 - name: Read the 1Password item and org keys this play needs in one shell invocation
@@ -69,7 +69,7 @@
     org_keys='{}'
     {% for org in github_runner_secrets_onepassword_orgs_to_read %}
     key_{{ loop.index }}=$(op read '{{ org.private_key_op_reference }}')
-    org_keys=$(jq -n --argjson prev "$org_keys" --arg name '{{ org.name }}' --arg key "$key_{{ loop.index }}" '$prev + {($name): $key}')
+    org_keys=$(jq -n --argjson prev "$org_keys" --arg name '{{ org.private_key_op_reference }}' --arg key "$key_{{ loop.index }}" '$prev + {($name): $key}')
     {% endfor %}
     jq -n --argjson secrets "$secrets" --argjson org_keys "$org_keys" '$secrets + {org_private_keys: $org_keys}'
   delegate_to: localhost
