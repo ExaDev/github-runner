@@ -15,6 +15,13 @@ from ansible.module_utils.parsing.convert_bool import boolean
 _DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _DNS_LABEL_MAX_LENGTH = 63
 
+# Where a scale set registers: githubConfigUrl is this followed by the entry's scope, an account login (an organisation's runners) or login/repository (one repository's runners), as the gha-runner-scale-set chart's values.yaml documents it.
+_GITHUB_URL = "https://github.com/"
+# Joins an entry's login and repository in the names derived from a repository scope. GitHub refuses consecutive hyphens in a login, so a login-only (organisation) scope never contains it, and the names of an organisation scope and a repository scope of the same login always differ.
+_REPOSITORY_NAME_SEPARATOR = "--"
+# A repository name may hold '.', '_' and upper-case letters, which no DNS label does; each such character becomes '-' in derived names. Two repositories that then derive the same name are refused by arc_profiles' namespace and release checks, and a profile's namespace and release_name override them.
+_NOT_IN_DNS_LABEL = re.compile(r"[^a-z0-9-]")
+
 # Sizing inputs: (key, required, default, lower bound, lower bound inclusive, upper bound, upper bound inclusive). None means unbounded.
 _SIZING_INPUTS: tuple[tuple[str, bool, str, str | None, bool, str | None, bool], ...] = (
     ("node_allocatable_cpu", True, "0", "0", False, None, False),
@@ -538,14 +545,32 @@ def arc_runner_placement(profile: Mapping[str, Any], eligibility: Mapping[str, A
     return {"nodeSelector": dict(profile["node_selector"]), "affinity": {"nodeAffinity": node_affinity}, "tolerations": own_tolerations + burst["tolerations"]}
 
 
-def _expand_profile(org_name: str, runner_image: str, app_secret: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
-    """Describe one scale-set profile of an org, or record why it cannot be described."""
-    where = f"{org_name} scale_set_profiles[{index}]"
+def arc_scope(org: Mapping[str, Any]) -> str:
+    """Return the scope a github_runner_arc_orgs entry registers its scale sets in: its name (an organisation) or, with repository set, name/repository (that one repository, of a user or an organisation).
+
+    The scope identifies an entry: it is what githubConfigUrl names, and the key the role records an entry's installation id and pull token under, so two entries of one login (the organisation and one of its repositories, or two repositories) stay apart.
+    """
+    name = _text(org, "name")
+    repository = _text(org, "repository")
+    return f"{name}/{repository}" if repository else name
+
+
+def _scope_slug(org_name: str, repository: str) -> str:
+    """Return the stem of the names derived for an entry's scope: the lower-cased login, joined to the repository with _REPOSITORY_NAME_SEPARATOR when there is one."""
+    if not repository:
+        return org_name.lower()
+    return f"{org_name.lower()}{_REPOSITORY_NAME_SEPARATOR}{_NOT_IN_DNS_LABEL.sub('-', repository.lower())}"
+
+
+def _expand_profile(org_name: str, repository: str, runner_image: str, app_secret: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
+    """Describe one scale-set profile of an entry, or record why it cannot be described."""
+    scope = f"{org_name}/{repository}" if repository else org_name
+    where = f"{scope} scale_set_profiles[{index}]"
     if not isinstance(profile, Mapping):
         errors.append(f"{where} must be a mapping")
         return None
     suffix = _text(profile, "suffix")
-    org_lower = org_name.lower()
+    slug = _scope_slug(org_name, repository)
     node_selector = profile.get("node_selector") or {}
     if not isinstance(node_selector, Mapping):
         errors.append(f"{where}.node_selector must be a mapping")
@@ -581,10 +606,13 @@ def _expand_profile(org_name: str, runner_image: str, app_secret: str, index: in
         max_runners = None if sizing_result["max_runners"] is None else sizing_result["max_runners"] + burst_runners
     else:
         max_runners = None
-    namespace = _optional_name(profile, "namespace", where, errors) or f"arc-runners-{org_lower}{suffix}"
-    release = _optional_name(profile, "release_name", where, errors) or f"{org_lower}-runners{suffix}"
+    namespace = _optional_name(profile, "namespace", where, errors) or f"arc-runners-{slug}{suffix}"
+    release = _optional_name(profile, "release_name", where, errors) or f"{slug}-runners{suffix}"
     expanded = {
         "org_name": org_name,
+        "repository": repository,
+        "scope": scope,
+        "config_url": f"{_GITHUB_URL}{scope}",
         "suffix": suffix,
         "namespace": namespace,
         "release": release,
@@ -592,7 +620,7 @@ def _expand_profile(org_name: str, runner_image: str, app_secret: str, index: in
         "target": f"{namespace}/{release}",
         "app_secret": app_secret,
         "runner_image": runner_image,
-        "scale_set_labels": _scale_set_labels(profile, f"{org_lower}-runners", where, errors),
+        "scale_set_labels": _scale_set_labels(profile, f"{slug}-runners", where, errors),
         "values_file": _text(profile, "values_file"),
         "node_selector": dict(node_selector),
         "autoscale": autoscale,
@@ -603,7 +631,7 @@ def _expand_profile(org_name: str, runner_image: str, app_secret: str, index: in
         "max_runners": max_runners,
         "capabilities": _capability_names(profile, where, errors),
         "capability_store": capability_store,
-        "label": f"{org_name}{suffix}",
+        "label": f"{scope}{suffix}",
         "settings": dict(profile),
     }
     # The role's own values template needs a static maxRunners: max_runners, or sizing on a profile the autoscaler does not manage (the autoscaled profile's sizing sets the autoscaler's ceiling, not its floor).
@@ -617,14 +645,16 @@ def _expand_profile(org_name: str, runner_image: str, app_secret: str, index: in
 def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, Any]:
     """Expand github_runner_arc_orgs entries into one record per scale-set profile, and check them.
 
-    Pass every org that installs into one cluster, not one host's, so that the cross-host checks (an org configured twice, two profiles sharing a namespace, more than one autoscaled profile setting its own sizing) see the whole cluster; arc_cluster_profiles gathers them from the inventory.
+    Pass every entry that installs into one cluster, not one host's, so that the cross-host checks (a scope configured twice, two profiles sharing a namespace, more than one autoscaled profile setting its own sizing) see the whole cluster; arc_cluster_profiles gathers them from the inventory.
+
+    An entry without repository registers organisation runners in the organisation name names. An entry with repository registers repository runners in name/repository instead, where name may be a user or an organisation; its derived namespace, release, scaleSetLabels default and App Secret name join name and repository with _REPOSITORY_NAME_SEPARATOR, so they differ from the organisation's and from every other repository's. The scope (see arc_scope) identifies an entry: the same scope twice is an error, while one login's organisation entry and its repository entries, or several repository entries, may sit side by side.
 
     Args:
         require_app_id: whether each org must set app_id. The role needs it only when it writes the App Secret; otherwise the App's id is in the existing App Secret, and an app_id that is set is only checked against it.
-        orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name. A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile may set capability_store (a boolean, default false) to copy its tool-cache and system-library payloads, and the dind sidecar's externals, into the capability store, which the pods of a node share, instead of into every pod (see arc_capability_pod). A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes, and a profile without sizing may set burst with exclusive true to run on burst nodes only, with burst.max_runners as its maxRunners; see arc_runner_placement.
+        orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name and repository (a repository name in name's account, without the owner). A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile may set capability_store (a boolean, default false) to copy its tool-cache and system-library payloads, and the dind sidecar's externals, into the capability store, which the pods of a node share, instead of into every pod (see arc_capability_pod). A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes, and a profile without sizing may set burst with exclusive true to run on burst nodes only, with burst.max_runners as its maxRunners; see arc_runner_placement.
 
     Returns:
-        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name, suffix, namespace, release, target (namespace/release, joined), app_secret, runner_image (its org's image), scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), capabilities (the names of the capabilities its runner pods carry, in order; see arc_capability_pod), capability_store (whether it uses the capability store), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
+        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name (the entry's name), repository (empty for an organisation scope), scope (see arc_scope), config_url (the githubConfigUrl it registers with), suffix, namespace, release, target (namespace/release, joined), app_secret, runner_image (its org's image), scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), capabilities (the names of the capabilities its runner pods carry, in order; see arc_capability_pod), capability_store (whether it uses the capability store), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
     """
     errors: list[str] = []
     profiles: list[dict[str, Any]] = []
@@ -640,24 +670,33 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
         if not org_name:
             errors.append(f"{where} has no name")
             continue
+        if "/" in org_name:
+            errors.append(f"{where}.name must be an account login, without '/'; set repository for a repository's runners")
+            continue
+        repository = org.get("repository")
+        if repository is not None and (not isinstance(repository, str) or not repository or "/" in repository):
+            errors.append(f"{where}.repository must be a repository name without its owner (no '/') when set")
+            continue
+        repository = repository or ""
+        scope = arc_scope(org)
         if require_app_id and not _text(org, "app_id"):
-            errors.append(f"{org_name}: app_id is required when the role writes the App Secret (github_runner_arc_manage_secrets); with an existing App Secret it is read from that Secret's github_app_id")
+            errors.append(f"{scope}: app_id is required when the role writes the App Secret (github_runner_arc_manage_secrets); with an existing App Secret it is read from that Secret's github_app_id")
         if not _text(org, "image"):
-            errors.append(f"{org_name}: image is required")
+            errors.append(f"{scope}: image is required")
         # Presence only: reading the value would decrypt an ansible-vault string for no reason.
         if org.get("private_key") is not None and org.get("private_key_op_reference") is not None:
-            errors.append(f"{org_name}: set private_key or private_key_op_reference, not both (the 1Password adapter fills private_key from the reference)")
-        if org_name.lower() in seen_orgs:
-            errors.append(f"Org '{org_name}' is configured more than once in github_runner_arc_orgs (also as '{seen_orgs[org_name.lower()]}'). Each org's Helm releases in a cluster must be installed from one entry on one host; remove the duplicate.")
+            errors.append(f"{scope}: set private_key or private_key_op_reference, not both (the 1Password adapter fills private_key from the reference)")
+        if scope.lower() in seen_orgs:
+            errors.append(f"'{scope}' is configured more than once in github_runner_arc_orgs (also as '{seen_orgs[scope.lower()]}'). Each scope's Helm releases in a cluster must be installed from one entry on one host; remove the duplicate.")
             continue
-        seen_orgs[org_name.lower()] = org_name
+        seen_orgs[scope.lower()] = scope
         org_profiles = org.get("scale_set_profiles")
         if not isinstance(org_profiles, Sequence) or isinstance(org_profiles, (str, bytes)) or not org_profiles:
-            errors.append(f"{org_name}: scale_set_profiles must be a non-empty list")
+            errors.append(f"{scope}: scale_set_profiles must be a non-empty list")
             continue
-        app_secret = _optional_name(org, "app_secret_name", org_name, errors) or f"{org_name.lower()}-github-app"
+        app_secret = _optional_name(org, "app_secret_name", scope, errors) or f"{_scope_slug(org_name, repository)}-github-app"
         for profile_index, profile in enumerate(org_profiles):
-            expanded = _expand_profile(org_name, _text(org, "image"), app_secret, profile_index, profile, errors)
+            expanded = _expand_profile(org_name, repository, _text(org, "image"), app_secret, profile_index, profile, errors)
             if expanded is not None:
                 profiles.append(expanded)
     namespaces: dict[str, str] = {}
@@ -666,8 +705,8 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
         if profile["namespace"] in namespaces:
             errors.append(f"{profile['label']} and {namespaces[profile['namespace']]} both map to namespace '{profile['namespace']}'; give one of them a different suffix or namespace")
         namespaces.setdefault(profile["namespace"], profile["label"])
-        # The release name is also the scale set's registration name on GitHub, so two of an org's releases sharing it would register a duplicate even from different namespaces.
-        release_key = (profile["org_name"].lower(), profile["release"])
+        # The release name is also the scale set's registration name on GitHub, so two releases of one scope sharing it would register a duplicate even from different namespaces. Scopes register apart, so another scope's release of the same name is no conflict.
+        release_key = (profile["scope"].lower(), profile["release"])
         if release_key in releases:
             errors.append(f"{profile['label']} and {releases[release_key]} both use release name '{profile['release']}', which is the scale set's name on GitHub; give one of them a different suffix or release_name")
         releases.setdefault(release_key, profile["label"])
@@ -706,11 +745,11 @@ def arc_cluster_profiles(orgs_by_host: Mapping[str, Any], cluster: Sequence[str]
             errors.append(f"{host}: github_runner_arc_orgs must be a list")
             continue
         for org in orgs:
-            name = _text(org, "name") if isinstance(org, Mapping) else ""
+            name = arc_scope(org) if isinstance(org, Mapping) else ""
             installer = installers.get(name.lower()) if name else None
-            # The same org twice on one host is arc_profiles' own check, so it is passed on for that.
+            # The same scope twice on one host is arc_profiles' own check, so it is passed on for that.
             if installer is not None and installer[0] != host:
-                errors.append(f"Org '{name}' is configured more than once in github_runner_arc_orgs for one cluster, on {installer[0]} (as '{installer[1]}') and on {host}. Each org's Helm releases in a cluster must be installed from one host; move its scale_set_profiles onto one of them.")
+                errors.append(f"'{name}' is configured more than once in github_runner_arc_orgs for one cluster, on {installer[0]} (as '{installer[1]}') and on {host}. Each scope's Helm releases in a cluster must be installed from one host; move its scale_set_profiles onto one of them.")
                 continue
             if name:
                 installers.setdefault(name.lower(), (host, name))
@@ -724,13 +763,13 @@ def arc_cluster_profiles(orgs_by_host: Mapping[str, Any], cluster: Sequence[str]
             continue
         for profile in arc_profiles(orgs, require_app_id=False)["profiles"]:
             if host in members:
-                registered.setdefault((profile["org_name"].lower(), profile["release"]), (host, profile["label"]))
+                registered.setdefault((profile["scope"].lower(), profile["release"]), (host, profile["label"]))
             else:
                 elsewhere.append((host, profile))
     for host, profile in elsewhere:
-        match = registered.get((profile["org_name"].lower(), profile["release"]))
+        match = registered.get((profile["scope"].lower(), profile["release"]))
         if match is not None:
-            errors.append(f"{match[1]} on {match[0]} and {profile['label']} on {host}, which installs into another cluster, both register scale set '{profile['release']}' for org '{profile['org_name']}'. GitHub gives a scale set name to one controller at a time; uninstall it from one cluster before installing it in the other, or give one of them a different suffix or release_name.")
+            errors.append(f"{match[1]} on {match[0]} and {profile['label']} on {host}, which installs into another cluster, both register scale set '{profile['release']}' in '{profile['scope']}'. GitHub gives a scale set name to one controller at a time; uninstall it from one cluster before installing it in the other, or give one of them a different suffix or release_name.")
     return {**result, "errors": errors + result["errors"]}
 
 
@@ -1920,6 +1959,7 @@ class FilterModule:
         """Return the filters this plugin provides."""
         return {
             "arc_profiles": arc_profiles,
+            "arc_scope": arc_scope,
             "arc_cluster_profiles": arc_cluster_profiles,
             "arc_max_runners": arc_max_runners,
             "arc_measured_max_runners": arc_measured_max_runners,
