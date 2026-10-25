@@ -188,7 +188,7 @@ class ClusterProfilesTest(unittest.TestCase):
 
     def test_an_org_on_two_hosts_of_one_cluster_names_both_hosts(self) -> None:
         result = arc.arc_cluster_profiles(self.SPLIT, ["node-a", "node-b"])
-        self.assertEqual(result["errors"], ["Org 'Example' is configured more than once in github_runner_arc_orgs for one cluster, on node-a (as 'Example') and on node-b. Each org's Helm releases in a cluster must be installed from one host; move its scale_set_profiles onto one of them."])
+        self.assertEqual(result["errors"], ["'Example' is configured more than once in github_runner_arc_orgs for one cluster, on node-a (as 'Example') and on node-b. Each scope's Helm releases in a cluster must be installed from one host; move its scale_set_profiles onto one of them."])
 
     def test_an_unknown_cluster_counts_every_host_as_one(self) -> None:
         result = arc.arc_cluster_profiles(self.SPLIT)
@@ -202,7 +202,7 @@ class ClusterProfilesTest(unittest.TestCase):
 
     def test_one_scale_set_registered_from_two_clusters_is_an_error(self) -> None:
         result = arc.arc_cluster_profiles({"node-a": [org(profiles=[{"max_runners": 1}])], "node-b": [org("example", [{"namespace": "elsewhere", "max_runners": 1}])]}, ["node-a"])
-        self.assertEqual(result["errors"], ["Example on node-a and example on node-b, which installs into another cluster, both register scale set 'example-runners' for org 'example'. GitHub gives a scale set name to one controller at a time; uninstall it from one cluster before installing it in the other, or give one of them a different suffix or release_name."])
+        self.assertEqual(result["errors"], ["Example on node-a and example on node-b, which installs into another cluster, both register scale set 'example-runners' in 'example'. GitHub gives a scale set name to one controller at a time; uninstall it from one cluster before installing it in the other, or give one of them a different suffix or release_name."])
 
     def test_another_orgs_scale_set_of_the_same_name_is_not_a_conflict(self) -> None:
         result = arc.arc_cluster_profiles({"node-a": [org(profiles=[{"release_name": "ci", "max_runners": 1}])], "node-b": [org("Other", [{"release_name": "ci", "max_runners": 1}])]}, ["node-a"])
@@ -220,6 +220,83 @@ class ClusterProfilesTest(unittest.TestCase):
     def test_a_hosts_orgs_must_be_a_list(self) -> None:
         result = arc.arc_cluster_profiles({"node-a": "Example"}, ["node-a"])
         self.assertEqual(result["errors"], ["node-a: github_runner_arc_orgs must be a list"])
+
+
+class RepositoryScopeTest(unittest.TestCase):
+    def test_an_entry_without_repository_registers_in_the_organisation(self) -> None:
+        profile = arc.arc_profiles([org("Example")])["profiles"][0]
+        self.assertEqual((profile["scope"], profile["repository"], profile["config_url"], profile["label"]), ("Example", "", "https://github.com/Example", "Example"))
+
+    def test_an_entry_with_repository_registers_in_that_repository(self) -> None:
+        result = arc.arc_profiles([org("example-user", [{"max_runners": 1}, {"suffix": "-big", "max_runners": 1}], repository="example-repo")])
+        self.assertEqual(result["errors"], [])
+        default, big = result["profiles"]
+        self.assertEqual((default["org_name"], default["repository"], default["scope"], default["config_url"]), ("example-user", "example-repo", "example-user/example-repo", "https://github.com/example-user/example-repo"))
+        self.assertEqual((default["namespace"], default["release"], default["app_secret"], default["scale_set_labels"], default["label"]), ("arc-runners-example-user--example-repo", "example-user--example-repo-runners", "example-user--example-repo-github-app", ["example-user--example-repo-runners"], "example-user/example-repo"))
+        self.assertEqual((big["namespace"], big["release"], big["label"]), ("arc-runners-example-user--example-repo-big", "example-user--example-repo-runners-big", "example-user/example-repo-big"))
+
+    def test_an_organisation_and_its_repositories_derive_distinct_names(self) -> None:
+        result = arc.arc_profiles([org("example-org"), org("example-org", repository="first"), org("example-org", repository="second")])
+        self.assertEqual(result["errors"], [])
+        for key in ("namespace", "release", "app_secret", "target", "scope", "config_url"):
+            values = [profile[key] for profile in result["profiles"]]
+            self.assertEqual(len(set(values)), 3, f"{key}: {values}")
+
+    def test_a_repository_named_like_an_organisation_suffix_does_not_collide(self) -> None:
+        # The organisation's suffixed profile and the repository's default profile would both be example-org-builder without the separator.
+        result = arc.arc_profiles([org("example-org", [{"suffix": "-builder", "max_runners": 1}]), org("example-org", repository="builder")])
+        self.assertEqual(result["errors"], [])
+        self.assertNotEqual(result["profiles"][0]["namespace"], result["profiles"][1]["namespace"])
+        self.assertNotEqual(result["profiles"][0]["release"], result["profiles"][1]["release"])
+
+    def test_the_same_repository_twice_is_an_error_even_in_a_different_case(self) -> None:
+        result = arc.arc_profiles([org("example-user", repository="example-repo"), org("Example-User", repository="Example-Repo")])
+        self.assertEqual(result["errors"], ["'Example-User/Example-Repo' is configured more than once in github_runner_arc_orgs (also as 'example-user/example-repo'). Each scope's Helm releases in a cluster must be installed from one entry on one host; remove the duplicate."])
+
+    def test_repository_characters_no_dns_label_allows_become_hyphens(self) -> None:
+        profile = arc.arc_profiles([org("example-user", repository="Example.Repo_2")])["profiles"][0]
+        self.assertEqual((profile["namespace"], profile["release"], profile["config_url"]), ("arc-runners-example-user--example-repo-2", "example-user--example-repo-2-runners", "https://github.com/example-user/Example.Repo_2"))
+
+    def test_repositories_that_derive_the_same_names_are_refused(self) -> None:
+        result = arc.arc_profiles([org("example-user", repository="example.repo"), org("example-user", repository="example_repo")])
+        self.assertTrue(any("both map to namespace 'arc-runners-example-user--example-repo'" in message for message in result["errors"]), result["errors"])
+
+    def test_a_repository_must_be_a_bare_repository_name(self) -> None:
+        for repository in ("", "example-user/example-repo", 5):
+            with self.subTest(repository=repository):
+                result = arc.arc_profiles([org("example-user", repository=repository)])
+                self.assertEqual(result["errors"], ["github_runner_arc_orgs[0].repository must be a repository name without its owner (no '/') when set"])
+                self.assertEqual(result["profiles"], [])
+
+    def test_a_name_holding_a_repository_is_refused(self) -> None:
+        result = arc.arc_profiles([org("example-user/example-repo")])
+        self.assertEqual(result["errors"], ["github_runner_arc_orgs[0].name must be an account login, without '/'; set repository for a repository's runners"])
+
+    def test_an_unset_or_null_repository_is_the_organisation_scope(self) -> None:
+        self.assertEqual(arc.arc_scope(org("Example")), "Example")
+        self.assertEqual(arc.arc_scope(org("Example", repository=None)), "Example")
+        self.assertEqual(arc.arc_scope(org("example-user", repository="example-repo")), "example-user/example-repo")
+
+    def test_a_release_name_may_repeat_across_scopes_of_one_login(self) -> None:
+        result = arc.arc_profiles([org("example-org", [{"release_name": "ci", "namespace": "ci-org", "max_runners": 1}]), org("example-org", [{"release_name": "ci", "namespace": "ci-repo", "max_runners": 1}], repository="example-repo")])
+        self.assertEqual(result["errors"], [])
+
+    def test_the_same_repository_on_two_hosts_of_one_cluster_is_an_error(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org("example-user", repository="example-repo")], "node-b": [org("example-user", [{"suffix": "-big", "max_runners": 1}], repository="example-repo")]}, ["node-a", "node-b"])
+        self.assertEqual(result["errors"], ["'example-user/example-repo' is configured more than once in github_runner_arc_orgs for one cluster, on node-a (as 'example-user/example-repo') and on node-b. Each scope's Helm releases in a cluster must be installed from one host; move its scale_set_profiles onto one of them."])
+
+    def test_an_organisation_and_its_repository_may_be_installed_from_two_hosts(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org("example-org")], "node-b": [org("example-org", repository="example-repo")]}, ["node-a", "node-b"])
+        self.assertEqual(result["errors"], [])
+
+    def test_one_repository_scale_set_registered_from_two_clusters_is_an_error(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org("example-user", repository="example-repo")], "node-b": [org("example-user", [{"namespace": "elsewhere", "max_runners": 1}], repository="example-repo")]}, ["node-a"])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("both register scale set 'example-user--example-repo-runners' in 'example-user/example-repo'", result["errors"][0])
+
+    def test_an_organisation_scale_set_and_a_repository_scale_set_of_one_name_do_not_conflict_across_clusters(self) -> None:
+        result = arc.arc_cluster_profiles({"node-a": [org("example-org", [{"release_name": "ci", "max_runners": 1}])], "node-b": [org("example-org", [{"release_name": "ci", "max_runners": 1}], repository="example-repo")]}, ["node-a"])
+        self.assertEqual(result["errors"], [])
 
 
 class MaxRunnersTest(unittest.TestCase):
