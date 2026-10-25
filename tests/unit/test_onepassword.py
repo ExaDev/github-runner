@@ -16,20 +16,25 @@ _spec.loader.exec_module(onepassword)
 class FillOrgKeysTest(unittest.TestCase):
     def test_a_reference_is_replaced_by_the_key_read_for_it(self) -> None:
         orgs = [{"name": "A", "app_id": 1, "private_key_op_reference": "op://v/a/key"}]
-        self.assertEqual(onepassword.onepassword_fill_org_keys(orgs, {"A": "pem-a"}), [{"name": "A", "app_id": 1, "private_key": "pem-a"}])
+        self.assertEqual(onepassword.onepassword_fill_org_keys(orgs, {"op://v/a/key": "pem-a"}), [{"name": "A", "app_id": 1, "private_key": "pem-a"}])
 
     def test_an_org_without_a_reference_is_left_alone(self) -> None:
         orgs = [{"name": "A", "private_key": "own"}, {"name": "B", "private_key_op_reference": "op://v/b/key"}]
-        self.assertEqual(onepassword.onepassword_fill_org_keys(orgs, {"A": "ignored", "B": "pem-b"}), [{"name": "A", "private_key": "own"}, {"name": "B", "private_key": "pem-b"}])
+        self.assertEqual(onepassword.onepassword_fill_org_keys(orgs, {"op://v/a/key": "ignored", "op://v/b/key": "pem-b"}), [{"name": "A", "private_key": "own"}, {"name": "B", "private_key": "pem-b"}])
 
     def test_the_input_is_not_changed(self) -> None:
         orgs = [{"name": "A", "private_key_op_reference": "op://v/a/key"}]
-        onepassword.onepassword_fill_org_keys(orgs, {"A": "pem-a"})
+        onepassword.onepassword_fill_org_keys(orgs, {"op://v/a/key": "pem-a"})
         self.assertEqual(orgs, [{"name": "A", "private_key_op_reference": "op://v/a/key"}])
 
     def test_a_reference_with_no_key_read_is_an_error(self) -> None:
-        with self.assertRaisesRegex(onepassword.AnsibleFilterError, "for org A"):
+        with self.assertRaisesRegex(onepassword.AnsibleFilterError, "for A \\(op://v/a/key\\)"):
             onepassword.onepassword_fill_org_keys([{"name": "A", "private_key_op_reference": "op://v/a/key"}], {})
+
+    def test_entries_of_one_login_get_the_key_their_own_reference_names(self) -> None:
+        orgs = [{"name": "example-org", "private_key_op_reference": "op://v/org/key"}, {"name": "example-org", "repository": "example-repo", "private_key_op_reference": "op://v/repo/key"}]
+        filled = onepassword.onepassword_fill_org_keys(orgs, {"op://v/org/key": "pem-org", "op://v/repo/key": "pem-repo"})
+        self.assertEqual([entry["private_key"] for entry in filled], ["pem-org", "pem-repo"])
 
     def test_a_non_list_is_an_error(self) -> None:
         with self.assertRaises(onepassword.AnsibleFilterError):
