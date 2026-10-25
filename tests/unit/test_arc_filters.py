@@ -268,6 +268,19 @@ class RepositoryScopeTest(unittest.TestCase):
                 self.assertEqual(result["errors"], ["github_runner_arc_orgs[0].repository must be a repository name without its owner (no '/') when set"])
                 self.assertEqual(result["profiles"], [])
 
+    def test_a_release_name_longer_than_helm_accepts_is_refused(self) -> None:
+        # The DNS label limit would accept this release name; Helm's does not.
+        repository = "r" * 35
+        result = arc.arc_profiles([org("example-user", repository=repository)])
+        release = f"example-user--{repository}-runners"
+        self.assertGreater(len(release), 53)
+        self.assertLessEqual(len(release), 63)
+        self.assertEqual(result["errors"], [f"example-user/{repository} scale_set_profiles[0]: the derived release name '{release}' is not a valid Kubernetes name (lower-case letters, digits and '-', at most 53 characters)"])
+
+    def test_a_release_name_of_helms_maximum_is_accepted(self) -> None:
+        result = arc.arc_profiles([org("example-user", [{"release_name": "r" * 53, "max_runners": 1}], repository="example-repo")])
+        self.assertEqual(result["errors"], [])
+
     def test_a_name_holding_a_repository_is_refused(self) -> None:
         result = arc.arc_profiles([org("example-user/example-repo")])
         self.assertEqual(result["errors"], ["github_runner_arc_orgs[0].name must be an account login, without '/'; set repository for a repository's runners"])
