@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -50,6 +51,20 @@ def form_text(tasks: list[dict]) -> str:
 
 
 BASE = {"github_runner_arc_app_setup_org": "example-org", "github_runner_arc_app_setup_name": "Example runners"}
+USER_REPOSITORY = {"github_runner_arc_app_setup_org": "example-user", "github_runner_arc_app_setup_owner_type": "user", "github_runner_arc_app_setup_repository": "example-repo", "github_runner_arc_app_setup_name": "Example runners"}
+
+
+def form_action(text: str) -> str:
+    """Return where the rendered form posts the manifest."""
+    match = re.search(r'<form id="manifest-form" action="([^"]+)"', text)
+    assert match is not None
+    return match.group(1)
+
+
+def manifest(tasks: list[dict]) -> dict:
+    """Return the manifest phase 1 built."""
+    [built] = [task for task in tasks if task["task"] == "Build the App manifest"]
+    return built["ansible_facts"]["github_runner_arc_app_manifest"]
 
 
 @unittest.skipIf(shutil.which("ansible-playbook") is None, "ansible-playbook is not installed")
@@ -93,6 +108,58 @@ class AppSetupPhaseOneTest(unittest.TestCase):
         form_text(tasks)
         [targets] = [task for task in tasks if task["task"] == "Work out where the App Secret goes"]
         self.assertEqual(targets["ansible_facts"]["github_runner_arc_app_setup_secret_targets"], [["one", "example-org-github-app"], ["two", "example-org-github-app"]])
+
+    def test_an_organisation_app_posts_to_the_organisation_with_organisation_runner_access(self) -> None:
+        result, tasks = run_phase_one(BASE)
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        self.assertTrue(form_action(form_text(tasks)).startswith("https://github.com/organizations/example-org/settings/apps/new?state="))
+        self.assertEqual(manifest(tasks)["default_permissions"], {"organization_self_hosted_runners": "write"})
+
+    def test_a_personal_accounts_repository_app_posts_to_the_account_with_repository_access(self) -> None:
+        result, tasks = run_phase_one(USER_REPOSITORY)
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        text = form_text(tasks)
+        self.assertTrue(form_action(text).startswith("https://github.com/settings/apps/new?state="))
+        self.assertEqual(manifest(tasks)["default_permissions"], {"administration": "write", "metadata": "read"})
+        self.assertIn("signed in to GitHub as example-user,", text)
+        self.assertIn("choosing example-repo among its repositories", text)
+        self.assertIn("""ansible-playbook playbooks/github_app_setup.yml -e github_runner_arc_app_setup_org=example-user -e github_runner_arc_app_setup_owner_type=user -e github_runner_arc_app_setup_repository=example-repo -e '{"github_runner_arc_app_setup_name": "Example runners"}' -e github_runner_arc_app_manifest_code=<code>""", text)
+
+    def test_an_organisations_repository_app_posts_to_the_organisation_with_repository_access(self) -> None:
+        result, tasks = run_phase_one(BASE | {"github_runner_arc_app_setup_repository": "example-repo"})
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        self.assertTrue(form_action(form_text(tasks)).startswith("https://github.com/organizations/example-org/settings/apps/new?state="))
+        self.assertEqual(manifest(tasks)["default_permissions"], {"administration": "write", "metadata": "read"})
+
+    def test_explicit_permissions_replace_the_scopes_own(self) -> None:
+        result, tasks = run_phase_one(USER_REPOSITORY | {"github_runner_arc_app_setup_permissions": {"administration": "write", "metadata": "read", "actions": "read"}})
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        form_text(tasks)
+        self.assertEqual(manifest(tasks)["default_permissions"], {"administration": "write", "metadata": "read", "actions": "read"})
+
+    def test_a_personal_account_without_a_repository_fails_before_the_form(self) -> None:
+        result, tasks = run_phase_one(USER_REPOSITORY | {"github_runner_arc_app_setup_repository": ""})
+        self.assertNotEqual(result.returncode, 0)
+        [failure] = [task for task in tasks if task["task"] == "Fail when the App's scope cannot exist"]
+        self.assertIn("A personal account has no organisation runners", failure["msg"])
+        self.assertFalse([task for task in tasks if task["task"] == "Render the form" and not task.get("skipped")])
+
+    def test_secret_targets_follow_the_repository_scope(self) -> None:
+        orgs = [
+            {"name": "example-user", "image": "ghcr.io/example-user/runner:1", "scale_set_profiles": [{"max_runners": 1}]},
+            {"name": "example-user", "repository": "example-repo", "image": "ghcr.io/example-user/runner:1", "scale_set_profiles": [{"max_runners": 1}, {"suffix": "-big", "max_runners": 1}]},
+        ]
+        result, tasks = run_phase_one(USER_REPOSITORY | {"github_runner_arc_app_setup_write_secret": True, "github_runner_arc_orgs": orgs})
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        form_text(tasks)
+        [targets] = [task for task in tasks if task["task"] == "Work out where the App Secret goes"]
+        self.assertEqual(targets["ansible_facts"]["github_runner_arc_app_setup_secret_targets"], [["arc-runners-example-user--example-repo", "example-user--example-repo-github-app"], ["arc-runners-example-user--example-repo-big", "example-user--example-repo-github-app"]])
+
+    def test_explicit_namespaces_take_the_repository_scopes_default_name(self) -> None:
+        _, tasks = run_phase_one(USER_REPOSITORY | {"github_runner_arc_app_setup_write_secret": True, "github_runner_arc_app_setup_secret_namespaces": ["one"]})
+        form_text(tasks)
+        [targets] = [task for task in tasks if task["task"] == "Work out where the App Secret goes"]
+        self.assertEqual(targets["ansible_facts"]["github_runner_arc_app_setup_secret_targets"], [["one", "example-user--example-repo-github-app"]])
 
     def test_writing_the_secret_with_nowhere_to_write_it_fails_in_phase_one(self) -> None:
         result, tasks = run_phase_one(BASE | {"github_runner_arc_app_setup_write_secret": True})

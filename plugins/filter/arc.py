@@ -564,6 +564,11 @@ def _scope_slug(org_name: str, repository: str) -> str:
     return f"{org_name.lower()}{_REPOSITORY_NAME_SEPARATOR}{_NOT_IN_DNS_LABEL.sub('-', repository.lower())}"
 
 
+def arc_default_app_secret(org: Mapping[str, Any]) -> str:
+    """Return the App Secret name an entry's profiles use when it sets no app_secret_name: <login>-github-app for an organisation scope, <login>--<repository>-github-app for a repository scope (see _scope_slug)."""
+    return f"{_scope_slug(_text(org, 'name'), _text(org, 'repository'))}-github-app"
+
+
 def _expand_profile(org_name: str, repository: str, runner_image: str, app_secret: str, index: int, profile: Any, errors: list[str]) -> dict[str, Any] | None:
     """Describe one scale-set profile of an entry, or record why it cannot be described."""
     scope = f"{org_name}/{repository}" if repository else org_name
@@ -696,7 +701,7 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
         if not isinstance(org_profiles, Sequence) or isinstance(org_profiles, (str, bytes)) or not org_profiles:
             errors.append(f"{scope}: scale_set_profiles must be a non-empty list")
             continue
-        app_secret = _optional_name(org, "app_secret_name", scope, errors) or f"{_scope_slug(org_name, repository)}-github-app"
+        app_secret = _optional_name(org, "app_secret_name", scope, errors) or arc_default_app_secret(org)
         for profile_index, profile in enumerate(org_profiles):
             expanded = _expand_profile(org_name, repository, _text(org, "image"), app_secret, profile_index, profile, errors)
             if expanded is not None:
@@ -1962,6 +1967,7 @@ class FilterModule:
         return {
             "arc_profiles": arc_profiles,
             "arc_scope": arc_scope,
+            "arc_default_app_secret": arc_default_app_secret,
             "arc_cluster_profiles": arc_cluster_profiles,
             "arc_max_runners": arc_max_runners,
             "arc_measured_max_runners": arc_measured_max_runners,
