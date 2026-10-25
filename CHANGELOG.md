@@ -1,3 +1,22 @@
+## [2.9.0](https://github.com/ExaDev/github-runner/compare/v2.8.0...v2.9.0) (2026-10-25)
+
+### Features
+
+* **arc:** create a GitHub App for one repository's runners ([0265731](https://github.com/ExaDev/github-runner/commit/0265731cb7a45bfee5bd6fd485fa19bf159b1b0c))
+* **arc:** expand a repository-scoped github_runner_arc_orgs entry ([0127083](https://github.com/ExaDev/github-runner/commit/012708395998380ba76c42aa8941b6a62aedb216))
+* **arc:** install a repository-scoped entry's scale sets ([81d8b70](https://github.com/ExaDev/github-runner/commit/81d8b70d16575ee571c1f95ad33b5ac467a6ea13))
+* **bootstrap:** register a bootstrapped scale set in one repository ([7779a79](https://github.com/ExaDev/github-runner/commit/7779a79a1716f63f98d426f49549616ddb990843))
+
+### Bug Fixes
+
+* **arc:** refuse a derived release name longer than Helm accepts ([4070178](https://github.com/ExaDev/github-runner/commit/40701789033260e8ec2c93701ca2198806a943fa))
+* **secrets:** key App private keys read from 1Password by reference ([db3d066](https://github.com/ExaDev/github-runner/commit/db3d066bc980587f49fef161a09fdad16bb6a12f))
+
+### Documentation
+
+* **arc:** describe repository-scoped entries and their App permissions ([ad98406](https://github.com/ExaDev/github-runner/commit/ad984066c3901e4564ce99bd83b0efa3d72962ae))
+* **arc:** state that the heartbeat expects repository scale sets too ([389b727](https://github.com/ExaDev/github-runner/commit/389b727a7b7d24cbeacb554b9f85729ef8f8617f))
+
 ## [2.8.0](https://github.com/ExaDev/github-runner/compare/v2.7.10...v2.8.0) (2026-10-22)
 
 ### Features
