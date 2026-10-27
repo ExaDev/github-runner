@@ -1,3 +1,9 @@
+## [2.9.1](https://github.com/ExaDev/github-runner/compare/v2.9.0...v2.9.1) (2026-10-27)
+
+### Bug Fixes
+
+* **image:** install lsof and tmux in the runner image ([492552e](https://github.com/ExaDev/github-runner/commit/492552e2c3c88d41d0cf700fd13f82e6be767fe0))
+
 ## [2.9.0](https://github.com/ExaDev/github-runner/compare/v2.8.0...v2.9.0) (2026-10-25)
 
 ### Features
