@@ -62,9 +62,11 @@ jobs:
           fi
           argument="${pins% *}"
           version="${PINNED_VERSION:-${pins#* }}"
-          echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
-          echo "version=${version}" >>"$GITHUB_OUTPUT"
-          echo "argument=${argument}" >>"$GITHUB_OUTPUT"
+          {
+            echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}"
+            echo "version=${version}"
+            echo "argument=${argument}"
+          } >>"$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v4
         with:
