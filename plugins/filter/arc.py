@@ -131,6 +131,11 @@ _HOOK_SCRIPTS_DIR = "job-started.d"
 _HOOK_FILE_MODE = 0o444
 # Container modes whose job steps run in a separate pod (the chart's container hooks), which sees neither the runner container's tool cache nor its PATH.
 _SEPARATE_POD_CONTAINER_MODES = frozenset({"kubernetes", "kubernetes-novolume"})
+# The runner's work directory volume: the name the gha-runner-scale-set chart gives it (templates/_helpers.tpl, dind-work-volume, which keeps a values volume of that name in place of its own) and where the runner keeps every job's checkout, dependencies and caches.
+_WORK_VOLUME = "work"
+# The media the work volume can sit on: the node's disk (the empty string, the Kubernetes default) or RAM (Memory, a tmpfs). A RAM-backed volume writes nothing to the node's disk, and its pages count against the pod's memory and cannot be reclaimed while the files exist, so a profile that uses it raises its runner pods' memory request and limit by the volume's size and needs a size_limit to bound it.
+_WORK_VOLUME_MEDIA = ("", "Memory")
+_MEMORY_MEDIUM = "Memory"
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -473,6 +478,30 @@ def _capability_names(profile: Mapping[str, Any], where: str, errors: list[str])
     return list(dict.fromkeys(names))
 
 
+def _work_volume(profile: Mapping[str, Any], where: str, errors: list[str]) -> tuple[str, str]:
+    """Return the medium a profile's work volume sits on and its size limit (empty for the node's disk), recording an error when the medium is not one of _WORK_VOLUME_MEDIA, when Memory has no size limit that is a positive Kubernetes quantity, or when a size limit is given for the disk."""
+    medium = profile.get("work_volume_medium", "")
+    size_limit = profile.get("work_volume_size_limit")
+    if medium not in _WORK_VOLUME_MEDIA:
+        errors.append(f"{where}.work_volume_medium must be one of {', '.join(repr(value) for value in _WORK_VOLUME_MEDIA)}")
+        return "", ""
+    if medium != _MEMORY_MEDIUM:
+        if size_limit is not None:
+            errors.append(f"{where}.work_volume_size_limit applies only with work_volume_medium: {_MEMORY_MEDIUM}")
+        return "", ""
+    if isinstance(size_limit, bool) or not isinstance(size_limit, (str, int)):
+        errors.append(f"{where}.work_volume_size_limit is required with work_volume_medium: {_MEMORY_MEDIUM}, as a Kubernetes quantity such as 6Gi, since a tmpfs without one may grow to the pod's memory limit")
+        return "", ""
+    try:
+        positive = arc_quantity(size_limit) > 0
+    except ValueError:
+        positive = False
+    if not positive:
+        errors.append(f"{where}.work_volume_size_limit must be a positive Kubernetes quantity such as 6Gi (got {size_limit!r})")
+        return "", ""
+    return _MEMORY_MEDIUM, str(size_limit)
+
+
 def _explicit_max_runners(profile: Mapping[str, Any], where: str, errors: list[str]) -> int | None:
     """Return the profile's own max_runners as a whole number, None when unset, recording an error when it is not a whole number of at least 0."""
     value = profile.get("max_runners")
@@ -615,6 +644,7 @@ def _expand_profile(org_name: str, repository: str, runner_image: str, app_secre
         max_runners = None
     namespace = _optional_name(profile, "namespace", where, errors) or f"arc-runners-{slug}{suffix}"
     release = _optional_name(profile, "release_name", where, errors) or f"{slug}-runners{suffix}"
+    work_volume_medium, work_volume_size_limit = _work_volume(profile, where, errors)
     expanded = {
         "org_name": org_name,
         "repository": repository,
@@ -638,6 +668,8 @@ def _expand_profile(org_name: str, repository: str, runner_image: str, app_secre
         "max_runners": max_runners,
         "capabilities": _capability_names(profile, where, errors),
         "capability_store": capability_store,
+        "work_volume_medium": work_volume_medium,
+        "work_volume_size_limit": work_volume_size_limit,
         "label": f"{scope}{suffix}",
         "settings": dict(profile),
     }
@@ -658,10 +690,10 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
 
     Args:
         require_app_id: whether each org must set app_id. The role needs it only when it writes the App Secret; otherwise the App's id is in the existing App Secret, and an app_id that is set is only checked against it.
-        orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name and repository (a repository name in name's account, without the owner). A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile may set capability_store (a boolean, default false) to copy its tool-cache and system-library payloads, and the dind sidecar's externals, into the capability store, which the pods of a node share, instead of into every pod (see arc_capability_pod). A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes, and a profile without sizing may set burst with exclusive true to run on burst nodes only, with burst.max_runners as its maxRunners; see arc_runner_placement.
+        orgs: github_runner_arc_orgs entries, each with name, app_id (see require_app_id), image and a non-empty scale_set_profiles list, at most one of private_key and private_key_op_reference, and optionally app_secret_name and repository (a repository name in name's account, without the owner). A profile may override its namespace and release_name, and set scale_set_labels in place of runs_on_label. A profile may set work_volume_medium ('' or Memory) and, with Memory, work_volume_size_limit (a Kubernetes quantity) to keep its runner's work directory in RAM (see arc_work_volume). A profile may set capability_store (a boolean, default false) to copy its tool-cache and system-library payloads, and the dind sidecar's externals, into the capability store, which the pods of a node share, instead of into every pod (see arc_capability_pod). A profile with sizing may set burst (node_label_key, node_label_values, tolerations, max_runners) to let its runner pods overflow onto burst nodes, and a profile without sizing may set burst with exclusive true to run on burst nodes only, with burst.max_runners as its maxRunners; see arc_runner_placement.
 
     Returns:
-        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name (the entry's name), repository (empty for an organisation scope), scope (see arc_scope), config_url (the githubConfigUrl it registers with), suffix, namespace, release, target (namespace/release, joined), app_secret, runner_image (its org's image), scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), capabilities (the names of the capabilities its runner pods carry, in order; see arc_capability_pod), capability_store (whether it uses the capability store), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
+        A dict with ``errors`` (messages, empty when valid), ``profiles`` (one dict per profile with org_name (the entry's name), repository (empty for an organisation scope), scope (see arc_scope), config_url (the githubConfigUrl it registers with), suffix, namespace, release, target (namespace/release, joined), app_secret, runner_image (its org's image), scale_set_labels, values_file, node_selector, autoscale, sizing, burst (the burst settings with defaults filled in, or None), burst_runners (burst.max_runners, 0 without burst), max_runners (the static maxRunners the role sets, including burst_runners, or None), capabilities (the names of the capabilities its runner pods carry, in order; see arc_capability_pod), capability_store (whether it uses the capability store), work_volume_medium and work_volume_size_limit (the runner's work volume's medium, empty for the node's disk, and its size limit with Memory; see arc_work_volume), label and settings, the profile's own keys) and ``autoscaled`` (every profile flagged autoscale, sharing one autoscaler-managed memory pool across their combined scale sets; empty when none are).
     """
     errors: list[str] = []
     profiles: list[dict[str, Any]] = []
@@ -1883,6 +1915,52 @@ def arc_registry_cache_configmap(cache: Mapping[str, Any]) -> dict[str, str]:
     return {**cache["hosts"], _BUILDKITD_DEFAULT_CONFIG: cache["buildkitd"]}
 
 
+def arc_work_volume(values: Mapping[str, Any], medium: str, size_limit: str) -> dict[str, Any]:
+    """Put a scale set's work volume, the runner's work directory, on the medium its profile names.
+
+    With the node's disk (an empty medium) the values are returned as given. With Memory the work volume becomes a tmpfs of size_limit (emptyDir medium Memory and sizeLimit), so a job's checkout, dependency installs and cache archives write nothing to the node's disk. A values volume named work, which the chart's Docker-in-Docker mode keeps in place of its own, is changed in place and must be an emptyDir that sets neither field already. Without one, the chart's Docker-in-Docker mode is given one, and otherwise, where the runner keeps its work directory in its own container's filesystem, the volume is added and mounted on the runner container at the work directory. The kubernetes container modes run each job's steps in a separate pod whose work volume the chart claims itself, so they are refused, as are values with no runner container to mount it on.
+
+    Args:
+        values: the release's rendered Helm values, last of all the role's changes, so the registry cache's dind wiring, which adds a work volume, is already in them. medium: the profile's work_volume_medium, one of _WORK_VOLUME_MEDIA. size_limit: the profile's work_volume_size_limit, a positive Kubernetes quantity, when medium is Memory.
+
+    Returns:
+        A dict with ``errors`` (empty when the values can carry the volume) and ``values`` (with the volume on the medium, or as given).
+    """
+    if medium != _MEMORY_MEDIUM:
+        return {"errors": [], "values": values}
+    result = copy.deepcopy(dict(values))
+    spec = result.setdefault("template", {}).setdefault("spec", {})
+    mode = (result.get("containerMode") or {}).get("type") or ""
+    if mode in _SEPARATE_POD_CONTAINER_MODES:
+        return {"errors": [f"a work volume in memory needs the job's steps to run in the runner pod; containerMode {mode} runs them in a separate pod whose work volume the chart claims itself"], "values": values}
+    volumes: list[dict[str, Any]] = list(spec.get("volumes") or [])
+    tmpfs = {"medium": _MEMORY_MEDIUM, "sizeLimit": size_limit}
+    work = _named(volumes, _WORK_VOLUME)
+    if work is not None:
+        source = sorted(key for key in work if key != "name")
+        if source != ["emptyDir"]:
+            return {"errors": [f"the values' {_WORK_VOLUME} volume is not an emptyDir ({', '.join(source) or 'no source'}), so it cannot be put in memory"], "values": values}
+        set_already = sorted(key for key in ("medium", "sizeLimit") if key in (work["emptyDir"] or {}))
+        if set_already:
+            return {"errors": [f"the values' {_WORK_VOLUME} volume already sets {' and '.join(set_already)}; set the work volume's medium and size in the profile alone"], "values": values}
+        work["emptyDir"] = {**(work["emptyDir"] or {}), **tmpfs}
+        spec["volumes"] = volumes
+        return {"errors": [], "values": result}
+    if mode == "dind":
+        spec["volumes"] = volumes + [{"name": _WORK_VOLUME, "emptyDir": tmpfs}]
+        return {"errors": [], "values": result}
+    runner = _runner_container(spec)
+    if runner is None:
+        return {"errors": ["a work volume in memory needs the values to define the runner container (template.spec.containers[] named runner), as the role's own values template does"], "values": values}
+    mounts: list[dict[str, Any]] = list(runner.get("volumeMounts") or [])
+    taken = [mount.get("name") for mount in mounts if str(mount.get("mountPath", "")).rstrip("/") == _RUNNER_WORK_DIR]
+    if taken:
+        return {"errors": [f"the runner container already mounts {taken[0]} at {_RUNNER_WORK_DIR}, the work directory, so a {_WORK_VOLUME} volume cannot be added there"], "values": values}
+    runner["volumeMounts"] = mounts + [{"name": _WORK_VOLUME, "mountPath": _RUNNER_WORK_DIR}]
+    spec["volumes"] = volumes + [{"name": _WORK_VOLUME, "emptyDir": tmpfs}]
+    return {"errors": [], "values": result}
+
+
 def arc_image_ref(image: str) -> dict[str, str]:
     """Split a container image reference into registry, repository and tag or digest.
 
@@ -1998,4 +2076,5 @@ class FilterModule:
             "arc_registry_cache_pod": arc_registry_cache_pod,
             "arc_registry_cache_configmap": arc_registry_cache_configmap,
             "arc_registry_cache_secret_problems": arc_registry_cache_secret_problems,
+            "arc_work_volume": arc_work_volume,
         }

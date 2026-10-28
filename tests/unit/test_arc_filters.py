@@ -699,5 +699,97 @@ class ArcUpgradeBlockerTest(unittest.TestCase):
         self.assertEqual(arc.arc_upgrade_blocker("", "0.15.0", 5), "")
 
 
+
+class WorkVolumeProfileTest(unittest.TestCase):
+    def expanded(self, profile: dict[str, Any]) -> dict[str, Any]:
+        result = arc.arc_profiles([org(profiles=[{"max_runners": 1, **profile}])])
+        self.assertEqual(result["errors"], [])
+        expanded: dict[str, Any] = result["profiles"][0]
+        return expanded
+
+    def errors(self, profile: dict[str, Any]) -> list[str]:
+        errors: list[str] = arc.arc_profiles([org(profiles=[{"max_runners": 1, **profile}])])["errors"]
+        return errors
+
+    def test_the_work_volume_stays_on_the_nodes_disk_unless_the_profile_names_memory(self) -> None:
+        self.assertEqual((self.expanded({})["work_volume_medium"], self.expanded({})["work_volume_size_limit"]), ("", ""))
+        self.assertEqual((self.expanded({"work_volume_medium": ""})["work_volume_medium"]), "")
+        memory = self.expanded({"work_volume_medium": "Memory", "work_volume_size_limit": "6Gi"})
+        self.assertEqual((memory["work_volume_medium"], memory["work_volume_size_limit"]), ("Memory", "6Gi"))
+        self.assertEqual(self.expanded({"work_volume_medium": "Memory", "work_volume_size_limit": 1073741824})["work_volume_size_limit"], "1073741824")
+
+    def test_a_medium_the_work_volume_cannot_use_is_an_error(self) -> None:
+        for medium in ("memory", "HugePages", 1, None):
+            with self.subTest(medium=medium):
+                self.assertEqual(self.errors({"work_volume_medium": medium}), ["Example scale_set_profiles[0].work_volume_medium must be one of '', 'Memory'"])
+
+    def test_memory_needs_a_positive_size_limit(self) -> None:
+        self.assertEqual(self.errors({"work_volume_medium": "Memory"}), ["Example scale_set_profiles[0].work_volume_size_limit is required with work_volume_medium: Memory, as a Kubernetes quantity such as 6Gi, since a tmpfs without one may grow to the pod's memory limit"])
+        for size_limit in ("0", "six", "-1Gi", "1 Gi"):
+            with self.subTest(size_limit=size_limit):
+                self.assertEqual(self.errors({"work_volume_medium": "Memory", "work_volume_size_limit": size_limit}), [f"Example scale_set_profiles[0].work_volume_size_limit must be a positive Kubernetes quantity such as 6Gi (got {size_limit!r})"])
+        for size_limit in (True, 1.5, ["6Gi"]):
+            with self.subTest(size_limit=size_limit):
+                self.assertTrue(self.errors({"work_volume_medium": "Memory", "work_volume_size_limit": size_limit})[0].startswith("Example scale_set_profiles[0].work_volume_size_limit is required"))
+
+    def test_a_size_limit_without_memory_is_an_error(self) -> None:
+        self.assertEqual(self.errors({"work_volume_size_limit": "6Gi"}), ["Example scale_set_profiles[0].work_volume_size_limit applies only with work_volume_medium: Memory"])
+
+
+class WorkVolumeTest(unittest.TestCase):
+    RUNNER = {"name": "runner", "command": ["/home/runner/run.sh"]}
+    TMPFS = {"medium": "Memory", "sizeLimit": "6Gi"}
+
+    def test_the_nodes_disk_leaves_the_values_as_given(self) -> None:
+        values = {"template": {"spec": {"containers": [self.RUNNER]}}}
+        self.assertIs(arc.arc_work_volume(values, "", "")["values"], values)
+
+    def test_a_values_work_volume_is_put_in_memory_in_place(self) -> None:
+        values = {"template": {"spec": {"containers": [{**self.RUNNER, "volumeMounts": [{"name": "work", "mountPath": "/home/runner/_work"}]}], "volumes": [{"name": "dind-sock", "emptyDir": {}}, {"name": "work", "emptyDir": {}}]}}}
+        result = arc.arc_work_volume(values, "Memory", "6Gi")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["values"]["template"]["spec"]["volumes"], [{"name": "dind-sock", "emptyDir": {}}, {"name": "work", "emptyDir": self.TMPFS}])
+        self.assertEqual(result["values"]["template"]["spec"]["containers"], values["template"]["spec"]["containers"])
+        self.assertEqual(values["template"]["spec"]["volumes"][1], {"name": "work", "emptyDir": {}})
+
+    def test_a_values_work_volume_that_cannot_be_put_in_memory_is_an_error(self) -> None:
+        cases = {
+            "the values' work volume is not an emptyDir (persistentVolumeClaim), so it cannot be put in memory": {"name": "work", "persistentVolumeClaim": {"claimName": "c"}},
+            "the values' work volume already sets medium; set the work volume's medium and size in the profile alone": {"name": "work", "emptyDir": {"medium": "Memory"}},
+            "the values' work volume already sets sizeLimit; set the work volume's medium and size in the profile alone": {"name": "work", "emptyDir": {"sizeLimit": "1Gi"}},
+        }
+        for message, volume in cases.items():
+            with self.subTest(message=message):
+                values = {"template": {"spec": {"containers": [self.RUNNER], "volumes": [volume]}}}
+                result = arc.arc_work_volume(values, "Memory", "6Gi")
+                self.assertEqual(result["errors"], [message])
+                self.assertIs(result["values"], values)
+
+    def test_dind_mode_gets_a_work_volume_the_chart_keeps_in_place_of_its_own(self) -> None:
+        values = {"containerMode": {"type": "dind"}, "template": {"spec": {"containers": [self.RUNNER]}}}
+        result = arc.arc_work_volume(values, "Memory", "6Gi")
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["values"]["template"]["spec"]["volumes"], [{"name": "work", "emptyDir": self.TMPFS}])
+        self.assertNotIn("volumeMounts", result["values"]["template"]["spec"]["containers"][0])
+
+    def test_without_a_work_volume_the_runner_gets_one_at_its_work_directory(self) -> None:
+        values = {"template": {"spec": {"containers": [{**self.RUNNER, "volumeMounts": [{"name": "cache", "mountPath": "/cache"}]}], "volumes": [{"name": "cache", "emptyDir": {}}]}}}
+        spec = arc.arc_work_volume(values, "Memory", "6Gi")["values"]["template"]["spec"]
+        self.assertEqual(spec["volumes"], [{"name": "cache", "emptyDir": {}}, {"name": "work", "emptyDir": self.TMPFS}])
+        self.assertEqual(spec["containers"][0]["volumeMounts"], [{"name": "cache", "mountPath": "/cache"}, {"name": "work", "mountPath": "/home/runner/_work"}])
+
+    def test_values_that_cannot_take_a_work_volume_are_an_error(self) -> None:
+        cases = {
+            "a work volume in memory needs the job's steps to run in the runner pod; containerMode kubernetes runs them in a separate pod whose work volume the chart claims itself": {"containerMode": {"type": "kubernetes"}, "template": {"spec": {"containers": [self.RUNNER]}}},
+            "a work volume in memory needs the values to define the runner container (template.spec.containers[] named runner), as the role's own values template does": {"template": {"spec": {}}},
+            "the runner container already mounts scratch at /home/runner/_work, the work directory, so a work volume cannot be added there": {"template": {"spec": {"containers": [{**self.RUNNER, "volumeMounts": [{"name": "scratch", "mountPath": "/home/runner/_work/"}]}], "volumes": [{"name": "scratch", "emptyDir": {}}]}}},
+        }
+        for message, values in cases.items():
+            with self.subTest(message=message):
+                result = arc.arc_work_volume(values, "Memory", "6Gi")
+                self.assertEqual(result["errors"], [message])
+                self.assertIs(result["values"], values)
+
+
 if __name__ == "__main__":
     unittest.main()

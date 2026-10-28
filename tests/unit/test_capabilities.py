@@ -492,6 +492,15 @@ class RenderedValuesTest(unittest.TestCase):
         self.assertEqual(runner(rendered["values"])["volumeMounts"], [{"name": "node-cache", "mountPath": "/node-cache"}])
         self.assertEqual(rendered["job_started"], {})
 
+    def test_the_role_renders_the_work_volume_in_memory_last_of_all(self) -> None:
+        tmpfs = {"name": "work", "emptyDir": {"medium": "Memory", "sizeLimit": "6Gi"}}
+        rendered = self.render({"max_runners": 1, "capabilities": ["node"], "work_volume_medium": "Memory", "work_volume_size_limit": "6Gi"})
+        self.assertEqual(rendered["values"]["template"]["spec"]["volumes"], [{"name": "tool-cache", "emptyDir": {}}, tmpfs])
+        self.assertEqual(runner(rendered["values"])["volumeMounts"], [{"name": "tool-cache", "mountPath": TOOL_CACHE}, {"name": "work", "mountPath": "/home/runner/_work"}])
+        dind = self.render({"max_runners": 1, "container_mode": "dind", "work_volume_medium": "Memory", "work_volume_size_limit": "6Gi"})
+        self.assertEqual(dind["values"]["template"]["spec"]["volumes"], [tmpfs])
+        self.assertNotIn("volumes", self.render({"max_runners": 1, "container_mode": "dind"})["values"]["template"]["spec"])
+
     def test_a_profile_without_capabilities_renders_as_before(self) -> None:
         rendered = self.render({"max_runners": 3, "container_mode": "dind"})
         self.assertEqual(rendered["job_started"], {})
