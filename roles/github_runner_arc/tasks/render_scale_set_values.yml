@@ -1,5 +1,5 @@
 ---
-# Renders one scale-set profile's Helm values on the control node, with `profile` (the expanded profile from plugins/filter/arc.py) and `org` (its org entry) set by the includer: the profile's values file (or the role's default template), the role's own overlay merged over it, then the profile's capabilities added (plugins/filter/arc.py's arc_capability_pod), then, with the registry cache on, its Docker daemon pointed at the cache (arc_registry_cache_pod), and last, with the profile's capability store on, the dind sidecar's copy of the runner's externals moved into the store (arc_capability_store_externals). Sets github_runner_arc_scale_set_values, the release's values, github_runner_arc_job_started_data, the job-started ConfigMap's data (empty when the profile needs none), github_runner_arc_registry_cache_wired, whether the profile's pods use the registry cache, and github_runner_arc_registry_cache_data, the data of the registry cache ConfigMap they then mount. Included by install_scale_set_profile.yml, and by tests/capabilities/render.yml so the tests render exactly what the role installs.
+# Renders one scale-set profile's Helm values on the control node, with `profile` (the expanded profile from plugins/filter/arc.py) and `org` (its org entry) set by the includer: the profile's values file (or the role's default template), the role's own overlay merged over it, then the profile's capabilities added (plugins/filter/arc.py's arc_capability_pod), then, with the registry cache on, its Docker daemon pointed at the cache (arc_registry_cache_pod), then, with the profile's capability store on, the dind sidecar's copy of the runner's externals moved into the store (arc_capability_store_externals), and last, with the profile's work_volume_medium set, the runner's work volume put on that medium (arc_work_volume). Sets github_runner_arc_scale_set_values, the release's values, github_runner_arc_job_started_data, the job-started ConfigMap's data (empty when the profile needs none), github_runner_arc_registry_cache_wired, whether the profile's pods use the registry cache, and github_runner_arc_registry_cache_data, the data of the registry cache ConfigMap they then mount. Included by install_scale_set_profile.yml, and by tests/capabilities/render.yml so the tests render exactly what the role installs.
 
 - name: Set the capability store settings for {{ profile.label }}
   ansible.builtin.set_fact:
@@ -85,3 +85,17 @@
 - name: Keep the values with the externals copy in the capability store for {{ profile.label }}
   ansible.builtin.set_fact:
     github_runner_arc_scale_set_values: "{{ github_runner_arc_capability_store_render['values'] }}"
+
+# Last of all, after the registry cache, whose dind wiring adds a work volume of its own, so that whichever work volume the pod ends up with is the one put on the profile's medium. A profile without work_volume_medium keeps the values exactly as rendered above.
+- name: Put the work volume on its medium for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_work_volume_render: "{{ github_runner_arc_scale_set_values | exadev.github_runner.arc_work_volume(profile.work_volume_medium, profile.work_volume_size_limit) }}"
+
+- name: Fail when the values cannot carry the work volume's medium for {{ profile.label }}
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_work_volume_render.errors | map('regex_replace', '^', profile.label ~ ': ') | list }}"
+  when: github_runner_arc_work_volume_render.errors | length > 0
+
+- name: Keep the values with the work volume on its medium for {{ profile.label }}
+  ansible.builtin.set_fact:
+    github_runner_arc_scale_set_values: "{{ github_runner_arc_work_volume_render['values'] }}"

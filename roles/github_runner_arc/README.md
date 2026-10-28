@@ -26,6 +26,7 @@ Before touching the cluster the role then checks the secrets it is about to writ
   - `autoscale`: `true` makes the profile's scale set one of those the autoscaler manages, pooled against one memory budget; at most one autoscaled profile in a cluster may set `sizing`.
   - `sizing`: derive a runner ceiling from node capacity, given as uniform figures or measured from each eligible node (see Sizing). On an ordinary profile without `max_runners` it sets `maxRunners`; on the autoscaled profile it bounds the ceiling the autoscaler works out from the nodes, leaving `maxRunners` as the floor.
   - `capabilities`: names of entries in `github_runner_arc_capabilities` that the profile's runner pods carry, in order (see [Capabilities](#capabilities)).
+  - `work_volume_medium`, `work_volume_size_limit`: what the runner's work volume sits on: unset or `""` for the node's disk, or `Memory` for a tmpfs of `work_volume_size_limit` (a Kubernetes quantity such as `6Gi`, required with `Memory`), which counts against the pod's memory (see [The work volume in memory](#the-work-volume-in-memory)).
   - `capability_store`: `true` copies the capabilities' tool-cache and system-library payloads into the capability store, which the pods of a node share, instead of into every pod, and does the same for the dind sidecar's copy of the runner's externals when the profile's values write that sidecar out with an `init-dind-externals` init container (a values file, or the registry cache's wiring), but not when the chart builds the sidecar itself from `containerMode: dind` (see [The capability store](#the-capability-store)). Default `false`.
   - `burst`: let the runner pods overflow onto nodes a cluster autoscaler adds on demand, and count those nodes' runners into `maxRunners` (see [Burst nodes](#burst-nodes)). Needs `sizing`, and no `max_runners` or `autoscale`; with `exclusive: true` the pods run on burst nodes only and `burst.max_runners` is the whole ceiling, with no `sizing`.
 - `github_runner_arc_values_dir`: the control-node directory relative `values_file` paths are read from.
@@ -94,6 +95,23 @@ sizing:
 A profile's own `max_runners` still takes precedence, and on the autoscaled profile the measured figure bounds the ceiling the autoscaler works out from the nodes on every poll, which is the same arithmetic without the reserve and margin, over the nodes that are Ready and uncordoned at that moment. Measured sizing uses the `exadev.github_runner.arc_measured_max_runners` filter.
 
 The filter behind it is `exadev.github_runner.arc_max_runners`.
+
+## The work volume in memory
+
+The runner keeps every job's checkout, dependency installs and cache archives (`actions/cache` writes them under the runner's temporary directory, inside the work directory) in its work directory, `/home/runner/_work`. On a node whose disk sustains far less write throughput than its memory could absorb, those writes can stall every task on the node on I/O while its CPU and memory sit idle. `work_volume_medium: Memory` puts the work directory on a tmpfs of `work_volume_size_limit` instead (an `emptyDir` with `medium: Memory` and `sizeLimit`), so a job writes nothing there to the disk.
+
+```yaml
+work_volume_medium: Memory
+work_volume_size_limit: 6Gi
+```
+
+The values' own volume named `work` is changed in place, and must then be an `emptyDir` that sets neither `medium` nor `sizeLimit`. Without one, the chart's Docker-in-Docker mode is given one (the chart keeps a values volume of that name in place of its own), and otherwise the volume is added and mounted on the runner container at the work directory. The `kubernetes` container modes run a job's steps in a separate pod whose work volume the chart claims, so the role refuses the option there. Unset, the values are left exactly as they were.
+
+The tmpfs's pages are memory. They are charged to the container that writes them (the runner, and a Docker-in-Docker sidecar that mounts the work directory for the containers it runs), and they cannot be reclaimed while the files exist, so a profile that sets the option raises its runner container's memory request and limit by `work_volume_size_limit` in its values, and its sizing's `pod_memory_request_gib` by the same, or the kubelet evicts its pods when the node runs short and measured sizing places more pods than the memory holds. With the higher request, measured sizing derives fewer pods per node by memory, which is the point: the option suits nodes whose disk, not their memory, bounds how many jobs they serve, pinned with `node_selector` so that the memory is reserved only where the disk is the bound. A write past the limit fails with no space left on the device, as on a full disk.
+
+Size it from running pods, sampled while the profile's real jobs run: the largest work directory seen (`du -sm /home/runner/_work` in the runner container, or `du -sm` of the `work` volume under `/var/lib/kubelet/pods/<pod uid>/volumes/kubernetes.io~empty-dir/` on the node), plus the largest cache archive a job restores or saves beside it, rounded up.
+
+Only the work volume is offered. The tool cache and the sysroot hold the capabilities' copies, which the capability store already writes once per node rather than once per pod (see [The capability store](#the-capability-store)), and in memory they would be reserved in every pod whether a job used them or not. The Docker daemon's data root is large only in jobs that build images, so reserving it in every pod's memory would charge the size of a build to every job; a values file whose profile only builds images can mount its own `emptyDir` with `medium: Memory` at the dind container's `/var/lib/docker`.
 
 ## Burst nodes
 
