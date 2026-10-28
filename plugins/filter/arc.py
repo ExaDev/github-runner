@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
@@ -754,7 +755,58 @@ def arc_profiles(orgs: Sequence[Any], require_app_id: bool = True) -> dict[str, 
     sized_autoscaled = [profile for profile in autoscaled if profile["sizing"] is not None]
     if len(sized_autoscaled) > 1:
         errors.append(f"At most one autoscaled scale-set profile may set sizing, because it derives the shared pool's ceiling; found {', '.join(profile['label'] for profile in sized_autoscaled)}")
+    # The autoscaler's ceiling (scripts/autoscaler-ceiling.jq) counts only the nodes every pooled scale set's runner pods can be placed on, and the sized profile's measurement counts the nodes its own selector and tolerations allow, so pooled profiles that may use different nodes would leave the ceiling counting a set of nodes some of the pool's pods never use, or never counting nodes they do.
+    if len({_placement_key(profile) for profile in autoscaled}) > 1:
+        errors.append(f"Autoscaled scale-set profiles share one pool whose ceiling counts only the nodes every one of them can use, so they must set the same node_selector and tolerations; {', '.join(profile['label'] for profile in autoscaled)} do not")
     return {"errors": errors, "profiles": profiles, "autoscaled": autoscaled}
+
+
+def _placement_key(profile: Mapping[str, Any]) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+    """Return what decides which nodes a profile's runner pods may use, apart from the eligibility label every profile shares, in a form two profiles can be compared by: its node_selector and its tolerations, each in a canonical order."""
+    selector = tuple(sorted((str(key), str(value)) for key, value in profile["node_selector"].items()))
+    tolerations = tuple(sorted(json.dumps(toleration, sort_keys=True, default=str) for toleration in profile["tolerations"]))
+    return selector, tolerations
+
+
+def _measured_by_role(profile: Mapping[str, Any]) -> bool:
+    """Whether the role measures a ceiling for the profile from the nodes: its sizing is measured and valid, and it is the autoscaled pool's sized profile (install_platform.yml) or an ordinary profile with no max_runners of its own (install_scale_set_profile.yml)."""
+    sizing = profile["sizing"]
+    if sizing is None or sizing["errors"] or not sizing["measured"]:
+        return False
+    return bool(profile["autoscale"]) or profile["max_runners"] is None
+
+
+def arc_measured_overlap_errors(profiles: Sequence[Mapping[str, Any]], nodes: Sequence[Mapping[str, Any]], eligibility: Mapping[str, Any]) -> list[str]:
+    """Refuse two profiles whose measured ceilings count the same node.
+
+    A measured ceiling counts the whole of each node its profile's runner pods may use, less the requests of the pods there that are not runner pods (arc_measured_max_runners), so two such profiles that may both use a node each count all of its room, and their ceilings together let more runner pods start than it holds. How to divide one node's room between two scale sets whose pods differ in size is a choice, not something the cluster's figures decide, so the role refuses the overlap rather than guess: the profiles' node_selector and tolerations must keep their pods on disjoint nodes, or all but one of them sets max_runners, which is not measured. A node counts for a profile as it does in arc_measured_max_runners: it carries the eligibility label and the profile's node_selector, and has no repelling taint other than a passing condition's that the profile's tolerations do not match.
+
+    Args:
+        profiles: the cluster's expanded profiles (arc_cluster_profiles), of which only those the role measures a ceiling for are compared (see _measured_by_role). nodes: Node objects, as kubernetes.core.k8s_info returns them. eligibility: the eligibility label as {key: value}, empty when the role sets none.
+
+    Returns:
+        One message per pair of measured profiles that may both use a node, naming the nodes; empty when no two overlap.
+    """
+    selector = {key: str(value) for key, value in eligibility.items()}
+    measured = [profile for profile in profiles if _measured_by_role(profile)]
+    usable: list[tuple[str, set[str]]] = []
+    for profile in measured:
+        names = {
+            (node.get("metadata") or {}).get("name", "")
+            for node in nodes
+            if not _node_eligibility(node, {**selector, **profile["node_selector"]}, profile["tolerations"])[0]
+        }
+        usable.append((profile["label"], names))
+    errors: list[str] = []
+    for index, (label, names) in enumerate(usable):
+        for other_label, other_names in usable[index + 1:]:
+            shared = sorted(names & other_names)
+            if shared:
+                errors.append(
+                    f"{label} and {other_label} both measure their runner ceiling from node(s) {', '.join(shared)}, so each counts the whole of their room and together they allow more runner pods than fit there. "
+                    "Keep their runner pods on disjoint nodes with node_selector and tolerations, or give all but one of them max_runners."
+                )
+    return errors
 
 
 def _is_list(value: Any) -> bool:
@@ -2049,6 +2101,7 @@ class FilterModule:
             "arc_cluster_profiles": arc_cluster_profiles,
             "arc_max_runners": arc_max_runners,
             "arc_measured_max_runners": arc_measured_max_runners,
+            "arc_measured_overlap_errors": arc_measured_overlap_errors,
             "arc_upgrade_blocker": arc_upgrade_blocker,
             "arc_helm_server_side": arc_helm_server_side,
             "arc_image_ref": arc_image_ref,

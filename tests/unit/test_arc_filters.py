@@ -700,6 +700,87 @@ class ArcUpgradeBlockerTest(unittest.TestCase):
 
 
 
+ELIGIBLE_LABEL = {"example.com/ci-eligible": "true"}
+SLOW_DISK_LABEL = {"example.com/slow-disk": "true"}
+SLOW_DISK_TOLERATION = {"key": "example.com/slow-disk", "operator": "Exists", "effect": "NoSchedule"}
+
+
+def slow_disk_node(name: str) -> dict[str, Any]:
+    """Return an eligible node that carries the slow-disk label and the taint only a profile pinned to it tolerates."""
+    return node(name, "8", "32Gi", labels={**ELIGIBLE_LABEL, **SLOW_DISK_LABEL}, taints=[{"key": "example.com/slow-disk", "value": "true", "effect": "NoSchedule"}])
+
+
+class ProfilesOnDifferentNodesTest(unittest.TestCase):
+    NODES = [node("shared-1", "4", "8Gi", labels=ELIGIBLE_LABEL), node("shared-2", "4", "8Gi", labels=ELIGIBLE_LABEL), slow_disk_node("slow-1"), slow_disk_node("slow-2")]
+    GENERAL = {"suffix": "", "sizing": MEASURED}
+    PINNED = {"suffix": "-slow", "sizing": MEASURED, "node_selector": SLOW_DISK_LABEL, "tolerations": [SLOW_DISK_TOLERATION]}
+
+    def profiles(self, *profiles: dict[str, Any]) -> list[dict[str, Any]]:
+        result = arc.arc_profiles([org(profiles=list(profiles))])
+        self.assertEqual(result["errors"], [])
+        expanded: list[dict[str, Any]] = result["profiles"]
+        return expanded
+
+    def test_a_pinned_profile_is_sized_from_its_own_nodes_and_the_other_from_the_rest(self) -> None:
+        general, pinned = self.profiles(self.GENERAL, self.PINNED)
+        measured_general = arc.arc_measured_max_runners(MEASURED, self.NODES, [], ELIGIBLE_LABEL | general["node_selector"], (), general["tolerations"])
+        measured_pinned = arc.arc_measured_max_runners(MEASURED, self.NODES, [], ELIGIBLE_LABEL | pinned["node_selector"], (), pinned["tolerations"])
+        self.assertEqual([entry["name"] for entry in measured_general["nodes"]], ["shared-1", "shared-2"])
+        self.assertEqual([entry["name"] for entry in measured_pinned["nodes"]], ["slow-1", "slow-2"])
+        # shared: 4 cores and 8 GiB hold four pods of 1 core and 2 GiB each; slow: 8 cores and 32 GiB hold eight by CPU.
+        self.assertEqual((measured_general["max_runners"], measured_pinned["max_runners"]), (8, 16))
+        self.assertEqual(arc.arc_measured_overlap_errors([general, pinned], self.NODES, ELIGIBLE_LABEL), [])
+
+    def test_without_the_selector_a_profile_that_tolerates_the_taint_counts_every_node(self) -> None:
+        [unpinned] = self.profiles({**self.PINNED, "node_selector": {}})
+        measured = arc.arc_measured_max_runners(MEASURED, self.NODES, [], ELIGIBLE_LABEL | unpinned["node_selector"], (), unpinned["tolerations"])
+        self.assertEqual([entry["name"] for entry in measured["nodes"]], ["shared-1", "shared-2", "slow-1", "slow-2"])
+        self.assertEqual(measured["max_runners"], 24)
+
+    def test_two_measured_profiles_that_may_use_one_node_are_refused_with_the_nodes_named(self) -> None:
+        general, pinned = self.profiles({**self.GENERAL, "tolerations": [SLOW_DISK_TOLERATION]}, self.PINNED)
+        self.assertEqual(arc.arc_measured_overlap_errors([general, pinned], self.NODES, ELIGIBLE_LABEL), [
+            "Example and Example-slow both measure their runner ceiling from node(s) slow-1, slow-2, so each counts the whole of their room and together they allow more runner pods than fit there. "
+            "Keep their runner pods on disjoint nodes with node_selector and tolerations, or give all but one of them max_runners."
+        ])
+
+    def test_a_profile_with_its_own_max_runners_or_uniform_sizing_is_not_compared(self) -> None:
+        tolerating = {**self.GENERAL, "tolerations": [SLOW_DISK_TOLERATION]}
+        for other in ({**self.PINNED, "max_runners": 2}, {**self.PINNED, "sizing": SIZING}, {**self.PINNED, "sizing": None, "max_runners": 1}):
+            with self.subTest(other=other):
+                self.assertEqual(arc.arc_measured_overlap_errors(self.profiles(tolerating, other), self.NODES, ELIGIBLE_LABEL), [])
+
+    def test_the_autoscaled_pools_sized_profile_is_compared_even_with_max_runners(self) -> None:
+        general, pinned = self.profiles({**self.GENERAL, "tolerations": [SLOW_DISK_TOLERATION]}, {**self.PINNED, "autoscale": True, "max_runners": 2})
+        self.assertEqual(len(arc.arc_measured_overlap_errors([general, pinned], self.NODES, ELIGIBLE_LABEL)), 1)
+
+    def test_the_eligibility_label_decides_too(self) -> None:
+        general, pinned = self.profiles({**self.GENERAL, "tolerations": [SLOW_DISK_TOLERATION]}, self.PINNED)
+        self.assertEqual(arc.arc_measured_overlap_errors([general, pinned], self.NODES, {"example.com/other": "true"}), [])
+
+    def test_autoscaled_profiles_must_share_their_node_selector_and_tolerations(self) -> None:
+        pooled = {"values_file": "v.yaml", "autoscale": True}
+        same = arc.arc_profiles([org(profiles=[{**pooled, "suffix": "-a", "tolerations": [SLOW_DISK_TOLERATION]}, {**pooled, "suffix": "-b", "tolerations": [dict(reversed(list(SLOW_DISK_TOLERATION.items())))]}])])
+        self.assertEqual(same["errors"], [])
+        for differing in ({"node_selector": SLOW_DISK_LABEL}, {"tolerations": [SLOW_DISK_TOLERATION]}):
+            with self.subTest(differing=differing):
+                result = arc.arc_profiles([org(profiles=[{**pooled, "suffix": "-a"}, {**pooled, "suffix": "-b", **differing}])])
+                self.assertEqual(result["errors"], ["Autoscaled scale-set profiles share one pool whose ceiling counts only the nodes every one of them can use, so they must set the same node_selector and tolerations; Example-a, Example-b do not"])
+
+    def test_the_role_refuses_an_overlap_before_it_installs_anything(self) -> None:
+        import yaml
+
+        tasks = Path(PLUGIN).parents[2] / "roles" / "github_runner_arc" / "tasks"
+        [install] = [task for task in yaml.safe_load((tasks / "main.yml").read_text()) if task.get("name") == "Install into the cluster"]
+        included = [task.get("ansible.builtin.include_tasks") for task in install["block"]]
+        check = included.index("check_measured_overlap.yml")
+        self.assertLess(check, included.index("install_platform.yml"))
+        self.assertLess(check, included.index("install_org.yml"))
+        self.assertEqual(included.index("label_nodes.yml"), check - 1)
+        [read, refuse] = yaml.safe_load((tasks / "check_measured_overlap.yml").read_text())
+        self.assertEqual(read["kubernetes.core.k8s_info"], {"kind": "Node"})
+        self.assertIn("exadev.github_runner.arc_measured_overlap_errors", refuse["vars"]["github_runner_arc_overlap_problems"])
+
 class WorkVolumeProfileTest(unittest.TestCase):
     def expanded(self, profile: dict[str, Any]) -> dict[str, Any]:
         result = arc.arc_profiles([org(profiles=[{"max_runners": 1, **profile}])])
