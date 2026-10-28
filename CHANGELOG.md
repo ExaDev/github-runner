@@ -1,3 +1,13 @@
+## [2.10.0](https://github.com/ExaDev/github-runner/compare/v2.9.1...v2.10.0) (2026-10-28)
+
+### Features
+
+* **arc:** let a profile keep its runner's work volume in memory ([0e66a66](https://github.com/ExaDev/github-runner/commit/0e66a663485d63f8c0e35eb8b37270606b26119a))
+
+### Bug Fixes
+
+* **arc:** refuse two measured profiles that count the same node ([c65cac9](https://github.com/ExaDev/github-runner/commit/c65cac9ddac791b1103eb2cf8885142fab5d2b70))
+
 ## [2.9.1](https://github.com/ExaDev/github-runner/compare/v2.9.0...v2.9.1) (2026-10-27)
 
 ### Bug Fixes
