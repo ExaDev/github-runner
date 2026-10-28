@@ -1,0 +1,19 @@
+---
+# Refuses, before any release is installed or upgraded, two profiles in the cluster whose measured ceilings would count the same node (plugins/filter/arc.py's arc_measured_overlap_errors): each measured ceiling counts the whole of every node its profile's runner pods may use, so two that share a node would together let more runner pods start than it holds. Every profile of the cluster is compared, not only this host's, since another host's measured profile counts the same nodes. Reads the Nodes only; read-only, so it also runs under --check.
+
+- name: Read the nodes the measured profiles may use
+  kubernetes.core.k8s_info:
+    kind: Node
+  register: github_runner_arc_overlap_nodes
+
+- name: Fail when two measured profiles count the same node
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_overlap_problems }}"
+  vars:
+    github_runner_arc_overlap_problems: >-
+      {{
+        github_runner_arc_fleet.profiles | exadev.github_runner.arc_measured_overlap_errors(
+          github_runner_arc_overlap_nodes.resources,
+          {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {})
+      }}
+  when: github_runner_arc_overlap_problems | length > 0
