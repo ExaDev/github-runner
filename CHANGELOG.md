@@ -1,3 +1,9 @@
+## [2.10.1](https://github.com/ExaDev/github-runner/compare/v2.10.0...v2.10.1) (2026-10-29)
+
+### Documentation
+
+* add the standard badge row to the README ([d0e8c8b](https://github.com/ExaDev/github-runner/commit/d0e8c8bebb425caad65650a5ffb57daddbdd0b44))
+
 ## [2.10.0](https://github.com/ExaDev/github-runner/compare/v2.9.1...v2.10.0) (2026-10-28)
 
 ### Features
