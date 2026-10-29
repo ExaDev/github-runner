@@ -189,6 +189,12 @@ github_runner_arc_capabilities:
     pnpm_config_enable_global_virtual_store: "true"
 ```
 
+That step is for pnpm 11. pnpm 10 (checked with 10.29.3) does not read `pnpm_config_*` variables, and its configuration cannot turn the global virtual store on in an Actions job: it sets `enableGlobalVirtualStore` to false whenever `CI` is set, which GitHub Actions always does, whatever the configuration says (pnpm 11 does so only when the setting is not given). With pnpm 10 the store is named on the command line and imported by copying, since the store's mount is not the workspace's and a hard link cannot cross it (`auto` would try a link first and log the failure). The install then writes every package file of the dependency tree into `node_modules`, as it does from any store on another mount, but fetches nothing from a registry or the Actions cache once the node's store holds the packages:
+
+```yaml
+- run: pnpm install --frozen-lockfile --store-dir "$NODE_CACHE_PNPM_STORE_DIR" --package-import-method copy
+```
+
 The `hostPath` volume needs a cluster that admits one: a namespace that enforces Pod Security's baseline or restricted level refuses it.
 
 ```yaml
