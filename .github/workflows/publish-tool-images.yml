@@ -1,6 +1,6 @@
 name: Publish tool images
 
-# Builds the reference images in tool-images/ (the tool-cache and system-library capability images, see the ARC role README's Capabilities section, and the build runner image, the stock runner image with a C toolchain) for linux/amd64 and linux/arm64 and pushes them to this repository owner's GitHub Container Registry namespace, as ghcr.io/<owner>/github-runner-toolcache-<name>, ghcr.io/<owner>/github-runner-sysroot-<name> and ghcr.io/<owner>/github-runner-runner-<name>, each tagged with the version its Dockerfile pins (its ARG <TOOL>_VERSION default; for the build runner image, the runner version it extends). A version tag that already exists is left alone, so a published version never changes under anyone pinning it and a run publishes only the images whose pinned version is new. The job summary lists each pushed image by digest, the reference to pin in a capability or as a runner image.
+# Builds the reference images in tool-images/ (the tool-cache and system-library capability images, see the ARC role README's Capabilities section, and the build runner image, the stock runner image with a C toolchain) for linux/amd64 and linux/arm64 and pushes them to this repository owner's GitHub Container Registry namespace, as ghcr.io/<owner>/github-runner-toolcache-<name>, ghcr.io/<owner>/github-runner-sysroot-<name> and ghcr.io/<owner>/github-runner-runner-<name>, each tagged with the version it builds: the one its matrix entry names in `version`, built through the Dockerfile's ARG <TOOL>_VERSION, or, for an entry without one, the version that ARG defaults to (for the build runner image, the runner version it extends). One directory can therefore publish several versions of a tool, each its own tag of the same repository. A version tag that already exists is left alone, so a published version never changes under anyone pinning it and a run publishes only the images whose pinned version is new. The job summary lists each pushed image by digest, the reference to pin in a capability or as a runner image.
 #
 # Runs only when started by hand or by pushing a tag named tool-images-<anything>; the release workflow does not build these images. Each architecture is built natively, on GitHub's amd64 and arm64 hosted runners, and pushed by digest, and a second job joins the two into one multi-architecture tag (https://docs.docker.com/build/ci/github-actions/multi-platform/), because compiling the system libraries under emulation is far slower than natively.
 
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.image.kind }}-${{ matrix.image.name }} (${{ matrix.platform.arch }})
+    name: Build ${{ matrix.image.kind }}-${{ matrix.image.name }} ${{ matrix.image.version }} (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
     permissions:
@@ -30,6 +30,7 @@ jobs:
       matrix:
         image:
           - {name: node, kind: toolcache}
+          - {name: node, kind: toolcache, version: 26.12.1}
           - {name: terraform, kind: toolcache}
           - {name: tflint, kind: toolcache}
           - {name: awscli, kind: toolcache}
@@ -51,15 +52,21 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           KIND: ${{ matrix.image.kind }}
           NAME: ${{ matrix.image.name }}
+          PINNED_VERSION: ${{ matrix.image.version }}
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
-          if [ -z "$version" ] || [ "$(wc -l <<<"$version")" != 1 ]; then
+          pins="$(sed -n 's/^ARG \([A-Z_]*_VERSION\)=\(.*\)/\1 \2/p' "tool-images/${NAME}/Dockerfile")"
+          if [ -z "$pins" ] || [ "$(wc -l <<<"$pins")" != 1 ]; then
             echo "tool-images/${NAME}/Dockerfile must pin exactly one ARG <TOOL>_VERSION" >&2
             exit 1
           fi
-          echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
-          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          argument="${pins% *}"
+          version="${PINNED_VERSION:-${pins#* }}"
+          {
+            echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}"
+            echo "version=${version}"
+            echo "argument=${argument}"
+          } >>"$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v4
         with:
@@ -88,6 +95,8 @@ jobs:
         with:
           context: tool-images/${{ matrix.image.name }}
           platforms: linux/${{ matrix.platform.arch }}
+          build-args: |
+            ${{ steps.image.outputs.argument }}=${{ steps.image.outputs.version }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -106,13 +115,13 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: steps.published.outputs.exists == 'false'
         with:
-          name: digests-${{ matrix.image.kind }}-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          name: digests-${{ matrix.image.kind }}-${{ matrix.image.name }}-${{ steps.image.outputs.version }}-${{ matrix.platform.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Publish ${{ matrix.image.kind }}-${{ matrix.image.name }}
+    name: Publish ${{ matrix.image.kind }}-${{ matrix.image.name }} ${{ matrix.image.version }}
     needs: [build]
     # Each image is joined on its own, so one image's failed build does not hold back the others; the join itself refuses an image missing an architecture.
     if: ${{ !cancelled() }}
@@ -126,6 +135,7 @@ jobs:
       matrix:
         image:
           - {name: node, kind: toolcache}
+          - {name: node, kind: toolcache, version: 26.12.1}
           - {name: terraform, kind: toolcache}
           - {name: tflint, kind: toolcache}
           - {name: awscli, kind: toolcache}
@@ -144,16 +154,17 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           KIND: ${{ matrix.image.kind }}
           NAME: ${{ matrix.image.name }}
+          PINNED_VERSION: ${{ matrix.image.version }}
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
+          default="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
           echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
-          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          echo "version=${PINNED_VERSION:-${default}}" >>"$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-${{ matrix.image.kind }}-${{ matrix.image.name }}-*
+          pattern: digests-${{ matrix.image.kind }}-${{ matrix.image.name }}-${{ steps.image.outputs.version }}-*
           merge-multiple: true
 
       - uses: docker/login-action@v4

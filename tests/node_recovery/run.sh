@@ -12,7 +12,9 @@ cluster=grtest-recovery
 platform_namespace=github-runner-platform
 namespace=grtest-listeners
 image=grtest/node-recovery:test
-pod_image=busybox:1.36
+# The stand-in's base image. The test loads a copy built from it, not the pulled image: with Docker's containerd image store a pulled multi-platform image is an index whose other platforms' content is not in the store, and kind's `ctr images import --all-platforms` then fails with "content digest ... not found".
+base_image=busybox:1.36
+pod_image=grtest/node-recovery-standin:test
 watcher_node="${cluster}-worker"
 doomed_node="${cluster}-worker2"
 voter_node="${cluster}-worker3"
@@ -155,7 +157,7 @@ doomed_uid="$(kubectl get node "$doomed_node" -o jsonpath='{.metadata.uid}')"
 
 log "Building and loading the watcher image and the stand-in's image"
 docker build -q -f "$repo_root/node-recovery/Dockerfile" -t "$image" "$repo_root" >/dev/null
-docker pull -q "$pod_image" >/dev/null
+printf 'FROM %s\n' "$base_image" | docker build -q -t "$pod_image" - >/dev/null
 kind load docker-image "$image" "$pod_image" --name "$cluster" >/dev/null
 
 # Renders the role's manifests into $work/recovery.yaml; extra arguments are further -e settings, such as the prune threshold.
