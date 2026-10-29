@@ -1,5 +1,7 @@
 # ExaDev GitHub Actions Runner
 
+[![GitHub](https://img.shields.io/badge/GitHub-181717?logo=github&logoColor=white)](https://github.com/ExaDev/github-runner) [![Release](https://img.shields.io/github/v/release/ExaDev/github-runner)](https://github.com/ExaDev/github-runner/releases/latest) [![CI](https://img.shields.io/github/actions/workflow/status/ExaDev/github-runner/ci.yml?branch=main)](https://github.com/ExaDev/github-runner/actions)
+
 > An Ansible collection, `exadev.github_runner`, for a self-hosted GitHub Actions runner fleet: GitHub's own [Actions Runner Controller](https://github.com/actions/actions-runner-controller) (ARC) on a k3s cluster that spans Apple Silicon (arm64) and Intel (amd64) hosts on different networks, joined over Tailscale or Headscale. It also holds the runner image and the fleet-health platform's images. A fleet's own inventory, host variables and Helm values live in that fleet's repository, which installs this collection; ExaDev's is the private [`ExaDev/github-runner-fleet`](https://github.com/ExaDev/github-runner-fleet).
 
 ## Getting started
