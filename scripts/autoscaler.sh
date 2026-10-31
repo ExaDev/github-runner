@@ -359,6 +359,7 @@ done
 
 # Cluster-wide memory-availability pressure via `kubectl top nodes` (metrics-server), not a single node's own /proc/meminfo - the autoscaler pod is genuinely unpinned now (see docker-compose.yml's own removal of host pinning), so a single-node reading would only ever reflect wherever the scheduler happened to place THIS pod, not the pool as a whole. Takes the WORST-CASE (minimum) available-memory percentage across the nodes it reads (those matching AUTOSCALER_NODE_SELECTOR, or every node when it is empty), not an average: a pool average can look healthy while the specific node a new runner pod would actually land on is not - consistent with the algorithm's own existing bias toward lowering eagerly, since lowering never disrupts in-flight jobs. No swap-pressure signal: metrics-server's API has no swap field at all (confirmed against its type, not just "probably not"), and the only alternative (the kubelet's own Summary API) needs a materially broader RBAC grant - node/proxy, effectively "reach anything a kubelet exposes" - for a signal most kubelet versions don't even surface unless the off-by-default NodeSwap feature gate is on. Real cluster-wide swap visibility needs Prometheus/node-exporter, which this fleet doesn't run and which would be genuine scope creep to add here - dropping swap detection is a deliberate, documented trade-off, not an oversight.
 # Only the nodes runner pods may be placed on, when the role restricts them by label: a node they cannot use says nothing about where the next one lands, and one whose kubelet is unreachable reports no metrics, which would otherwise fail safe on every poll it is down.
+# A node among them whose kubelet has stopped reporting (NotReady) is printed with `<unknown>` as its MEMORY%: it has no memory reading to contribute, so it is skipped with a log line and the worst case comes from the nodes that did report, instead of holding every pool at its floor for as long as the node stays down. The fail-safe still applies to a MEMORY% that is neither `<unknown>` nor a number, and to the case that no node reported a percentage at all, which would otherwise read as no pressure.
 TOP_NODES_ARGS=(top nodes --no-headers)
 [ -n "$NODE_SELECTOR" ] && TOP_NODES_ARGS+=(-l "$NODE_SELECTOR")
 # kubectl's own error is kept for the message, since its exit status alone does not say which failure it was: "Metrics API not available" when API discovery lists no usable metrics.k8s.io version (not registered, or registered but marked unavailable), the API server's own error when the list request itself fails, and "metrics not available yet" when the list succeeds with no node in it, which is what a selector matching no node, or matching only nodes whose kubelets are down, comes to.
@@ -371,12 +372,19 @@ rm -f "$TOP_NODES_ERR_FILE"
   || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} failed (${TOP_NODES_ERR% }): the metrics API is missing or unreachable, or no node${NODE_SELECTOR:+ matching the selector} reports metrics"
 [ -n "$TOP_NODES_OUTPUT" ] || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} returned no nodes"
 mem_available_pct=100
-while read -r _name _cpu _cpu_pct _mem mem_pct; do
+reporting_nodes=0
+while read -r node_name _cpu _cpu_pct _mem mem_pct; do
   mem_pct="${mem_pct%\%}"
+  if [ "$mem_pct" = "<unknown>" ]; then
+    echo "Skipping node ${node_name}: kubectl top nodes has no memory reading for it (its kubelet is not reporting), so it is left out of the pressure calculation"
+    continue
+  fi
   case "$mem_pct" in ''|*[!0-9]*) fail_safe "could not parse a node's own MEMORY% from kubectl top nodes ('$mem_pct')" ;; esac
+  reporting_nodes=$(( reporting_nodes + 1 ))
   node_available_pct=$(( 100 - mem_pct ))
   [ "$node_available_pct" -lt "$mem_available_pct" ] && mem_available_pct=$node_available_pct
 done <<< "$TOP_NODES_OUTPUT"
+[ "$reporting_nodes" -gt 0 ] || fail_safe "no node reported a MEMORY% from kubectl top nodes (every row was <unknown>)"
 
 pressure=false
 if [ "$mem_available_pct" -lt "$MEM_AVAILABLE_PRESSURE_PCT" ]; then
