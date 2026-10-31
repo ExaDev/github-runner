@@ -120,7 +120,7 @@ FAKE_KUBECTL = textwrap.dedent(
         # -l takes one key=value selector, as the autoscaler passes it; a node is listed when it carries that label. Like the real kubectl, a node without metrics is printed as <unknown> beside ones with them, and when no listed node has metrics at all (none matches, or every match is down) it prints nothing and fails.
         selector = args[args.index("-l") + 1] if "-l" in args else None
         listed = [node for node in state["nodes"] if selector is None or selector in node["labels"]]
-        if not any(node["mem"] != "<unknown>" for node in listed):
+        if not state["top_nodes_lists_unknown"] and not any(node["mem"] != "<unknown>" for node in listed):
             sys.stderr.write("error: metrics not available yet\\n")
             sys.exit(1)
         for node in listed:
@@ -203,6 +203,7 @@ class AutoscalerTest(unittest.TestCase):
         cluster_pods: list[dict[str, object]] | None = None,
         nodes_fail: bool = False,
         cluster_pods_fail: bool = False,
+        top_nodes_lists_unknown: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         state = self.dir / "state.json"
         state.write_text(
@@ -230,6 +231,7 @@ class AutoscalerTest(unittest.TestCase):
                     "cluster_pods": cluster_pods or [],
                     "nodes_fail": nodes_fail,
                     "cluster_pods_fail": cluster_pods_fail,
+                    "top_nodes_lists_unknown": top_nodes_lists_unknown,
                 }
             )
         )
@@ -312,12 +314,15 @@ class AutoscalerTest(unittest.TestCase):
         self.assertIn("mem_available=70%", result.stdout)
         self.assertNotIn("would patch", result.stdout)
 
-    def test_an_unreachable_node_fails_safe_without_a_selector(self) -> None:
+    def test_an_unreachable_node_is_left_out_without_a_selector(self) -> None:
         result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=list(self.UNREACHABLE_INELIGIBLE))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY%", result.stderr)
-        for namespace in NAMESPACES:
-            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+        self.assertNotIn("FAIL-SAFE", result.stderr)
+        self.assertIn("Skipping node c: kubectl top nodes has no memory reading for it", result.stdout)
+        self.assertNotIn("Skipping node a", result.stdout)
+        self.assertNotIn("Skipping node b", result.stdout)
+        self.assertIn("mem_available=70% pressure=false", result.stdout)
+        self.assertNotIn("would patch", result.stdout)
 
     def test_pressure_on_a_node_outside_the_selector_is_not_pressure(self) -> None:
         nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "c", "labels": [], "mem": "95%"}]
@@ -333,13 +338,42 @@ class AutoscalerTest(unittest.TestCase):
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
 
-    def test_an_unreachable_node_inside_the_selector_fails_safe(self) -> None:
+    def test_an_unreachable_node_inside_the_selector_is_left_out_and_logged_by_name(self) -> None:
         nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "<unknown>"}, {"name": "c", "labels": [], "mem": "10%"}]
         result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY% from kubectl top nodes ('<unknown>')", result.stderr)
+        self.assertNotIn("FAIL-SAFE", result.stderr)
+        self.assertEqual(result.stdout.count("Skipping node"), 1)
+        self.assertIn("Skipping node b: kubectl top nodes has no memory reading for it", result.stdout)
+        self.assertIn("mem_available=80% pressure=false", result.stdout)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_every_node_unreachable_fails_safe_with_its_own_message(self) -> None:
+        # kubectl itself fails when no listed node has metrics (see the fake), so this answer, which lists only <unknown> rows, is the guard against reading it as no pressure.
+        nodes = [{"name": "a", "labels": [], "mem": "<unknown>"}, {"name": "b", "labels": [], "mem": "<unknown>"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, top_nodes_lists_unknown=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("Skipping node"), 2)
+        self.assertIn("FAIL-SAFE: no node reported a MEMORY% from kubectl top nodes (every row was <unknown>)", result.stderr)
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    def test_a_percentage_that_is_not_a_number_still_fails_safe(self) -> None:
+        nodes = [{"name": "a", "labels": [], "mem": "20%"}, {"name": "b", "labels": [], "mem": "garbage%"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY% from kubectl top nodes ('garbage')", result.stderr)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    def test_the_worst_reporting_node_still_gives_pressure_beside_an_unreachable_one(self) -> None:
+        nodes = [{"name": "a", "labels": [], "mem": "<unknown>"}, {"name": "b", "labels": [], "mem": "95%"}, {"name": "c", "labels": [], "mem": "50%"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("FAIL-SAFE", result.stderr)
+        self.assertIn("Skipping node a", result.stdout)
+        self.assertIn("mem_available=5% pressure=true", result.stdout)
+        self.assertIn("lower: host pressure", result.stdout)
 
     def recorded(self) -> dict[str, dict[str, object]]:
         return json.loads(self.job_memory_out.read_text())
