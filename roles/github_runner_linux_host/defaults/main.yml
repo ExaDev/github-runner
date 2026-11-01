@@ -48,11 +48,19 @@ github_runner_linux_host_battery_device: BAT0
 github_runner_linux_host_power_supply_dir: /sys/class/power_supply
 github_runner_linux_host_battery_unit: /etc/systemd/system/github-runner-battery-charge-limit.service
 
-# Whether the host runs without a desktop: the default target is set to multi-user.target, and the display manager is disabled and stopped. A desktop session has an idle-suspend of its own, independent of logind and of the lid, and holds memory a node can use; stopping the display manager ends the desktop session.
+# Whether the host runs without a desktop: the default target is set to multi-user.target, and the display manager is stopped and disabled. A desktop session has an idle-suspend of its own, independent of logind and of the lid, and holds memory a node can use; stopping the display manager ends the desktop session.
 github_runner_linux_host_headless: false
-# Not settings: the target the host boots to and the display manager's unit, which every display manager (gdm3, lightdm, sddm) is an alias of; disabling the alias removes the link to whichever one is installed. Variables only so the tests can point them at a stand-in.
+# Not a setting: the target the host boots to. A variable only so the tests can narrow it.
 github_runner_linux_host_default_target: multi-user.target
-github_runner_linux_host_display_manager_unit: display-manager.service
+# The display manager's unit, when the host is to name it. Empty (the default) works it out from the host: each unit of github_runner_linux_host_display_manager_candidates is read in order, an alias reading as the unit it resolves to, and the first that is loaded and active is stopped and disabled, or failing that the first that is loaded and enabled is disabled. A host with none has nothing to stop. A unit set here is used as it is, and the candidates are not read.
+github_runner_linux_host_display_manager_unit: ""
+# The units tried in order when github_runner_linux_host_display_manager_unit is empty. display-manager.service is first because it is an alias of whichever display manager is enabled, but a release can have the alias unloaded while the display manager itself runs (Ubuntu 26.04 LTS has gdm.service loaded and display-manager.service not), so the display managers' own units follow.
+github_runner_linux_host_display_manager_candidates:
+  - display-manager.service
+  - gdm.service
+  - gdm3.service
+  - lightdm.service
+  - sddm.service
 
 # Whether the units in github_runner_linux_host_unneeded_services are disabled and stopped, those that are enabled or running. A dedicated node needs none of them, and each is a daemon and an attack surface that runs for nothing. avahi-daemon (the .local name a laptop is reached by) and NetworkManager are not in the list, and a service the host does not have is left alone.
 github_runner_linux_host_disable_unneeded_services: false
