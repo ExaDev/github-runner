@@ -7,6 +7,7 @@
   vars:
     github_runner_cluster_docker_cli_environment: {}
     github_runner_cluster_container_name: github-runner-k3s
+    github_runner_cluster_compose_project: github-runner
     github_runner_cluster_network_probe_image: "busybox:1.37"
     github_runner_cluster_cluster_read_timeout: 30
   tasks:

@@ -21,14 +21,14 @@ LAN = "192.0.2.0/24"
 ON_LAN = "3: col0    inet 192.0.2.44/24 brd 192.0.2.255 scope global col0\\       valid_lft 85000sec"
 OFF_LAN = "2: eth0    inet 192.168.5.1/24 brd 192.168.5.255 scope global eth0\\       valid_lft 85000sec"
 
-# The stand-in docker appends its arguments and DOCKER_CONTEXT to calls.log and answers from files in the work directory: docker ps lists container-state (empty: no such container), docker run prints addresses, a "--" line and links, and docker exec answers kubectl: /readyz/etcd from etcd-<container> (no file: the read fails), the node list from nodes.json and the pods from pods.json. A daemon-down file makes every call fail, kubectl-nodes-fails (or kubectl-nodes-fails-<container>) makes the node list fail, and hang-<context> makes docker exec on that context sleep for the seconds it holds.
+# The stand-in docker appends its arguments and DOCKER_CONTEXT to calls.log and answers from files in the work directory: docker ps lists container-state (empty: no such container), or, when asked for the Compose project labels of the running containers, running (one name|project line each; no file: none), docker run prints addresses, a "--" line and links, and docker exec answers kubectl: /readyz/etcd from etcd-<container> (no file: the read fails), the node list from nodes.json and the pods from pods.json. A daemon-down file makes every call fail, kubectl-nodes-fails (or kubectl-nodes-fails-<container>) makes the node list fail, and hang-<context> makes docker exec on that context sleep for the seconds it holds.
 STUBS = {
     "docker": """\
         #!/bin/sh
         echo "docker ${DOCKER_CONTEXT:--} $*" >> "$STUB_DIR/calls.log"
         [ -e "$STUB_DIR/daemon-down" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
         case "$1" in
-          ps) cat "$STUB_DIR/container-state" ;;
+          ps) case "$*" in *Label*) { [ -e "$STUB_DIR/running" ] && cat "$STUB_DIR/running"; true; } ;; *) cat "$STUB_DIR/container-state" ;; esac ;;
           run) cat "$STUB_DIR/addresses"; echo --; cat "$STUB_DIR/links" ;;
           exec)
             [ -e "$STUB_DIR/hang-${DOCKER_CONTEXT:--}" ] && sleep "$(cat "$STUB_DIR/hang-${DOCKER_CONTEXT:--}")"
@@ -205,6 +205,42 @@ class HostNetworkRoleTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("it must be bridge", result.stdout)
         self.assertEqual(self.calls(), [])
+
+    def test_a_container_of_another_project_on_the_engine_refuses_host_mode_before_anything_else(self) -> None:
+        for running in ("github-runner-k3s|github-runner\nweb|\n", "github-runner-k3s|github-runner\nweb|other-project\n"):
+            with self.subTest(running=running):
+                (self.work / "running").write_text(running)
+                (self.work / "calls.log").unlink(missing_ok=True)
+                result = self.run_tasks()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(failed_task(result.stdout), "Fail if the node's Docker engine runs a container that is not the node's own")
+                self.assertIn("already runs web, which is not part of the Compose project github-runner", result.stdout)
+                self.assertEqual([call.split()[2] for call in self.calls()], ["ps"])
+
+    def test_every_container_of_another_project_is_named(self) -> None:
+        (self.work / "running").write_text("github-runner-k3s|github-runner\nweb|\ndb|other\n")
+        result = self.run_tasks()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already runs web, db, which are not part of", result.stdout)
+
+    def test_only_the_node_s_own_compose_project_may_run_on_the_engine_in_host_mode(self) -> None:
+        (self.work / "running").write_text("github-runner-k3s|github-runner\ngithub-runner-docker-prune-1|github-runner\n")
+        result = self.run_tasks()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_another_container_on_the_engine_is_refused_under_check_too_and_for_a_node_already_on_the_host_network(self) -> None:
+        (self.work / "running").write_text("web|\n")
+        self.state(addresses=[ON_LAN], container="running host", nodes=HEALTHY, pods=[])
+        for args in ((), ("--check",)):
+            with self.subTest(args=args):
+                result = self.run_tasks(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("already runs web", result.stdout)
+
+    def test_the_bridge_network_does_not_need_an_engine_of_its_own(self) -> None:
+        (self.work / "running").write_text("web|\n")
+        result = self.run_tasks(github_runner_cluster_network_mode="bridge", github_runner_cluster_lan_cidr="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_two_nodes_moving_in_one_run_are_refused(self) -> None:
         result = self.run_tasks(limit="node1,node2")
