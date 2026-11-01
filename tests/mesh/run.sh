@@ -52,6 +52,7 @@ diagnose() {
     # Where regrading has the node: how often and when the container started, what it recorded, and which credentials exist (an etcd-only server writes no kubeconfig).
     echo "----- $(container "$index"): regrade state"
     docker_on "$index" inspect --format 'restarts={{.RestartCount}} started={{.State.StartedAt}} running={{.State.Running}}' "$(container "$index")" || true
+    # shellcheck disable=SC2016 # the expansions are for the shell in the node's container, not this one.
     docker_on "$index" exec "$(container "$index")" sh -c 'echo "started: $(cat /run/regrade-level 2>&1)"; echo "requested: $(cat /var/lib/rancher/k3s/regrade-level 2>&1)"; ls /etc/rancher/k3s /var/lib/rancher/k3s/server/cred 2>&1' </dev/null 2>&1 | head -n 40 || true
     docker exec "grtest-node${index}-regrade-1" fleet-regrade status </dev/null 2>&1 | head -n 5 || true
   done
