@@ -69,6 +69,10 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(DEFAULTS["github_runner_linux_host_sleep_targets"], TARGETS)
         self.assertEqual(DEFAULTS["github_runner_linux_host_lid_switch_settings"], ["HandleLidSwitch", "HandleLidSwitchExternalPower", "HandleLidSwitchDocked"])
 
+    def test_the_display_manager_is_worked_out_from_the_host_unless_a_unit_is_named(self) -> None:
+        self.assertEqual(DEFAULTS["github_runner_linux_host_display_manager_unit"], "")
+        self.assertEqual(DEFAULTS["github_runner_linux_host_display_manager_candidates"], ["display-manager.service", "gdm.service", "gdm3.service", "lightdm.service", "sddm.service"])
+
     def test_the_networkmanager_drop_in_sorts_after_ubuntus_default(self) -> None:
         self.assertGreater(Path(DEFAULTS["github_runner_linux_host_networkmanager_dropin"]).name, "default-wifi-powersave-on.conf")
 
@@ -126,6 +130,9 @@ class Harness(unittest.TestCase):
         bin_dir = self.bin
         stand_in(bin_dir / "systemctl", log + r"""state="$STUB/state"
 unit_state() { if [ -e "$state/masked-$1" ]; then echo masked; elif [ -e "$state/enabled-$1" ]; then cat "$state/enabled-$1"; else echo disabled; fi; }
+# alias-NAME holds the unit NAME resolves to, as the symlink an enabled display manager leaves; a unit is loaded when systemd has reason to: it is active, enabled or marked loaded.
+resolve() { if [ -e "$state/alias-$1" ]; then cat "$state/alias-$1"; else echo "$1"; fi; }
+is_loaded() { [ -e "$state/loaded-$1" ] || [ -e "$state/active-$1" ] || [ -e "$state/enabled-$1" ]; }
 case "$1" in
   is-enabled) out=$(unit_state "$2"); echo "$out"; case "$out" in enabled|alias|static) exit 0 ;; *) exit 1 ;; esac ;;
   is-active) if [ -e "$state/active-$2" ]; then echo active; exit 0; fi; echo inactive; exit 3 ;;
@@ -133,8 +140,19 @@ case "$1" in
   set-default) printf '%s\n' "$2" > "$state/default-target" ;;
   mask) touch "$state/masked-$2" ;;
   enable) printf '%s\n' enabled > "$state/enabled-$2" ;;
-  disable) printf '%s\n' disabled > "$state/enabled-$2" ;;
-  stop) rm -f "$state/active-$2" ;;
+  disable)
+    if [ -e "$state/alias-$2" ]; then printf '%s\n' disabled > "$state/enabled-$(cat "$state/alias-$2")"; rm -f "$state/alias-$2"
+    else printf '%s\n' disabled > "$state/enabled-$2"; for link in "$state"/alias-*; do [ -e "$link" ] && [ "$(cat "$link")" = "$2" ] && rm -f "$link"; done; true; fi ;;
+  show)
+    for name; do :; done
+    id=$(resolve "$name")
+    if is_loaded "$id"; then load=loaded; file_state=$(unit_state "$id"); else load=not-found; file_state=""; fi
+    if [ -e "$state/active-$id" ]; then active=active; else active=inactive; fi
+    printf 'Id=%s\nLoadState=%s\nActiveState=%s\nUnitFileState=%s\n' "$id" "$load" "$active" "$file_state" ;;
+  stop)
+    id=$(resolve "$2")
+    if ! is_loaded "$id"; then echo "Failed to stop $2: Unit $2 not loaded." >&2; exit 5; fi
+    rm -f "$state/active-$id" ;;
 esac
 """)
         stand_in(bin_dir / "nmcli", log + r"""case "$*" in
@@ -332,6 +350,15 @@ class BaselineRoleTest(Harness):
         if active:
             (self.state / f"active-{name}").touch()
 
+    def display_manager(self, unit: str, alias: str | None = "display-manager.service", active: bool = True, state: str = "enabled") -> None:
+        """Installs a display manager as systemd leaves it: the unit itself, and the alias link of an enabled one."""
+        self.enable(unit, state, active=active)
+        if alias is not None:
+            (self.state / f"alias-{alias}").write_text(unit + "\n")
+
+    def stopped_and_disabled(self, unit: str) -> bool:
+        return not (self.state / f"active-{unit}").exists() and (self.state / f"enabled-{unit}").read_text().strip() == "disabled"
+
     # k3s prerequisites
 
     def test_the_k3s_prerequisites_are_loaded_and_set_now_with_the_modules_first_and_written_for_boot(self) -> None:
@@ -435,11 +462,77 @@ class BaselineRoleTest(Harness):
     # headless
 
     def test_a_graphical_host_boots_to_multi_user_and_loses_its_display_manager(self) -> None:
-        self.enable("display-manager.service", "alias", active=True)
+        self.display_manager("gdm3.service")
         result = self.run_role(github_runner_linux_host_headless=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.changes(), ["systemctl set-default multi-user.target", "systemctl disable display-manager.service", "systemctl stop display-manager.service"])
+        self.assertEqual(self.changes(), ["systemctl set-default multi-user.target", "systemctl stop gdm3.service", "systemctl disable gdm3.service"])
         self.assertEqual((self.state / "default-target").read_text().strip(), "multi-user.target")
+        self.assertTrue(self.stopped_and_disabled("gdm3.service"))
+        self.assertFalse((self.state / "alias-display-manager.service").exists())
+
+    def test_the_alias_that_is_loaded_names_the_display_manager_whatever_unit_it_resolves_to(self) -> None:
+        self.display_manager("lightdm.service")
+        self.enable("gdm.service", active=True)
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if "set-default" not in call], ["systemctl stop lightdm.service", "systemctl disable lightdm.service"])
+
+    def test_an_alias_that_is_not_loaded_leaves_the_display_managers_own_unit_to_be_stopped(self) -> None:
+        # Ubuntu 26.04 LTS after an in-place upgrade: gdm.service runs and display-manager.service is not loaded, so stopping the alias exits 5.
+        self.display_manager("gdm.service", alias=None)
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if "set-default" not in call], ["systemctl stop gdm.service", "systemctl disable gdm.service"])
+        self.assertTrue(self.stopped_and_disabled("gdm.service"))
+
+    def test_the_first_candidate_that_is_active_is_the_display_manager_even_after_an_enabled_one(self) -> None:
+        self.display_manager("gdm3.service", alias=None, active=False)
+        self.display_manager("sddm.service", alias=None)
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if "set-default" not in call], ["systemctl stop sddm.service", "systemctl disable sddm.service"])
+
+    def test_a_display_manager_an_earlier_run_stopped_but_left_enabled_is_disabled_and_not_stopped(self) -> None:
+        self.display_manager("gdm.service", alias=None, active=False)
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if "set-default" not in call], ["systemctl disable gdm.service"])
+
+    def test_a_host_with_no_display_manager_is_told_so_and_does_not_fail(self) -> None:
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["systemctl set-default multi-user.target"])
+        self.assertIn("nothing to stop or disable", result.stdout)
+        self.assertNotIn("systemctl stop", "\n".join(self.calls()))
+
+    def test_a_display_manager_that_is_loaded_and_neither_active_nor_enabled_is_left_alone(self) -> None:
+        (self.state / "loaded-gdm.service").touch()
+        (self.state / "default-target").write_text("multi-user.target\n")
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+
+    def test_a_unit_the_host_names_is_used_as_it_is_and_no_candidate_is_read(self) -> None:
+        self.display_manager("custom-dm.service", alias=None)
+        self.display_manager("gdm.service")
+        result = self.run_role(github_runner_linux_host_headless=True, github_runner_linux_host_display_manager_unit="custom-dm.service")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if "set-default" not in call], ["systemctl stop custom-dm.service", "systemctl disable custom-dm.service"])
+        self.assertEqual([call for call in self.calls() if call.startswith("systemctl show")], ["systemctl show --property=Id,LoadState,ActiveState,UnitFileState custom-dm.service"])
+        self.assertTrue((self.state / "active-gdm.service").exists())
+
+    def test_a_host_that_names_the_alias_has_it_stopped_before_it_is_disabled(self) -> None:
+        self.display_manager("gdm3.service")
+        result = self.run_role(github_runner_linux_host_headless=True, github_runner_linux_host_display_manager_unit="display-manager.service")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if "set-default" not in call], ["systemctl stop display-manager.service", "systemctl disable display-manager.service"])
+        self.assertTrue(self.stopped_and_disabled("gdm3.service"))
+
+    def test_a_unit_the_host_names_that_is_not_loaded_is_left_alone(self) -> None:
+        self.display_manager("gdm.service", alias=None)
+        result = self.run_role(github_runner_linux_host_headless=True, github_runner_linux_host_display_manager_unit="custom-dm.service")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if "set-default" not in call], [])
 
     def test_a_headless_host_is_left_as_it_is(self) -> None:
         (self.state / "default-target").write_text("multi-user.target\n")
@@ -449,7 +542,7 @@ class BaselineRoleTest(Harness):
         self.assertEqual(self.changed(result), 0, result.stdout)
 
     def test_a_second_headless_run_changes_nothing(self) -> None:
-        self.enable("display-manager.service", "alias", active=True)
+        self.display_manager("gdm3.service")
         self.assertEqual(self.run_role(github_runner_linux_host_headless=True).returncode, 0)
         before = len(self.calls())
         result = self.run_role(github_runner_linux_host_headless=True)
@@ -458,11 +551,11 @@ class BaselineRoleTest(Harness):
         self.assertEqual([call for call in self.calls()[before:] if re.match(r"^systemctl (set-default|disable|stop)", call)], [])
 
     def test_a_check_run_of_the_headless_step_reports_each_change_and_makes_none(self) -> None:
-        self.enable("display-manager.service", "alias", active=True)
+        self.display_manager("gdm.service", alias=None)
         result = self.run_role(check=True, github_runner_linux_host_headless=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.changes(), [])
-        for command in ("set-default multi-user.target", "disable display-manager.service", "stop display-manager.service"):
+        for command in ("set-default multi-user.target", "stop gdm.service", "disable gdm.service"):
             self.assertIn(f"systemctl {command}", result.stdout)
 
     # unneeded services

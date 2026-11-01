@@ -99,8 +99,18 @@ argument_specs:
         description: The target the host boots to when headless. Not a setting, and a variable only so the tests can narrow it.
       github_runner_linux_host_display_manager_unit:
         type: str
-        default: display-manager.service
-        description: The display manager's unit, which every display manager is an alias of. Not a setting, and a variable only so the tests can point it at a stand-in.
+        default: ''
+        description: The display manager's unit, used as it is when set. Empty works it out from the host, from github_runner_linux_host_display_manager_candidates.
+      github_runner_linux_host_display_manager_candidates:
+        type: list
+        elements: str
+        default:
+          - display-manager.service
+          - gdm.service
+          - gdm3.service
+          - lightdm.service
+          - sddm.service
+        description: The units tried in order when github_runner_linux_host_display_manager_unit is empty. An alias reads as the unit it resolves to. The first that is loaded and active is the display manager, or failing that the first that is loaded and enabled; the role stops and disables it, and does nothing when none is.
       github_runner_linux_host_disable_unneeded_services:
         type: bool
         default: false
