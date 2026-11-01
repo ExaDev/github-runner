@@ -1,0 +1,40 @@
+---
+# The host-level baseline of a Mac that carries a k3s node: nothing here touches the node's own containers, or the Tailscale client each node's k3s container runs on the cluster's tailnet. Every variable is checked against meta/argument_specs.yml when the role runs.
+
+# Passwordless sudo for the connecting user, off by default because it is security-sensitive: a fleet states it per host, for the Macs where the role is how that user gets sudo. It writes /etc/sudoers.d/<user> (root:wheel, 0440) holding "<user> ALL=(ALL) NOPASSWD: ALL", checked with visudo before it replaces anything. Leave it off on a host that gets the grant from elsewhere (a device-management agent such as JumpCloud), or the two would fight over it. The first application on a host needs the sudo password once (--ask-become-pass), since the grant does not exist yet.
+github_runner_macos_host_sudoers_nopasswd: false
+# The user the grant is for. Empty is the user Ansible connects as.
+github_runner_macos_host_sudoers_user: ""
+# Not a setting: macOS reads sudoers drop-ins from here. It is a variable only so the tests can point it at a stand-in.
+github_runner_macos_host_sudoers_dir: /etc/sudoers.d
+
+# AC power. A Mac that sleeps drops off the network, so SSH and the host's Tailscale client stop answering and its node leaves the cluster. These are the values the fleet's always-on Macs already run with, applied with pmset -c, which sets only the AC Power profile (a laptop on battery keeps its own). The role sets a value only when pmset -g custom reports a different one for the AC Power profile, and skips a setting pmset does not report for the Mac (hardware it lacks).
+github_runner_macos_host_power: true
+# Minutes before the whole system sleeps; 0 never.
+github_runner_macos_host_power_ac_sleep: 0
+# Minutes before the display sleeps; 0 never.
+github_runner_macos_host_power_ac_displaysleep: 0
+# Minutes before the disks spin down; 0 never.
+github_runner_macos_host_power_ac_disksleep: 0
+# Wake for network access (Wake on LAN), 1 on, 0 off.
+github_runner_macos_host_power_ac_womp: 1
+# Write the memory image to disk when sleeping, 1 on, 0 off.
+github_runner_macos_host_power_ac_standby: 1
+# Power Nap, 1 on, 0 off.
+github_runner_macos_host_power_ac_powernap: 1
+# Keep TCP connections alive while the Mac sleeps, 1 on, 0 off.
+github_runner_macos_host_power_ac_tcpkeepalive: 1
+
+# The host's own Tailscale client, installed from the Homebrew formula and run as the tailscaled system daemon (a launchd daemon that starts at boot, before anyone logs in, so the host stays reachable on its tailnet). The role installs and starts the daemon and never joins a tailnet unless github_runner_macos_host_tailscale_auth_key is set. A host whose daemon is already installed, by this role or by hand, is left entirely alone.
+github_runner_macos_host_tailscale: true
+# The Homebrew prefix, whose bin directory holds the formula's tailscaled and tailscale. Empty takes /opt/homebrew on Apple silicon and /usr/local on Intel, from the host's machine fact.
+github_runner_macos_host_homebrew_prefix: ""
+# Not a setting: tailscaled install-system-daemon writes exactly this file, and its presence is how the role knows the daemon is installed. It is a variable only so the tests can point it at a stand-in.
+github_runner_macos_host_tailscale_plist: /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+# A Tailscale auth key (a secret only the tailnet's owner can create, from any source Ansible reads), empty by default. Set, the role runs tailscale up with it on a host whose daemon the role manages (the Homebrew formula's tailscale is installed) and whose tailnet login is still needed; empty, the role never joins or re-authenticates a tailnet.
+github_runner_macos_host_tailscale_auth_key: ""
+# Further arguments for tailscale up, such as --hostname=example or --advertise-tags=tag:example. Used only when the auth key is set.
+github_runner_macos_host_tailscale_up_args: []
+
+# The PATH the Homebrew tasks run with. Both prefixes and the system directories, since the host's login PATH is not what a non-interactive SSH session gets and an absent directory is skipped.
+github_runner_macos_host_path: /opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin

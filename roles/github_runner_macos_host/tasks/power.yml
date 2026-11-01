@@ -1,0 +1,41 @@
+---
+# pmset is found on the PATH (it is in /usr/bin), so the tests can stand in for it. The AC Power profile only (pmset -c): a laptop on battery keeps its own settings. pmset -g custom is the read, and a setting is written only when it differs from the wanted value there, so a Mac already in line is untouched and a second run changes nothing.
+
+- name: Read the power settings in force
+  ansible.builtin.command:
+    argv: [pmset, -g, custom]
+  register: github_runner_macos_host_pmset
+  changed_when: false
+  # Read-only, so it also runs under --check and the run can say what would change.
+  check_mode: false
+
+- name: Work out which AC power settings differ from the wanted ones
+  ansible.builtin.set_fact:
+    github_runner_macos_host_power_changes: >-
+      {{ github_runner_macos_host_pmset.stdout | exadev.github_runner.macos_host_pmset_ac_changes({
+        'sleep': github_runner_macos_host_power_ac_sleep,
+        'displaysleep': github_runner_macos_host_power_ac_displaysleep,
+        'disksleep': github_runner_macos_host_power_ac_disksleep,
+        'womp': github_runner_macos_host_power_ac_womp,
+        'standby': github_runner_macos_host_power_ac_standby,
+        'powernap': github_runner_macos_host_power_ac_powernap,
+        'tcpkeepalive': github_runner_macos_host_power_ac_tcpkeepalive,
+      }) }}
+
+- name: Apply the AC power settings that differ
+  become: true
+  ansible.builtin.command:
+    argv: "{{ ['pmset', '-c'] + github_runner_macos_host_power_changes }}"
+  when:
+    - github_runner_macos_host_power_changes | length > 0
+    - not ansible_check_mode
+  changed_when: true
+
+- name: Report the AC power settings a real run would change
+  # Under --check the task above does not run, so that no privilege is needed to review a run; this reports the same change instead.
+  ansible.builtin.debug:
+    msg: "pmset -c {{ github_runner_macos_host_power_changes | join(' ') }}"
+  when:
+    - ansible_check_mode
+    - github_runner_macos_host_power_changes | length > 0
+  changed_when: true

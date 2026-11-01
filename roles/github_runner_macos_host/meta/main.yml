@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: ExaDev
+  description: Keeps a Mac from sleeping on AC power and runs its own Tailscale client as the tailscaled system daemon.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions: [all]
+dependencies: []
