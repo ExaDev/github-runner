@@ -1,0 +1,34 @@
+---
+# The role's variables, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it.
+argument_specs:
+  main:
+    short_description: Keeps a Linux host that carries a k3s node from suspending, and its Wi-Fi from power saving.
+    description:
+      - Runs on Linux hosts only and does nothing on any other. Both steps are off by default. Its tasks that change the host use become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
+    options:
+      github_runner_linux_host_keep_awake:
+        type: bool
+        default: false
+        description: Whether the host is kept from suspending, by masking the sleep targets and having systemd-logind ignore the lid switch.
+      github_runner_linux_host_sleep_targets:
+        type: list
+        elements: str
+        default: [sleep.target, suspend.target, hibernate.target, hybrid-sleep.target]
+        description: The targets masked. Not a setting, and a variable only so the tests can narrow it.
+      github_runner_linux_host_lid_switch_settings:
+        type: list
+        elements: str
+        default: [HandleLidSwitch, HandleLidSwitchExternalPower, HandleLidSwitchDocked]
+        description: The logind settings set to ignore. Not a setting, and a variable only so the tests can narrow it.
+      github_runner_linux_host_logind_dropin:
+        type: path
+        default: /etc/systemd/logind.conf.d/90-github-runner-keep-awake.conf
+        description: Where the logind drop-in goes. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_wifi_powersave_off:
+        type: bool
+        default: false
+        description: Whether NetworkManager is told not to power-save Wi-Fi (wifi.powersave = 2), as the default for every connection and on the radio now.
+      github_runner_linux_host_networkmanager_dropin:
+        type: path
+        default: /etc/NetworkManager/conf.d/zz-github-runner-wifi-powersave.conf
+        description: Where the NetworkManager drop-in goes. Not a setting, and a variable only so the tests can point it at a stand-in.

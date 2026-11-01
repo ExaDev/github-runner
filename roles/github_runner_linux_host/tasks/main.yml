@@ -1,0 +1,23 @@
+---
+# Linux hosts only. Every part is skipped on any other host, so the role can be applied to a mixed inventory. The tasks that change the host use become (sudo); everything the role only reads runs as the connecting user.
+
+- name: Read which operating system the host has
+  # Only the platform subset, the cheapest that holds it, and only when the caller did not gather it: a play with gather_facts: false leaves ansible_facts without it. Read-only, so it runs under --check too.
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - platform
+  when: "'system' not in ansible_facts"
+
+- name: Keep the host from suspending
+  ansible.builtin.include_tasks: keep_awake.yml
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - github_runner_linux_host_keep_awake | bool
+
+- name: Keep the host's Wi-Fi from power saving
+  ansible.builtin.include_tasks: wifi_powersave.yml
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - github_runner_linux_host_wifi_powersave_off | bool

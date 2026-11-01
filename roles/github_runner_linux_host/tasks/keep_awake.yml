@@ -1,0 +1,61 @@
+---
+# Masks every target systemd suspends or hibernates the host through, and has systemd-logind ignore the lid switch. Masking is what stops a request that does not come from logind (`systemctl suspend`, a desktop's idle timer asking logind, a power button some other way): the target cannot be started. The logind drop-in is what stops the lid, whose default action is to suspend, before it asks. Both are idempotent, and under --check each change is reported and none is made.
+
+- name: Read whether each sleep target is masked
+  # `systemctl is-enabled` prints masked (and exits 1) for a masked unit and static (exit 0) for one that is not; either way the printed state is what is read.
+  ansible.builtin.command:
+    argv: [systemctl, is-enabled, "{{ item }}"]
+  loop: "{{ github_runner_linux_host_sleep_targets }}"
+  register: github_runner_linux_host_targets
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Mask the sleep targets that are not masked
+  become: true
+  ansible.builtin.command:
+    argv: [systemctl, mask, "{{ item.item }}"]
+  loop: "{{ github_runner_linux_host_targets.results | rejectattr('stdout', 'search', '^masked') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: not ansible_check_mode
+
+- name: Report the sleep targets a real run would mask
+  ansible.builtin.debug:
+    msg: "systemctl mask {{ item.item }}"
+  loop: "{{ github_runner_linux_host_targets.results | rejectattr('stdout', 'search', '^masked') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: ansible_check_mode
+
+- name: Create the directory of the logind drop-in
+  become: true
+  ansible.builtin.file:
+    path: "{{ github_runner_linux_host_logind_dropin | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Have systemd-logind ignore the lid switch
+  become: true
+  ansible.builtin.copy:
+    content: |
+      # Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand.
+      [Login]
+      {% for setting in github_runner_linux_host_lid_switch_settings %}
+      {{ setting }}=ignore
+      {% endfor %}
+    dest: "{{ github_runner_linux_host_logind_dropin }}"
+    mode: "0644"
+  register: github_runner_linux_host_logind
+
+- name: Make systemd-logind read the drop-in
+  # SIGHUP reloads logind's configuration without restarting it, which would end the login sessions it tracks.
+  become: true
+  ansible.builtin.command:
+    argv: [systemctl, kill, --signal=HUP, --kill-whom=main, systemd-logind.service]
+  changed_when: true
+  when:
+    - github_runner_linux_host_logind is changed
+    - not ansible_check_mode

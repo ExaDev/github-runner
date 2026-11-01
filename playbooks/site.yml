@@ -33,6 +33,13 @@
   roles:
     - exadev.github_runner.github_runner_macos_host
 
+# Before the fleet play, so a Linux host that would suspend, or whose Wi-Fi would power-save, is fixed before k3s starts on it. Linux hosts only (the role does nothing on any other), and both of its steps are off unless a host's variables turn them on. The tasks that change the host use become (sudo), as do those of a native node (github_runner_cluster_node_mode: native), so run the play with passwordless sudo for the connecting user or with --ask-become-pass. It gathers its own facts: only the platform subset the role needs, so the host's Python is the only requirement.
+- name: Set up the Linux hosts' host baseline
+  hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
+  gather_facts: false
+  roles:
+    - exadev.github_runner.github_runner_linux_host
+
 - name: GitHub Actions runner fleet
   # The cluster group, whose inventory order decides which hosts are k3s servers (see roles/github_runner_cluster/defaults/main.yml). bootstrap.sh sets github_runner_cluster_group to all, since its one-host inventory has no groups.
   hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
