@@ -1,0 +1,23 @@
+---
+# The host-level baseline of a Linux host that carries a k3s node: nothing here touches the node itself, or the Tailscale client. Every variable is checked against meta/argument_specs.yml when the role runs. Both steps are off by default, because each changes how the host behaves for whoever else uses it: a fleet turns them on per host, for a machine that is dedicated to the cluster.
+
+# Whether the host is kept from suspending: sleep.target, suspend.target, hibernate.target and hybrid-sleep.target are masked, so nothing can put it to sleep (a desktop's idle timer, a power button, `systemctl suspend`), and systemd-logind is told to ignore the lid switch, which a laptop would otherwise suspend on whenever its lid closes, with or without an external monitor or power. A host that sleeps drops off the network, so its node leaves the cluster and its runner pods stop.
+github_runner_linux_host_keep_awake: false
+# The targets masked, which are every way systemd suspends or hibernates the host. A constant, not a setting; a variable only so the tests can narrow it.
+github_runner_linux_host_sleep_targets:
+  - sleep.target
+  - suspend.target
+  - hibernate.target
+  - hybrid-sleep.target
+# The logind settings written to the drop-in, all three ignore: the lid switch on battery, on external power and docked. Constants, not settings.
+github_runner_linux_host_lid_switch_settings:
+  - HandleLidSwitch
+  - HandleLidSwitchExternalPower
+  - HandleLidSwitchDocked
+# Not settings: where the logind drop-in goes, which systemd-logind reads on top of /etc/systemd/logind.conf. Variables only so the tests can point it at a stand-in.
+github_runner_linux_host_logind_dropin: /etc/systemd/logind.conf.d/90-github-runner-keep-awake.conf
+
+# Whether NetworkManager is told not to power-save Wi-Fi (wifi.powersave = 2, disable). A Wi-Fi radio in power-save mode sleeps between beacons and drops or delays packets, which on a node of the cluster shows as the node flapping NotReady; it matters only for a host that is on Wi-Fi, and does nothing to a host without a Wi-Fi device. It sets the default for every connection that does not set its own, and applies to the radio now.
+github_runner_linux_host_wifi_powersave_off: false
+# Not settings: where the NetworkManager drop-in goes. The name sorts after Ubuntu's default-wifi-powersave-on.conf (wifi.powersave = 3), because NetworkManager reads its configuration files in alphabetical order and the last one to set a value wins. Variables only so the tests can point them at a stand-in.
+github_runner_linux_host_networkmanager_dropin: /etc/NetworkManager/conf.d/zz-github-runner-wifi-powersave.conf
