@@ -249,7 +249,7 @@ record_measured_peaks() {
   store_job_entries "$JOB_PEAK_KEY" "$jobs" false
 }
 
-# Works out how many pooled runner pods the nodes can place now (scripts/autoscaler-ceiling.jq has the rule) and prints the program's result. Each pooled scale set's runner pod spec is read from its live AutoscalingRunnerSet, as its memory limit is above, so a change to the pod's request moves the ceiling with it. The lists go through files, never arguments: every pod in the cluster is more than one argument may hold (see configmap_set). Any failed read, or a figure the program cannot use, prints why on stderr and returns non-zero. A subshell, so the files go with it whichever way it ends; errexit does not apply inside a function called as a condition, so each step checks its own status.
+# Works out how many pooled runner pods the nodes can place now (scripts/autoscaler-ceiling.jq has the rule) and prints the program's result. Each pooled scale set's runner pod spec is read from its live AutoscalingRunnerSet, as its memory limit is above, so a change to the pod's request moves the ceiling with it. The nodes are the poll's one read of them (NODES_FILE, taken before the memory check), so the ceiling and the memory check agree on which nodes are Ready. The lists go through files, never arguments: every pod in the cluster is more than one argument may hold (see configmap_set). Any failed read, or a figure the program cannot use, prints why on stderr and returns non-zero. A subshell, so the files go with it whichever way it ends; errexit does not apply inside a function called as a condition, so each step checks its own status.
 measure_ceiling() (
   work="$(mktemp -d)" || exit 1
   trap 'rm -rf "$work"' EXIT
@@ -257,10 +257,9 @@ measure_ceiling() (
     kubectl get autoscalingrunnerset "${RELEASES[$i]}" -n "${NAMESPACES[$i]}" -o json | jq -c '.spec.template.spec' >> "$work/templates" \
       || { echo "could not read ${TARGETS[$i]}'s runner pod template" >&2; exit 1; }
   done
-  kubectl get nodes -o json > "$work/nodes" || { echo "could not list the nodes" >&2; exit 1; }
   kubectl get pods --all-namespaces --field-selector=status.phase!=Succeeded,status.phase!=Failed -o json > "$work/pods" \
     || { echo "could not list the pods that hold requests" >&2; exit 1; }
-  jq -c --slurpfile templates "$work/templates" --slurpfile nodes "$work/nodes" --argjson pooled "$(printf '%s\n' "${NAMESPACES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+  jq -c --slurpfile templates "$work/templates" --slurpfile nodes "$NODES_FILE" --argjson pooled "$(printf '%s\n' "${NAMESPACES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
     -L "$JQ_MODULES" -f "$CEILING_PROGRAM" "$work/pods"
 )
 
@@ -358,7 +357,10 @@ for i in "${!TARGETS[@]}"; do
 done
 
 # Cluster-wide memory-availability pressure via `kubectl top nodes` (metrics-server), not a single node's own /proc/meminfo - the autoscaler pod is genuinely unpinned now (see docker-compose.yml's own removal of host pinning), so a single-node reading would only ever reflect wherever the scheduler happened to place THIS pod, not the pool as a whole. Takes the WORST-CASE (minimum) available-memory percentage across the nodes it reads (those matching AUTOSCALER_NODE_SELECTOR, or every node when it is empty), not an average: a pool average can look healthy while the specific node a new runner pod would actually land on is not - consistent with the algorithm's own existing bias toward lowering eagerly, since lowering never disrupts in-flight jobs. No swap-pressure signal: metrics-server's API has no swap field at all (confirmed against its type, not just "probably not"), and the only alternative (the kubelet's own Summary API) needs a materially broader RBAC grant - node/proxy, effectively "reach anything a kubelet exposes" - for a signal most kubelet versions don't even surface unless the off-by-default NodeSwap feature gate is on. Real cluster-wide swap visibility needs Prometheus/node-exporter, which this fleet doesn't run and which would be genuine scope creep to add here - dropping swap detection is a deliberate, documented trade-off, not an oversight.
-# Only the nodes runner pods may be placed on, when the role restricts them by label: a node they cannot use says nothing about where the next one lands, and one whose kubelet is unreachable reports no metrics, which would otherwise fail safe on every poll it is down.
+# Only the nodes runner pods may be placed on, when the role restricts them by label: a node they cannot use says nothing about where the next one lands, and one whose kubelet is unreachable reports no metrics, which would otherwise fail safe on every poll it is down. The same holds inside the label for a node that is not Ready: `kubectl top nodes` prints it with <unknown> figures, and it places no runner pod, which the ceiling already leaves out of its count. The poll reads every node once into NODES_FILE (the ceiling reads the same file below), and a figure counts only when its node is Ready by the one definition both share (scripts/autoscaler-node.jq); a Ready node whose figure cannot be read still fails safe.
+NODES_FILE="$WORK/nodes"
+kubectl get nodes -o json > "$NODES_FILE" 2>/dev/null || fail_safe "could not list the nodes"
+READY_NODES="$(jq -r -L "$JQ_MODULES" 'include "autoscaler-node"; .items[] | select(is_ready) | .metadata.name' "$NODES_FILE")" || fail_safe "could not work out which nodes are Ready"
 TOP_NODES_ARGS=(top nodes --no-headers)
 [ -n "$NODE_SELECTOR" ] && TOP_NODES_ARGS+=(-l "$NODE_SELECTOR")
 # kubectl's own error is kept for the message, since its exit status alone does not say which failure it was: "Metrics API not available" when API discovery lists no usable metrics.k8s.io version (not registered, or registered but marked unavailable), the API server's own error when the list request itself fails, and "metrics not available yet" when the list succeeds with no node in it, which is what a selector matching no node, or matching only nodes whose kubelets are down, comes to.
@@ -371,7 +373,8 @@ rm -f "$TOP_NODES_ERR_FILE"
   || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} failed (${TOP_NODES_ERR% }): the metrics API is missing or unreachable, or no node${NODE_SELECTOR:+ matching the selector} reports metrics"
 [ -n "$TOP_NODES_OUTPUT" ] || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} returned no nodes"
 mem_available_pct=100
-while read -r _name _cpu _cpu_pct _mem mem_pct; do
+while read -r top_node _cpu _cpu_pct _mem mem_pct; do
+  case $'\n'"$READY_NODES"$'\n' in *$'\n'"$top_node"$'\n'*) ;; *) continue ;; esac
   mem_pct="${mem_pct%\%}"
   case "$mem_pct" in ''|*[!0-9]*) fail_safe "could not parse a node's own MEMORY% from kubectl top nodes ('$mem_pct')" ;; esac
   node_available_pct=$(( 100 - mem_pct ))

@@ -333,11 +333,49 @@ class AutoscalerTest(unittest.TestCase):
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
 
-    def test_an_unreachable_node_inside_the_selector_fails_safe(self) -> None:
+    def test_a_not_ready_node_inside_the_selector_is_left_out_of_the_memory_check(self) -> None:
+        for ready in ("False", "Unknown"):
+            with self.subTest(ready=ready):
+                nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "<unknown>", "ready": ready}, {"name": "c", "labels": [], "mem": "10%"}]
+                result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("FAIL-SAFE", result.stderr)
+                self.assertIn("mem_available=80% pressure=false", result.stdout)
+                self.assertNotIn("would patch", result.stdout)
+
+    def test_a_not_ready_node_is_left_out_without_a_selector_too(self) -> None:
+        nodes = [{"name": "a", "labels": [], "mem": "20%"}, {"name": "b", "labels": [], "mem": "<unknown>", "ready": "False"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("FAIL-SAFE", result.stderr)
+        self.assertIn("mem_available=80% pressure=false", result.stdout)
+
+    def test_a_not_ready_node_is_left_out_whatever_figure_it_reports(self) -> None:
+        # A kubelet that went silent can leave metrics-server's last figure behind: the node places no pod, so its figure says nothing about where the next one lands.
+        nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "99%", "ready": "False"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("mem_available=80% pressure=false", result.stdout)
+        self.assertNotIn("would patch", result.stdout)
+
+    def test_a_ready_node_inside_the_selector_with_an_unreadable_figure_fails_safe(self) -> None:
         nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "<unknown>"}, {"name": "c", "labels": [], "mem": "10%"}]
         result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY% from kubectl top nodes ('<unknown>')", result.stderr)
+        for namespace in NAMESPACES:
+            self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
+
+    def test_a_ready_node_with_an_unreadable_figure_fails_safe_beside_a_not_ready_one(self) -> None:
+        nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "20%"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "<unknown>", "ready": "False"}, {"name": "d", "labels": [self.ELIGIBLE], "mem": "<unknown>"}]
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY% from kubectl top nodes ('<unknown>')", result.stderr)
+
+    def test_a_node_list_that_cannot_be_read_fails_safe(self) -> None:
+        result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes_fail=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAIL-SAFE: could not list the nodes", result.stderr)
         for namespace in NAMESPACES:
             self.assertIn(f"would patch {namespace}/release-{namespace}'s maxRunners to {RUNNING}", result.stdout)
 
@@ -767,7 +805,7 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(status["ceiling_nodes"], [{"name": "a", "runners": 4}, {"name": "b", "runners": 1}, {"name": "c", "not_counted": "does not carry the runner pods' nodeSelector"}])
 
     def test_a_failed_read_keeps_the_last_ceiling_for_lowering_and_never_raises(self) -> None:
-        for failure in ({"nodes_fail": True}, {"cluster_pods_fail": True}):
+        for failure in ({"cluster_pods_fail": True},):
             with self.subTest(failure):
                 lowered = self.ceiling_poll(configmap={"ceiling": "5"}, **failure)
                 self.assertEqual(lowered.returncode, 0, lowered.stderr)
@@ -782,14 +820,14 @@ class AutoscalerTest(unittest.TestCase):
                 self.assertEqual(self.stored("raise-confirm-count"), "0")
 
     def test_with_no_ceiling_ever_worked_out_and_no_bound_a_failed_read_neither_raises_nor_lowers(self) -> None:
-        result = self.ceiling_poll(nodes_fail=True, max_runners={"ns-a": 2, "ns-b": 2}, configmap={"raise-confirm-count": "1"})
+        result = self.ceiling_poll(cluster_pods_fail=True, max_runners={"ns-a": 2, "ns-b": 2}, configmap={"raise-confirm-count": "1"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ERROR: could not work out the ceiling from the nodes; not raising", result.stderr)
         self.assertIn("ceiling=none measured_ceiling=false", result.stdout)
         self.assertNotIn("would patch", result.stdout)
 
     def test_with_a_bound_and_no_ceiling_ever_worked_out_a_failed_read_lowers_to_the_bound(self) -> None:
-        result = self.ceiling_poll(nodes_fail=True, ceiling=4)
+        result = self.ceiling_poll(cluster_pods_fail=True, ceiling=4)
         self.assertIn("ceiling=4 measured_ceiling=false", result.stdout)
         self.assertEqual(self.pooled_total_after(result), 4)
 

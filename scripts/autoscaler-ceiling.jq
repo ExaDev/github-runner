@@ -8,6 +8,8 @@
 
 # The quantity parsing shared with the usage program (scripts/autoscaler-quantity.jq), found through jq's -L, which the autoscaler points at its own directory.
 include "autoscaler-quantity";
+# Which nodes are Ready, shared with the autoscaler's memory check (scripts/autoscaler-node.jq).
+include "autoscaler-node";
 
 # A container's request for one resource. A container that sets only a limit is given that limit as its request when its pod is created, which a scale set's template has not been yet; a running pod already carries the request, so the fallback changes nothing there.
 def container_request($resource): (.resources.requests[$resource] // .resources.limits[$resource] // 0) | amount($resource);
@@ -33,9 +35,8 @@ def tolerates($tolerations; $taint):
 # Why a node cannot take a runner pod of the template $spec now, or "" when it can.
 def unplaceable($spec):
   (.metadata.labels // {}) as $labels
-  | ([.status.conditions[]? | select(.type == "Ready") | .status] | first) as $ready
   | if any(($spec.nodeSelector // {}) | to_entries[]; $labels[.key] != (.value | tostring)) then "does not carry the runner pods' nodeSelector"
-    elif $ready != "True" then "is not Ready"
+    elif is_ready | not then "is not Ready"
     elif .spec.unschedulable == true then "is cordoned"
     else [.spec.taints[]? | select(.effect == "NoSchedule" or .effect == "NoExecute") | select(tolerates($spec.tolerations // []; .) | not) | "has the taint \(.key):\(.effect)"] | first // ""
     end;

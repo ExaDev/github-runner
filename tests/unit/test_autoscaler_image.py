@@ -39,6 +39,14 @@ class ImageContentsTest(unittest.TestCase):
                 self.assertTrue((ROOT / "scripts" / name).is_file(), name)
                 self.assertIn(f"COPY scripts/{name} /app/scripts/{name}", dockerfile)
 
+    def test_every_jq_module_a_program_the_image_runs_includes_is_copied_beside_it(self) -> None:
+        dockerfile = DOCKERFILE.read_text()
+        for program in sorted((ROOT / "scripts").glob("autoscaler-*.jq")):
+            for module in re.findall(r'^include "([A-Za-z0-9._-]+)";', program.read_text(), re.MULTILINE):
+                with self.subTest(program=program.name, module=module):
+                    self.assertTrue((ROOT / "scripts" / f"{module}.jq").is_file())
+                    self.assertIn(f"COPY scripts/{module}.jq /app/scripts/{module}.jq", dockerfile)
+
     def test_every_script_the_role_runs_from_the_image_is_copied_into_it_and_made_executable(self) -> None:
         dockerfile = DOCKERFILE.read_text()
         for script in scripts_run_from_the_image():

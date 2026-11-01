@@ -21,6 +21,7 @@ COPY scripts/autoscaler.sh /app/scripts/autoscaler.sh
 COPY scripts/autoscaler-ceiling.jq /app/scripts/autoscaler-ceiling.jq
 COPY scripts/autoscaler-usage.jq /app/scripts/autoscaler-usage.jq
 COPY scripts/autoscaler-quantity.jq /app/scripts/autoscaler-quantity.jq
+COPY scripts/autoscaler-node.jq /app/scripts/autoscaler-node.jq
 COPY scripts/psi-reporter.sh /app/scripts/psi-reporter.sh
 COPY scripts/node-cache-pruner.sh /app/scripts/node-cache-pruner.sh
 RUN chmod +x /app/loop.sh /app/scripts/autoscaler.sh /app/scripts/psi-reporter.sh /app/scripts/node-cache-pruner.sh

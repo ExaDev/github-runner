@@ -9,6 +9,7 @@ on:
     paths:
       - scripts/autoscaler.sh
       - scripts/autoscaler-ceiling.jq
+      - scripts/autoscaler-node.jq
       - roles/github_runner_arc/tasks/install_platform.yml
       - plugins/filter/arc.py
       - tests/autoscaler_ceiling/**
