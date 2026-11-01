@@ -55,6 +55,7 @@ diagnose() {
     # shellcheck disable=SC2016 # the expansions are for the shell in the node's container, not this one.
     docker_on "$index" exec "$(container "$index")" sh -c 'echo "started: $(cat /run/regrade-level 2>&1)"; echo "requested: $(cat /var/lib/rancher/k3s/regrade-level 2>&1)"; ls /etc/rancher/k3s /var/lib/rancher/k3s/server/cred 2>&1' </dev/null 2>&1 | head -n 40 || true
     docker_on "$index" exec "grtest-node${index}-regrade-1" fleet-regrade status </dev/null 2>&1 | head -n 5 || true
+    docker_on "$index" logs --tail 40 "grtest-node${index}-regrade-1" 2>&1 | cut -c1-400 || true
   done
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
