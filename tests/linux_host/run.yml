@@ -1,5 +1,5 @@
 ---
-# Runs the github_runner_linux_host role as site.yml includes it, for tests/unit/test_linux_host.py. The host's facts are stood in for by the extra variable host_system, and the systemctl, nmcli and iw the role calls are the test's stand-ins on PATH, so no real target, drop-in or radio is ever touched.
+# Runs the github_runner_linux_host role as site.yml includes it, for tests/unit/test_linux_host.py. The host's facts are stood in for by the extra variables host_system and host_os_family, and the systemctl, nmcli, iw, modprobe, sysctl, apt-get, dpkg-query, uname and shutdown the role calls are the test's stand-ins on PATH, so no real target, drop-in, radio, module, package or reboot is ever touched.
 - name: Run the Linux host baseline role
   hosts: all
   connection: local
@@ -9,6 +9,7 @@
       ansible.builtin.set_fact:
         ansible_facts:
           system: "{{ host_system }}"
+          os_family: "{{ host_os_family | default('Debian') }}"
 
     - name: Include the role
       ansible.builtin.include_role:

@@ -1,0 +1,84 @@
+---
+# Loads the kernel modules k3s needs and sets the sysctls it needs, now and at boot: a modules-load.d file and a sysctl.d file for boot, and modprobe and sysctl -w for now. The modules go first, because the bridge sysctls only exist once br_netfilter is loaded. Idempotent: a module is loaded only when /sys/module does not have it, a sysctl is set only when its value differs, and the two files are copied only when they differ. Under --check each change is reported and none is made.
+
+- name: Write the file that loads the kernel modules at boot
+  become: true
+  ansible.builtin.copy:
+    content: |
+      # Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand.
+      {% for module in github_runner_linux_host_kernel_modules %}
+      {{ module }}
+      {% endfor %}
+    dest: "{{ github_runner_linux_host_modules_load_file }}"
+    mode: "0644"
+
+- name: Read which of the kernel modules are loaded
+  ansible.builtin.stat:
+    path: "{{ github_runner_linux_host_sys_module_dir }}/{{ item }}"
+  loop: "{{ github_runner_linux_host_kernel_modules }}"
+  register: github_runner_linux_host_modules
+
+- name: Load the kernel modules that are not loaded
+  become: true
+  ansible.builtin.command:
+    argv: [modprobe, --, "{{ item.item }}"]
+  loop: "{{ github_runner_linux_host_modules.results | rejectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: not ansible_check_mode
+
+- name: Report the kernel modules a real run would load
+  ansible.builtin.debug:
+    msg: "modprobe {{ item.item }}"
+  loop: "{{ github_runner_linux_host_modules.results | rejectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+  when: ansible_check_mode
+
+- name: Write the file that sets the sysctls at boot
+  become: true
+  ansible.builtin.copy:
+    content: |
+      # Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand.
+      {% for key, value in github_runner_linux_host_sysctl_settings.items() %}
+      {{ key }} = {{ value }}
+      {% endfor %}
+    dest: "{{ github_runner_linux_host_sysctl_file }}"
+    mode: "0644"
+
+- name: Read the sysctls now
+  # A key that does not exist yet (a bridge key before br_netfilter is loaded, which a real run has done by now) reads as no value, which differs from the wanted one.
+  ansible.builtin.command:
+    argv: [sysctl, -n, "{{ item.key }}"]
+  loop: "{{ github_runner_linux_host_sysctl_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: github_runner_linux_host_sysctls
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Set the sysctls whose value differs
+  become: true
+  ansible.builtin.command:
+    argv: [sysctl, -w, "{{ item.item.key }}={{ item.item.value }}"]
+  loop: "{{ github_runner_linux_host_sysctls.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.value | string
+    - not ansible_check_mode
+
+- name: Report the sysctls a real run would set
+  ansible.builtin.debug:
+    msg: "sysctl -w {{ item.item.key }}={{ item.item.value }}"
+  loop: "{{ github_runner_linux_host_sysctls.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.value | string
+    - ansible_check_mode

@@ -1,4 +1,4 @@
-"""Tests the github_runner_linux_host role: its defaults, argument specs and README, and its tasks (tests/linux_host/run.yml) against stand-ins for systemctl, nmcli and iw on PATH, with the drop-ins redirected, so that no real target, drop-in or radio is touched."""
+"""Tests the github_runner_linux_host role: its defaults, argument specs and README, and its tasks (tests/linux_host/run.yml) against stand-ins for systemctl, nmcli, iw, modprobe, sysctl, apt-get, dpkg-query, uname and shutdown on PATH, with every file the role writes or reads redirected, so that no real target, drop-in, radio, module, package or reboot is touched."""
 
 from __future__ import annotations
 
@@ -23,12 +23,47 @@ DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_
 SPECS: dict[str, Any] = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())["argument_specs"]["main"]["options"]
 README = (ROLE / "README.md").read_text()
 TARGETS = ["sleep.target", "suspend.target", "hibernate.target", "hybrid-sleep.target"]
+STEPS = [
+    "github_runner_linux_host_keep_awake",
+    "github_runner_linux_host_wifi_powersave_off",
+    "github_runner_linux_host_k3s_prerequisites",
+    "github_runner_linux_host_battery_charge_limit",
+    "github_runner_linux_host_headless",
+    "github_runner_linux_host_disable_unneeded_services",
+    "github_runner_linux_host_unattended_upgrades",
+    "github_runner_linux_host_upgrade",
+]
+SYSCTLS = {"net.ipv4.ip_forward": "1", "net.bridge.bridge-nf-call-iptables": "1", "net.bridge.bridge-nf-call-ip6tables": "1"}
 
 
 class DefaultsTest(unittest.TestCase):
-    def test_both_steps_are_off_by_default(self) -> None:
-        self.assertIs(DEFAULTS["github_runner_linux_host_keep_awake"], False)
-        self.assertIs(DEFAULTS["github_runner_linux_host_wifi_powersave_off"], False)
+    def test_every_step_is_off_by_default_and_has_a_variable_of_its_own(self) -> None:
+        for step in STEPS:
+            with self.subTest(step=step):
+                self.assertIs(DEFAULTS[step], False)
+        tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
+        gated = [next(condition for condition in task["when"] if "| bool" in condition).split(" ")[0] for task in tasks if "when" in task and isinstance(task["when"], list)]
+        self.assertEqual(gated, STEPS)
+
+    def test_the_k3s_prerequisites_are_the_modules_and_sysctls_k3s_needs(self) -> None:
+        self.assertEqual(DEFAULTS["github_runner_linux_host_kernel_modules"], ["overlay", "br_netfilter"])
+        self.assertEqual({key: str(value) for key, value in DEFAULTS["github_runner_linux_host_sysctl_settings"].items()}, SYSCTLS)
+
+    def test_the_battery_is_limited_to_eighty_percent_of_bat0_unless_told_otherwise(self) -> None:
+        self.assertEqual((DEFAULTS["github_runner_linux_host_battery_charge_limit_percent"], DEFAULTS["github_runner_linux_host_battery_device"]), (80, "BAT0"))
+
+    def test_the_services_a_dedicated_node_does_not_need_are_listed_and_the_ones_it_does_are_not(self) -> None:
+        services = DEFAULTS["github_runner_linux_host_unneeded_services"]
+        self.assertEqual({service.split(".")[0] for service in services}, {"cups", "cups-browsed", "bluetooth", "ModemManager"})
+        self.assertLess(services.index("cups.socket"), services.index("cups.service"))
+        self.assertLess(services.index("cups.path"), services.index("cups.service"))
+        for kept in ("avahi", "NetworkManager"):
+            self.assertFalse([service for service in services if kept in service], kept)
+
+    def test_the_upgrade_is_off_by_default_reboots_when_due_and_refuses_a_running_node(self) -> None:
+        self.assertIs(DEFAULTS["github_runner_linux_host_upgrade_reboot"], True)
+        self.assertIs(DEFAULTS["github_runner_linux_host_upgrade_reboot_running_node"], False)
+        self.assertEqual(DEFAULTS["github_runner_linux_host_node_services"], ["k3s-agent.service", "k3s.service"])
 
     def test_every_sleep_the_host_can_enter_is_masked_and_every_lid_setting_is_set(self) -> None:
         self.assertEqual(DEFAULTS["github_runner_linux_host_sleep_targets"], TARGETS)
@@ -58,21 +93,48 @@ def stand_in(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-class RoleTest(unittest.TestCase):
+class Harness(unittest.TestCase):
+    """Runs the role against stand-ins; the tests are in RoleTest and BaselineRoleTest."""
+
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="linux-host-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.stubs = self.tmp / "stubs"
         self.state = self.stubs / "state"
         self.state.mkdir(parents=True)
-        (self.stubs / "bin").mkdir()
-        self.logind = self.tmp / "etc" / "systemd" / "logind.conf.d" / "90-github-runner-keep-awake.conf"
-        self.networkmanager = self.tmp / "etc" / "NetworkManager" / "conf.d" / "zz-github-runner-wifi-powersave.conf"
+        self.bin = self.stubs / "bin"
+        self.bin.mkdir()
+        self.host = self.tmp / "host"
+        self.logind = self.host / "etc" / "systemd" / "logind.conf.d" / "90-github-runner-keep-awake.conf"
+        self.networkmanager = self.host / "etc" / "NetworkManager" / "conf.d" / "zz-github-runner-wifi-powersave.conf"
+        self.modules_file = self.host / "etc" / "modules-load.d" / "github-runner-k3s.conf"
+        self.sysctl_file = self.host / "etc" / "sysctl.d" / "90-github-runner-k3s.conf"
+        self.sys_module = self.host / "sys" / "module"
+        self.power_supply = self.host / "sys" / "class" / "power_supply"
+        self.battery_unit = self.host / "etc" / "systemd" / "system" / "github-runner-battery-charge-limit.service"
+        self.apt_file = self.host / "etc" / "apt" / "apt.conf.d" / "52github-runner-unattended-upgrades"
+        self.reboot_required = self.host / "var" / "run" / "reboot-required"
+        # Directories every host has already: the role puts files in them and creates no others of the system's.
+        for path in (self.sys_module, self.power_supply, self.reboot_required.parent, self.battery_unit.parent, self.modules_file.parent, self.sysctl_file.parent, self.apt_file.parent):
+            path.mkdir(parents=True, exist_ok=True)
+        self.make_stand_ins()
+        (self.state / "devices").write_text("wlp2s0:wifi\ntailscale0:tun\nlo:loopback\np2p-dev-wlp2s0:wifi-p2p\n")
+        (self.state / "power-save-wlp2s0").touch()
+
+    def make_stand_ins(self) -> None:
         log = 'echo "$(basename "$0") $*" >> "$STUB/calls.log"\n'
-        bin_dir = self.stubs / "bin"
-        stand_in(bin_dir / "systemctl", log + r"""case "$1" in
-  is-enabled) if [ -e "$STUB/state/masked-$2" ]; then echo masked; exit 1; fi; echo static; exit 0 ;;
-  mask) touch "$STUB/state/masked-$2" ;;
+        bin_dir = self.bin
+        stand_in(bin_dir / "systemctl", log + r"""state="$STUB/state"
+unit_state() { if [ -e "$state/masked-$1" ]; then echo masked; elif [ -e "$state/enabled-$1" ]; then cat "$state/enabled-$1"; else echo disabled; fi; }
+case "$1" in
+  is-enabled) out=$(unit_state "$2"); echo "$out"; case "$out" in enabled|alias|static) exit 0 ;; *) exit 1 ;; esac ;;
+  is-active) if [ -e "$state/active-$2" ]; then echo active; exit 0; fi; echo inactive; exit 3 ;;
+  get-default) if [ -e "$state/default-target" ]; then cat "$state/default-target"; else echo graphical.target; fi ;;
+  set-default) printf '%s\n' "$2" > "$state/default-target" ;;
+  mask) touch "$state/masked-$2" ;;
+  enable) printf '%s\n' enabled > "$state/enabled-$2" ;;
+  disable) printf '%s\n' disabled > "$state/enabled-$2" ;;
+  stop) rm -f "$state/active-$2" ;;
 esac
 """)
         stand_in(bin_dir / "nmcli", log + r"""case "$*" in
@@ -86,29 +148,76 @@ case "$3" in
   set) rm -f "$STUB/state/power-save-$device" ;;
 esac
 """)
-        (self.state / "devices").write_text("wlp2s0:wifi\ntailscale0:tun\nlo:loopback\np2p-dev-wlp2s0:wifi-p2p\n")
-        (self.state / "power-save-wlp2s0").touch()
+        stand_in(bin_dir / "modprobe", log + r"""touch "$STUB/sys-module-$2"
+mkdir -p "$SYS_MODULE" && touch "$SYS_MODULE/$2"
+""")
+        stand_in(bin_dir / "sysctl", log + r"""dir="$STUB/state/sysctl"
+mkdir -p "$dir"
+case "$1" in
+  -n) [ -e "$dir/$2" ] || { echo "sysctl: cannot stat /proc/sys/$2: No such file or directory" >&2; exit 255; }; cat "$dir/$2" ;;
+  -w)
+    key=${2%%=*}; value=${2#*=}
+    case "$key" in net.bridge.*) [ -e "$SYS_MODULE/br_netfilter" ] || { echo "sysctl: cannot stat /proc/sys/$key" >&2; exit 255; } ;; esac
+    printf '%s\n' "$value" > "$dir/$key" ;;
+esac
+""")
+        stand_in(bin_dir / "apt-get", log + r"""state="$STUB/state"
+simulate=no; for argument in "$@"; do [ "$argument" = --simulate ] && simulate=yes; done
+case " $* " in
+  *" install "*unattended-upgrades*) [ "$simulate" = yes ] || touch "$state/package-unattended-upgrades" ;;
+  *" dist-upgrade"*)
+    if [ -e "$state/upgradable" ]; then
+      echo "3 upgraded, 1 newly installed, 0 to remove and 0 not upgraded."
+      if [ "$simulate" = no ]; then
+        rm -f "$state/upgradable"
+        if [ -e "$state/upgrade-needs-reboot" ]; then touch "$REBOOT_REQUIRED"; fi
+      fi
+    else echo "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."; fi ;;
+  *" autoremove"*)
+    if [ -e "$state/removable" ]; then
+      echo "0 upgraded, 0 newly installed, 2 to remove and 0 not upgraded."
+      if [ "$simulate" = no ]; then rm -f "$state/removable"; fi
+    else echo "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."; fi ;;
+esac
+""")
+        stand_in(bin_dir / "dpkg-query", r"""case "$*" in
+  *unattended-upgrades*) if [ -e "$STUB/state/package-unattended-upgrades" ]; then printf 'ii '; else exit 1; fi ;;
+esac
+""")
+        stand_in(bin_dir / "uname", r"""echo 6.14.0-test
+""")
+        stand_in(bin_dir / "shutdown", log)
 
-    def run_role(self, *args: str, check: bool = False, system: str = "Linux", **variables: Any) -> subprocess.CompletedProcess[str]:
+    def run_role(self, *args: str, check: bool = False, system: str = "Linux", os_family: str = "Debian", **variables: Any) -> subprocess.CompletedProcess[str]:
         inventory = self.tmp / "inventory.yml"
         inventory.write_text(yaml.safe_dump({"all": {"hosts": {"host": {
             "ansible_connection": "local",
             "ansible_become": False,
             "github_runner_linux_host_logind_dropin": str(self.logind),
             "github_runner_linux_host_networkmanager_dropin": str(self.networkmanager),
+            "github_runner_linux_host_modules_load_file": str(self.modules_file),
+            "github_runner_linux_host_sysctl_file": str(self.sysctl_file),
+            "github_runner_linux_host_sys_module_dir": str(self.sys_module),
+            "github_runner_linux_host_power_supply_dir": str(self.power_supply),
+            "github_runner_linux_host_battery_unit": str(self.battery_unit),
+            "github_runner_linux_host_unattended_upgrades_file": str(self.apt_file),
+            "github_runner_linux_host_reboot_required_file": str(self.reboot_required),
+            "github_runner_linux_host_reboot_timeout": 5,
             **variables,
         }}}}))
         env = {
             **os.environ,
-            "PATH": f"{self.stubs / 'bin'}:{os.environ['PATH']}",
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
             "STUB": str(self.stubs),
+            "SYS_MODULE": str(self.sys_module),
+            "REBOOT_REQUIRED": str(self.reboot_required),
             "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"),
             "ANSIBLE_NOCOLOR": "1",
             "ANSIBLE_LOCALHOST_WARNING": "false",
             "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false",
             "ANSIBLE_RETRY_FILES_ENABLED": "false",
         }
-        command = [ANSIBLE_PLAYBOOK, "-i", str(inventory), str(RUN), "-e", json.dumps({"host_system": system}), *args]
+        command = [ANSIBLE_PLAYBOOK, "-i", str(inventory), str(RUN), "-e", json.dumps({"host_system": system, "host_os_family": os_family}), *args]
         if check:
             command.append("--check")
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=300, check=False, cwd=ROOT / "ansible")
@@ -118,11 +227,13 @@ esac
         return log.read_text().splitlines() if log.exists() else []
 
     def changes(self) -> list[str]:
-        return [call for call in self.calls() if re.match(r"^(systemctl (mask|kill)|nmcli general|iw dev \S+ set)", call)]
+        return [call for call in self.calls() if re.match(r"^(systemctl (mask|kill|enable|disable|stop|set-default)|nmcli general|iw dev \S+ set|modprobe|sysctl -w|apt-get|shutdown)", call)]
 
     def changed(self, result: subprocess.CompletedProcess[str]) -> int:
         return int(re.search(r"changed=(\d+)", result.stdout).group(1))  # type: ignore[union-attr]
 
+
+class RoleTest(Harness):
     def test_with_both_steps_off_the_role_reads_nothing_and_changes_nothing(self) -> None:
         result = self.run_role()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -211,6 +322,307 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("github_runner_linux_host_keep_awake", result.stdout)
         self.assertEqual(self.calls(), [])
+
+
+class BaselineRoleTest(Harness):
+    """The opt-in steps beyond keeping the host awake and its Wi-Fi from power saving."""
+
+    def enable(self, name: str, state: str = "enabled", active: bool = False) -> None:
+        (self.state / f"enabled-{name}").write_text(state + "\n")
+        if active:
+            (self.state / f"active-{name}").touch()
+
+    # k3s prerequisites
+
+    def test_the_k3s_prerequisites_are_loaded_and_set_now_with_the_modules_first_and_written_for_boot(self) -> None:
+        result = self.run_role(github_runner_linux_host_k3s_prerequisites=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.modules_file.read_text().split("\n")[1:3], ["overlay", "br_netfilter"])
+        sysctl_lines = [line for line in self.sysctl_file.read_text().splitlines() if not line.startswith("#")]
+        self.assertEqual(sysctl_lines, [f"{key} = {value}" for key, value in SYSCTLS.items()])
+        self.assertEqual(self.changes(), ["modprobe -- overlay", "modprobe -- br_netfilter"] + [f"sysctl -w {key}={value}" for key, value in SYSCTLS.items()])
+        for key, value in SYSCTLS.items():
+            self.assertEqual((self.state / "sysctl" / key).read_text().strip(), value)
+
+    def test_a_second_run_of_the_k3s_prerequisites_changes_nothing(self) -> None:
+        self.assertEqual(self.run_role(github_runner_linux_host_k3s_prerequisites=True).returncode, 0)
+        before = len(self.calls())
+        result = self.run_role(github_runner_linux_host_k3s_prerequisites=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if re.match(r"^(modprobe|sysctl -w)", call)], [])
+
+    def test_only_the_modules_and_sysctls_that_need_it_are_loaded_and_set(self) -> None:
+        (self.sys_module / "overlay").touch()
+        (self.state / "sysctl").mkdir()
+        (self.state / "sysctl" / "net.ipv4.ip_forward").write_text("1\n")
+        self.assertEqual(self.run_role(github_runner_linux_host_k3s_prerequisites=True).returncode, 0)
+        self.assertEqual(self.changes(), ["modprobe -- br_netfilter", "sysctl -w net.bridge.bridge-nf-call-iptables=1", "sysctl -w net.bridge.bridge-nf-call-ip6tables=1"])
+
+    def test_a_check_run_of_the_k3s_prerequisites_reports_each_change_and_makes_none(self) -> None:
+        result = self.run_role(check=True, github_runner_linux_host_k3s_prerequisites=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertIn("modprobe br_netfilter", result.stdout)
+        self.assertIn("sysctl -w net.bridge.bridge-nf-call-iptables=1", result.stdout)
+
+    # battery
+
+    def battery(self, value: str | None = "100") -> Path:
+        attribute = self.power_supply / "BAT0" / "charge_control_end_threshold"
+        attribute.parent.mkdir(parents=True, exist_ok=True)
+        if value is not None:
+            attribute.write_text(value + "\n")
+        return attribute
+
+    def test_the_battery_is_limited_now_and_by_a_unit_that_writes_the_limit_at_boot(self) -> None:
+        attribute = self.battery()
+        result = self.run_role(github_runner_linux_host_battery_charge_limit=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(attribute.read_text().strip(), "80")
+        unit = self.battery_unit.read_text()
+        self.assertIn("Type=oneshot\nRemainAfterExit=yes\n", unit)
+        self.assertIn(f"ConditionPathExists={attribute}\n", unit)
+        self.assertIn("After=systemd-udev-trigger.service\n", unit)
+        self.assertIn(f"ExecStart=/bin/sh -c 'echo 80 > {attribute}'\n", unit)
+        self.assertIn("WantedBy=multi-user.target\n", unit)
+        self.assertEqual([call for call in self.calls() if call.startswith("systemctl") and "is-" not in call], ["systemctl daemon-reload", "systemctl enable github-runner-battery-charge-limit.service"])
+
+    def test_a_configured_limit_and_device_are_used(self) -> None:
+        attribute = self.battery("100")
+        (self.power_supply / "BAT1").mkdir()
+        other = self.power_supply / "BAT1" / "charge_control_end_threshold"
+        other.write_text("100\n")
+        self.assertEqual(self.run_role(github_runner_linux_host_battery_charge_limit=True, github_runner_linux_host_battery_charge_limit_percent=60, github_runner_linux_host_battery_device="BAT1").returncode, 0)
+        self.assertEqual((other.read_text().strip(), attribute.read_text().strip()), ("60", "100"))
+        self.assertIn("charge to 60 percent", self.battery_unit.read_text())
+
+    def test_a_battery_at_the_limit_with_the_unit_enabled_changes_nothing(self) -> None:
+        self.battery()
+        self.assertEqual(self.run_role(github_runner_linux_host_battery_charge_limit=True).returncode, 0)
+        before = len(self.calls())
+        result = self.run_role(github_runner_linux_host_battery_charge_limit=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if "is-enabled" not in call and not call.startswith("cat")], [])
+
+    def test_a_host_without_the_attribute_is_skipped_and_says_so(self) -> None:
+        result = self.run_role(github_runner_linux_host_battery_charge_limit=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("charge_control_end_threshold does not exist", re.sub(r"\s+", " ", result.stdout))
+        self.assertFalse(self.battery_unit.exists())
+        self.assertEqual(self.changes(), [])
+
+    def test_a_limit_that_is_not_a_percentage_is_refused_before_anything_is_changed(self) -> None:
+        attribute = self.battery()
+        for percent in (0, 101, -5):
+            with self.subTest(percent=percent):
+                result = self.run_role(github_runner_linux_host_battery_charge_limit=True, github_runner_linux_host_battery_charge_limit_percent=percent)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must be a whole number from 1 to 100", re.sub(r"\s+", " ", result.stdout))
+                self.assertEqual(attribute.read_text().strip(), "100")
+                self.assertFalse(self.battery_unit.exists())
+
+    def test_a_check_run_of_the_battery_limit_changes_nothing(self) -> None:
+        attribute = self.battery()
+        result = self.run_role(check=True, github_runner_linux_host_battery_charge_limit=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(attribute.read_text().strip(), "100")
+        self.assertFalse(self.battery_unit.exists())
+        self.assertIn(f"write 80 to {attribute} (it is 100)", result.stdout)
+        self.assertIn("systemctl enable github-runner-battery-charge-limit.service", result.stdout)
+
+    # headless
+
+    def test_a_graphical_host_boots_to_multi_user_and_loses_its_display_manager(self) -> None:
+        self.enable("display-manager.service", "alias", active=True)
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["systemctl set-default multi-user.target", "systemctl disable display-manager.service", "systemctl stop display-manager.service"])
+        self.assertEqual((self.state / "default-target").read_text().strip(), "multi-user.target")
+
+    def test_a_headless_host_is_left_as_it_is(self) -> None:
+        (self.state / "default-target").write_text("multi-user.target\n")
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.changed(result), 0, result.stdout)
+
+    def test_a_second_headless_run_changes_nothing(self) -> None:
+        self.enable("display-manager.service", "alias", active=True)
+        self.assertEqual(self.run_role(github_runner_linux_host_headless=True).returncode, 0)
+        before = len(self.calls())
+        result = self.run_role(github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if re.match(r"^systemctl (set-default|disable|stop)", call)], [])
+
+    def test_a_check_run_of_the_headless_step_reports_each_change_and_makes_none(self) -> None:
+        self.enable("display-manager.service", "alias", active=True)
+        result = self.run_role(check=True, github_runner_linux_host_headless=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        for command in ("set-default multi-user.target", "disable display-manager.service", "stop display-manager.service"):
+            self.assertIn(f"systemctl {command}", result.stdout)
+
+    # unneeded services
+
+    def test_the_enabled_and_running_unneeded_services_are_disabled_and_stopped_and_the_others_left(self) -> None:
+        self.enable("cups.socket", active=True)
+        self.enable("cups.service", active=True)
+        self.enable("bluetooth.service")
+        self.enable("ModemManager.service", active=True)
+        self.enable("cups-browsed.service", "disabled")
+        self.enable("avahi-daemon.service", active=True)
+        result = self.run_role(github_runner_linux_host_disable_unneeded_services=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [
+            "systemctl disable cups.socket", "systemctl disable cups.service", "systemctl disable bluetooth.service", "systemctl disable ModemManager.service",
+            "systemctl stop cups.socket", "systemctl stop cups.service", "systemctl stop ModemManager.service",
+        ])
+        self.assertTrue((self.state / "active-avahi-daemon.service").exists())
+
+    def test_a_second_run_leaves_the_services_alone(self) -> None:
+        self.enable("bluetooth.service", active=True)
+        self.assertEqual(self.run_role(github_runner_linux_host_disable_unneeded_services=True).returncode, 0)
+        before = len(self.calls())
+        result = self.run_role(github_runner_linux_host_disable_unneeded_services=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if re.match(r"^systemctl (disable|stop)", call)], [])
+
+    def test_a_check_run_of_the_services_reports_each_change_and_makes_none(self) -> None:
+        self.enable("bluetooth.service", active=True)
+        result = self.run_role(check=True, github_runner_linux_host_disable_unneeded_services=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertIn("systemctl disable bluetooth.service", result.stdout)
+        self.assertIn("systemctl stop bluetooth.service", result.stdout)
+
+    # unattended upgrades
+
+    def test_unattended_upgrades_is_installed_and_set_to_install_security_updates_without_rebooting(self) -> None:
+        result = self.run_role(github_runner_linux_host_unattended_upgrades=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["apt-get install --yes --no-install-recommends unattended-upgrades"])
+        text = self.apt_file.read_text()
+        for line in ('APT::Periodic::Update-Package-Lists "1";', 'APT::Periodic::Unattended-Upgrade "1";', 'Unattended-Upgrade::Allowed-Origins:: "${distro_id}:${distro_codename}-security";', 'Unattended-Upgrade::Automatic-Reboot "false";'):
+            self.assertIn(line + "\n", text)
+        self.assertNotIn('Automatic-Reboot "true"', text)
+
+    def test_a_second_unattended_upgrades_run_changes_nothing(self) -> None:
+        self.assertEqual(self.run_role(github_runner_linux_host_unattended_upgrades=True).returncode, 0)
+        before = len(self.calls())
+        result = self.run_role(github_runner_linux_host_unattended_upgrades=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if call.startswith("apt-get")], [])
+
+    def test_a_check_run_of_unattended_upgrades_changes_nothing(self) -> None:
+        result = self.run_role(check=True, github_runner_linux_host_unattended_upgrades=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.apt_file.exists())
+        self.assertIn("apt-get install unattended-upgrades", result.stdout)
+
+    def test_the_apt_steps_are_refused_on_a_host_without_apt(self) -> None:
+        for step in ("github_runner_linux_host_unattended_upgrades", "github_runner_linux_host_upgrade"):
+            with self.subTest(step=step):
+                result = self.run_role(os_family="RedHat", **{step: True})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("needs apt", re.sub(r"\s+", " ", result.stdout))
+                self.assertEqual(self.changes(), [])
+
+    # upgrade
+
+    def pending_upgrade(self, reboot: bool = False, removable: bool = True) -> None:
+        (self.state / "upgradable").touch()
+        (self.state / "active-multi-user.target").touch()
+        if reboot:
+            (self.state / "upgrade-needs-reboot").touch()
+        if removable:
+            (self.state / "removable").touch()
+
+    def apt_calls(self) -> list[str]:
+        return [call.removeprefix("apt-get ").replace("--yes ", "") for call in self.calls() if call.startswith("apt-get")]
+
+    def test_the_upgrade_updates_upgrades_and_removes_what_it_superseded_in_that_order(self) -> None:
+        self.pending_upgrade()
+        result = self.run_role(github_runner_linux_host_upgrade=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.apt_calls(), ["update", "dist-upgrade", "autoremove --purge"])
+        self.assertEqual(self.changed(result), 2, result.stdout)
+        self.assertFalse([call for call in self.calls() if call.startswith("shutdown")])
+
+    def test_an_upgrade_with_nothing_to_do_changes_nothing(self) -> None:
+        result = self.run_role(github_runner_linux_host_upgrade=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+
+    def test_a_node_service_that_is_active_stops_a_reboot_and_the_autoremove_waits(self) -> None:
+        self.pending_upgrade(reboot=True)
+        (self.state / "active-k3s-agent.service").touch()
+        result = self.run_role(github_runner_linux_host_upgrade=True)
+        self.assertNotEqual(result.returncode, 0)
+        text = re.sub(r"\s+", " ", result.stdout)
+        self.assertIn("is a running node of the cluster (k3s-agent.service active)", text)
+        self.assertIn("The packages are upgraded and nothing was rebooted", text)
+        self.assertEqual(self.apt_calls(), ["update", "dist-upgrade"])
+        self.assertFalse([call for call in self.calls() if call.startswith("shutdown")])
+
+    def test_a_reboot_that_is_not_wanted_is_reported_and_not_made(self) -> None:
+        self.pending_upgrade(reboot=True)
+        (self.state / "active-k3s-agent.service").touch()
+        result = self.run_role(github_runner_linux_host_upgrade=True, github_runner_linux_host_upgrade_reboot=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("github_runner_linux_host_upgrade_reboot is false: the host was not rebooted", re.sub(r"\s+", " ", result.stdout))
+        self.assertFalse([call for call in self.calls() if call.startswith("shutdown")])
+        self.assertEqual(self.apt_calls(), ["update", "dist-upgrade", "autoremove --purge"])
+
+    # ansible.builtin.reboot refuses a local connection ("would reboot the control node"), so these tests cannot make the reboot: they
+    # check that the run gets as far as the Reboot task, and that nothing before it refused, and read the task's arguments.
+    REBOOT_REFUSED = "Running ansible.builtin.reboot with local connection would reboot the control node"
+
+    def test_a_host_that_is_not_a_node_reaches_the_reboot_when_the_upgrade_needs_one(self) -> None:
+        self.pending_upgrade(reboot=True)
+        result = self.run_role(github_runner_linux_host_upgrade=True)
+        self.assertIn(self.REBOOT_REFUSED, result.stdout)
+        self.assertNotIn("is a running node of the cluster (", re.sub(r"\s+", " ", result.stdout))
+        self.assertEqual(self.apt_calls(), ["update", "dist-upgrade"])
+
+    def test_a_running_node_reaches_the_reboot_only_when_the_run_says_so(self) -> None:
+        self.pending_upgrade(reboot=True)
+        (self.state / "active-k3s-agent.service").touch()
+        result = self.run_role(github_runner_linux_host_upgrade=True, github_runner_linux_host_upgrade_reboot_running_node=True)
+        self.assertIn(self.REBOOT_REFUSED, result.stdout)
+        self.assertNotIn("is a running node of the cluster (", re.sub(r"\s+", " ", result.stdout))
+
+    def test_the_reboot_task_waits_for_the_timeout_and_checks_the_host_reached_multi_user_target(self) -> None:
+        tasks = yaml.safe_load((ROLE / "tasks" / "upgrade.yml").read_text())
+        [block] = [task for task in tasks if task.get("name", "") == "Reboot the host and check it came back"]
+        [reboot] = [task for task in block["block"] if "ansible.builtin.reboot" in task]
+        self.assertIs(reboot["become"], True)
+        arguments = reboot["ansible.builtin.reboot"]
+        self.assertEqual(arguments["reboot_timeout"], "{{ github_runner_linux_host_reboot_timeout | int }}")
+        self.assertEqual(arguments["test_command"], "systemctl is-active multi-user.target")
+        names = [task["name"] for task in tasks]
+        self.assertLess(names.index(block["name"]), names.index("Remove the packages and kernels the upgrade left unused"))
+
+    def test_the_services_that_make_a_host_a_node_are_the_ones_named(self) -> None:
+        self.pending_upgrade(reboot=True)
+        (self.state / "active-docker.service").touch()
+        self.assertNotEqual(self.run_role(github_runner_linux_host_upgrade=True, github_runner_linux_host_node_services=["docker.service"]).returncode, 0)
+        self.assertEqual([call for call in self.calls() if call.startswith("shutdown")], [])
+
+    def test_a_check_run_of_the_upgrade_simulates_and_reports_the_reboot(self) -> None:
+        self.pending_upgrade(reboot=True)
+        self.reboot_required.touch()
+        result = self.run_role(check=True, github_runner_linux_host_upgrade=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.apt_calls(), ["--simulate dist-upgrade", "--simulate autoremove --purge"])
+        self.assertFalse([call for call in self.calls() if call.startswith("shutdown")])
+        self.assertIn(f"reboot host: {self.reboot_required} exists", result.stdout)
+        self.assertTrue((self.state / "upgradable").exists())
 
 
 if __name__ == "__main__":
