@@ -1,3 +1,9 @@
+## [2.12.2](https://github.com/ExaDev/github-runner/compare/v2.12.1...v2.12.2) (2026-11-01)
+
+### Bug Fixes
+
+* **autoscaler:** leave a NotReady node out of the memory check ([2520da4](https://github.com/ExaDev/github-runner/commit/2520da4bb846d21abf1cd6a083b13f93e1c4e0f3))
+
 ## [2.12.1](https://github.com/ExaDev/github-runner/compare/v2.12.0...v2.12.1) (2026-11-01)
 
 ### Bug Fixes
