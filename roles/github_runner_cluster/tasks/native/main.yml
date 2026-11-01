@@ -48,6 +48,12 @@
         github_runner_cluster_native_k3s_sha256 is '{{ github_runner_cluster_native_k3s_sha256 }}'; it must be empty or 64 lower-case
         hexadecimal digits.
       bad: "{{ github_runner_cluster_native_k3s_sha256 | length > 0 and github_runner_cluster_native_k3s_sha256 is not match('^[0-9a-f]{64}\\Z') }}"
+    - msg: >-
+        github_runner_cluster_network_mode is host for {{ inventory_hostname }}, which sets github_runner_cluster_node_mode: native.
+        The host network is a Docker node's choice of network namespace; a native node has no container, runs k3s under systemd on the
+        host's own network with the host's own Tailscale client, and has no Docker network to choose. Remove
+        github_runner_cluster_network_mode (or set it to bridge) for this host.
+      bad: "{{ github_runner_cluster_network_mode == 'host' }}"
   loop_control:
     label: "{{ item.msg | split(' ') | first }}"
   when: item.bad | bool
