@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import grp
 import hashlib
 import importlib.util
 import json
@@ -419,6 +420,7 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(self.recap(result)["changed"], 1, result.stdout)
         self.assertIn("joe ALL=(ALL) NOPASSWD: ALL", result.stdout)
 
+    @unittest.skipUnless("wheel" in {group.gr_name for group in grp.getgrall()}, "this machine has no wheel group, which the copy looks up even under --check")
     def test_check_mode_on_a_host_with_the_file_compares_it_as_root(self) -> None:
         self.sudoers().parent.mkdir()
         self.sudoers().write_text("joe ALL=(ALL) NOPASSWD: ALL\n")
