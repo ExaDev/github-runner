@@ -1,0 +1,40 @@
+---
+# Passwordless sudo for the connecting user, as a drop-in file named after the user. The file is root-owned and unreadable to the user, so comparing it with what is wanted takes privilege: ansible.builtin.copy does that under become, reports ok when the file already matches and changed when it writes. visudo checks the new content before it replaces anything, so a bad file can never lock sudo out.
+
+- name: Work out whom the grant is for
+  ansible.builtin.set_fact:
+    github_runner_macos_host_effective_sudoers_user: "{{ github_runner_macos_host_sudoers_user if github_runner_macos_host_sudoers_user | length > 0 else ansible_facts['user_id'] }}"
+
+- name: Fail if that is not a plain lower-case login name
+  # It becomes a file name and the first word of a sudoers line, so anything else could write another rule or another file. The dot and the tilde are left out because sudo skips a drop-in whose name has one.
+  ansible.builtin.assert:
+    that: github_runner_macos_host_effective_sudoers_user is match('^[a-z_][a-z0-9_-]*$')
+    fail_msg: "The sudoers user must be a lower-case login name (letters, digits, underscores and hyphens), not {{ github_runner_macos_host_effective_sudoers_user | quote }}."
+    quiet: true
+
+- name: Look for the user's sudoers file
+  # Needs no privilege to see whether the file exists, only to read it.
+  ansible.builtin.stat:
+    path: "{{ github_runner_macos_host_sudoers_dir }}/{{ github_runner_macos_host_effective_sudoers_user }}"
+    get_checksum: false
+  register: github_runner_macos_host_sudoers_file
+
+- name: Write the user's sudoers file
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_macos_host_effective_sudoers_user }} ALL=(ALL) NOPASSWD: ALL\n"
+    dest: "{{ github_runner_macos_host_sudoers_dir }}/{{ github_runner_macos_host_effective_sudoers_user }}"
+    owner: root
+    group: wheel
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  # Under --check a file that is not there yet is reported below, so that a host that has no sudo grant yet, and so no way to elevate, can still be reviewed without its password.
+  when: github_runner_macos_host_sudoers_file.stat.exists or not ansible_check_mode
+
+- name: Report the sudoers file a real run would write
+  ansible.builtin.debug:
+    msg: "{{ github_runner_macos_host_sudoers_dir }}/{{ github_runner_macos_host_effective_sudoers_user }} would be written: {{ github_runner_macos_host_effective_sudoers_user }} ALL=(ALL) NOPASSWD: ALL"
+  when:
+    - ansible_check_mode
+    - not github_runner_macos_host_sudoers_file.stat.exists
+  changed_when: true
