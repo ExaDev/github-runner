@@ -1,5 +1,5 @@
 ---
-# A cluster with a native agent: the first three hosts are Docker nodes (servers, with Tailscale inside their containers), and asus runs k3s directly under systemd as an agent, with its own Tailscale client as the node's device. See the cluster role's README, Native nodes. Run with: ansible-playbook -i examples/native-agent/inventory.yml exadev.github_runner.site --limit asus --check   # then without --check
+# A cluster with a native agent: the first three hosts are Docker nodes (servers, with Tailscale inside their containers), and laptop runs k3s directly under systemd as an agent, with its own Tailscale client as the node's device. See the cluster role's README, Native nodes. Run with: ansible-playbook -i examples/native-agent/inventory.yml exadev.github_runner.site --limit laptop --check   # then without --check
 all:
   children:
     github_runner_cluster:
@@ -15,9 +15,9 @@ all:
           ansible_host: node2.example.com
         node3:
           ansible_host: node3.example.com
-        asus:
+        laptop:
           # Reached by its LAN name, not over the tailnet: the host's Tailscale client is logged out of any other tailnet before k3s joins the cluster's, which would cut an SSH session over it.
-          ansible_host: asus.local
+          ansible_host: laptop.local
           github_runner_cluster_node_mode: native
           # The host is dedicated to the cluster, so the role may log its client out of the tailnet it was in.
           github_runner_cluster_native_tailscale_leave_other_tailnet: true

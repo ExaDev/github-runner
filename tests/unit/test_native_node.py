@@ -422,7 +422,7 @@ esac
             **{name: str(path) for name, path in self.paths.items()},
         }
         node = {**shared, "github_runner_cluster_node_mode": "native", **host_vars}
-        hosts = {"asus": node} if only_the_node else {"server1": dict(shared), "asus": node}
+        hosts = {"laptop": node} if only_the_node else {"server1": dict(shared), "laptop": node}
         inventory = {"all": {"children": {"github_runner_cluster": {"hosts": hosts}}}}
         path = self.tmp / "inventory.yml"
         path.write_text(yaml.safe_dump(inventory))
@@ -457,7 +457,7 @@ esac
         return self.paths[key] / name
 
     def recap(self, result: subprocess.CompletedProcess[str]) -> dict[str, int]:
-        line = next(line for line in result.stdout.splitlines() if re.match(r"^asus\s+:", line))
+        line = next(line for line in result.stdout.splitlines() if re.match(r"^laptop\s+:", line))
         return {name: int(count) for name, count in re.findall(r"(\w+)=(\d+)", line)}
 
     def test_a_first_run_installs_configures_starts_and_checks_the_node(self) -> None:
@@ -475,7 +475,7 @@ esac
         self.assertEqual(config, {
             "server": f"https://server1.{DOMAIN}:6443",
             "token-file": str(self.file(config_dir, "token")),
-            "node-name": "asus",
+            "node-name": "laptop",
             "vpn-auth-file": str(self.file(config_dir, "vpn-auth")),
             "resolv-conf": "/run/github-runner-k3s/resolv.conf",
         })
@@ -527,9 +527,9 @@ esac
         self.assertEqual(config["node-taint"], taints)
 
     def test_a_host_that_sets_its_node_name_joins_under_it(self) -> None:
-        self.assertEqual(self.run_role(host_vars={"github_runner_cluster_node_name": "asus-laptop"}).returncode, 0)
+        self.assertEqual(self.run_role(host_vars={"github_runner_cluster_node_name": "laptop-renamed"}).returncode, 0)
         config = yaml.safe_load(self.file("github_runner_cluster_native_config_dir", "config.yaml").read_text())
-        self.assertEqual(config["node-name"], "asus-laptop")
+        self.assertEqual(config["node-name"], "laptop-renamed")
 
     def test_a_second_run_changes_nothing(self) -> None:
         self.assertEqual(self.run_role().returncode, 0)
@@ -728,7 +728,7 @@ esac
         stand_in(self.stubs / "bin" / "systemctl", 'echo "systemctl $*" >> "$STUB/calls.log"\ncase "$1" in\n  is-enabled) echo disabled; exit 1 ;;\n  is-active) echo failed; exit 3 ;;\nesac\n')
         result = self.run_role()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("k3s-agent is failed on asus", result.stdout)
+        self.assertIn("k3s-agent is failed on laptop", result.stdout)
 
     def test_no_secret_is_in_the_output(self) -> None:
         for check in (False, True):
@@ -741,7 +741,7 @@ esac
         result = self.run_role(host_vars={"github_runner_cluster_server_url": "https://elsewhere.example.ts.net:6443"}, only_the_node=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         text = re.sub(r"\s+", " ", result.stdout)
-        self.assertIn("bootstraps no cluster of its own, so no server of this inventory can confirm that asus is Ready", text)
+        self.assertIn("bootstraps no cluster of its own, so no server of this inventory can confirm that laptop is Ready", text)
         self.assertEqual([call for call in self.calls() if call.startswith("docker")], [])
         config = yaml.safe_load(self.file("github_runner_cluster_native_config_dir", "config.yaml").read_text())
         self.assertEqual(config["server"], "https://elsewhere.example.ts.net:6443")
