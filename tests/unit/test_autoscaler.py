@@ -373,7 +373,8 @@ class AutoscalerTest(unittest.TestCase):
         self.assertIn("FAIL-SAFE: could not parse a node's own MEMORY% from kubectl top nodes ('<unknown>')", result.stderr)
 
     def test_every_listed_node_not_ready_fails_safe_instead_of_reading_full_availability(self) -> None:
-        nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "<unknown>", "ready": "False"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "<unknown>", "ready": "Unknown"}]
+        # metrics-server can keep the last figure of a silent kubelet, so kubectl top still answers while no listed node is Ready.
+        nodes = [{"name": "a", "labels": [self.ELIGIBLE], "mem": "99%", "ready": "False"}, {"name": "b", "labels": [self.ELIGIBLE], "mem": "99%", "ready": "Unknown"}]
         result = self.poll({"ns-a": [SCHEDULED_POD], "ns-b": [SCHEDULED_POD]}, ceiling=MAX_RUNNERS * len(NAMESPACES), nodes=nodes, node_selector=self.ELIGIBLE)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("FAIL-SAFE: no Ready node", result.stderr)
