@@ -1,0 +1,13 @@
+# Managed by the exadev.github_runner collection's github_runner_cluster role (node mode native). Do not edit by hand: change this host's variables and run the role again.
+# k3s reads this file as the flags of `k3s agent`. The token and the --vpn-auth value are secrets and are in files of their own, mode 0600. Values are written as JSON strings, which YAML reads as written.
+server: {{ github_runner_cluster_effective_server_url | to_json }}
+token-file: {{ (github_runner_cluster_native_config_dir ~ '/token') | to_json }}
+node-name: {{ github_runner_cluster_effective_node_name | to_json }}
+vpn-auth-file: {{ (github_runner_cluster_native_config_dir ~ '/vpn-auth') | to_json }}
+resolv-conf: "/run/github-runner-k3s/resolv.conf"
+{% if github_runner_cluster_node_taints | length > 0 %}
+node-taint:
+{% for taint in github_runner_cluster_node_taints %}
+  - {{ taint | to_json }}
+{% endfor %}
+{% endif %}

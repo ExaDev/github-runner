@@ -1,0 +1,84 @@
+---
+# Brings this host up as a native k3s node: the agent runs directly on the host as the systemd service k3s-agent, with no Docker or Compose layer, and the host's own Tailscale client is the node's device on the cluster's tailnet (k3s's --vpn-auth runs `tailscale up` against it). Selected by github_runner_cluster_node_mode: native, from tasks/main.yml, which ends the role after this. The topology, the versions, the API port, the token and the mesh are worked out by the same task files as the Docker path, so a native agent joins the same cluster with the same secrets, node name rules and API port. Safe to rerun: each step converges, and the service is restarted only when its binary, configuration or secrets changed. Every task that changes the host uses become (sudo) on its own; under --check nothing is changed and each change a real run would make is reported.
+
+- name: Read the platform the native node needs
+  # Only the subsets that hold the kernel, architecture, distribution and init system, and only when the caller did not gather them: a play with gather_facts: false leaves ansible_facts without them. Read-only, so it runs under --check too.
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - platform
+      - distribution
+      - service_mgr
+  when: "'system' not in ansible_facts or 'architecture' not in ansible_facts or 'os_family' not in ansible_facts or 'service_mgr' not in ansible_facts"
+
+- name: Fail unless this host runs Linux under systemd
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} sets github_runner_cluster_node_mode: native, which needs a Linux host that systemd runs; this one reports
+      {{ ansible_facts['system'] }} with {{ ansible_facts['service_mgr'] }}. Remove the setting to run its node under Docker Compose.
+      Nothing was changed.
+  when: ansible_facts['system'] != 'Linux' or ansible_facts['service_mgr'] != 'systemd'
+
+- name: Work out which k3s release asset this host's architecture takes
+  # Fails, naming the architectures there are binaries for, on any other; before anything is changed.
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_asset: "{{ ansible_facts['architecture'] | exadev.github_runner.cluster_native_k3s_asset }}"
+
+- name: Fail if the distribution is not one the role installs Tailscale for
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} runs {{ ansible_facts['distribution'] }} ({{ ansible_facts['os_family'] }}), and
+      github_runner_cluster_native_tailscale_install installs the Tailscale package from Tailscale's apt repository, which is
+      Debian and Ubuntu only. Install the pinned Tailscale ({{ github_runner_cluster_tailscale_version }}) another way and set
+      github_runner_cluster_native_tailscale_install: false. Nothing was changed.
+  when:
+    - github_runner_cluster_native_tailscale_install | bool
+    - ansible_facts['os_family'] != 'Debian'
+
+- name: Fail if the settings a native node needs are missing or malformed
+  ansible.builtin.fail:
+    msg: "{{ item.msg }} Nothing was changed."
+  loop:
+    - msg: >-
+        github_runner_cluster_tailnet_domain is not set. A native node shares its Tailscale client with nothing else, and the role
+        tells whether that client is logged in to the cluster's tailnet by comparing the tailnet's domain with it.
+      bad: "{{ github_runner_cluster_tailnet_domain | length == 0 }}"
+    - msg: >-
+        github_runner_cluster_native_k3s_sha256 is '{{ github_runner_cluster_native_k3s_sha256 }}'; it must be empty or 64 lower-case
+        hexadecimal digits.
+      bad: "{{ github_runner_cluster_native_k3s_sha256 | length > 0 and github_runner_cluster_native_k3s_sha256 is not match('^[0-9a-f]{64}\\Z') }}"
+  loop_control:
+    label: "{{ item.msg | split(' ') | first }}"
+  when: item.bad | bool
+
+- name: Decide this host's part in the cluster
+  ansible.builtin.include_tasks: topology.yml
+
+- name: Check the versions the node is pinned to
+  ansible.builtin.include_tasks: versions.yml
+
+- name: Check the API port is one every host of the cluster group shares
+  ansible.builtin.include_tasks: api_port.yml
+
+- name: Check the k3s token is set
+  ansible.builtin.include_tasks: k3s_token.yml
+
+- name: Set up the mesh the nodes join, and publish its join key and control server
+  # Before anything is written, since the --vpn-auth value is built from the facts it publishes. See tasks/mesh/main.yml for the provider interface.
+  ansible.builtin.include_tasks: mesh/main.yml
+
+- name: Check the k3s version against what this node and the cluster run now
+  ansible.builtin.include_tasks: native/version_check.yml
+
+- name: Install the pinned Tailscale client and check the tailnet it is logged in to
+  ansible.builtin.include_tasks: native/tailscale.yml
+
+- name: Install the pinned k3s binary
+  ansible.builtin.include_tasks: native/k3s_binary.yml
+
+- name: Write the node's helpers, configuration, secrets and unit
+  ansible.builtin.include_tasks: native/config.yml
+
+- name: Start the node and check it joined
+  ansible.builtin.include_tasks: native/service.yml

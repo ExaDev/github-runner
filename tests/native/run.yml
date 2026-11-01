@@ -1,0 +1,14 @@
+---
+# Runs the github_runner_cluster role against a host in native node mode, for tests/unit/test_native_node.py. The host's facts are stood in for by the extra variable host_facts, and the commands the role runs on it (systemctl, tailscale, dpkg-query, apt-get, and docker for the reads through a server) are the test's stand-ins on PATH, so no real service, package or tailnet is ever touched. The play's host is the native node (native_host); the rest of the inventory is the cluster it joins.
+- name: Run the cluster role as a native node
+  hosts: "{{ native_host | default('asus') }}"
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Stand in for the host's facts
+      ansible.builtin.set_fact:
+        ansible_facts: "{{ host_facts }}"
+
+    - name: Include the role
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster

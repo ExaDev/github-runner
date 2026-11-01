@@ -199,3 +199,35 @@ github_runner_cluster_deployed_version_annotation: "github-runner.exadev.com/dep
 
 # The collection version this role was released as, stamped by scripts/release/stamp_version.py. A server host records it as an annotation on its own node once the node has registered, and the heartbeat publishes it in fleet-health.json. It is what was applied, not what is running, and an agent host, which has no API of its own, records nothing.
 github_runner_cluster_collection_version: "2.11.0"
+
+# How this host runs its k3s node. compose (the default) is everything above: k3s in a container under Docker Compose, with Tailscale inside the container. native runs k3s as an agent directly on the host, as the systemd service k3s-agent, with no Docker or Compose layer: the node's containerd then uses the host's filesystem and network instead of nesting inside a container's. Per host, in its host_vars. native is for a Linux host that systemd runs, and only as an agent: tasks/topology.yml never makes it a server, and refuses a native host that asks to be one. See the role README's Native nodes section, which also says what a native node gives up.
+github_runner_cluster_node_mode: compose
+
+# Native mode only, from here on. Whether the role enables and starts the k3s-agent service, restarts it when its binary or configuration changed, and then waits for the node to report Ready as a server sees it. false installs and configures everything and leaves the service as it finds it (a first install stays disabled and stopped), for staging a host before the cluster is joined.
+github_runner_cluster_native_start: true
+# The most seconds, about, the role waits for the started node to report Ready on a heartbeat from the k3s that was just started. The same bound as a recreated server's.
+github_runner_cluster_native_ready_timeout: "{{ github_runner_cluster_server_ready_timeout }}"
+# Where the k3s release binaries are downloaded from: <this>/<release tag, with "+" written %2B>/<asset>, as GitHub publishes them. The download is checked against the SHA-256 sum the same release lists for the asset, unless github_runner_cluster_native_k3s_sha256 is set. A variable so a mirror, or a test, can stand in.
+github_runner_cluster_native_k3s_download_url: https://github.com/k3s-io/k3s/releases/download
+# The SHA-256 of the k3s binary to install, for this host's architecture. Empty, the default, takes the sum from the release's own sum file, which catches a corrupt or cut-short download; a sum set here, from a source other than the download, also catches a release that was replaced. It has to be set per architecture, so per host or per group of hosts.
+github_runner_cluster_native_k3s_sha256: ""
+# Whether the role installs the pinned Tailscale package (github_runner_cluster_tailscale_version) from Tailscale's own apt repository, adding the repository when the host has none, and keeps the service running. false leaves the host's Tailscale client as it is (installed by other means, or already at the right version) and only checks its login. Debian and Ubuntu hosts only.
+github_runner_cluster_native_tailscale_install: true
+# Where Tailscale's package repository is, <this>/<ubuntu or debian>/<release>.noarmor.gpg and <release>.tailscale-keyring.list being the signing key and the repository's list file. A variable so a mirror, or a test, can stand in.
+github_runner_cluster_native_tailscale_repository_url: https://pkgs.tailscale.com/stable
+# The host's Tailscale client is the node's: k3s's --vpn-auth runs `tailscale up` against it, and the node's tailnet device is the host's. A client logged in to another tailnet would not join the cluster's, so the role refuses to carry on with the client in one, unless this is true, which logs the client out of it first (`tailscale logout`): the host leaves that tailnet, and anything reaching the host over it stops. Only for a host that is dedicated to the cluster.
+github_runner_cluster_native_tailscale_leave_other_tailnet: false
+
+# Derived, never set directly: the name of the node's systemd service, as k3s's own install script names an agent's.
+github_runner_cluster_native_service: k3s-agent
+# Derived, never set directly: the host name in the node's join URL, which the Tailscale wrapper waits for after `tailscale up`.
+github_runner_cluster_native_join_host: "{{ github_runner_cluster_effective_server_url | urlsplit('hostname') }}"
+# Not settings: where the native node's files live. Variables only so the tests can point them at a stand-in. The binary goes in bin_dir, the PATH wrapper and the resolver helper under lib_dir, the configuration and the two secrets (token, vpn-auth) in config_dir, and the unit in unit_dir; tailscale_cli is the Tailscale command the package installs.
+github_runner_cluster_native_bin_dir: /usr/local/bin
+github_runner_cluster_native_lib_dir: /usr/local/lib/github-runner-k3s
+github_runner_cluster_native_config_dir: /etc/rancher/k3s
+github_runner_cluster_native_unit_dir: /etc/systemd/system
+github_runner_cluster_native_tailscale_cli: /usr/bin/tailscale
+# Not settings: where Tailscale's apt signing key and repository list file go, which are the paths Tailscale's own install instructions use. A host that has either already is left alone. Variables only so the tests can point them at a stand-in.
+github_runner_cluster_native_apt_keyring: /usr/share/keyrings/tailscale-archive-keyring.gpg
+github_runner_cluster_native_apt_source: /etc/apt/sources.list.d/tailscale.list

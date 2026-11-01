@@ -1,0 +1,164 @@
+---
+# The host's Tailscale client is the node's: k3s's --vpn-auth runs `tailscale up --authkey ... --reset` against the client's default socket and reads the node's address from `tailscale status --json` and the interface tailscale0 (pkg/vpn/vpn.go in the k3s source hard-codes both, and runs `tailscale` from PATH with no --socket), so a second client beside the host's own cannot be used: it would need the interface name the host's already has, and two clients rewrite each other's ts-* netfilter chains. This installs the pinned package, keeps its service running, and makes sure it is not logged in to another tailnet, since `tailscale up --authkey` does not move a logged-in client to the key's tailnet (and k3s from v1.35 skips `tailscale up` altogether while the client is running). It never logs in: that is k3s's own start, with the join key.
+
+- name: Install the pinned Tailscale package and keep its service running
+  when: github_runner_cluster_native_tailscale_install | bool
+  block:
+    - name: Look for Tailscale's package signing key and repository list file
+      # A host that has them (added by hand, by an earlier run or by the installer) keeps them: get_url without a checksum asks the server for the file again even when it exists, and a repository file someone edited would be replaced.
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ github_runner_cluster_native_apt_keyring }}"
+        - "{{ github_runner_cluster_native_apt_source }}"
+      register: github_runner_cluster_native_apt_files
+
+    - name: Add Tailscale's package signing key
+      # Tailscale's documented way to add its repository (https://tailscale.com/kb/1031/install-linux): the key and the repository's list file, per distribution and release.
+      become: true
+      ansible.builtin.get_url:
+        url: "{{ github_runner_cluster_native_tailscale_repository_url }}/{{ ansible_facts['distribution'] | lower }}/{{ ansible_facts['distribution_release'] }}.noarmor.gpg"
+        dest: "{{ github_runner_cluster_native_apt_keyring }}"
+        mode: "0644"
+      register: github_runner_cluster_native_tailscale_key
+      when: not github_runner_cluster_native_apt_files.results[0].stat.exists
+
+    - name: Add Tailscale's package repository
+      become: true
+      ansible.builtin.get_url:
+        url: "{{ github_runner_cluster_native_tailscale_repository_url }}/{{ ansible_facts['distribution'] | lower }}/{{ ansible_facts['distribution_release'] }}.tailscale-keyring.list"
+        dest: "{{ github_runner_cluster_native_apt_source }}"
+        mode: "0644"
+      register: github_runner_cluster_native_tailscale_repository
+      when: not github_runner_cluster_native_apt_files.results[1].stat.exists
+
+    - name: Read the Tailscale package version installed
+      # Nothing installed reads as no output.
+      ansible.builtin.command:
+        argv: [dpkg-query, "--showformat=${Version}", --show, tailscale]
+      register: github_runner_cluster_native_tailscale_installed
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Work out whether the package has to change
+      ansible.builtin.set_fact:
+        github_runner_cluster_native_tailscale_package_version: "{{ github_runner_cluster_tailscale_version | exadev.github_runner.cluster_native_tailscale_package_version }}"
+        github_runner_cluster_native_tailscale_install_needed: "{{ (github_runner_cluster_native_tailscale_installed.stdout | trim) != (github_runner_cluster_tailscale_version | exadev.github_runner.cluster_native_tailscale_package_version) }}"
+
+    - name: Refresh the package index for the repository just added
+      become: true
+      ansible.builtin.command:
+        argv: [apt-get, update]
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: true
+      when:
+        - github_runner_cluster_native_tailscale_install_needed | bool
+        - github_runner_cluster_native_tailscale_key is changed or github_runner_cluster_native_tailscale_repository is changed
+        - not ansible_check_mode
+
+    - name: Install the pinned Tailscale package
+      # --allow-downgrades: the pin is the version every native node runs, so a host that has a newer client is brought back to it. The package's own scripts enable and start tailscaled and restart a running one, which keeps its login.
+      become: true
+      ansible.builtin.command:
+        argv: [apt-get, install, --yes, --no-install-recommends, --allow-downgrades, "tailscale={{ github_runner_cluster_native_tailscale_package_version }}"]
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: true
+      when:
+        - github_runner_cluster_native_tailscale_install_needed | bool
+        - not ansible_check_mode
+
+    - name: Report the package install a real run would make
+      ansible.builtin.debug:
+        msg: "apt-get install tailscale={{ github_runner_cluster_native_tailscale_package_version }} (installed: {{ github_runner_cluster_native_tailscale_installed.stdout | trim | default('none', true) }})"
+      changed_when: true
+      when:
+        - github_runner_cluster_native_tailscale_install_needed | bool
+        - ansible_check_mode
+
+    - name: Read whether the Tailscale service is enabled and running
+      # One read for each, since either missing needs the service enabled and started.
+      ansible.builtin.command:
+        argv: [systemctl, "{{ item }}", tailscaled]
+      loop: [is-enabled, is-active]
+      register: github_runner_cluster_native_tailscaled_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Enable and start the Tailscale service
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, enable, --now, tailscaled]
+      changed_when: true
+      when:
+        - github_runner_cluster_native_tailscaled_state.results | map(attribute='rc') | select('ne', 0) | list | length > 0
+        - not ansible_check_mode
+
+- name: Read which tailnet the host's Tailscale client is logged in to
+  # Asked until the client has read its persisted login: for a moment after tailscaled starts its state is NoState or Starting. A package that is about to be installed under --check is not there to ask, and a client that does not answer is reported below.
+  become: true
+  ansible.builtin.command:
+    argv: ["{{ github_runner_cluster_native_tailscale_cli }}", status, --json, --peers=false]
+  register: github_runner_cluster_native_tailscale_status
+  until: >-
+    github_runner_cluster_native_tailscale_status.rc != 0
+    or (github_runner_cluster_native_tailscale_status.stdout | exadev.github_runner.cluster_native_tailnet_login(github_runner_cluster_tailnet_domain)).state != 'settling'
+  retries: 30
+  delay: 1
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not (ansible_check_mode and github_runner_cluster_native_tailscale_install | bool and github_runner_cluster_native_tailscale_install_needed | bool)
+
+- name: Fail if the Tailscale client does not answer
+  ansible.builtin.fail:
+    msg: >-
+      {{ github_runner_cluster_native_tailscale_cli }} status --json failed on {{ inventory_hostname }}
+      ({{ github_runner_cluster_native_tailscale_status.stderr | default('') | trim }}). The Tailscale service has to be running before k3s starts:
+      check `systemctl status tailscaled`. Nothing else was changed.
+  when:
+    - github_runner_cluster_native_tailscale_status is not skipped
+    - github_runner_cluster_native_tailscale_status.rc != 0
+
+- name: Work out which tailnet the client is in
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_tailnet: "{{ github_runner_cluster_native_tailscale_status.stdout | exadev.github_runner.cluster_native_tailnet_login(github_runner_cluster_tailnet_domain) }}"
+  when: github_runner_cluster_native_tailscale_status is not skipped
+
+- name: Fail if the client is logged in to another tailnet and the role may not leave it
+  ansible.builtin.fail:
+    msg: >-
+      The Tailscale client on {{ inventory_hostname }} is logged in to {{ github_runner_cluster_native_tailnet.domain }}, not the
+      cluster's tailnet {{ github_runner_cluster_tailnet_domain }}. k3s's --vpn-auth uses this client, and `tailscale up --authkey`
+      does not move a logged-in client to another tailnet, so the node would join the wrong one. Set
+      github_runner_cluster_native_tailscale_leave_other_tailnet: true to log the client out of it first (the host leaves
+      {{ github_runner_cluster_native_tailnet.domain }}, and anything that reaches the host over that tailnet, an SSH session included,
+      stops), or log it out by hand.
+  when:
+    - github_runner_cluster_native_tailnet is defined
+    - github_runner_cluster_native_tailnet.state == 'other'
+    - not github_runner_cluster_native_tailscale_leave_other_tailnet | bool
+
+- name: Log the client out of the other tailnet
+  become: true
+  ansible.builtin.command:
+    argv: ["{{ github_runner_cluster_native_tailscale_cli }}", logout]
+  changed_when: true
+  when:
+    - github_runner_cluster_native_tailnet is defined
+    - github_runner_cluster_native_tailnet.state == 'other'
+    - github_runner_cluster_native_tailscale_leave_other_tailnet | bool
+    - not ansible_check_mode
+
+- name: Report the logout a real run would make
+  ansible.builtin.debug:
+    msg: "tailscale logout, leaving {{ github_runner_cluster_native_tailnet.domain }} for {{ github_runner_cluster_tailnet_domain }}"
+  changed_when: true
+  when:
+    - github_runner_cluster_native_tailnet is defined
+    - github_runner_cluster_native_tailnet.state == 'other'
+    - github_runner_cluster_native_tailscale_leave_other_tailnet | bool
+    - ansible_check_mode

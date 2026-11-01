@@ -40,11 +40,13 @@
 - name: Say what the version check could not compare
   # Only when no server answered and none failed: every server of the inventory was read as stopped, or there is none. Which of those it is, and whether the cluster lives outside the inventory, comes from the topology: a group with no bootstrap host joins a cluster that one of its hosts did not bootstrap.
   vars:
+    # What the run compares besides the cluster: a container under Docker Compose, the installed binary of a native node.
+    github_runner_cluster_own_subject: "{{ \"this node's own k3s\" if github_runner_cluster_node_mode == 'native' else \"this node's own container\" }}"
     github_runner_cluster_running_joins_outside: >-
       {{ github_runner_cluster_topology.hosts | dict2items | selectattr('value.bootstrap') | list | length == 0 }}
   ansible.builtin.debug:
     msg: >-
-      {% if github_runner_cluster_running_reads.results | default([]) | length == 0 %}No server of {{ github_runner_cluster_group }} is in the inventory, so the cluster this node joins cannot be read; only this node's own container was compared.{% elif github_runner_cluster_running_joins_outside | bool %}{{ github_runner_cluster_group }} joins a cluster whose other servers are outside the inventory, and none of its own servers runs its container, so the cluster could not be read; only this node's own container was compared.{% else %}No server of {{ github_runner_cluster_group }} runs its container, so there is no cluster to compare with yet (a first bootstrap, or a cluster whose servers are all stopped); only this node's own container was compared.{% endif %}
+      {% if github_runner_cluster_running_reads.results | default([]) | length == 0 %}No server of {{ github_runner_cluster_group }} is in the inventory, so the cluster this node joins cannot be read; only {{ github_runner_cluster_own_subject }} was compared.{% elif github_runner_cluster_running_joins_outside | bool %}{{ github_runner_cluster_group }} joins a cluster whose other servers are outside the inventory, and none of its own servers runs its container, so the cluster could not be read; only {{ github_runner_cluster_own_subject }} was compared.{% else %}No server of {{ github_runner_cluster_group }} runs its container, so there is no cluster to compare with yet (a first bootstrap, or a cluster whose servers are all stopped); only {{ github_runner_cluster_own_subject }} was compared.{% endif %}
   when:
     - not github_runner_cluster_allow_k3s_version_jump | bool
     - github_runner_cluster_running_reads.results | default([]) | rejectattr('stdout', 'defined') | list | length == 0

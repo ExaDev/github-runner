@@ -1,5 +1,14 @@
 ---
-# Brings this host up as a k3s node under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, as tasks/topology.yml decides from the cluster group. Safe to rerun: the .env is templated and docker compose converges to it.
+# Brings this host up as a k3s node, natively under systemd (github_runner_cluster_node_mode: native, tasks/native/main.yml) or, by default, under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, as tasks/topology.yml decides from the cluster group. Safe to rerun: the .env is templated and docker compose converges to it.
+
+- name: Bring this host up as a native k3s agent, with no Docker
+  # github_runner_cluster_node_mode: native. Everything below drives Docker, which a native node does not have, so the role ends after this; see tasks/native/main.yml.
+  ansible.builtin.include_tasks: native/main.yml
+  when: github_runner_cluster_node_mode == "native"
+
+- name: End the role here, since a native node has none of the Docker tasks below
+  ansible.builtin.meta: end_role
+  when: github_runner_cluster_node_mode == "native"
 
 - name: Check which Docker daemon the role drives on this host
   # First, so that a pinned context that does not exist, or one set alongside DOCKER_HOST, stops the run before anything touches the host.

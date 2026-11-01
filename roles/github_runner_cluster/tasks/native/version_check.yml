@@ -1,0 +1,40 @@
+---
+# Compares the k3s version this host is to run with what its installed binary reports and with every node of the cluster as the servers report it, as the Docker path does for a container (running_version.yml). k3s upgrades one minor at a time and never downgrades, so the role refuses what would break k3s's upgrade path or Kubernetes' version skew policy before it changes anything (plugins/filter/cluster_versions.py's cluster_k3s_version_change_blockers lists the rules). Unlike a container, the installed binary is replaced in this run, so the agent counts as built whenever its version differs from the pin. With github_runner_cluster_allow_k3s_version_jump true nothing here runs. Every task only reads, and runs under --check too.
+
+- name: Check the cluster read timeout
+  ansible.builtin.include_tasks: read_timeout.yml
+
+- name: Read the k3s version the installed binary reports
+  # Not installed yet reads as no report at all, which is a first install.
+  ansible.builtin.command:
+    argv: ["{{ github_runner_cluster_native_bin_dir }}/k3s", --version]
+  register: github_runner_cluster_native_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+  when: not github_runner_cluster_allow_k3s_version_jump | bool
+
+- name: Read every node's k3s version through each server of the inventory
+  ansible.builtin.include_tasks: cluster_nodes_read.yml
+  when: not github_runner_cluster_allow_k3s_version_jump | bool
+
+- name: Refuse a k3s version outside the upgrade path from what runs now
+  vars:
+    github_runner_cluster_native_release: "{{ github_runner_cluster_k3s_version | exadev.github_runner.cluster_native_k3s_release }}"
+    github_runner_cluster_native_installed_report: "{{ github_runner_cluster_native_installed.stdout | default('') if github_runner_cluster_native_installed.rc | default(1) == 0 else '' }}"
+    github_runner_cluster_version_change_blockers: >-
+      {{ github_runner_cluster_k3s_version | exadev.github_runner.cluster_k3s_version_change_blockers(
+           github_runner_cluster_effective_node_name, github_runner_cluster_native_installed_report,
+           github_runner_cluster_running_reads.results | default([]), github_runner_cluster_effective_node_role,
+           github_runner_cluster_native_release not in github_runner_cluster_native_installed_report) }}
+  ansible.builtin.fail:
+    msg: >-
+      Not installing k3s {{ github_runner_cluster_k3s_version }} on {{ github_runner_cluster_effective_node_name }}:
+      {{ github_runner_cluster_version_change_blockers | join(' ') }}
+      Set github_runner_cluster_k3s_version to the minor the cluster runs, or one minor above it to upgrade (see the role
+      README's Versions section). To install it anyway, for a deliberate downgrade, a cluster being replaced or one that cannot
+      be read, run once with -e github_runner_cluster_allow_k3s_version_jump=true. Nothing was changed.
+  when:
+    - not github_runner_cluster_allow_k3s_version_jump | bool
+    - github_runner_cluster_version_change_blockers | length > 0

@@ -1,0 +1,38 @@
+# Managed by the exadev.github_runner collection's github_runner_cluster role (node mode native). Do not edit by hand: change this host's variables and run the role again.
+# Modelled on the unit that k3s's own install script writes for an agent (install.sh in the k3s repository), with the changes noted below.
+[Unit]
+Description=k3s agent (a native node of the GitHub Actions runner fleet)
+Documentation=https://docs.k3s.io
+# tailscaled is wanted rather than required: restarting it (a package upgrade does) must not restart this service, since Tailscale keeps the node's routes across its own restart.
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+
+[Service]
+# exec rather than the installer's notify: an agent that cannot reach its server would otherwise leave `systemctl start` waiting for ever (TimeoutStartSec=0), and the role checks the node from the server's side instead.
+Type=exec
+# The wrapper directory comes first, so k3s's own `tailscale up` finds files/native/tailscale-up-wait.sh before the real command; see that file.
+Environment="PATH={{ github_runner_cluster_native_lib_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="GITHUB_RUNNER_TAILSCALE={{ github_runner_cluster_native_tailscale_cli }}"
+Environment="GITHUB_RUNNER_JOIN_HOST={{ github_runner_cluster_native_join_host }}"
+# Pods keep running while this service restarts or stops (their containerd shims stay), as with the installer's unit.
+KillMode=process
+Delegate=yes
+User=root
+# Zero limits cost accounting overhead in the kernel; cgroups account for containers.
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+# Kept across restarts, so the file the kubelet reads is there while k3s starts again; removed when the service stops.
+RuntimeDirectory=github-runner-k3s
+RuntimeDirectoryPreserve=restart
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStartPre={{ github_runner_cluster_native_lib_dir }}/write-resolv-conf /run/github-runner-k3s/resolv.conf
+ExecStart={{ github_runner_cluster_native_bin_dir }}/k3s agent
+
+[Install]
+WantedBy=multi-user.target
