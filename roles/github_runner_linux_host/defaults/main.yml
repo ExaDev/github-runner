@@ -1,5 +1,5 @@
 ---
-# The host-level baseline of a Linux host that carries a k3s node: nothing here touches the node itself, or the Tailscale client. Every variable is checked against meta/argument_specs.yml when the role runs. Both steps are off by default, because each changes how the host behaves for whoever else uses it: a fleet turns them on per host, for a machine that is dedicated to the cluster.
+# The host-level baseline of a Linux host that carries a k3s node: nothing here touches the node itself, or the Tailscale client. Every variable is checked against meta/argument_specs.yml when the role runs. Every step is off by default, each behind a variable of its own, because each changes how the host behaves for whoever else uses it: a fleet turns them on per host, for a machine that is dedicated to the cluster.
 
 # Whether the host is kept from suspending: sleep.target, suspend.target, hibernate.target and hybrid-sleep.target are masked, so nothing can put it to sleep (a desktop's idle timer, a power button, `systemctl suspend`), and systemd-logind is told to ignore the lid switch, which a laptop would otherwise suspend on whenever its lid closes, with or without an external monitor or power. A host that sleeps drops off the network, so its node leaves the cluster and its runner pods stop.
 github_runner_linux_host_keep_awake: false
@@ -21,3 +21,66 @@ github_runner_linux_host_logind_dropin: /etc/systemd/logind.conf.d/90-github-run
 github_runner_linux_host_wifi_powersave_off: false
 # Not settings: where the NetworkManager drop-in goes. The name sorts after Ubuntu's default-wifi-powersave-on.conf (wifi.powersave = 3), because NetworkManager reads its configuration files in alphabetical order and the last one to set a value wins. Variables only so the tests can point them at a stand-in.
 github_runner_linux_host_networkmanager_dropin: /etc/NetworkManager/conf.d/zz-github-runner-wifi-powersave.conf
+
+# What k3s needs of the kernel (https://docs.k3s.io/installation/requirements and the sysctls kube-proxy and the CNI plugins rely on). true loads the kernel modules now and at boot (a modules-load.d file), and sets the sysctls now and at boot (a sysctl.d file). k3s loads the modules and sets some of the sysctls itself when it starts, but the bridge ones only exist once br_netfilter is loaded, and a host that sets them before k3s starts does not depend on that.
+github_runner_linux_host_k3s_prerequisites: false
+# The kernel modules loaded. Constants, not settings; variables only so the tests can narrow them. br_netfilter has to be loaded before the bridge sysctls below exist.
+github_runner_linux_host_kernel_modules:
+  - overlay
+  - br_netfilter
+# The sysctls set: forwarding, which pod traffic between interfaces needs, and the bridge hooks that make bridged pod traffic pass through iptables, which services' NAT needs. Constants, not settings.
+github_runner_linux_host_sysctl_settings:
+  net.ipv4.ip_forward: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+# Not settings: where the modules-load.d file, the sysctl.d file and the module directory the role reads loaded modules from are. Variables only so the tests can point them at a stand-in.
+github_runner_linux_host_modules_load_file: /etc/modules-load.d/github-runner-k3s.conf
+github_runner_linux_host_sysctl_file: /etc/sysctl.d/90-github-runner-k3s.conf
+github_runner_linux_host_sys_module_dir: /sys/module
+
+# Whether the battery is kept from charging past github_runner_linux_host_battery_charge_limit_percent, which wears a lithium cell less than sitting at full charge on mains power all day does. The role writes the limit to the battery's charge_control_end_threshold now, and installs a systemd oneshot unit that writes it at every boot, after udev has coldplugged the devices. A host whose battery has no such file (no battery, or firmware that does not offer the limit) is skipped, and says so.
+github_runner_linux_host_battery_charge_limit: false
+# The percentage the charge stops at, 1 to 100.
+github_runner_linux_host_battery_charge_limit_percent: 80
+# The battery's name under the power supply directory.
+github_runner_linux_host_battery_device: BAT0
+# Not settings: where the power supply class is in sysfs, and where the unit that writes the limit at boot goes. Variables only so the tests can point them at a stand-in.
+github_runner_linux_host_power_supply_dir: /sys/class/power_supply
+github_runner_linux_host_battery_unit: /etc/systemd/system/github-runner-battery-charge-limit.service
+
+# Whether the host runs without a desktop: the default target is set to multi-user.target, and the display manager is disabled and stopped. A desktop session has an idle-suspend of its own, independent of logind and of the lid, and holds memory a node can use; stopping the display manager ends the desktop session.
+github_runner_linux_host_headless: false
+# Not settings: the target the host boots to and the display manager's unit, which every display manager (gdm3, lightdm, sddm) is an alias of; disabling the alias removes the link to whichever one is installed. Variables only so the tests can point them at a stand-in.
+github_runner_linux_host_default_target: multi-user.target
+github_runner_linux_host_display_manager_unit: display-manager.service
+
+# Whether the units in github_runner_linux_host_unneeded_services are disabled and stopped, those that are enabled or running. A dedicated node needs none of them, and each is a daemon and an attack surface that runs for nothing. avahi-daemon (the .local name a laptop is reached by) and NetworkManager are not in the list, and a service the host does not have is left alone.
+github_runner_linux_host_disable_unneeded_services: false
+# The units disabled. The socket and path units come first, so that they stop before the service they would start again.
+github_runner_linux_host_unneeded_services:
+  - cups.socket
+  - cups.path
+  - cups.service
+  - cups-browsed.service
+  - bluetooth.service
+  - ModemManager.service
+
+# Whether unattended-upgrades is installed and set to install security updates every day without ever rebooting the host: a node must not reboot itself, so Automatic-Reboot is false, and a reboot (when /var/run/reboot-required says one is due) is for github_runner_linux_host_upgrade below, or for whoever has drained the node. Debian and Ubuntu only.
+github_runner_linux_host_unattended_upgrades: false
+# Not a setting: where the apt configuration the role writes goes. Its name sorts after Ubuntu's 20auto-upgrades and 50unattended-upgrades, so its values win. A variable only so the tests can point it at a stand-in.
+github_runner_linux_host_unattended_upgrades_file: /etc/apt/apt.conf.d/52github-runner-unattended-upgrades
+
+# An upgrade on demand, never part of every run, so a fleet leaves it false in host_vars and sets it with -e for the run that does it: apt-get update, dist-upgrade, a reboot when /var/run/reboot-required says one is due, and then autoremove --purge, which removes the kernels the upgrade superseded once the new one is running. Debian and Ubuntu only. Under --check it simulates both apt-get steps, and says whether it would reboot.
+github_runner_linux_host_upgrade: false
+# Whether the upgrade reboots the host when one is due. false installs the upgrade and says a reboot is due.
+github_runner_linux_host_upgrade_reboot: true
+# The units whose being active means the host is a running node of the cluster. The upgrade refuses to reboot a host while any is active, unless github_runner_linux_host_upgrade_reboot_running_node is true: draining the node first is the operator's. A Docker node would list docker.service.
+github_runner_linux_host_node_services:
+  - k3s-agent.service
+  - k3s.service
+# Whether the upgrade may reboot a host whose node service is active. The reboot takes the node off the cluster until it comes back, and fails the jobs its runner pods are running.
+github_runner_linux_host_upgrade_reboot_running_node: false
+# How long the reboot waits for the host to come back, in seconds; ansible.builtin.reboot's own default.
+github_runner_linux_host_reboot_timeout: 600
+# Not a setting: the file Debian and Ubuntu create when an upgrade needs a reboot. A variable only so the tests can point it at a stand-in.
+github_runner_linux_host_reboot_required_file: /var/run/reboot-required

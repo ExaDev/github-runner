@@ -1,0 +1,61 @@
+---
+# Makes the host boot without a desktop: sets the default target to multi-user.target, and disables and stops the display manager. A desktop session has an idle suspend of its own, independent of logind and of the lid, so it can suspend a host that keep_awake has made ignore its lid. Stopping the display manager ends the desktop session. The display manager is disabled through the alias display-manager.service, which every display manager is: disabling it removes the link to whichever is installed (systemctl is-enabled reports an enabled display manager as alias, and not-found once the link is gone). Idempotent, and under --check each change is reported and none is made.
+
+- name: Read the default target and the display manager's state
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [systemctl, get-default]
+    - [systemctl, is-enabled, "{{ github_runner_linux_host_display_manager_unit }}"]
+    - [systemctl, is-active, "{{ github_runner_linux_host_display_manager_unit }}"]
+  register: github_runner_linux_host_graphical
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Work out what the host needs
+  ansible.builtin.set_fact:
+    github_runner_linux_host_needs_target: "{{ github_runner_linux_host_graphical.results[0].stdout | trim != github_runner_linux_host_default_target }}"
+    github_runner_linux_host_needs_dm_disabled: "{{ github_runner_linux_host_graphical.results[1].stdout | trim in ['alias', 'enabled'] }}"
+    github_runner_linux_host_needs_dm_stopped: "{{ github_runner_linux_host_graphical.results[2].stdout | trim in ['active', 'activating'] }}"
+
+- name: Boot to the multi-user target
+  become: true
+  ansible.builtin.command:
+    argv: [systemctl, set-default, "{{ github_runner_linux_host_default_target }}"]
+  changed_when: true
+  when:
+    - github_runner_linux_host_needs_target | bool
+    - not ansible_check_mode
+
+- name: Disable the display manager
+  become: true
+  ansible.builtin.command:
+    argv: [systemctl, disable, "{{ github_runner_linux_host_display_manager_unit }}"]
+  changed_when: true
+  when:
+    - github_runner_linux_host_needs_dm_disabled | bool
+    - not ansible_check_mode
+
+- name: Stop the display manager
+  become: true
+  ansible.builtin.command:
+    argv: [systemctl, stop, "{{ github_runner_linux_host_display_manager_unit }}"]
+  changed_when: true
+  when:
+    - github_runner_linux_host_needs_dm_stopped | bool
+    - not ansible_check_mode
+
+- name: Report what a real run would do
+  ansible.builtin.debug:
+    msg: "{{ item.msg }}"
+  loop:
+    - {when: "{{ github_runner_linux_host_needs_target }}", msg: "systemctl set-default {{ github_runner_linux_host_default_target }}"}
+    - {when: "{{ github_runner_linux_host_needs_dm_disabled }}", msg: "systemctl disable {{ github_runner_linux_host_display_manager_unit }}"}
+    - {when: "{{ github_runner_linux_host_needs_dm_stopped }}", msg: "systemctl stop {{ github_runner_linux_host_display_manager_unit }}"}
+  loop_control:
+    label: "{{ item.msg }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - item.when | bool
