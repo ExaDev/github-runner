@@ -1,3 +1,17 @@
+## [2.13.1](https://github.com/ExaDev/github-runner/compare/v2.13.0...v2.13.1) (2026-11-01)
+
+### Bug Fixes
+
+* **autoscaler:** fail safe when no Ready node has a memory reading ([cba032d](https://github.com/ExaDev/github-runner/commit/cba032dc570bbbdecb9d3a45c2959701d0ed98c8))
+
+### Documentation
+
+* **cluster:** move the node password volume with the node to a bridged VM ([00f5611](https://github.com/ExaDev/github-runner/commit/00f56116995868df7d6b93c89b2dfbe13f6b240a))
+
+### Tests
+
+* **autoscaler:** cover the guard with stale figures from silent kubelets ([67d546f](https://github.com/ExaDev/github-runner/commit/67d546f027c17972c3f144b5b9b5d047d08f5276))
+
 ## [2.13.0](https://github.com/ExaDev/github-runner/compare/v2.12.2...v2.13.0) (2026-11-01)
 
 ### Features
