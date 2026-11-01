@@ -373,13 +373,17 @@ rm -f "$TOP_NODES_ERR_FILE"
   || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} failed (${TOP_NODES_ERR% }): the metrics API is missing or unreachable, or no node${NODE_SELECTOR:+ matching the selector} reports metrics"
 [ -n "$TOP_NODES_OUTPUT" ] || fail_safe "kubectl top nodes${NODE_SELECTOR:+ -l ${NODE_SELECTOR}} returned no nodes"
 mem_available_pct=100
+measured_nodes=0
 while read -r top_node _cpu _cpu_pct _mem mem_pct; do
   case $'\n'"$READY_NODES"$'\n' in *$'\n'"$top_node"$'\n'*) ;; *) continue ;; esac
+  measured_nodes=$(( measured_nodes + 1 ))
   mem_pct="${mem_pct%\%}"
   case "$mem_pct" in ''|*[!0-9]*) fail_safe "could not parse a node's own MEMORY% from kubectl top nodes ('$mem_pct')" ;; esac
   node_available_pct=$(( 100 - mem_pct ))
   [ "$node_available_pct" -lt "$mem_available_pct" ] && mem_available_pct=$node_available_pct
 done <<< "$TOP_NODES_OUTPUT"
+# With every listed node left out as not Ready, no figure was read and the 100 above is only its starting value, not a measurement of free memory.
+[ "$measured_nodes" -gt 0 ] || fail_safe "no Ready node${NODE_SELECTOR:+ matching ${NODE_SELECTOR}} has a memory reading in kubectl top nodes"
 
 pressure=false
 if [ "$mem_available_pct" -lt "$MEM_AVAILABLE_PRESSURE_PCT" ]; then
