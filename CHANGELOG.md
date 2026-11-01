@@ -1,3 +1,25 @@
+## [2.12.0](https://github.com/ExaDev/github-runner/compare/v2.11.0...v2.12.0) (2026-11-01)
+
+### Features
+
+* **cluster:** make a native node an agent in the cluster topology ([7e9827a](https://github.com/ExaDev/github-runner/commit/7e9827a6a5146dcf41113218e0a29255d7c43f54))
+* **cluster:** run a Linux host's k3s agent natively under systemd ([e25894e](https://github.com/ExaDev/github-runner/commit/e25894e243e8e5de0892124fb21778631d2fd729))
+* **linux-host:** add opt-in steps to prepare a dedicated Linux node ([72606af](https://github.com/ExaDev/github-runner/commit/72606af0b852cd6079e62b057ff603b60623e5c8))
+* **linux-host:** keep a Linux host awake and its Wi-Fi from power saving ([45019f3](https://github.com/ExaDev/github-runner/commit/45019f3b1f500a80f646b7445349e49eea869997))
+
+### Code Refactoring
+
+* **cluster:** share the API port checks and the cluster version read ([cf0e100](https://github.com/ExaDev/github-runner/commit/cf0e100c247ed9d42bbec2959a9911fa6df9b773))
+* **cluster:** share the read timeout and k3s token checks ([89b7f49](https://github.com/ExaDev/github-runner/commit/89b7f495fa3a058111598a9c9b0def4351b65a9d))
+
+### Documentation
+
+* describe native nodes and correct when k3s skips tailscale up ([07df978](https://github.com/ExaDev/github-runner/commit/07df978ad6d07dcfef356361f2c083ce58695da3))
+
+### Tests
+
+* **native:** name the native test host and example host generically ([b424051](https://github.com/ExaDev/github-runner/commit/b42405172a7c7d741487ec91ad337cacb1c18425))
+
 ## [2.11.0](https://github.com/ExaDev/github-runner/compare/v2.10.1...v2.11.0) (2026-11-01)
 
 ### Features
