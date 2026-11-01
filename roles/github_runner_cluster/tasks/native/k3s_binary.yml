@@ -1,0 +1,16 @@
+---
+# Installs the k3s release binary github_runner_cluster_k3s_version names, checked against its SHA-256: the sum the release lists for this architecture's asset, or github_runner_cluster_native_k3s_sha256 when that is set. The download is skipped while the file already there has the sum, and replaces it in one rename otherwise, so a running k3s keeps its old binary until the service restarts (config.yml and service.yml restart it when this changed).
+
+- name: Download the pinned k3s release binary
+  vars:
+    github_runner_cluster_native_release: "{{ github_runner_cluster_k3s_version | exadev.github_runner.cluster_native_k3s_release }}"
+    github_runner_cluster_native_release_url: "{{ github_runner_cluster_native_k3s_download_url }}/{{ github_runner_cluster_native_release | urlencode }}"
+  become: true
+  ansible.builtin.get_url:
+    url: "{{ github_runner_cluster_native_release_url }}/{{ github_runner_cluster_native_asset.asset }}"
+    dest: "{{ github_runner_cluster_native_bin_dir }}/k3s"
+    checksum: >-
+      sha256:{{ github_runner_cluster_native_k3s_sha256 if github_runner_cluster_native_k3s_sha256 | length > 0
+      else github_runner_cluster_native_release_url ~ '/' ~ github_runner_cluster_native_asset.checksums }}
+    mode: "0755"
+  register: github_runner_cluster_native_binary

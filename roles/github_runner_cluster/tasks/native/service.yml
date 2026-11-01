@@ -1,0 +1,77 @@
+---
+# Enables and starts the k3s-agent service, restarts it when anything it reads changed, and then checks the node: the service is running, the host's Tailscale client is logged in to the cluster's tailnet, and a server of the cluster sees the node Ready on a heartbeat from the k3s that was just started. Nothing here happens while github_runner_cluster_native_start is false, which leaves the service as it is: a first install stays disabled and stopped.
+
+- name: Reload systemd when the unit changed
+  become: true
+  ansible.builtin.command:
+    argv: [systemctl, daemon-reload]
+  changed_when: true
+  when:
+    - github_runner_cluster_native_unit is changed
+    - not ansible_check_mode
+
+- name: Start the node and check it
+  when: github_runner_cluster_native_start | bool
+  block:
+    - name: Read whether the service is enabled and running
+      ansible.builtin.command:
+        argv: [systemctl, "{{ item }}", "{{ github_runner_cluster_native_service }}"]
+      loop: [is-enabled, is-active]
+      register: github_runner_cluster_native_service_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Work out what the service needs
+      ansible.builtin.set_fact:
+        github_runner_cluster_native_enabled: "{{ github_runner_cluster_native_service_state.results[0].rc == 0 }}"
+        github_runner_cluster_native_active: "{{ github_runner_cluster_native_service_state.results[1].rc == 0 }}"
+
+    - name: Read the time on the host, before the service is started or restarted
+      # The node's Ready condition outlives a stopped k3s for a while, so the check below waits for a heartbeat later than this. The host's own clock, which the kubelet's heartbeat is stamped with.
+      ansible.builtin.command:
+        argv: [date, -u, "+%Y-%m-%dT%H:%M:%SZ"]
+      register: github_runner_cluster_native_started
+      changed_when: false
+      check_mode: false
+
+    - name: Enable the service
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, enable, "{{ github_runner_cluster_native_service }}"]
+      changed_when: true
+      when:
+        - not github_runner_cluster_native_enabled | bool
+        - not ansible_check_mode
+
+    - name: Start the service
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, start, "{{ github_runner_cluster_native_service }}"]
+      changed_when: true
+      when:
+        - not github_runner_cluster_native_active | bool
+        - not ansible_check_mode
+
+    - name: Restart the service, since its binary, configuration or secrets changed
+      # Pods keep running: the unit's KillMode=process leaves their containerd shims alone.
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, restart, "{{ github_runner_cluster_native_service }}"]
+      changed_when: true
+      when:
+        - github_runner_cluster_native_active | bool
+        - github_runner_cluster_native_changed | bool
+        - not ansible_check_mode
+
+    - name: Report what a real run would do to the service
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'enable ' if not github_runner_cluster_native_enabled | bool else '' }}{{ 'start' if not github_runner_cluster_native_active | bool
+          else ('restart' if github_runner_cluster_native_changed | bool else 'leave running') }} {{ github_runner_cluster_native_service }}
+      changed_when: not github_runner_cluster_native_enabled | bool or not github_runner_cluster_native_active | bool or github_runner_cluster_native_changed | bool
+      when: ansible_check_mode
+
+    - name: Check the node
+      ansible.builtin.include_tasks: native/end_checks.yml
+      when: not ansible_check_mode

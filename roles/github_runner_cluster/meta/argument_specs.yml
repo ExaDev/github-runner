@@ -1,0 +1,70 @@
+---
+# The variables that choose and tune the native node mode, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it, and also the Docker path's variables, which are not declared here: an option that is not declared is not checked.
+argument_specs:
+  main:
+    short_description: Brings a host up as a k3s node, in a container under Docker Compose or natively under systemd.
+    description:
+      - With github_runner_cluster_node_mode compose (the default) the host runs its k3s node as a server or an agent in a container under Docker Compose, with Tailscale inside the container.
+      - With github_runner_cluster_node_mode native a Linux host runs k3s as an agent directly under systemd, with no Docker or Compose layer, and its own Tailscale client joins the cluster's tailnet through k3s's --vpn-auth. Its tasks that change the host use become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
+    options:
+      github_runner_cluster_node_mode:
+        type: str
+        default: compose
+        choices: [compose, native]
+        description: How this host runs its k3s node. compose is a container under Docker Compose. native is the k3s-agent systemd service on a Linux host, always as an agent.
+      github_runner_cluster_native_start:
+        type: bool
+        default: true
+        description: Whether a native node's service is enabled, started and restarted when its binary or configuration changed, and the node then waited for until it reports Ready. false installs and configures everything and leaves the service as it is.
+      github_runner_cluster_native_ready_timeout:
+        type: int
+        default: 600
+        description: The most seconds, about, the role waits for a native node to report Ready after it started.
+      github_runner_cluster_native_k3s_download_url:
+        type: str
+        default: https://github.com/k3s-io/k3s/releases/download
+        description: Where the k3s release binaries are downloaded from, <this>/<release tag>/<asset>.
+      github_runner_cluster_native_k3s_sha256:
+        type: str
+        default: ""
+        description: The SHA-256 of the k3s binary to install, for this host's architecture, 64 lower-case hexadecimal digits. Empty takes the sum from the release's own sum file.
+      github_runner_cluster_native_tailscale_install:
+        type: bool
+        default: true
+        description: Whether the role installs the pinned Tailscale package from Tailscale's apt repository (Debian and Ubuntu) and keeps its service running.
+      github_runner_cluster_native_tailscale_repository_url:
+        type: str
+        default: https://pkgs.tailscale.com/stable
+        description: Where Tailscale's package repository is, <this>/<ubuntu or debian>/<release>.noarmor.gpg and <release>.tailscale-keyring.list being the signing key and the list file.
+      github_runner_cluster_native_tailscale_leave_other_tailnet:
+        type: bool
+        default: false
+        description: Whether the role logs the host's Tailscale client out of a tailnet other than the cluster's, so that k3s can join the cluster's. false stops the run instead.
+      github_runner_cluster_native_bin_dir:
+        type: path
+        default: /usr/local/bin
+        description: Where the k3s binary is installed. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_lib_dir:
+        type: path
+        default: /usr/local/lib/github-runner-k3s
+        description: Where the Tailscale wrapper and the resolver helper are installed. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_config_dir:
+        type: path
+        default: /etc/rancher/k3s
+        description: Where k3s reads its configuration, and where the role keeps the node's token and --vpn-auth value. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_unit_dir:
+        type: path
+        default: /etc/systemd/system
+        description: Where the k3s-agent unit is installed. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_tailscale_cli:
+        type: path
+        default: /usr/bin/tailscale
+        description: The Tailscale command the package installs, which the service puts behind its wrapper. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_apt_keyring:
+        type: path
+        default: /usr/share/keyrings/tailscale-archive-keyring.gpg
+        description: Where Tailscale's apt signing key goes. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_apt_source:
+        type: path
+        default: /etc/apt/sources.list.d/tailscale.list
+        description: Where Tailscale's apt repository list file goes. Not a setting, and a variable only so the tests can point it at a stand-in.

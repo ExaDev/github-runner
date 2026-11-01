@@ -1,0 +1,74 @@
+---
+# Writes everything the k3s-agent service reads: the two helper scripts, the configuration, the two secrets and the unit. Registers github_runner_cluster_native_changed, whether any of them (or the binary k3s_binary.yml installed) changed, which is what restarts a running service. The token and the --vpn-auth value are secrets: each is in a file of its own, mode 0600, written by a task that logs nothing, and the configuration only names the files.
+
+- name: Create the directories the node's files go in
+  become: true
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ github_runner_cluster_native_lib_dir }}", mode: "0755"}
+    - {path: "{{ github_runner_cluster_native_lib_dir }}/bin", mode: "0755"}
+    - {path: "{{ github_runner_cluster_native_config_dir }}", mode: "0755"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Place the Tailscale wrapper and the resolver helper
+  # See the two files for what each does. Copied on every run, so a collection upgrade reaches the host.
+  become: true
+  ansible.builtin.copy:
+    src: "native/{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "0755"
+  loop:
+    - {src: tailscale-up-wait.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/bin/tailscale"}
+    - {src: write-resolv-conf.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/write-resolv-conf"}
+  loop_control:
+    label: "{{ item.dest }}"
+  register: github_runner_cluster_native_helpers
+
+- name: Write the k3s agent configuration
+  become: true
+  ansible.builtin.template:
+    src: native/config.yaml.j2
+    dest: "{{ github_runner_cluster_native_config_dir }}/config.yaml"
+    mode: "0600"
+  register: github_runner_cluster_native_config
+
+- name: Write the node's token
+  # No trailing newline: k3s trims the file, and the bytes then are exactly the token.
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_cluster_k3s_token }}"
+    dest: "{{ github_runner_cluster_native_config_dir }}/token"
+    mode: "0600"
+  no_log: true
+  register: github_runner_cluster_native_token
+
+- name: Write the node's --vpn-auth value
+  become: true
+  ansible.builtin.copy:
+    content: "{{ github_runner_cluster_mesh_vpn_auth }}"
+    dest: "{{ github_runner_cluster_native_config_dir }}/vpn-auth"
+    mode: "0600"
+  no_log: true
+  register: github_runner_cluster_native_vpn_auth
+
+- name: Write the k3s-agent unit
+  become: true
+  ansible.builtin.template:
+    src: native/k3s-agent.service.j2
+    dest: "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_native_service }}.service"
+    mode: "0644"
+  register: github_runner_cluster_native_unit
+
+- name: Record whether anything the running service reads changed
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_changed: >-
+      {{ github_runner_cluster_native_binary is changed
+         or github_runner_cluster_native_helpers is changed
+         or github_runner_cluster_native_config is changed
+         or github_runner_cluster_native_token is changed
+         or github_runner_cluster_native_vpn_auth is changed
+         or github_runner_cluster_native_unit is changed }}
