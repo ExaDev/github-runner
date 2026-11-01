@@ -1,12 +1,8 @@
 ---
 # Compares the k3s version this host's image is to be built from with what already runs: this node's own container, and every node of the cluster as the servers report it. k3s upgrades one minor at a time and never downgrades, so the role refuses what would break k3s's upgrade path or Kubernetes' version skew policy: this node built older than it runs (by patch release and k3s build too), any node more than one minor below the version, a server built an older minor than any other node, or an agent built a newer minor than any server, the last only when the run builds the agent's image (plugins/filter/cluster_versions.py's cluster_k3s_version_change_blockers lists the rules). With github_runner_cluster_allow_k3s_version_jump true nothing here runs. Every task only reads, and runs under --check too; a failure changes nothing on the host.
 
-- name: Fail if the cluster read timeout is not a positive whole number of seconds
-  ansible.builtin.fail:
-    msg: >-
-      github_runner_cluster_cluster_read_timeout is '{{ github_runner_cluster_cluster_read_timeout }}'; it must be a positive
-      whole number of seconds (kubectl reads 0 as no timeout at all, which would let one server hold up every host's run).
-  when: (github_runner_cluster_cluster_read_timeout | string) is not match('^[1-9][0-9]*\\Z')
+- name: Check the cluster read timeout
+  ansible.builtin.include_tasks: read_timeout.yml
 
 - name: Read the k3s version this node's running container reports
   # docker ps rather than docker inspect, so that a container that does not exist (a first run) reads as not running while a daemon that cannot be reached fails the run instead of skipping the check.
