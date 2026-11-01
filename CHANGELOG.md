@@ -1,3 +1,19 @@
+## [2.11.0](https://github.com/ExaDev/github-runner/compare/v2.10.1...v2.11.0) (2026-11-01)
+
+### Features
+
+* **macos-host:** add a role for a Mac's AC power, Tailscale daemon and sudo ([1afb90e](https://github.com/ExaDev/github-runner/commit/1afb90ee8ce8b003ac9f861c5093cc29cf8df260))
+* **site:** run the macOS host baseline before the fleet play ([ada0e86](https://github.com/ExaDev/github-runner/commit/ada0e86cfe43b9b87e95bfdd40accb33f07edf80))
+
+### Documentation
+
+* describe the macOS host baseline role ([261235e](https://github.com/ExaDev/github-runner/commit/261235e319766baec98b04b08336d5d22f15ccc3))
+
+### Tests
+
+* **macos-host:** cover the role against stand-ins for pmset, brew, tailscale and sudo ([3203aa0](https://github.com/ExaDev/github-runner/commit/3203aa0f6a7e43befdbc70711f383a731204b45c))
+* **macos-host:** skip the sudoers comparison where the machine has no wheel group ([da99c71](https://github.com/ExaDev/github-runner/commit/da99c71a95bb1f17dff6c5a813ead120eab5f4b7))
+
 ## [2.10.1](https://github.com/ExaDev/github-runner/compare/v2.10.0...v2.10.1) (2026-10-29)
 
 ### Documentation
