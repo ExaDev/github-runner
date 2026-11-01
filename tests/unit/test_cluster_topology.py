@@ -165,5 +165,56 @@ class ValidationTest(unittest.TestCase):
         self.assert_error(hosts, "must be 'server' or 'agent'")
 
 
+class NativeNodeTest(unittest.TestCase):
+    """A host that runs k3s natively under systemd is only ever an agent."""
+
+    def test_a_native_host_is_an_agent_and_takes_no_server_place(self) -> None:
+        hosts = plain(4)
+        hosts["h1"]["github_runner_cluster_node_mode"] = "native"
+        result = topology(hosts)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["hosts"]["h1"]["role"], "agent")
+        self.assertEqual(result["servers"], ["h2", "h3", "h4"])
+        self.assertEqual(result["bootstrap"], "h2")
+
+    def test_native_hosts_do_not_count_towards_the_automatic_server_number(self) -> None:
+        hosts = plain(4)
+        for name in ("h3", "h4"):
+            hosts[name]["github_runner_cluster_node_mode"] = "native"
+        result = topology(hosts)
+        self.assertEqual(result["servers"], ["h1"])
+        self.assertEqual(result["hosts"]["h4"]["server_url"], "https://h1:6443")
+
+    def test_a_native_host_joins_the_bootstrap_server_like_any_agent(self) -> None:
+        hosts = plain(4)
+        hosts["h4"]["github_runner_cluster_node_mode"] = "native"
+        for host in hosts.values():
+            host["github_runner_cluster_tailnet_domain"] = "example.ts.net"
+        result = topology(hosts)
+        self.assertEqual(result["hosts"]["h4"]["server_url"], "https://h1.example.ts.net:6443")
+        self.assertEqual(result["hosts"]["h4"]["tls_sans"], ["h1.example.ts.net", "h2.example.ts.net", "h3.example.ts.net"])
+
+    def test_the_compose_mode_changes_nothing(self) -> None:
+        explicit = plain(5)
+        for host in explicit.values():
+            host["github_runner_cluster_node_mode"] = "compose"
+        self.assertEqual(topology(explicit), topology(plain(5)))
+
+    def test_a_native_host_cannot_be_a_server_or_bootstrap(self) -> None:
+        for override in ({"github_runner_cluster_node_role": "server"}, {"github_runner_cluster_bootstrap": True}):
+            with self.subTest(override=override):
+                hosts = plain(3)
+                hosts["h1"]["github_runner_cluster_node_mode"] = "native"
+                hosts["h1"].update(override)
+                errors = topology(hosts)["errors"]
+                self.assertTrue(any("h1 sets github_runner_cluster_node_mode: native" in error for error in errors), errors)
+
+    def test_a_mode_that_is_neither_compose_nor_native_is_refused(self) -> None:
+        hosts = plain(1)
+        hosts["h1"]["github_runner_cluster_node_mode"] = "container"
+        errors = topology(hosts)["errors"]
+        self.assertTrue(any("must be 'compose' or 'native'" in error for error in errors), errors)
+
+
 if __name__ == "__main__":
     unittest.main()

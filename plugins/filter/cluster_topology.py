@@ -9,6 +9,7 @@ from ansible.errors import AnsibleFilterError
 from ansible.module_utils.parsing.convert_bool import boolean
 
 NODE_ROLES = ("server", "agent")
+NODE_MODES = ("compose", "native")
 
 
 def _text(host_vars: Mapping[str, Any], key: str) -> str:
@@ -22,6 +23,9 @@ def _describe_host(name: str, host_vars: Mapping[str, Any], errors: list[str]) -
     role = _text(host_vars, "github_runner_cluster_node_role")
     if role and role not in NODE_ROLES:
         errors.append(f"{name}: github_runner_cluster_node_role must be 'server' or 'agent' (got '{role}').")
+    mode = _text(host_vars, "github_runner_cluster_node_mode") or "compose"
+    if mode not in NODE_MODES:
+        errors.append(f"{name}: github_runner_cluster_node_mode must be 'compose' or 'native' (got '{mode}').")
     bootstrap_override = host_vars.get("github_runner_cluster_bootstrap")
     node_name = _text(host_vars, "github_runner_cluster_node_name") or name
     domain = _text(host_vars, "github_runner_cluster_tailnet_domain")
@@ -29,6 +33,7 @@ def _describe_host(name: str, host_vars: Mapping[str, Any], errors: list[str]) -
     return {
         "name": name,
         "role_override": role if role in NODE_ROLES else "",
+        "native": mode == "native",
         "bootstrap_override": None if bootstrap_override is None else boolean(bootstrap_override, strict=False),
         "node_name": node_name,
         "address": address,
@@ -49,7 +54,7 @@ def github_runner_cluster_topology(members: list[str], hostvars: Mapping[str, Ma
 
     :param members: the cluster group's hosts, in inventory order. :param hostvars: Ansible's hostvars, read for each member's per-host overrides. :param max_servers: the most servers to choose automatically. :param api_port: the k3s API port a joining node connects to. :returns: ``errors`` (empty when the result is valid), ``servers`` and ``bootstrap`` (host names), and ``hosts``, mapping each member to its ``role``, ``bootstrap``, ``node_name``, ``address``, ``server_url`` and ``tls_sans``. :raises AnsibleFilterError: if max_servers or api_port is not an integer.
 
-    The automatic server count is the largest odd number no greater than both the number of hosts that are not forced to be agents and max_servers, because etcd needs a majority and an even member count tolerates no more failures than the odd count below it. The first hosts in inventory order become servers; the first server not told to join elsewhere bootstraps the cluster, and every other node joins it.
+    The automatic server count is the largest odd number no greater than both the number of hosts that are not forced to be agents (a host with github_runner_cluster_node_mode: native is always an agent) and max_servers, because etcd needs a majority and an even member count tolerates no more failures than the odd count below it. The first hosts in inventory order become servers; the first server not told to join elsewhere bootstraps the cluster, and every other node joins it.
     """
     try:
         server_limit = int(max_servers)
@@ -61,6 +66,12 @@ def github_runner_cluster_topology(members: list[str], hostvars: Mapping[str, Ma
     if server_limit < 1:
         errors.append(f"github_runner_cluster_max_servers must be at least 1 (got {server_limit}).")
     hosts = [_describe_host(name, hostvars[name], errors) for name in members]
+    # A native node runs k3s as a systemd service on the host and only ever as an agent, so it is never offered a server place, and a host that asks for one is refused.
+    for host in hosts:
+        if host["native"]:
+            if host["role_override"] == "server" or host["bootstrap_override"] is True:
+                errors.append(f"{host['name']} sets github_runner_cluster_node_mode: native, which runs a k3s agent only; it cannot be a server or bootstrap the cluster.")
+            host["role_override"] = "agent"
     # A host told to bootstrap has to be a server, so it takes one of the server places rather than competing for one in inventory order.
     for host in hosts:
         if host["bootstrap_override"] is True and not host["role_override"]:
