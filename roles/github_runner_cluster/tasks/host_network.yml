@@ -65,15 +65,15 @@
   vars:
     github_runner_cluster_network_container: >-
       {{ github_runner_cluster_container_name if github_runner_cluster_effective_node_role == 'server' else 'github-runner-k3s-agent' }}
-  register: github_runner_cluster_node_container
+  register: github_runner_cluster_network_node_container
   changed_when: false
   check_mode: false
 
 - name: Note whether the node's container runs, and whether on the host network
   # A container on the host network lists exactly one network, "host".
   ansible.builtin.set_fact:
-    github_runner_cluster_network_running: "{{ (github_runner_cluster_node_container.stdout.split() | first | default('')) == 'running' }}"
-    github_runner_cluster_network_on_host: "{{ (github_runner_cluster_node_container.stdout.split()[1:] | join(' ')) == 'host' }}"
+    github_runner_cluster_network_running: "{{ (github_runner_cluster_network_node_container.stdout.split() | first | default('')) == 'running' }}"
+    github_runner_cluster_network_on_host: "{{ (github_runner_cluster_network_node_container.stdout.split()[1:] | join(' ')) == 'host' }}"
 
 - name: Note whether Compose is about to move a running node to the other network
   # Only when the running container is on the other kind of network than the one asked for, which is when Compose recreates it.
