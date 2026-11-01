@@ -1,5 +1,5 @@
 ---
-# Before the role changes anything on the host: github_runner_cluster_network_mode must be bridge or host; with host, the Docker host must have an address on the LAN the nodes share (github_runner_cluster_lan_cidr) and no Tailscale device of another client on its network; and whenever the node's running container is on the other kind of network, Compose is about to recreate it, so the role first refuses unless the cluster stays safe without this node (plugins/filter/cluster_guard.py's cluster_restart_blockers): the other servers with a Ready node and a healthy etcd must still be a majority of all servers, and no ARC runner pod may be on this node. Whatever cannot be read refuses the move. Every task here only reads (the probe pulls its small image if the host lacks it); a failure changes nothing on the host.
+# Before the role changes anything on the host: github_runner_cluster_network_mode must be bridge or host; with host, the Docker host must have an address on the LAN the nodes share (github_runner_cluster_lan_cidr) and no Tailscale device of another client on its network, and no running container but the node's own Compose project's on its Docker engine; and whenever the node's running container is on the other kind of network, Compose is about to recreate it, so the role first refuses unless the cluster stays safe without this node (plugins/filter/cluster_guard.py's cluster_restart_blockers): the other servers with a Ready node and a healthy etcd must still be a majority of all servers, and no ARC runner pod may be on this node. Whatever cannot be read refuses the move. Every task here only reads (the probe pulls its small image if the host lacks it); a failure changes nothing on the host.
 
 - name: Fail if the node's network mode is not one the role knows
   ansible.builtin.fail:
@@ -17,6 +17,38 @@
   when:
     - github_runner_cluster_network_mode == 'host'
     - github_runner_cluster_lan_cidr | trim | length == 0
+
+- name: Read the containers running on the node's Docker engine, and their Compose projects
+  # With the host network the node's Tailscale client, k3s routes and kube-proxy rules live in the Docker host's network namespace, so any other container on the engine gets a route into the mesh through it. docker ps without --all lists exactly the containers that can use one (running, restarting and paused). Runs under --check too, since the check below depends on it.
+  ansible.builtin.command:
+    argv:
+      - docker
+      - ps
+      - --format
+      - "{{ '{{' }}.Names{{ '}}' }}|{{ '{{' }}.Label \"com.docker.compose.project\"{{ '}}' }}"
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
+  register: github_runner_cluster_engine_containers
+  changed_when: false
+  check_mode: false
+  when: github_runner_cluster_network_mode == 'host'
+
+- name: Fail if the node's Docker engine runs a container that is not the node's own
+  # The engine must be dedicated to the node, so that the mesh cannot be reached from a container that is not part of it: a bridged Colima profile of its own per node meets it. The node's own containers are those of its Compose project (the k3s container, the pruner and the regrade service).
+  vars:
+    github_runner_cluster_engine_others: >-
+      {{ github_runner_cluster_engine_containers.stdout_lines | reject('equalto', '') | map('split', '|')
+         | rejectattr('1', 'equalto', github_runner_cluster_compose_project) | map(attribute='0') | list }}
+  ansible.builtin.fail:
+    msg: >-
+      The Docker engine {{ inventory_hostname }}'s node would run on already runs
+      {{ github_runner_cluster_engine_others | join(', ') }}, which {{ 'is' if github_runner_cluster_engine_others | length == 1 else 'are' }}
+      not part of the Compose project {{ github_runner_cluster_compose_project }}. On the host network the node's Tailscale client, k3s
+      routes and kube-proxy rules live in the engine's network namespace, so every other container on the engine gets a route into
+      the cluster's mesh. The host network needs an engine of its own for the node (a bridged Colima profile per node); stop or
+      move those containers, or run the node on the bridge network. Nothing was changed.
+  when:
+    - github_runner_cluster_network_mode == 'host'
+    - github_runner_cluster_engine_others | length > 0
 
 - name: Read whether the node's container runs, and on which network
   # docker ps rather than docker inspect, so that a container that does not exist (a first run) reads as absent while a daemon that cannot be reached fails the run.
