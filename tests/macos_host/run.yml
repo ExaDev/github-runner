@@ -1,0 +1,17 @@
+---
+# Runs the github_runner_macos_host role as site.yml includes it, for tests/unit/test_macos_host.py. The host's facts are stood in for by extra variables (host_system, host_machine, host_user), and the pmset, brew, tailscaled, tailscale and sudo it calls are the test's stand-ins on PATH, so no real power setting, package, daemon or privilege is ever touched.
+- name: Run the macOS host baseline role
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Stand in for the host's facts
+      ansible.builtin.set_fact:
+        ansible_facts:
+          system: "{{ host_system }}"
+          machine: "{{ host_machine }}"
+          user_id: "{{ host_user | default('joe') }}"
+
+    - name: Include the role
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_macos_host
