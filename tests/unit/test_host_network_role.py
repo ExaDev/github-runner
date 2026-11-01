@@ -333,6 +333,25 @@ class MainTasksTest(unittest.TestCase):
         self.assertEqual(wait["ansible.builtin.wait_for"]["host"], "127.0.0.1")
         self.assertIn("github_runner_cluster_network_mode == 'host'", wait["when"])
 
+    def test_no_variable_the_checks_register_or_set_is_a_role_default(self) -> None:
+        """A register or set_fact of a defaults name overrides it for the rest of the run: the checks once registered docker ps's result as github_runner_cluster_node_container, which the regrade service's environment file then rendered as a dict."""
+        defaults = yaml.safe_load((ROOT / "roles" / "github_runner_cluster" / "defaults" / "main.yml").read_text())
+
+        def written(tasks: list[dict[str, Any]]) -> set[str]:
+            names: set[str] = set()
+            for task in tasks:
+                if "register" in task:
+                    names.add(task["register"])
+                if "ansible.builtin.set_fact" in task:
+                    names.update(name for name in task["ansible.builtin.set_fact"] if name != "cacheable")
+                names.update(written(task.get("block", [])))
+            return names
+
+        tasks = yaml.safe_load((ROOT / "roles" / "github_runner_cluster" / "tasks" / "host_network.yml").read_text())
+        names = written(tasks)
+        self.assertTrue(names)
+        self.assertEqual(sorted(names & defaults.keys()), [])
+
     def test_the_network_checks_run_before_anything_changes(self) -> None:
         tasks = yaml.safe_load((ROOT / "roles" / "github_runner_cluster" / "tasks" / "main.yml").read_text())
         includes = [task.get("ansible.builtin.include_tasks") for task in tasks]
