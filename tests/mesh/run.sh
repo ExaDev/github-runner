@@ -54,7 +54,7 @@ diagnose() {
     docker_on "$index" inspect --format 'restarts={{.RestartCount}} started={{.State.StartedAt}} running={{.State.Running}}' "$(container "$index")" || true
     # shellcheck disable=SC2016 # the expansions are for the shell in the node's container, not this one.
     docker_on "$index" exec "$(container "$index")" sh -c 'echo "started: $(cat /run/regrade-level 2>&1)"; echo "requested: $(cat /var/lib/rancher/k3s/regrade-level 2>&1)"; ls /etc/rancher/k3s /var/lib/rancher/k3s/server/cred 2>&1' </dev/null 2>&1 | head -n 40 || true
-    docker exec "grtest-node${index}-regrade-1" fleet-regrade status </dev/null 2>&1 | head -n 5 || true
+    docker_on "$index" exec "grtest-node${index}-regrade-1" fleet-regrade status </dev/null 2>&1 | head -n 5 || true
   done
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
@@ -232,7 +232,7 @@ assert_cluster() {
   log "Checking each joining server's k3s ran the wait after its own tailscale up"
   for index in $(seq 2 "$node_count"); do
     # grep without -q reads the whole log: with -q it would stop at the first match and, under pipefail, the docker logs it cut off would fail the check.
-    docker logs "$(container "$index")" 2>&1 | grep -F "github-runner-node: $(node_name 1).mesh.grtest.internal is a peer and resolves after tailscale up" >/dev/null \
+    docker_on "$index" logs "$(container "$index")" 2>&1 | grep -F "github-runner-node: $(node_name 1).mesh.grtest.internal is a peer and resolves after tailscale up" >/dev/null \
       || fail "$(container "$index") never logged the wait after k3s's tailscale up"
   done
 
