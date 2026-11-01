@@ -678,6 +678,7 @@ esac
             ({"github_runner_cluster_k3s_version": "latest"}, "must be a pinned rancher/k3s tag"),
             ({"github_runner_cluster_node_role": "server"}, "cannot be a server or bootstrap the cluster"),
             ({"github_runner_cluster_node_mode": "container"}, "must be one of: compose, native"),
+            ({"github_runner_cluster_network_mode": "host"}, "which sets github_runner_cluster_node_mode: native"),
         ]
         for host_vars, message in cases:
             with self.subTest(host_vars=host_vars):
