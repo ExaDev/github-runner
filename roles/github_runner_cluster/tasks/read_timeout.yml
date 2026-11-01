@@ -1,0 +1,9 @@
+---
+# Checks github_runner_cluster_cluster_read_timeout, which bounds every read of what the cluster's servers run (running_version.yml for the Docker path, native/version_check.yml for the native node). Read-only, so it runs under --check too.
+
+- name: Fail if the cluster read timeout is not a positive whole number of seconds
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_cluster_read_timeout is '{{ github_runner_cluster_cluster_read_timeout }}'; it must be a positive
+      whole number of seconds (kubectl reads 0 as no timeout at all, which would let one server hold up every host's run).
+  when: (github_runner_cluster_cluster_read_timeout | string) is not match('^[1-9][0-9]*\\Z')
