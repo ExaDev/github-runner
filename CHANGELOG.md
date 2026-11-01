@@ -1,3 +1,9 @@
+## [2.12.1](https://github.com/ExaDev/github-runner/compare/v2.12.0...v2.12.1) (2026-11-01)
+
+### Bug Fixes
+
+* **linux-host:** resolve the loaded display manager before stopping it ([4fa28a1](https://github.com/ExaDev/github-runner/commit/4fa28a19cce9140846b80f7024be9a0854684fea))
+
 ## [2.12.0](https://github.com/ExaDev/github-runner/compare/v2.11.0...v2.12.0) (2026-11-01)
 
 ### Features
