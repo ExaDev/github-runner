@@ -1,3 +1,29 @@
+## [2.13.0](https://github.com/ExaDev/github-runner/compare/v2.12.2...v2.13.0) (2026-11-01)
+
+### Features
+
+* **cluster:** check the host network's preconditions before moving a node ([81c35fc](https://github.com/ExaDev/github-runner/commit/81c35fc63a7b451dfe0f9b12c1fee192d4ea773b))
+* **cluster:** let the node container run on the Docker host's network ([90d297f](https://github.com/ExaDev/github-runner/commit/90d297f42a62279143f176e49d0d427e3371e5d9))
+* **cluster:** refuse the host network for a native node ([b49f407](https://github.com/ExaDev/github-runner/commit/b49f407cbd803a327ee3b734954e2cbf1a7905af))
+* **cluster:** refuse the host network on an engine that runs other containers ([d3ed232](https://github.com/ExaDev/github-runner/commit/d3ed232697718f404b42a08b2c5797bdc299a236))
+
+### Bug Fixes
+
+* **cluster:** keep the network checks from overriding the role's node container template ([bfe8b35](https://github.com/ExaDev/github-runner/commit/bfe8b35e456397dbcf54daa20e24cd6625371d71))
+
+### Documentation
+
+* **cluster:** describe the node network modes and moving a node to a bridged Colima VM ([09c7458](https://github.com/ExaDev/github-runner/commit/09c745845e2052fabe8f551e668998adb09ac051))
+* **cluster:** describe what k3s's StartVPN really does with tailscale up ([5c36c92](https://github.com/ExaDev/github-runner/commit/5c36c9217ef25c4fa774358b433fe042ce950628))
+
+### Tests
+
+* **cluster:** move a running node between networks in the host_network scenario ([0fbe097](https://github.com/ExaDev/github-runner/commit/0fbe097db858be3dda9912c6b35830e67be7bd0d))
+* **cluster:** read a node's logs and regrade status from its own daemon in host_network ([7ac6c6a](https://github.com/ExaDev/github-runner/commit/7ac6c6aadf9e318e48003fa46d6380268d608eef))
+* **cluster:** run nodes on the host network of Docker daemons of their own ([1d2ad37](https://github.com/ExaDev/github-runner/commit/1d2ad377831f37302962cde53bb958ce5f3428f6))
+* **cluster:** silence shellcheck on the regrade diagnosis run in the node's own container ([4548eb6](https://github.com/ExaDev/github-runner/commit/4548eb6863df2072e1463765a63eeda6a7b45a8c))
+* **mesh:** print the regrade container's log when a scenario fails ([017403a](https://github.com/ExaDev/github-runner/commit/017403aff424765c1f06614cec4e31916e0b5f66))
+
 ## [2.12.2](https://github.com/ExaDev/github-runner/compare/v2.12.1...v2.12.2) (2026-11-01)
 
 ### Bug Fixes
