@@ -1,0 +1,44 @@
+---
+# macOS and Debian-family Linux hosts; any other host is skipped with a message, so the role can be applied to a mixed inventory. The tasks that change the host use become (sudo) or run the installer, which uses sudo itself; everything else, Homebrew included, runs as the connecting user, because Homebrew refuses to run as root.
+
+- name: Fail if mise is wanted without Homebrew
+  # mise is installed through Homebrew, so there is nothing to install it with.
+  ansible.builtin.assert:
+    that: github_runner_host_tools_homebrew | bool or not github_runner_host_tools_mise | bool
+    fail_msg: github_runner_host_tools_mise is true but github_runner_host_tools_homebrew is false. mise is installed through Homebrew, so turn off both or neither.
+    quiet: true
+
+- name: Fail if the installer's commit or checksum is not a hash
+  # They name the one file the installer is, so a value that is not a full hash would pin nothing.
+  ansible.builtin.assert:
+    that:
+      - github_runner_host_tools_homebrew_install_commit is match('^[0-9a-f]{40}$')
+      - github_runner_host_tools_homebrew_install_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: github_runner_host_tools_homebrew_install_commit must be a 40 character lower-case hexadecimal commit hash and github_runner_host_tools_homebrew_install_sha256 a 64 character lower-case hexadecimal SHA-256 checksum.
+    quiet: true
+
+- name: Read which operating system, machine and connecting user the host has
+  # Only the platform, distribution and user subsets, the cheapest that hold them, and only when the caller did not gather them: a play with gather_facts: false leaves ansible_facts without them. Read-only, so it runs under --check too.
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - platform
+      - distribution
+      - user
+  when: "'system' not in ansible_facts or 'machine' not in ansible_facts or 'os_family' not in ansible_facts or 'user_id' not in ansible_facts or 'user_dir' not in ansible_facts"
+
+- name: Work out whether this host is one the role supports
+  ansible.builtin.set_fact:
+    github_runner_host_tools_supported: "{{ ansible_facts['system'] == 'Darwin' or (ansible_facts['system'] == 'Linux' and ansible_facts['os_family'] == 'Debian') }}"
+
+- name: Say that the host is skipped
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} is {{ ansible_facts['system'] }} ({{ ansible_facts['os_family'] }}), and the role supports macOS and Debian-family Linux only, so nothing was changed."
+  when: not github_runner_host_tools_supported | bool
+
+- name: Install and configure Homebrew and mise
+  ansible.builtin.include_tasks: tools.yml
+  when:
+    - github_runner_host_tools_supported | bool
+    - github_runner_host_tools_homebrew | bool

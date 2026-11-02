@@ -1,0 +1,35 @@
+---
+# One line of shell integration (github_runner_host_tools_integration: its name, the pattern that finds an equivalent line and the line itself), added to the shell's startup file unless a startup file of the shell has an equivalent already.
+
+- name: Work out where the shell's startup files are
+  ansible.builtin.set_fact:
+    github_runner_host_tools_startup_files: "{{ github_runner_host_tools_shell_files[github_runner_host_tools_shell]['read'] | map('regex_replace', '^', ansible_facts['user_dir'] ~ '/') | list }}"
+    github_runner_host_tools_startup_target: "{{ ansible_facts['user_dir'] }}/{{ github_runner_host_tools_shell_files[github_runner_host_tools_shell]['write'] }}"
+    github_runner_host_tools_marker: "# {mark} ANSIBLE MANAGED BLOCK github_runner_host_tools {{ github_runner_host_tools_integration['name'] }}"
+
+- name: Look for an equivalent line in the startup files
+  # grep exits 0 for a match, 1 for none and 2 when it could not read a file, which a startup file that does not exist is; with -q a match is 0 whatever else went wrong. Read-only, so it runs under --check too.
+  ansible.builtin.command:
+    argv: "{{ ['grep', '-E', '-q', '-s', '-e', github_runner_host_tools_integration['pattern'], '--'] + github_runner_host_tools_startup_files }}"
+  register: github_runner_host_tools_equivalent
+  changed_when: false
+  failed_when: github_runner_host_tools_equivalent.rc not in [0, 1, 2]
+  check_mode: false
+
+- name: Look for the role's own block in the file it writes
+  # A block the role wrote earlier is the equivalent line the search above found, and it is kept up to date (a different prefix, say) rather than left behind.
+  ansible.builtin.command:
+    argv: [grep, -F, -q, -s, -e, "{{ github_runner_host_tools_marker | replace('{mark}', 'BEGIN') }}", --, "{{ github_runner_host_tools_startup_target }}"]
+  register: github_runner_host_tools_own_block
+  changed_when: false
+  failed_when: github_runner_host_tools_own_block.rc not in [0, 1, 2]
+  check_mode: false
+
+- name: Add the line to the startup file  # noqa: risky-file-permissions
+  # No mode is passed on purpose, so an existing file keeps the mode it has (blockinfile always edits the target of a symlink, so a startup file that is a link stays one), and a file that does not exist yet gets the user's umask.
+  ansible.builtin.blockinfile:
+    path: "{{ github_runner_host_tools_startup_target }}"
+    marker: "{{ github_runner_host_tools_marker }}"
+    block: "{{ github_runner_host_tools_integration['line'] }}"
+    create: true
+  when: github_runner_host_tools_equivalent.rc != 0 or github_runner_host_tools_own_block.rc == 0

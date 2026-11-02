@@ -1,0 +1,40 @@
+---
+# The role's variables, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it.
+argument_specs:
+  main:
+    short_description: Installs Homebrew and mise, keeps them at their latest release and makes them available to the connecting user's shell.
+    description:
+      - Runs on macOS and Debian-family Linux hosts and skips any other with a message. Homebrew refuses to run as root, so the connecting user must not be root; the tasks that need privilege (the Linux prerequisites packages and the installer's own sudo) use become or sudo, so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
+    options:
+      github_runner_host_tools_homebrew:
+        type: bool
+        default: true
+        description: Whether the role installs Homebrew when it is missing and runs brew update on every run.
+      github_runner_host_tools_mise:
+        type: bool
+        default: true
+        description: Whether the role installs mise through Homebrew and keeps it at its latest release. Needs github_runner_host_tools_homebrew.
+      github_runner_host_tools_shell_integration:
+        type: bool
+        default: true
+        description: Whether the role adds Homebrew's shellenv and the mise activation to the connecting user's shell startup file, when none of that shell's startup files has them.
+      github_runner_host_tools_homebrew_install_commit:
+        type: str
+        default: 8c82c081753d4263da0cfe615ef8d9433425f22b
+        description: The commit of Homebrew/install whose install.sh the role downloads, a 40 character hexadecimal hash.
+      github_runner_host_tools_homebrew_install_sha256:
+        type: str
+        default: 5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148
+        description: The SHA-256 checksum of that install.sh, 64 hexadecimal characters. The download is refused unless it matches.
+      github_runner_host_tools_mise_config:
+        type: dict
+        default: {}
+        description: Global mise defaults, as a mapping with the tables tools and settings. Empty writes nothing; otherwise it is rendered to ~/.config/mise/conf.d/00-fleet.toml.
+      github_runner_host_tools_homebrew_prefix:
+        type: str
+        default: ""
+        description: The Homebrew prefix. Empty takes /opt/homebrew on Apple silicon, /usr/local on Intel and /home/linuxbrew/.linuxbrew on Linux. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_host_tools_homebrew_install_base_url:
+        type: str
+        default: https://raw.githubusercontent.com/Homebrew/install
+        description: Where the commit's install.sh is downloaded from, as <this>/<commit>/install.sh. Not a setting, and a variable only so the tests can point it at a stand-in.

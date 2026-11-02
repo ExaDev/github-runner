@@ -1,0 +1,44 @@
+---
+# Homebrew and mise on a host the role supports, in the order each needs the last.
+
+- name: Fail if the connecting user is root
+  # Homebrew's installer and brew itself both refuse to run as root, so a run as root would fail half way, after the prerequisites were changed.
+  ansible.builtin.assert:
+    that: ansible_facts['user_id'] != 'root'
+    fail_msg: Homebrew refuses to run as root, and {{ inventory_hostname }} was reached as root. Connect as a regular user with passwordless sudo, which the role uses for the tasks that need it.
+    quiet: true
+
+- name: Work out the Homebrew prefix and the PATH its commands run with
+  ansible.builtin.set_fact:
+    github_runner_host_tools_effective_prefix: >-
+      {{ github_runner_host_tools_homebrew_prefix
+      if github_runner_host_tools_homebrew_prefix | length > 0
+      else ansible_facts['system'] | exadev.github_runner.host_tools_homebrew_prefix(ansible_facts['machine']) }}
+
+- name: Work out the PATH the Homebrew commands run with
+  # The prefix first, so brew finds its own tools, then the system directories, since the host's login PATH is not what a non-interactive SSH session gets and an absent directory is skipped.
+  ansible.builtin.set_fact:
+    github_runner_host_tools_path: "{{ github_runner_host_tools_effective_prefix }}/bin:{{ github_runner_host_tools_effective_prefix }}/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+- name: Look for the brew binary
+  ansible.builtin.stat:
+    path: "{{ github_runner_host_tools_effective_prefix }}/bin/brew"
+    get_checksum: false
+  register: github_runner_host_tools_brew
+
+- name: Install Homebrew
+  ansible.builtin.include_tasks: install_homebrew.yml
+  when: not github_runner_host_tools_brew.stat.exists
+
+- name: Keep Homebrew and mise at their latest release
+  ansible.builtin.include_tasks: packages.yml
+
+- name: Make Homebrew and mise available to the connecting user's shell
+  ansible.builtin.include_tasks: shell_integration.yml
+  when: github_runner_host_tools_shell_integration | bool
+
+- name: Write the global mise defaults
+  ansible.builtin.include_tasks: mise_config.yml
+  when:
+    - github_runner_host_tools_mise | bool
+    - github_runner_host_tools_mise_config | length > 0

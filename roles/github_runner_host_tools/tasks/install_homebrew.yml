@@ -1,0 +1,92 @@
+---
+# Installs Homebrew on a host that has none. The installer is Homebrew's own install.sh, downloaded from a pinned commit and refused unless it matches its checksum, then run as the connecting user (it uses sudo for the directories it creates) with NONINTERACTIVE=1 so it never waits for a key. Never piped from the network into a shell. Under --check nothing is downloaded or run, and the run reports what it would do.
+
+- name: Install the packages the installer needs
+  when: ansible_facts['system'] == 'Linux'
+  block:
+    - name: Read which of them are installed
+      ansible.builtin.command:
+        argv: "{{ ['dpkg-query', '--showformat=${Package} ${db:Status-Abbrev}\\n', '--show'] + github_runner_host_tools_apt_prerequisites }}"
+      register: github_runner_host_tools_installed_packages
+      changed_when: false
+      # dpkg-query exits non-zero for a package the system has never heard of and still lists the others; a package it lists as anything but "ii" is missing either way.
+      failed_when: false
+      check_mode: false
+
+    - name: Work out which of them are missing
+      ansible.builtin.set_fact:
+        github_runner_host_tools_missing_packages: >-
+          {{ github_runner_host_tools_apt_prerequisites
+          | reject('in', github_runner_host_tools_installed_packages.stdout_lines
+          | select('match', '^\S+ ii')
+          | map('regex_replace', ' .*$', '')
+          | list)
+          | list }}
+
+    - name: Refresh the package index
+      # A host that has never installed a package has no index to find them in.
+      become: true
+      ansible.builtin.command:
+        argv: [apt-get, update]
+      changed_when: true
+      when:
+        - github_runner_host_tools_missing_packages | length > 0
+        - not ansible_check_mode
+
+    - name: Install the missing packages
+      become: true
+      ansible.builtin.command:
+        argv: "{{ ['apt-get', 'install', '--yes', '--no-install-recommends'] + github_runner_host_tools_missing_packages }}"
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: true
+      when:
+        - github_runner_host_tools_missing_packages | length > 0
+        - not ansible_check_mode
+
+    - name: Report the packages a real run would install
+      ansible.builtin.debug:
+        msg: "apt-get install {{ github_runner_host_tools_missing_packages | join(' ') }}"
+      changed_when: true
+      when:
+        - github_runner_host_tools_missing_packages | length > 0
+        - ansible_check_mode
+
+- name: Download and run the installer
+  when: not ansible_check_mode
+  block:
+    - name: Make a directory for the installer
+      # Private to the connecting user (mode 0700), so nobody else can swap the file between the download and the run.
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: homebrew-install-
+      register: github_runner_host_tools_installer_dir
+
+    - name: Download the installer
+      ansible.builtin.get_url:
+        url: "{{ github_runner_host_tools_homebrew_install_base_url }}/{{ github_runner_host_tools_homebrew_install_commit }}/install.sh"
+        dest: "{{ github_runner_host_tools_installer_dir.path }}/install.sh"
+        checksum: "sha256:{{ github_runner_host_tools_homebrew_install_sha256 }}"
+        mode: "0600"
+
+    - name: Run the installer
+      ansible.builtin.command:
+        argv: [/bin/bash, "{{ github_runner_host_tools_installer_dir.path }}/install.sh"]
+        creates: "{{ github_runner_host_tools_effective_prefix }}/bin/brew"
+      environment:
+        NONINTERACTIVE: "1"
+        PATH: "{{ github_runner_host_tools_path }}"
+  always:
+    - name: Remove the installer
+      ansible.builtin.file:
+        path: "{{ github_runner_host_tools_installer_dir.path }}"
+        state: absent
+      when: (github_runner_host_tools_installer_dir | default({})).path is defined
+      changed_when: false
+
+- name: Report the installer a real run would run
+  # Under --check the tasks above do not run, so that nothing is downloaded or installed in a review; Homebrew is known to be absent, so this reports the same change instead.
+  ansible.builtin.debug:
+    msg: "Homebrew's install.sh at {{ github_runner_host_tools_homebrew_install_commit }} (sha256 {{ github_runner_host_tools_homebrew_install_sha256 }}), which creates {{ github_runner_host_tools_effective_prefix }}/bin/brew"
+  changed_when: true
+  when: ansible_check_mode

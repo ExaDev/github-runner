@@ -1,0 +1,18 @@
+---
+# Runs the host tools role against the host facts a test states, so a Mac, a Linux host and a host the role skips can all be exercised on whatever machine runs the tests.
+- name: Run the host tools role
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Stand in for the host's facts
+      ansible.builtin.set_fact:
+        ansible_facts:
+          system: "{{ host_system }}"
+          machine: "{{ host_machine }}"
+          os_family: "{{ host_os_family }}"
+          user_id: "{{ host_user | default('joe') }}"
+          user_dir: "{{ host_home }}"
+    - name: Include the role
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_host_tools

@@ -1,0 +1,17 @@
+---
+# Not settings, so not defaults: what the role knows about the shells it supports. Each shell's startup files, in the order the role looks in them for a line it would add, and the one it writes to when none has the line. zsh's .zshenv is read by every zsh, including the non-interactive one an SSH command starts, and bash's .bashrc is read by the non-interactive shell sshd starts, so a command run over SSH finds the tools too.
+github_runner_host_tools_shell_files:
+  zsh:
+    read: [.zshenv, .zshrc, .zprofile]
+    write: .zshenv
+  bash:
+    read: [.bashrc, .bash_profile, .profile]
+    write: .bashrc
+
+# The packages Homebrew's documented requirements name for Debian and Ubuntu (https://docs.brew.sh/Homebrew-on-Linux#requirements).
+github_runner_host_tools_apt_prerequisites:
+  - build-essential
+  - procps
+  - curl
+  - file
+  - git
