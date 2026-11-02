@@ -332,7 +332,7 @@ class RoleTest(unittest.TestCase):
     def have_homebrew(self) -> None:
         shutil.copy(self.tools / "brew", self.prefix / "bin" / "brew")
 
-    def run_role(self, *extra: str, system: str = "Darwin", machine: str = "arm64", os_family: str = "Darwin", user: str = "joe", **variables: Any) -> subprocess.CompletedProcess[str]:
+    def run_role(self, *extra: str, system: str = "Darwin", machine: str = "arm64", os_family: str = "Darwin", user: str = "example", **variables: Any) -> subprocess.CompletedProcess[str]:
         host = {
             "host_system": system,
             "host_machine": machine,
@@ -548,7 +548,7 @@ class RoleTest(unittest.TestCase):
         (self.stub / "shell").write_text("/bin/bash")
         self.ok(self.run_role())
         self.assertEqual((self.home / ".bashrc").read_text(), homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
-        self.assertIn("dscl . -read /Users/joe UserShell", self.logged())
+        self.assertIn("dscl . -read /Users/example UserShell", self.logged())
 
     def test_a_line_a_startup_file_has_already_is_not_added_again_in_any_file_of_that_shell(self) -> None:
         self.have_homebrew()
