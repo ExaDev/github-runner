@@ -1,3 +1,18 @@
+## [2.14.0](https://github.com/ExaDev/github-runner/compare/v2.13.1...v2.14.0) (2026-11-02)
+
+### Features
+
+* **host-tools:** choose the Homebrew prefix, shell lines and mise TOML ([d9e63ad](https://github.com/ExaDev/github-runner/commit/d9e63ad7b69ed569772bcc8215770bf3349abec9))
+* **host-tools:** install Homebrew and mise on every fleet host ([b32a1ab](https://github.com/ExaDev/github-runner/commit/b32a1ab07a86fe9e78d56ea8a66e053ed6932da7))
+
+### Bug Fixes
+
+* **bootstrap:** keep an apostrophe out of the jq program's comment ([b745afc](https://github.com/ExaDev/github-runner/commit/b745afc36396a72903538205d46f03aa1cc9c098))
+
+### Tests
+
+* **host-tools:** use a neutral account name in the role's fixtures ([8829dca](https://github.com/ExaDev/github-runner/commit/8829dca13b66c57ea4cc6d7801c26b442e292e36))
+
 ## [2.13.1](https://github.com/ExaDev/github-runner/compare/v2.13.0...v2.13.1) (2026-11-01)
 
 ### Bug Fixes

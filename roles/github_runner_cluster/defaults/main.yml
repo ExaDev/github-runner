@@ -205,7 +205,7 @@ github_runner_cluster_record_deployed_version: true
 github_runner_cluster_deployed_version_annotation: "github-runner.exadev.com/deployed-version"
 
 # The collection version this role was released as, stamped by scripts/release/stamp_version.py. A server host records it as an annotation on its own node once the node has registered, and the heartbeat publishes it in fleet-health.json. It is what was applied, not what is running, and an agent host, which has no API of its own, records nothing.
-github_runner_cluster_collection_version: "2.13.1"
+github_runner_cluster_collection_version: "2.14.0"
 
 # How this host runs its k3s node. compose (the default) is everything above: k3s in a container under Docker Compose, with Tailscale inside the container. native runs k3s as an agent directly on the host, as the systemd service k3s-agent, with no Docker or Compose layer: the node's containerd then uses the host's filesystem and network instead of nesting inside a container's. Per host, in its host_vars. native is for a Linux host that systemd runs, and only as an agent: tasks/topology.yml never makes it a server, and refuses a native host that asks to be one. See the role README's Native nodes section, which also says what a native node gives up.
 github_runner_cluster_node_mode: compose
