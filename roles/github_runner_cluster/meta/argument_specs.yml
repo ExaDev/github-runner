@@ -1,5 +1,5 @@
 ---
-# The variables that choose and tune the native node mode, and the one that chooses how a macOS host starts its Colima profile, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it, and also the Docker path's variables, which are not declared here: an option that is not declared is not checked.
+# The variables that choose and tune the native node mode, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it, and also the Docker path's variables, which are not declared here: an option that is not declared is not checked.
 argument_specs:
   main:
     short_description: Brings a host up as a k3s node, in a container under Docker Compose or natively under systemd.
@@ -7,11 +7,6 @@ argument_specs:
       - With github_runner_cluster_node_mode compose (the default) the host runs its k3s node as a server or an agent in a container under Docker Compose, with Tailscale inside the container.
       - With github_runner_cluster_node_mode native a Linux host runs k3s as an agent directly under systemd, with no Docker or Compose layer, and its own Tailscale client joins the cluster's tailnet through k3s's --vpn-auth. Its tasks that change the host use become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
     options:
-      github_runner_cluster_runtime_autostart_at:
-        type: str
-        default: auto
-        choices: [auto, login, boot]
-        description: When a macOS host starts its Colima profile (with github_runner_cluster_runtime_autostart on). login is a per-user launchd agent, which runs once the user has logged in. boot is a launchd daemon in /Library/LaunchDaemons, which runs when the Mac starts with nobody logged in, installed with become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass. auto is boot for the profile named by github_runner_cluster_runtime_boot_profile and login for any other. Installing one retires the other for the same profile.
       github_runner_cluster_node_mode:
         type: str
         default: compose
