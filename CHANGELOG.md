@@ -1,3 +1,9 @@
+## [2.15.0](https://github.com/ExaDev/github-runner/compare/v2.14.0...v2.15.0) (2026-11-02)
+
+### Features
+
+* **cluster:** start a Colima profile that lives in a home of its own ([9b934e6](https://github.com/ExaDev/github-runner/commit/9b934e6afe6fb7476250b974320138943867abcc))
+
 ## [2.14.0](https://github.com/ExaDev/github-runner/compare/v2.13.1...v2.14.0) (2026-11-02)
 
 ### Features
