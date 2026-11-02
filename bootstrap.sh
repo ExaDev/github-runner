@@ -51,7 +51,7 @@ jq -n \
   def opt($name; $var): if (env[$var] // "") != "" then {($name): env[$var]} else {} end;
   {
     github_runner_cluster_group: "all",
-    # The machine is brought up without sudo, so the host baseline (power settings, the Tailscale system daemon and Homebrew's installer, which need it) is for inventory-managed hosts only.
+    # The machine is brought up without sudo, so the host baseline (power settings, the Tailscale system daemon and the Homebrew installer, which need it) is for inventory-managed hosts only.
     github_runner_macos_host_power: false,
     github_runner_macos_host_tailscale: false,
     github_runner_host_tools_homebrew: false,
