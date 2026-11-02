@@ -1,3 +1,9 @@
+## [2.18.1](https://github.com/ExaDev/github-runner/compare/v2.18.0...v2.18.1) (2026-11-02)
+
+### Bug Fixes
+
+* **cluster:** load br_netfilter in the Colima VM now and at every boot ([777764b](https://github.com/ExaDev/github-runner/commit/777764be6832eb425c6110e25ec424e54e461bc6))
+
 ## [2.18.0](https://github.com/ExaDev/github-runner/compare/v2.17.0...v2.18.0) (2026-11-02)
 
 ### Features
