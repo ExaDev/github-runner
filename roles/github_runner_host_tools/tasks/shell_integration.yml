@@ -1,0 +1,35 @@
+---
+# Adds Homebrew's shellenv and the mise activation to the connecting user's shell, and only what is missing: a line goes into a startup file only when none of the shell's startup files has an equivalent already, so a host that was set up by hand, or by a dotfiles manager, is left exactly as it is. The user's login shell is read from the account database, never assumed.
+
+- name: Read the connecting user's account entry on Linux
+  ansible.builtin.command:
+    argv: [getent, passwd, "{{ ansible_facts['user_id'] }}"]
+  register: github_runner_host_tools_account_linux
+  changed_when: false
+  check_mode: false
+  when: ansible_facts['system'] == 'Linux'
+
+- name: Read the connecting user's login shell on macOS
+  ansible.builtin.command:
+    argv: [dscl, ., -read, "/Users/{{ ansible_facts['user_id'] }}", UserShell]
+  register: github_runner_host_tools_account_macos
+  changed_when: false
+  check_mode: false
+  when: ansible_facts['system'] == 'Darwin'
+
+- name: Work out which shell it is
+  # getent prints name:password:uid:gid:gecos:home:shell and dscl prints "UserShell: /bin/zsh"; the shell's name is what follows the last slash of the last field of either.
+  ansible.builtin.set_fact:
+    github_runner_host_tools_shell: "{{ ((github_runner_host_tools_account_linux.stdout | default(github_runner_host_tools_account_macos.stdout)) | trim).split(':')[-1] | trim | basename }}"
+
+- name: Say that the shell is not one the role sets up
+  ansible.builtin.debug:
+    msg: "{{ ansible_facts['user_id'] }} logs in with {{ github_runner_host_tools_shell | quote }}, and the role sets up {{ github_runner_host_tools_shell_files | list | join(' and ') }} only, so no startup file was changed."
+  when: github_runner_host_tools_shell not in github_runner_host_tools_shell_files
+
+- name: Add what each shell startup file is missing
+  # The list is empty for a shell the role does not set up, because a loop is evaluated before its when and the filter refuses a shell it does not know.
+  ansible.builtin.include_tasks: shell_integration_line.yml
+  loop: "{{ (github_runner_host_tools_effective_prefix | exadev.github_runner.host_tools_shell_integrations(github_runner_host_tools_shell, github_runner_host_tools_homebrew | bool, github_runner_host_tools_mise | bool)) if github_runner_host_tools_shell in github_runner_host_tools_shell_files else [] }}"
+  loop_control:
+    loop_var: github_runner_host_tools_integration

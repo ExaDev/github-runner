@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  author: ExaDev
+  description: Installs Homebrew and mise on macOS and Debian-family Linux hosts, keeps them at their latest release and makes them available to the connecting user's shell.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions: [all]
+    - name: Debian
+      versions: [all]
+    - name: Ubuntu
+      versions: [all]
+dependencies: []

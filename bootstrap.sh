@@ -51,9 +51,11 @@ jq -n \
   def opt($name; $var): if (env[$var] // "") != "" then {($name): env[$var]} else {} end;
   {
     github_runner_cluster_group: "all",
-    # The machine is brought up without sudo, so the host baseline (power settings and the Tailscale system daemon, which need it) is for inventory-managed hosts only.
+    # The machine is brought up without sudo, so the host baseline (power settings, the Tailscale system daemon and Homebrew's installer, which need it) is for inventory-managed hosts only.
     github_runner_macos_host_power: false,
     github_runner_macos_host_tailscale: false,
+    github_runner_host_tools_homebrew: false,
+    github_runner_host_tools_mise: false,
     github_runner_cluster_node_role: $node_role,
     github_runner_cluster_node_name: $node_name,
     github_runner_cluster_server_url: (if $node_role == "agent" then env.K3S_AGENT_SERVER_URL else (env.K3S_JOIN_SERVER_URL // "") end),

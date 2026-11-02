@@ -1,0 +1,21 @@
+---
+# Homebrew and mise on every host of the fleet, macOS and Debian-family Linux: installed when missing, kept at their latest release, and made available to the connecting user's shell. Every variable is checked against meta/argument_specs.yml when the role runs.
+
+# Whether the role manages Homebrew: installs it when the brew binary is missing, and runs brew update on every run, which is how Homebrew itself is kept at its latest release. Homebrew refuses to run as root, so the connecting user must not be root. The role never upgrades any formula other than mise.
+github_runner_host_tools_homebrew: true
+# Whether the role installs mise through Homebrew and keeps it at its latest release. Needs github_runner_host_tools_homebrew, since Homebrew is how mise is installed.
+github_runner_host_tools_mise: true
+# Whether the role adds Homebrew's shellenv and the mise activation to the connecting user's shell startup file. It adds a line only when none of that shell's startup files has it already, so a host that is set up by hand is left as it is.
+github_runner_host_tools_shell_integration: true
+
+# The commit of Homebrew/install whose install.sh the role downloads, and the SHA-256 checksum of that file. The download is refused unless the file matches, so the installer is the one that was read, never whatever the branch holds later. Raise them together: take the commit, download its install.sh and take its checksum. Used only on a host that has no Homebrew.
+github_runner_host_tools_homebrew_install_commit: 8c82c081753d4263da0cfe615ef8d9433425f22b
+github_runner_host_tools_homebrew_install_sha256: 5f333bbe53bc490e51e7ccb1df8779b3dd6ee73a1a7379efda216edb08ccb148
+
+# Global mise defaults, as a mapping of mise's own configuration tables. Empty (the default) writes nothing and leaves any existing file alone. Otherwise the role renders it to ~/.config/mise/conf.d/00-fleet.toml, never to config.toml, which is the host's own and takes precedence over conf.d. Two tables are understood: tools (a tool name, quoted in the file if it needs it, to a version string or a list of them) and settings (a setting name to a string, number, boolean or a list of those). For example {tools: {node: "22", python: ["3.13", "3.12"]}, settings: {experimental: true}}.
+github_runner_host_tools_mise_config: {}
+
+# Not a setting: the Homebrew prefix. Empty takes /opt/homebrew on Apple silicon, /usr/local on Intel and /home/linuxbrew/.linuxbrew on Linux, which are the only places Homebrew supports. It is a variable only so the tests can point it at a stand-in.
+github_runner_host_tools_homebrew_prefix: ""
+# Not a setting: where the commit's install.sh is downloaded from, as <this>/<commit>/install.sh. It is a variable only so the tests can point it at a stand-in.
+github_runner_host_tools_homebrew_install_base_url: https://raw.githubusercontent.com/Homebrew/install

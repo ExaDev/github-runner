@@ -26,6 +26,13 @@
         name: exadev.github_runner.github_runner_arc
         tasks_from: validate.yml
 
+# Before the host baseline plays, so Homebrew and mise are there for anything after them that wants them. macOS and Debian-family Linux hosts (the role skips any other with a message), and its tasks that change the host use become (sudo) or run Homebrew's installer, which uses sudo itself, so run it with passwordless sudo for the connecting user or with --ask-become-pass. The connecting user must not be root, because Homebrew refuses to run as root. It gathers its own facts: only the platform, distribution and user subsets the role needs, so the host's Python is the only requirement. Both tools are installed and kept at their latest release by default; only mise is ever upgraded, never any other formula.
+- name: Install Homebrew and mise
+  hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
+  gather_facts: false
+  roles:
+    - exadev.github_runner.github_runner_host_tools
+
 # Before the fleet play, so a Mac that would sleep or have no Tailscale client of its own is fixed before k3s starts on it. macOS hosts only (the role does nothing on any other), and its tasks use become (sudo), so run it with passwordless sudo for the connecting user or with --ask-become-pass. It gathers its own facts: only the platform subset the role needs, so the host's Python is the only requirement.
 - name: Set up the Macs' host baseline
   hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"
