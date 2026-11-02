@@ -1,0 +1,60 @@
+---
+# Writes the npm package-install security settings (github_runner_host_tools_npm_settings and github_runner_host_tools_npm_min_release_age_exclude) to the connecting user's ~/.npmrc as one managed block, and takes the block out again when the variables no longer name anything. The file can hold credentials: it is never printed, logged or given a mode it did not have, and no line outside the block is touched. A key the file already sets outside the block is the user's own, so it is left as it is and reported.
+
+- name: Look for ~/.npmrc
+  ansible.builtin.stat:
+    path: "{{ ansible_facts['user_dir'] }}/.npmrc"
+    get_checksum: false
+  register: github_runner_host_tools_npmrc
+
+- name: Look for the role's own block in ~/.npmrc
+  # grep prints nothing with -q, so the file is not read into the output. It exits 0 for a match, 1 for none and 2 when it could not read the file, which a file that does not exist is. Read-only, so it runs under --check too.
+  ansible.builtin.command:
+    argv: [grep, -F, -q, -s, -e, "{{ github_runner_host_tools_npmrc_marker | replace('{mark}', 'BEGIN') }}", --, "{{ ansible_facts['user_dir'] }}/.npmrc"]
+  register: github_runner_host_tools_npmrc_own_block
+  changed_when: false
+  failed_when: github_runner_host_tools_npmrc_own_block.rc not in [0, 1, 2]
+  check_mode: false
+
+- name: Write or remove the managed block
+  # Only when there is something to write, or a block the role wrote earlier to take out: with both variables empty and no block, ~/.npmrc is not even read.
+  when: github_runner_host_tools_npm_settings | length > 0 or github_runner_host_tools_npm_min_release_age_exclude | length > 0 or github_runner_host_tools_npmrc_own_block.rc == 0
+  block:
+    - name: Read ~/.npmrc
+      # Only to tell which keys the user already sets outside the block. no_log keeps the file, credentials included, out of the output and the log, and the filter below returns key names only.
+      ansible.builtin.slurp:
+        src: "{{ ansible_facts['user_dir'] }}/.npmrc"
+      register: github_runner_host_tools_npmrc_content
+      no_log: true
+      check_mode: false
+      when: github_runner_host_tools_npmrc.stat.exists
+
+    - name: Work out the lines of the block
+      # The file's text is empty when it does not exist yet (a --check run before the file is created).
+      ansible.builtin.set_fact:
+        github_runner_host_tools_npmrc_plan: "{{ github_runner_host_tools_npm_settings | exadev.github_runner.host_tools_npmrc(github_runner_host_tools_npm_min_release_age_exclude, github_runner_host_tools_npmrc_content.content | default('') | b64decode, github_runner_host_tools_npmrc_marker) }}"
+
+    - name: Report the settings ~/.npmrc already sets itself
+      ansible.builtin.debug:
+        msg: "{{ ansible_facts['user_dir'] }}/.npmrc already sets {{ github_runner_host_tools_npmrc_plan['shadowed'] | join(', ') }} outside the block the role manages, so the host's own value is kept and the role's is not written."
+      when: github_runner_host_tools_npmrc_plan['shadowed'] | length > 0
+
+    - name: Create ~/.npmrc when it does not exist
+      # After the lines are worked out, so a value the filter refuses leaves no file behind. 0600 because an npmrc can hold credentials. Only when the file is missing: copy would apply the mode to an existing file too, and the role never changes the mode of a file the user has.
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ ansible_facts['user_dir'] }}/.npmrc"
+        mode: "0600"
+        force: false
+      when:
+        - not github_runner_host_tools_npmrc.stat.exists
+        - github_runner_host_tools_npm_settings | length > 0 or github_runner_host_tools_npm_min_release_age_exclude | length > 0
+
+    - name: Write the block  # noqa: risky-file-permissions
+      # No mode is passed on purpose, so an existing file keeps the mode it has (blockinfile always edits the target of a symlink, so an npmrc that is a link stays one). With no lines the block is removed.
+      ansible.builtin.blockinfile:
+        path: "{{ ansible_facts['user_dir'] }}/.npmrc"
+        marker: "{{ github_runner_host_tools_npmrc_marker }}"
+        block: "{{ github_runner_host_tools_npmrc_plan['lines'] | join('\n') }}"
+        state: "{{ 'present' if github_runner_host_tools_npmrc_plan['lines'] | length > 0 else 'absent' }}"
+        create: true

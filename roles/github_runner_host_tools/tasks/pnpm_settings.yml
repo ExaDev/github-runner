@@ -1,0 +1,60 @@
+---
+# Merges github_runner_host_tools_pnpm_settings and github_runner_host_tools_pnpm_minimum_release_age_exclude into pnpm's global config.yaml, at the path the host's operating system has. Only reached when there is something to write. The keys the role names are set; every other key and comment in the file stays as it is, and a file that already holds the values is not rewritten.
+
+- name: Fail if the exclusion list is given twice
+  # minimumReleaseAgeExclude can be set by its own variable or inside the settings mapping, and a host that did both would have one silently win.
+  ansible.builtin.assert:
+    that: "'minimumReleaseAgeExclude' not in github_runner_host_tools_pnpm_settings or github_runner_host_tools_pnpm_minimum_release_age_exclude | length == 0"
+    fail_msg: minimumReleaseAgeExclude is in github_runner_host_tools_pnpm_settings and github_runner_host_tools_pnpm_minimum_release_age_exclude is set too. Use one of them.
+    quiet: true
+
+- name: Work out the pnpm settings and the file they go to
+  ansible.builtin.set_fact:
+    github_runner_host_tools_pnpm_wanted: "{{ github_runner_host_tools_pnpm_settings | combine({'minimumReleaseAgeExclude': github_runner_host_tools_pnpm_minimum_release_age_exclude} if github_runner_host_tools_pnpm_minimum_release_age_exclude | length > 0 else {}) }}"
+    github_runner_host_tools_pnpm_config: "{{ ansible_facts['user_dir'] }}/{{ github_runner_host_tools_pnpm_config_files[ansible_facts['system']] }}"
+
+- name: Look for the config file
+  ansible.builtin.stat:
+    path: "{{ github_runner_host_tools_pnpm_config }}"
+    get_checksum: false
+  register: github_runner_host_tools_pnpm_file
+
+- name: Look for the config directory
+  ansible.builtin.stat:
+    path: "{{ github_runner_host_tools_pnpm_config | dirname }}"
+    get_checksum: false
+  register: github_runner_host_tools_pnpm_dir
+
+- name: Make the config directory  # noqa: risky-file-permissions
+  # No mode is passed on purpose, so an existing directory keeps the mode it has; a new one gets the user's umask.
+  ansible.builtin.file:
+    path: "{{ github_runner_host_tools_pnpm_config | dirname }}"
+    state: directory
+
+- name: Read the config file
+  ansible.builtin.slurp:
+    src: "{{ github_runner_host_tools_pnpm_config }}"
+  register: github_runner_host_tools_pnpm_content
+  no_log: true
+  check_mode: false
+  when: github_runner_host_tools_pnpm_file.stat.exists
+
+- name: Merge the settings into the file's text
+  ansible.builtin.set_fact:
+    github_runner_host_tools_pnpm_merged: "{{ github_runner_host_tools_pnpm_content.content | default('') | b64decode | exadev.github_runner.host_tools_yaml_merge(github_runner_host_tools_pnpm_wanted) }}"
+
+- name: Write the config file  # noqa: risky-file-permissions
+  # No mode is passed on purpose, so an existing file keeps the mode it has and a new one gets the user's umask; follow keeps a file that is a symlink one and edits its target. Under --check the directory above was not made if it was missing, and copy refuses a destination whose directory is not there, so that case is reported below.
+  ansible.builtin.copy:
+    content: "{{ github_runner_host_tools_pnpm_merged }}"
+    dest: "{{ github_runner_host_tools_pnpm_config }}"
+    follow: true
+  when: github_runner_host_tools_pnpm_dir.stat.exists or not ansible_check_mode
+
+- name: Report the settings a real run would write
+  ansible.builtin.debug:
+    msg: "{{ github_runner_host_tools_pnpm_config }} would be written"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - not github_runner_host_tools_pnpm_dir.stat.exists

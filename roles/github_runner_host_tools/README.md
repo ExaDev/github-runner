@@ -1,6 +1,6 @@
 # github_runner_host_tools
 
-Homebrew and [mise](https://mise.jdx.dev) on every host of the fleet, Mac or Linux: installed when missing, kept at their latest release and made available to the connecting user's shell. It runs on macOS (Apple silicon and Intel) and on Debian-family Linux (Debian and Ubuntu) and skips any other host with a message, so it can be applied to a mixed inventory. `playbooks/site.yml` runs it for every cluster host, before the two host baseline plays and the fleet play.
+Homebrew and [mise](https://mise.jdx.dev) on every host of the fleet, Mac or Linux: installed when missing, kept at their latest release and made available to the connecting user's shell, and the package-install security settings of npm and pnpm, written from variables. It runs on macOS (Apple silicon and Intel) and on Debian-family Linux (Debian and Ubuntu) and skips any other host with a message, so it can be applied to a mixed inventory. `playbooks/site.yml` runs it for every cluster host, before the two host baseline plays and the fleet play.
 
 ## Privileges
 
@@ -71,6 +71,58 @@ experimental = true
 
 Any other table, or a value of a kind its table does not take, fails the run with a message rather than being written in a form mise might read differently.
 
+## Package-install security settings
+
+Hosts that install packages can refuse packages younger than a minimum age and skip install scripts. The role writes these settings from variables, and all four are empty by default: empty, the role does not read or write `~/.npmrc` or pnpm's config file, so a host that sets none of them sees no change. They do not need Homebrew or mise, and they apply on every host the role supports. Node and pnpm themselves are not installed here; put them in `github_runner_host_tools_mise_config`.
+
+### npm
+
+`github_runner_host_tools_npm_settings` is a mapping of npmrc keys to string, number or boolean values, and `github_runner_host_tools_npm_min_release_age_exclude` is a list of package names or patterns. Both are written to the connecting user's `~/.npmrc` in one block between `ANSIBLE MANAGED BLOCK` marker lines, and nothing outside the block is touched:
+
+```yaml
+github_runner_host_tools_npm_settings:
+  min-release-age: 7
+  ignore-scripts: true
+github_runner_host_tools_npm_min_release_age_exclude:
+  - example-package
+  - "@example/*"
+```
+
+renders to
+
+```ini
+# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools npm
+min-release-age=7
+ignore-scripts=true
+min-release-age-exclude[]=example-package
+min-release-age-exclude[]=@example/*
+# END ANSIBLE MANAGED BLOCK github_runner_host_tools npm
+```
+
+`min-release-age` is in days ([npm config](https://docs.npmjs.com/cli/v11/using-npm/config#min-release-age); [Wayback Machine snapshot](https://web.archive.org/web/20261022065815/https://docs.npmjs.com/cli/v11/using-npm/config/)). A second run changes nothing, dropping an entry removes its line, and dropping them all removes the block.
+
+An `.npmrc` can hold credentials, so the role reads it only to tell which keys the user already sets, with `no_log`, and prints key names and nothing else. It never changes the mode of an existing file, and creates a missing one with mode `0600`. A file that is a symlink stays one and its target is edited.
+
+A key the file already sets outside the block is the user's own, and the role keeps it: the role's value for that key is not written, and the run prints a message naming the key (`~/.npmrc already sets min-release-age outside the block the role manages, so the host's own value is kept and the role's is not written.`). Writing it would not be neutral, because npm reads the last of two assignments of a key, so a line in a block at the end of the file would silently replace the user's. The run does not fail, since a host that chose its own value on purpose is not a fault. A key set only in a comment does not count, and an exclusion the file lists already is not listed again. A key the user adds later leaves the block on the next run.
+
+The ini format npm reads treats `;` and `#` as comments and a leading quote as quoting, so a value with any of those, a backslash, a control character or surrounding space is refused with a message rather than written in a form npm might read differently. A key that is the exclusion list's own (`min-release-age-exclude`) has the variable above and is refused in the mapping.
+
+### pnpm
+
+`github_runner_host_tools_pnpm_settings` is a mapping of top-level keys of pnpm's global `config.yaml` to values, and `github_runner_host_tools_pnpm_minimum_release_age_exclude` is a list written under `minimumReleaseAgeExclude`:
+
+```yaml
+github_runner_host_tools_pnpm_settings:
+  minimumReleaseAge: 10080
+  saveExact: true
+github_runner_host_tools_pnpm_minimum_release_age_exclude:
+  - example-package
+```
+
+`minimumReleaseAge` is in minutes ([pnpm, Supply chain security](https://pnpm.io/supply-chain-security); [Wayback Machine snapshot](https://web.archive.org/web/20261022233946/https://pnpm.io/supply-chain-security)). The file is at `~/Library/Preferences/pnpm/config.yaml` on macOS and `~/.config/pnpm/config.yaml` on Linux, the two paths [pnpm config](https://pnpm.io/cli/config) documents for the global configuration file ([Wayback Machine snapshot](https://web.archive.org/web/20260915213602/https://pnpm.io/cli/config)). pnpm reads `$XDG_CONFIG_HOME/pnpm/config.yaml` instead when `XDG_CONFIG_HOME` is set, which a play over a non-interactive SSH session cannot know, so a host that sets it has the file elsewhere and the role still writes the platform's own location.
+
+The role sets each key it is given and edits nothing else: every other key, comment and blank line stays byte for byte, a key that already holds the value is not touched (so a second run changes nothing and a file that is right is not rewritten), and a list is written indented under its key. A comment on the same line as a rewritten key goes with its old value. The result is parsed and compared with what the merge should hold before it is written, and a file whose layout the merge cannot edit safely (not YAML, not a mapping at the top, a flow-style mapping, several documents) fails the run with a message and is left as it is. Setting `minimumReleaseAgeExclude` in both variables fails the run before anything is written. The role never changes the mode of an existing file, a new one gets the user's umask, and a symlink stays one with its target edited. A key dropped from the variable is left in the file, since the role cannot tell which keys in a YAML file it wrote.
+
 ## Variables
 
 - `github_runner_host_tools_homebrew` (default true): install Homebrew when it is missing and run `brew update` on every run.
@@ -78,6 +130,10 @@ Any other table, or a value of a kind its table does not take, fails the run wit
 - `github_runner_host_tools_shell_integration` (default true): add the Homebrew and mise lines to the connecting user's shell startup file where none has them.
 - `github_runner_host_tools_homebrew_install_commit`, `github_runner_host_tools_homebrew_install_sha256`: the commit of Homebrew/install whose `install.sh` is downloaded, and that file's SHA-256 checksum. Both are checked to be full lower-case hexadecimal hashes (40 and 64 characters) before anything runs; `defaults/main.yml` holds the values.
 - `github_runner_host_tools_mise_config` (default an empty mapping): see Global mise defaults above.
+- `github_runner_host_tools_npm_settings` (default an empty mapping): npmrc keys and values written to `~/.npmrc`; see Package-install security settings above.
+- `github_runner_host_tools_npm_min_release_age_exclude` (default an empty list): package names or patterns written as `min-release-age-exclude[]=NAME` lines in the same block.
+- `github_runner_host_tools_pnpm_settings` (default an empty mapping): top-level keys and values merged into pnpm's global `config.yaml`.
+- `github_runner_host_tools_pnpm_minimum_release_age_exclude` (default an empty list): package names or patterns written under `minimumReleaseAgeExclude` in that file.
 - `github_runner_host_tools_homebrew_prefix` (default empty): the Homebrew prefix. Empty takes the prefix described under Homebrew. Not a setting; a variable only so the tests can point it at a stand-in.
 - `github_runner_host_tools_homebrew_install_base_url`: where the installer is downloaded from, as `<this>/<commit>/install.sh`. Not a setting; a variable only so the tests can point it at a stand-in.
 
@@ -100,6 +156,15 @@ github_runner_host_tools_mise_config:
     python: "3.13"
 ```
 
+```yaml
+# host_vars/example.yml: refuse packages younger than a week and skip install scripts
+github_runner_host_tools_npm_settings:
+  min-release-age: 7
+  ignore-scripts: true
+github_runner_host_tools_pnpm_settings:
+  minimumReleaseAge: 10080
+```
+
 ## Testing
 
-`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. Nothing is downloaded and no real package manager, privilege or startup file is touched.
+`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. They also check the package-install settings: that nothing is read or written when the variables are empty, that the `.npmrc` block holds only the role's lines, keeps the user's lines and credentials (made-up values) out of the output, is idempotent and shrinks as entries are dropped, that a key the user sets outside the block is kept and reported, that a new `.npmrc` is `0600` and no existing file or symlink changes mode, that the pnpm merge keeps unrelated keys and comments. Nothing is downloaded and no real package manager, privilege or startup file is touched.
