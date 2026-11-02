@@ -40,6 +40,11 @@
       when: ansible_check_mode
       changed_when: true
 
+# Keeping what the host has current, after the install above and before any join: replacing the daemon restarts it, and the login read below waits for it to settle.
+- name: Keep the host's Tailscale software current
+  ansible.builtin.include_tasks: tailscale_update.yml
+  when: github_runner_macos_host_tailscale_update | bool
+
 # Joining needs an auth key, a secret only the tailnet's owner can create, so it happens only when one is given. The login state is read from the daemon, so a host that is already logged in, and a failed join, are both handled by rerunning.
 - name: Find the Tailscale command line the role installed
   ansible.builtin.stat:

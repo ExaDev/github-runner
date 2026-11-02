@@ -164,6 +164,20 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(DEFAULTS["github_runner_macos_host_sudoers_user"], "")
         self.assertEqual(DEFAULTS["github_runner_macos_host_sudoers_dir"], "/etc/sudoers.d")
 
+    def test_the_tailscale_software_is_kept_current_by_default_and_only_when_it_is_installed(self) -> None:
+        self.assertIs(DEFAULTS["github_runner_macos_host_tailscale_update"], True)
+        tasks = yaml.safe_load((ROLE / "tasks" / "tailscale_update.yml").read_text())
+        [formula] = [task for task in tasks if task.get("name") == "Keep the formula's daemon current"]
+        [upgrade] = [task for task in formula["block"] if "community.general.homebrew" in task]
+        # Only the tailscale formula is named, so no other formula is upgraded, and none is installed by this.
+        self.assertEqual((upgrade["community.general.homebrew"]["name"], upgrade["community.general.homebrew"]["state"]), ("tailscale", "latest"))
+        self.assertIn("github_runner_macos_host_tailscale_formula_managed", formula["when"])
+        [cask] = [task for task in tasks if "community.general.homebrew_cask" in task]
+        self.assertIn("github_runner_macos_host_tailscale_app_installed", cask["when"])
+        self.assertIs(cask["community.general.homebrew_cask"]["greedy"], True)
+        include = [task for task in yaml.safe_load((ROLE / "tasks" / "tailscale.yml").read_text()) if task.get("ansible.builtin.include_tasks") == "tailscale_update.yml"]
+        self.assertEqual([task["when"] for task in include], ["github_runner_macos_host_tailscale_update | bool"])
+
     def test_the_role_never_joins_a_tailnet_by_default(self) -> None:
         self.assertEqual(DEFAULTS["github_runner_macos_host_tailscale_auth_key"], "")
         self.assertEqual(DEFAULTS["github_runner_macos_host_tailscale_up_args"], [])
@@ -266,7 +280,7 @@ class WiringTest(unittest.TestCase):
         for path in sorted(ROLE.glob("tasks/*.yml")):
             text = path.read_text()
             with self.subTest(path=path.name):
-                self.assertEqual(len(re.findall(r"^\s*become: true", text, re.MULTILINE)), {"power.yml": 2, "sudoers.yml": 1, "tailscale.yml": 2}.get(path.name, 0))
+                self.assertEqual(len(re.findall(r"^\s*become: true", text, re.MULTILINE)), {"power.yml": 2, "sudoers.yml": 1, "tailscale.yml": 2, "tailscale_update.yml": 1}.get(path.name, 0))
 
     def test_every_task_that_runs_on_the_host_is_guarded_to_macos(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
@@ -331,25 +345,51 @@ elif name == "brew":
     log("brew root=" + str(int(root)) + " " + " ".join(args))
     if root:
         sys.exit("Running Homebrew as root is extremely dangerous and no longer supported.")
-    if args[:2] == ["info", "--json=v2"] and args[2:3] == ["tailscale"]:
-        installed = [{{"version": "1.0"}}] if os.path.exists(path("brew.installed")) else []
-        print(json.dumps({{"formulae": [{{"name": "tailscale", "full_name": "tailscale", "tap": "homebrew/core", "installed": installed, "outdated": False}}], "casks": []}}))
-    elif args[:2] == ["install", "tailscale"]:
-        write("brew.installed")
+    if args == ["--version"]:
+        print("Homebrew 4.6.0")
+    elif args == ["update", "--quiet"]:
+        pass
+    elif args[:2] == ["info", "--json=v2"] and args[2:3] == ["tailscale"]:
+        installed = [{{"version": read("formula.installed")}}] if os.path.exists(path("formula.installed")) else []
+        print(json.dumps({{"formulae": [{{"name": "tailscale", "full_name": "tailscale", "tap": "homebrew/core", "installed": installed, "outdated": bool(installed) and read("formula.installed") != read("formula.latest", "1.2.0")}}], "casks": []}}))
+    elif args[:1] in (["install"], ["upgrade"]) and args[1:] == ["tailscale"]:
+        write("formula.installed", read("formula.latest", "1.2.0"))
         bindir = os.path.dirname(os.path.abspath(sys.argv[0]))
         for tool in ("tailscaled", "tailscale"):
             target = os.path.join(bindir, tool)
             open(target, "w").write(open(sys.argv[0]).read())
             os.chmod(target, 0o755)
+    elif args[:2] == ["list", "--cask"]:
+        sys.exit(0 if os.path.exists(path("cask.installed")) else 1)
+    elif args[:2] == ["outdated", "--cask"] and args[-1:] == ["tailscale-app"]:
+        if "--greedy" not in args:
+            sys.exit(0)
+        if read("cask.installed") != read("cask.latest", "1.2.0"):
+            print("tailscale-app")
+    elif args == ["upgrade", "--cask", "tailscale-app"]:
+        write("cask.installed", read("cask.latest", "1.2.0"))
     else:
         sys.exit("unexpected brew call: " + " ".join(args))
 elif name == "tailscaled":
-    log("tailscaled root=" + str(int(root)) + " " + " ".join(args))
-    if args != ["install-system-daemon"]:
+    system = os.path.abspath(sys.argv[0]) == os.environ["MACOS_HOST_DAEMON"]
+    log(("daemon" if system else "tailscaled") + " root=" + str(int(root)) + " " + " ".join(args))
+    if args == ["--version"]:
+        # The system daemon is a copy of the formula's tailscaled, or a link to it where the daemon path is a link.
+        print(read("formula.installed") if not system or os.path.exists(path("daemon.link")) else read("daemon.version"))
+        print("  go version: go1.0")
+        sys.exit(0)
+    if system or args != ["install-system-daemon"]:
         sys.exit("unexpected tailscaled call: " + " ".join(args))
     need_root()
     write("LaunchDaemons/com.tailscale.tailscaled.plist", "<plist/>")
     write("daemon.up")
+    write("daemon.running", read("formula.installed"))
+    if not os.path.exists(path("daemon.link")):
+        write("daemon.version", read("formula.installed"))
+        target = os.environ["MACOS_HOST_DAEMON"]
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        open(target, "w").write(open(sys.argv[0]).read())
+        os.chmod(target, 0o755)
     if not os.path.exists(path("login.state")):
         write("login.state", "NeedsLogin")
 elif name == "tailscale":
@@ -357,7 +397,7 @@ elif name == "tailscale":
     if not os.path.exists(path("daemon.up")):
         sys.exit("failed to connect to local tailscaled")
     if args[:1] == ["status"]:
-        print(json.dumps({{"BackendState": read("login.state")}}))
+        print(json.dumps({{"BackendState": read("login.state"), "Version": read("daemon.running") + "-tabcdef-gabcdef"}}))
     elif args[:1] == ["up"]:
         need_root()
         key = sys.stdin.read()
@@ -394,6 +434,8 @@ class RoleTest(unittest.TestCase):
             tool.write_text(STUB.format(python=sys.executable))
             tool.chmod(0o755)
         self.plist = self.stub / "LaunchDaemons" / PLIST_NAME
+        # Where tailscaled install-system-daemon puts the daemon it installs.
+        self.daemon_binary = self.stub / "usr-local-bin" / "tailscaled"
         self.set_power(sleepdisabled="0", sleep="1", displaysleep="10", disksleep="10")
 
     def set_power(self, sleepdisabled: str | None = "1", **overrides: str) -> None:
@@ -416,12 +458,43 @@ class RoleTest(unittest.TestCase):
         self.plist.parent.mkdir()
         self.plist.write_text("<plist/>")
 
+    def formula_daemon(self, installed: str = "1.2.0", latest: str = "1.2.0", running: str | None = None, binary: str | None = None, link: bool = False) -> None:
+        """A host whose daemon the formula installed: the formula at `installed` while `latest` is out, the daemon binary at `binary` and the running daemon at `running` (each the formula's release unless given), and its login state Running. `link` makes the daemon path a link to the formula, as on a prefix of /usr/local."""
+        for tool in ("tailscaled", "tailscale"):
+            (self.bin / tool).write_text(STUB.format(python=sys.executable))
+            (self.bin / tool).chmod(0o755)
+        (self.stub / "formula.installed").write_text(installed)
+        (self.stub / "formula.latest").write_text(latest)
+        (self.stub / "daemon.running").write_text(running or installed)
+        (self.stub / "daemon.version").write_text(binary or installed)
+        (self.stub / "login.state").write_text("Running")
+        (self.stub / "daemon.up").write_text("")
+        if link:
+            (self.stub / "daemon.link").write_text("")
+        self.daemon_binary.parent.mkdir(parents=True)
+        self.daemon_binary.write_text(STUB.format(python=sys.executable))
+        self.daemon_binary.chmod(0o755)
+        self.plist.parent.mkdir(exist_ok=True)
+        self.plist.write_text("<plist/>")
+
+    def app(self, installed: str | None = "1.2.0", latest: str = "1.2.0") -> None:
+        """The standalone app as the Homebrew cask: installed at `installed` (None for not installed) while `latest` is out."""
+        if installed is not None:
+            (self.stub / "cask.installed").write_text(installed)
+        (self.stub / "cask.latest").write_text(latest)
+
+    def state(self, name: str) -> str:
+        return (self.stub / name).read_text()
+
     def run_role(self, *extra: str, system: str = "Darwin", machine: str = "arm64", **variables: Any) -> subprocess.CompletedProcess[str]:
         host = {
             "host_system": system,
             "host_machine": machine,
             "github_runner_macos_host_homebrew_prefix": str(self.prefix),
             "github_runner_macos_host_tailscale_plist": str(self.plist),
+            "github_runner_macos_host_tailscale_daemon_binary": str(self.daemon_binary),
+            # The install and join tests are about those, and a stand-in formula that is installed would otherwise be upgraded on their second runs: the update has tests of its own, which turn it on.
+            "github_runner_macos_host_tailscale_update": False,
             **variables,
         }
         inventory = self.work / "inventory.yml"
@@ -433,6 +506,7 @@ class RoleTest(unittest.TestCase):
             "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false",
             "ANSIBLE_RETRY_FILES_ENABLED": "false",
             "MACOS_HOST_STUB": str(self.stub),
+            "MACOS_HOST_DAEMON": str(self.daemon_binary),
             # The stand-ins come first on the playbook's own PATH as well, so nothing the role runs can reach this machine's real pmset, Homebrew or sudo.
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
         }
@@ -452,7 +526,7 @@ class RoleTest(unittest.TestCase):
     def writes(self, *tools: str) -> list[str]:
         """The calls that change the host, without the read-only ones the role makes to find out."""
         wanted = tools or ("pmset", "brew", "tailscaled", "tailscale")
-        read_only = re.compile(r"(pmset root=0 -g( custom)?|brew root=0 info .*|tailscale root=0 status .*)$")
+        read_only = re.compile(r"(pmset root=0 -g( custom)?|brew root=0 (info|list|outdated|update|--version).*|tailscaled root=0 --version|daemon root=0 --version|tailscale root=0 status .*)$")
         return [call for call in self.calls() if call.split(" ")[0] in wanted and not read_only.match(call)]
 
     def recap(self, result: subprocess.CompletedProcess[str]) -> dict[str, int]:
@@ -685,7 +759,7 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(self.writes(), [])
         self.assertEqual(self.sudo_calls(), [], "a dry run needs no privilege")
         self.assertFalse(self.plist.exists())
-        self.assertFalse((self.stub / "brew.installed").exists())
+        self.assertFalse((self.stub / "formula.installed").exists())
         self.assertEqual(self.recap(result)["changed"], 2, result.stdout)
 
     def test_check_mode_with_an_auth_key_on_a_host_without_the_daemon_joins_nothing(self) -> None:
@@ -704,6 +778,164 @@ class RoleTest(unittest.TestCase):
             with self.subTest(machine=machine, prefix_set=prefix_set):
                 rendered = environment.from_string(expression).render(ansible_facts={"machine": machine}, github_runner_macos_host_homebrew_prefix=prefix_set)
                 self.assertEqual(rendered.strip(), expected)
+
+    # Keeping the Tailscale software current.
+
+    def update_role(self, *extra: str, **variables: Any) -> subprocess.CompletedProcess[str]:
+        self.set_power()
+        return self.run_role(*extra, github_runner_macos_host_tailscale_update=True, **variables)
+
+    def test_a_formula_and_daemon_already_current_are_left_alone_and_not_restarted(self) -> None:
+        self.formula_daemon()
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.sudo_calls(), [])
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_an_older_formula_and_daemon_get_one_upgrade_of_the_formula_alone_and_one_refresh(self) -> None:
+        self.formula_daemon(installed="1.1.0", latest="1.2.0")
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), ["brew root=0 upgrade tailscale", "tailscaled root=1 install-system-daemon"])
+        self.assertEqual((self.state("formula.installed"), self.state("daemon.version"), self.state("daemon.running")), ("1.2.0", "1.2.0", "1.2.0"))
+        self.assertEqual(self.recap(result)["changed"], 2, result.stdout)
+        self.assertEqual(self.state("login.state"), "Running")
+        self.assertFalse([call for call in self.calls() if call.startswith("tailscale root=1 up")])
+
+    def test_after_the_refresh_a_second_run_changes_nothing(self) -> None:
+        self.formula_daemon(installed="1.1.0", latest="1.2.0")
+        self.update_role()
+        before = self.writes()
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), before)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_formula_upgraded_by_hand_still_gets_the_daemon_refreshed(self) -> None:
+        self.formula_daemon(installed="1.2.0", latest="1.2.0", running="1.1.0", binary="1.1.0")
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), ["tailscaled root=1 install-system-daemon"])
+        self.assertEqual(self.state("daemon.running"), "1.2.0")
+
+    def test_a_daemon_path_that_links_to_the_formula_is_refreshed_when_the_process_is_still_the_old_release(self) -> None:
+        self.formula_daemon(installed="1.2.0", latest="1.2.0", running="1.1.0", link=True)
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), ["tailscaled root=1 install-system-daemon"])
+        self.assertEqual(self.state("daemon.running"), "1.2.0")
+
+    def test_a_missing_daemon_binary_is_put_back(self) -> None:
+        self.formula_daemon()
+        self.daemon_binary.unlink()
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), ["tailscaled root=1 install-system-daemon"])
+        self.assertTrue(self.daemon_binary.exists())
+
+    def test_a_daemon_that_does_not_answer_is_compared_by_its_binary_alone(self) -> None:
+        self.formula_daemon()
+        (self.stub / "daemon.up").unlink()
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), [])
+
+    def test_check_mode_reports_the_upgrade_and_the_refresh_and_makes_no_change(self) -> None:
+        self.formula_daemon(installed="1.1.0", latest="1.2.0")
+        result = self.update_role("--check")
+        self.ok(result)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.sudo_calls(), [], "a dry run needs no privilege")
+        self.assertEqual((self.state("formula.installed"), self.state("daemon.version")), ("1.1.0", "1.1.0"))
+        self.assertEqual(self.recap(result)["changed"], 2, result.stdout)
+        self.assertIn("tailscaled install-system-daemon, to run the formula's release", result.stdout)
+
+    def test_check_mode_with_everything_current_reports_nothing(self) -> None:
+        self.formula_daemon()
+        self.app()
+        result = self.update_role("--check")
+        self.ok(result)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_with_the_variable_false_nothing_is_asked_of_homebrew_or_the_daemon(self) -> None:
+        self.formula_daemon(installed="1.1.0", latest="1.2.0")
+        self.app(installed="1.1.0", latest="1.2.0")
+        self.set_power()
+        result = self.run_role(github_runner_macos_host_tailscale_update=False)
+        self.ok(result)
+        self.assertEqual(self.calls(), READS)
+        self.assertEqual((self.state("formula.installed"), self.state("cask.installed")), ("1.1.0", "1.1.0"))
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_the_standalone_app_is_upgraded_when_it_is_installed_as_the_cask(self) -> None:
+        self.formula_daemon()
+        self.app(installed="1.1.0", latest="1.2.0")
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), ["brew root=0 upgrade --cask tailscale-app"])
+        self.assertEqual(self.state("cask.installed"), "1.2.0")
+        self.assertIn("brew root=0 outdated --cask --greedy tailscale-app", self.calls())
+        self.assertEqual(self.recap(result)["changed"], 1, result.stdout)
+
+    def test_the_standalone_app_is_never_installed(self) -> None:
+        self.formula_daemon()
+        self.app(installed=None, latest="1.2.0")
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), [])
+        self.assertFalse((self.stub / "cask.installed").exists())
+        self.assertIn("brew root=0 list --cask tailscale-app", self.calls())
+
+    def test_check_mode_reports_the_app_upgrade_and_makes_no_call_that_changes_it(self) -> None:
+        self.formula_daemon()
+        self.app(installed="1.1.0", latest="1.2.0")
+        result = self.update_role("--check")
+        self.ok(result)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.state("cask.installed"), "1.1.0")
+        self.assertEqual(self.recap(result)["changed"], 1, result.stdout)
+
+    def test_the_app_alone_is_kept_current_beside_a_daemon_built_by_hand(self) -> None:
+        self.hand_built_daemon()
+        self.app(installed="1.1.0", latest="1.2.0")
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), ["brew root=0 upgrade --cask tailscale-app"])
+        self.assertFalse((self.stub / "formula.installed").exists())
+
+    def test_a_daemon_built_by_hand_with_no_formula_or_app_is_skipped_with_a_message(self) -> None:
+        self.hand_built_daemon()
+        result = self.update_role(github_runner_macos_host_tailscale_auth_key=AUTH_KEY)
+        self.ok(result)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.sudo_calls(), [])
+        self.assertIn("Tailscale is not updated", result.stdout)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_host_without_homebrew_is_skipped_and_the_run_does_not_fail(self) -> None:
+        self.hand_built_daemon()
+        (self.bin / "brew").unlink()
+        result = self.update_role()
+        self.ok(result)
+        self.assertIn("Tailscale is not updated", result.stdout)
+        self.assertEqual(self.writes(), [])
+
+    def test_a_first_install_gets_the_latest_release_from_the_install_and_is_not_upgraded_again(self) -> None:
+        (self.stub / "formula.latest").write_text("1.2.0")
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.writes(), ["brew root=0 install tailscale", "tailscaled root=1 install-system-daemon"])
+        self.assertEqual(self.state("daemon.version"), "1.2.0")
+
+    def test_the_update_never_logs_in_even_with_the_daemon_waiting_for_one(self) -> None:
+        self.formula_daemon(installed="1.1.0", latest="1.2.0")
+        (self.stub / "login.state").write_text("NeedsLogin")
+        result = self.update_role()
+        self.ok(result)
+        self.assertEqual(self.state("login.state"), "NeedsLogin")
+        self.assertFalse([call for call in self.calls() if call.startswith("tailscale ") and " up" in call])
 
     # Joining a tailnet.
 
