@@ -1,3 +1,15 @@
+## [2.17.0](https://github.com/ExaDev/github-runner/compare/v2.16.0...v2.17.0) (2026-11-02)
+
+### Features
+
+* **host-tools:** set shell environment variables from a mapping ([045e863](https://github.com/ExaDev/github-runner/commit/045e8638af9087cb25dc612b6cfdb884cedeb2f1))
+* **host-tools:** write npm and pnpm package-install security settings ([34351bb](https://github.com/ExaDev/github-runner/commit/34351bb693e2bd6864f9904b1178da7f46e5047c))
+
+### Code Refactoring
+
+* **host-tools:** drop a comment filter the npmrc key patterns made redundant ([ef94034](https://github.com/ExaDev/github-runner/commit/ef94034794030ad9ecda2ce31cae0d184d9b7efc))
+* **host-tools:** leave removal of the npmrc block to blockinfile's empty block ([e4d7849](https://github.com/ExaDev/github-runner/commit/e4d7849565885a67270aca5b8b71651d5805385e))
+
 ## [2.16.0](https://github.com/ExaDev/github-runner/compare/v2.15.0...v2.16.0) (2026-11-02)
 
 ### Features
