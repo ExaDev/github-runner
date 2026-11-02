@@ -1,3 +1,13 @@
+## [2.19.0](https://github.com/ExaDev/github-runner/compare/v2.18.3...v2.19.0) (2026-11-02)
+
+### Features
+
+* **cluster:** read a Colima profile's home from its Docker context ([0ef93e2](https://github.com/ExaDev/github-runner/commit/0ef93e23bc968b506496818027409b3002599f4e))
+
+### Bug Fixes
+
+* **cluster:** start a Colima profile in its own home at login ([22e8460](https://github.com/ExaDev/github-runner/commit/22e846069050560d7f117738e1d1a4b66c48982c))
+
 ## [2.18.3](https://github.com/ExaDev/github-runner/compare/v2.18.2...v2.18.3) (2026-11-02)
 
 ### Bug Fixes
