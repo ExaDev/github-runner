@@ -1,3 +1,10 @@
+## [2.16.0](https://github.com/ExaDev/github-runner/compare/v2.15.0...v2.16.0) (2026-11-02)
+
+### Features
+
+* **macos-host:** keep a Mac awake with its lid closed ([a5f4c85](https://github.com/ExaDev/github-runner/commit/a5f4c85f15b8fa6299350e7e12ae240649eb4d97))
+* **macos-host:** read whether sleep is disabled from pmset -g ([aa6eb04](https://github.com/ExaDev/github-runner/commit/aa6eb04b26f781e198f02586512739c666419e57))
+
 ## [2.15.0](https://github.com/ExaDev/github-runner/compare/v2.14.0...v2.15.0) (2026-11-02)
 
 ### Features
