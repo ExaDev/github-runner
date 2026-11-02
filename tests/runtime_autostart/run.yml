@@ -1,4 +1,4 @@
-# Runs the cluster role's runtime tasks (runtime.yml, then end_checks.yml, or one of them) through the role itself, as tasks/main.yml includes them on a macOS host, for tests/unit/test_runtime_autostart.py. The host's facts are stood in for by extra variables (runtime_system, runtime_uid, runtime_home), and the docker, colima, launchctl and plutil it calls are the test's stubs on PATH. The condition is the one tasks/main.yml puts on both includes, which the test checks is still there.
+# Runs the cluster role's runtime tasks (runtime.yml, then end_checks.yml, or one of them) through the role itself, as tasks/main.yml includes them on a macOS host, for tests/unit/test_runtime_autostart.py. The host's facts are stood in for by extra variables (runtime_system, runtime_uid, runtime_user, runtime_home), and the docker, colima, launchctl and plutil it calls are the test's stubs on PATH. The condition is the one tasks/main.yml puts on both includes, which the test checks is still there.
 - name: Run the cluster role's runtime tasks
   hosts: all
   connection: local
@@ -9,6 +9,7 @@
         ansible_facts:
           system: "{{ runtime_system }}"
           user_uid: "{{ runtime_uid }}"
+          user_id: "{{ runtime_user | default('example') }}"
           env:
             HOME: "{{ runtime_home }}"
 

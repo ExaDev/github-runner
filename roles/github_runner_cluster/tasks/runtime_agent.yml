@@ -1,0 +1,104 @@
+---
+# Colima hosts with github_runner_cluster_runtime_autostart on and github_runner_cluster_runtime_at_boot off (runtime.yml includes it). Installs the per-user launchd agent that starts the profile at every login and loads it into the user's login session, then retires the boot daemon of an earlier run, so the profile is started by one job only. The agent runs as the connecting user and none of this uses become, since a LaunchAgent belongs to the user whose login session loads it.
+
+- name: Create the connecting user's LaunchAgents directory
+  ansible.builtin.file:
+    path: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents"
+    state: directory
+    mode: "0755"
+
+- name: Install the launchd agent that starts the Colima profile at login
+  # The label is per profile, so two profiles on one host get two agents. plutil rejects a malformed property list before it replaces the installed one, since launchd would otherwise fail to load the agent at the next login with nobody watching. The task's environment gives plutil the same PATH as the agent.
+  ansible.builtin.template:
+    src: colima-launchd.plist.j2
+    dest: "{{ github_runner_cluster_runtime_agent_plist }}"
+    mode: "0644"
+    validate: plutil -lint %s
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_agent
+
+- name: Read whether the user has a login session to load the agent into
+  # gui/<uid> exists only while that user is logged in at the console. Without it the agent cannot be loaded now, and launchd loads it at the next login, which is all it is for.
+  ansible.builtin.command:
+    argv: [launchctl, print, "gui/{{ ansible_facts['user_uid'] }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_session
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read whether the agent is loaded
+  ansible.builtin.command:
+    argv: [launchctl, print, "gui/{{ ansible_facts['user_uid'] }}/{{ github_runner_cluster_runtime_launchd_label }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_loaded
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Unload the agent so that its new definition is read
+  # launchd keeps the definition it loaded, whatever the file says now.
+  ansible.builtin.command:
+    argv: [launchctl, bootout, "gui/{{ ansible_facts['user_uid'] }}/{{ github_runner_cluster_runtime_launchd_label }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  changed_when: true
+  when:
+    - github_runner_cluster_runtime_agent is changed
+    - github_runner_cluster_runtime_session.rc == 0
+    - github_runner_cluster_runtime_loaded.rc == 0
+
+- name: Load the agent into the user's login session
+  # Loading runs it once (RunAtLoad), which finds the profile already started above and does nothing.
+  ansible.builtin.command:
+    argv:
+      - launchctl
+      - bootstrap
+      - "gui/{{ ansible_facts['user_uid'] }}"
+      - "{{ github_runner_cluster_runtime_agent_plist }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  changed_when: true
+  when:
+    - github_runner_cluster_runtime_session.rc == 0
+    - github_runner_cluster_runtime_loaded.rc != 0 or github_runner_cluster_runtime_agent is changed
+
+- name: Say that the agent waits for the next login
+  ansible.builtin.debug:
+    msg: >-
+      The connecting user has no login session on {{ inventory_hostname }}, so launchd cannot load
+      {{ github_runner_cluster_runtime_launchd_label }} now. It is installed and loads at the next login.
+  when: github_runner_cluster_runtime_session.rc != 0
+
+- name: Look for a boot daemon of this profile from an earlier run
+  # Present only on a host whose profile was started at boot before it was set to start at login. Read from the file alone, so a host that never had one makes no launchctl call.
+  ansible.builtin.stat:
+    path: "{{ github_runner_cluster_runtime_daemon_plist }}"
+    get_checksum: false
+  register: github_runner_cluster_runtime_retired_daemon
+
+- name: Read whether that daemon is loaded
+  ansible.builtin.command:
+    argv: [launchctl, print, "system/{{ github_runner_cluster_runtime_launchd_label }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_retired_daemon_loaded
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: github_runner_cluster_runtime_retired_daemon.stat.exists
+
+- name: Unload that daemon
+  # Unloading a daemon whose job has finished stops nothing: the VM it started runs on, detached from it (AbandonProcessGroup).
+  become: true
+  ansible.builtin.command:
+    argv: [launchctl, bootout, "system/{{ github_runner_cluster_runtime_launchd_label }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  changed_when: true
+  when:
+    - github_runner_cluster_runtime_retired_daemon.stat.exists
+    - github_runner_cluster_runtime_retired_daemon_loaded.rc == 0
+
+- name: Remove that daemon's property list
+  become: true
+  ansible.builtin.file:
+    path: "{{ github_runner_cluster_runtime_daemon_plist }}"
+    state: absent
+  when: github_runner_cluster_runtime_retired_daemon.stat.exists
