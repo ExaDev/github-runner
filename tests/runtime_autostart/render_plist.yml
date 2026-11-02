@@ -7,6 +7,8 @@
     - ../../roles/github_runner_cluster/defaults/main.yml
   vars:
     docker_context: colima
+    # What tasks/runtime.yml works out; a test passes its own.
+    github_runner_cluster_runtime_colima_home: ""
     ansible_facts:
       env:
         HOME: /Users/example

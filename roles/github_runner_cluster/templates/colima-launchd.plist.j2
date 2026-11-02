@@ -18,9 +18,9 @@
   <dict>
     <key>PATH</key>
     <string>{{ github_runner_cluster_runtime_path | e }}</string>
-{% if github_runner_cluster_colima_home | length > 0 %}
+{% if github_runner_cluster_runtime_colima_home | length > 0 %}
     <key>COLIMA_HOME</key>
-    <string>{{ github_runner_cluster_colima_home | e }}</string>
+    <string>{{ github_runner_cluster_runtime_colima_home | e }}</string>
 {% endif %}
   </dict>
   <key>RunAtLoad</key>
