@@ -34,11 +34,23 @@ argument_specs:
       github_runner_linux_host_wifi_powersave_off:
         type: bool
         default: false
-        description: Whether NetworkManager is told not to power-save Wi-Fi (wifi.powersave = 2), as the default for every connection and on the radio now.
+        description: Whether the host's Wi-Fi is kept from power saving, through NetworkManager (wifi.powersave = 2, as the default for every connection) when it manages a Wi-Fi device, else through a udev rule and a systemd unit that run iw for each Wi-Fi interface when systemd-networkd is running, and on the radio now. Fails when neither manages a Wi-Fi device.
       github_runner_linux_host_networkmanager_dropin:
         type: path
         default: /etc/NetworkManager/conf.d/zz-github-runner-wifi-powersave.conf
         description: Where the NetworkManager drop-in goes. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_sysfs_net_dir:
+        type: path
+        default: /sys/class/net
+        description: Where the sysfs network class is read for the host's Wi-Fi devices. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_wifi_udev_rule:
+        type: path
+        default: /etc/udev/rules.d/90-github-runner-wifi-powersave.rules
+        description: Where the udev rule goes that starts the power save unit for each Wi-Fi interface under systemd-networkd. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_wifi_powersave_unit:
+        type: path
+        default: /etc/systemd/system/github-runner-wifi-powersave@.service
+        description: Where the power save unit template goes, whose name must end in @.service. Not a setting, and a variable only so the tests can point it at a stand-in.
       github_runner_linux_host_k3s_prerequisites:
         type: bool
         default: false

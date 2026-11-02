@@ -1,0 +1,16 @@
+# Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand: change this host's variables and run the role again.
+
+[Unit]
+
+Description=Switch Wi-Fi power save off on %i
+# The instance is the interface's name, as the udev rule names it. The device unit for it exists once udev has finished with the interface, and the service goes when the interface does, so it runs again when the interface comes back.
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+
+
+[Service]
+
+Type=oneshot
+RemainAfterExit=yes
+# A file name without a slash is looked for in systemd's own PATH (systemd.service, "Command lines").
+ExecStart=iw dev %i set power_save off

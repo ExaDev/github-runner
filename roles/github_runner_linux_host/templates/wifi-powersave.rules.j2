@@ -1,0 +1,4 @@
+# Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand: change this host's variables and run the role again.
+#
+# Has systemd start the power save unit for each Wi-Fi interface (cfg80211 gives its network devices DEVTYPE wlan) when the interface appears. $name is the interface's name after any rename, which is what systemd names its device unit by (99-systemd.rules sets SYSTEMD_ALIAS from it). The tag is what makes systemd read SYSTEMD_WANTS at all, and is also set by 99-systemd.rules.
+ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", TAG+="systemd", ENV{SYSTEMD_WANTS}+="{{ github_runner_linux_host_wifi_powersave_unit | basename | replace('@.service', '@$name.service') }}"

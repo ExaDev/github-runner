@@ -1,90 +1,67 @@
 ---
-# Tells NetworkManager not to power-save Wi-Fi, as a drop-in that sets the default for every connection that does not set its own (which NetworkManager applies each time it activates a connection), and switches power save off on the radio now. Does nothing on a host that has no Wi-Fi device, and fails on one without NetworkManager (the setting is explicitly asked for). Idempotent, and under --check the change is reported and not made.
+# Keeps Wi-Fi from power saving, through whichever network stack manages the host's Wi-Fi device: NetworkManager (wifi_powersave_networkmanager.yml) when it manages one, else systemd-networkd (wifi_powersave_networkd.yml) when it is running and the kernel has a Wi-Fi device. Does nothing on a host that has no Wi-Fi device and a stack that answers, and fails on a host where neither stack manages a Wi-Fi device (the setting is explicitly asked for). Idempotent, and under --check the change is reported and not made.
 
-- name: Read the host's Wi-Fi devices
-  # The devices NetworkManager manages whose type is wifi, one per line; a host without NetworkManager has no nmcli, which is reported below.
+- name: Read the host's Wi-Fi devices from NetworkManager
+  # The devices NetworkManager lists with their type and state, one per line. A device it lists as unmanaged is not its to configure, and a host without NetworkManager has no nmcli, which is reported below.
   ansible.builtin.command:
-    argv: [nmcli, --terse, --fields, "DEVICE,TYPE", device, status]
+    argv: [nmcli, --terse, --fields, "DEVICE,TYPE,STATE", device, status]
   register: github_runner_linux_host_devices
   changed_when: false
   failed_when: false
   check_mode: false
 
-- name: Fail if the host has no NetworkManager
+- name: Read the host's Wi-Fi devices from the kernel
+  # cfg80211 links every wireless network device to its phy as phy80211, whichever driver it has and whatever name it was given.
+  ansible.builtin.command:
+    argv: [find, -L, "{{ github_runner_linux_host_sysfs_net_dir }}", -mindepth, "2", -maxdepth, "2", -name, phy80211]
+  register: github_runner_linux_host_kernel_devices
+  changed_when: false
+  check_mode: false
+
+- name: Read whether systemd-networkd is running
+  ansible.builtin.command:
+    argv: [systemctl, is-active, systemd-networkd.service]
+  register: github_runner_linux_host_networkd
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Work out which stack manages the Wi-Fi
+  ansible.builtin.set_fact:
+    github_runner_linux_host_networkmanager_wifi_devices: "{{ github_runner_linux_host_devices.stdout_lines | map('split', ':') | selectattr('1', 'equalto', 'wifi') | rejectattr('2', 'equalto', 'unmanaged') | map('first') | list }}"
+    github_runner_linux_host_kernel_wifi_devices: "{{ github_runner_linux_host_kernel_devices.stdout_lines | map('dirname') | map('basename') | list }}"
+    github_runner_linux_host_networkd_running: "{{ github_runner_linux_host_networkd.stdout | trim == 'active' }}"
+    github_runner_linux_host_networkmanager_answered: "{{ github_runner_linux_host_devices.rc | default(1) == 0 }}"
+
+- name: Choose the stack
+  ansible.builtin.set_fact:
+    github_runner_linux_host_wifi_stack: >-
+      {{ 'networkmanager' if github_runner_linux_host_networkmanager_wifi_devices | length > 0
+      else 'networkd' if github_runner_linux_host_kernel_wifi_devices | length > 0 and github_runner_linux_host_networkd_running
+      else 'none' }}
+
+- name: Fail if no network stack manages a Wi-Fi device
   ansible.builtin.fail:
     msg: >-
-      github_runner_linux_host_wifi_powersave_off is true, but nmcli did not answer on {{ inventory_hostname }}
-      ({{ github_runner_linux_host_devices.msg | default(github_runner_linux_host_devices.stderr) | default('no output') | trim }});
-      the setting is NetworkManager's. Nothing was changed.
-  when: github_runner_linux_host_devices.rc | default(1) != 0
-
-- name: Work out the Wi-Fi devices
-  ansible.builtin.set_fact:
-    github_runner_linux_host_wifi_devices: "{{ github_runner_linux_host_devices.stdout_lines | select('match', '^[^:]+:wifi$') | map('split', ':') | map('first') | list }}"
+      github_runner_linux_host_wifi_powersave_off is true, but neither NetworkManager nor systemd-networkd manages a Wi-Fi device on {{ inventory_hostname }}
+      (nmcli: {{ 'answered, no managed Wi-Fi device' if github_runner_linux_host_networkmanager_answered else github_runner_linux_host_devices.stderr | default(github_runner_linux_host_devices.msg, true) | default('no output', true) | trim }};
+      systemd-networkd: {{ github_runner_linux_host_networkd.stdout | trim | default('unknown', true) }};
+      Wi-Fi devices the kernel has: {{ github_runner_linux_host_kernel_wifi_devices | join(', ') | default('none', true) }}).
+      Nothing was changed.
+  when:
+    - github_runner_linux_host_wifi_stack == 'none'
+    - >-
+      github_runner_linux_host_kernel_wifi_devices | length > 0
+      or not (github_runner_linux_host_networkmanager_answered or github_runner_linux_host_networkd_running)
 
 - name: Tell NetworkManager not to power-save Wi-Fi
-  when: github_runner_linux_host_wifi_devices | length > 0
-  block:
-    - name: Create the directory of the NetworkManager drop-in
-      become: true
-      ansible.builtin.file:
-        path: "{{ github_runner_linux_host_networkmanager_dropin | dirname }}"
-        state: directory
-        mode: "0755"
+  vars:
+    github_runner_linux_host_wifi_devices: "{{ github_runner_linux_host_networkmanager_wifi_devices }}"
+  ansible.builtin.include_tasks: wifi_powersave_networkmanager.yml
+  when: github_runner_linux_host_wifi_stack == 'networkmanager'
 
-    - name: Write the drop-in
-      become: true
-      ansible.builtin.copy:
-        content: |
-          # Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand.
-          # 2 is NM_SETTING_WIRELESS_POWERSAVE_DISABLE. The name sorts after default-wifi-powersave-on.conf, which sets 3.
-          [connection]
-          wifi.powersave = 2
-        dest: "{{ github_runner_linux_host_networkmanager_dropin }}"
-        mode: "0644"
-      register: github_runner_linux_host_networkmanager
-
-    - name: Make NetworkManager read the drop-in
-      become: true
-      ansible.builtin.command:
-        argv: [nmcli, general, reload, conf]
-      changed_when: true
-      when:
-        - github_runner_linux_host_networkmanager is changed
-        - not ansible_check_mode
-
-    - name: Read whether each Wi-Fi device is power saving now
-      # `nmcli device reapply` and the reload above leave a running radio as it is: NetworkManager sets power save when it activates a connection. iw reads and sets it on the radio itself, with no change to the link, so an SSH session over it survives. A host without iw is reported below.
-      ansible.builtin.command:
-        argv: [iw, dev, "{{ item }}", get, power_save]
-      loop: "{{ github_runner_linux_host_wifi_devices }}"
-      register: github_runner_linux_host_power_save
-      changed_when: false
-      failed_when: false
-      check_mode: false
-
-    - name: Switch power save off on each Wi-Fi device that has it on
-      become: true
-      ansible.builtin.command:
-        argv: [iw, dev, "{{ item.item }}", set, power_save, "off"]
-      loop: "{{ github_runner_linux_host_power_save.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'search', 'Power save: on') | list }}"
-      loop_control:
-        label: "{{ item.item }}"
-      changed_when: true
-      when: not ansible_check_mode
-
-    - name: Report the devices a real run would switch power save off on
-      ansible.builtin.debug:
-        msg: "iw dev {{ item.item }} set power_save off"
-      loop: "{{ github_runner_linux_host_power_save.results | selectattr('rc', 'equalto', 0) | selectattr('stdout', 'search', 'Power save: on') | list }}"
-      loop_control:
-        label: "{{ item.item }}"
-      changed_when: true
-      when: ansible_check_mode
-
-    - name: Say that the radio could not be read, so the setting applies when NetworkManager next activates the connection
-      ansible.builtin.debug:
-        msg: "iw cannot read {{ item.item }}'s power save ({{ item.msg | default(item.stderr) | default('no output') | trim }}); the drop-in applies when NetworkManager next activates its connection, or after a reboot."
-      loop: "{{ github_runner_linux_host_power_save.results | rejectattr('rc', 'equalto', 0) | list }}"
-      loop_control:
-        label: "{{ item.item }}"
+- name: Keep Wi-Fi from power saving under systemd-networkd
+  vars:
+    github_runner_linux_host_wifi_devices: "{{ github_runner_linux_host_kernel_wifi_devices }}"
+  ansible.builtin.include_tasks: wifi_powersave_networkd.yml
+  when: github_runner_linux_host_wifi_stack == 'networkd'

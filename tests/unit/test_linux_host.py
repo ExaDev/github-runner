@@ -1,4 +1,4 @@
-"""Tests the github_runner_linux_host role: its defaults, argument specs and README, and its tasks (tests/linux_host/run.yml) against stand-ins for systemctl, nmcli, iw, modprobe, sysctl, apt-get, dpkg-query, uname and shutdown on PATH, with every file the role writes or reads redirected, so that no real target, drop-in, radio, module, package or reboot is touched."""
+"""Tests the github_runner_linux_host role: its defaults, argument specs and README, and its tasks (tests/linux_host/run.yml) against stand-ins for systemctl, nmcli, iw, udevadm, modprobe, sysctl, apt-get, dpkg-query, uname and shutdown on PATH, with every file the role writes or reads redirected, so that no real target, drop-in, radio, module, package or reboot is touched."""
 
 from __future__ import annotations
 
@@ -129,14 +129,24 @@ class Harness(unittest.TestCase):
         self.sys_module = self.host / "sys" / "module"
         self.power_supply = self.host / "sys" / "class" / "power_supply"
         self.battery_unit = self.host / "etc" / "systemd" / "system" / "github-runner-battery-charge-limit.service"
+        self.sysfs_net = self.host / "sys" / "class" / "net"
+        self.wifi_unit = self.host / "etc" / "systemd" / "system" / "github-runner-wifi-powersave@.service"
+        self.wifi_rule = self.host / "etc" / "udev" / "rules.d" / "90-github-runner-wifi-powersave.rules"
         self.apt_file = self.host / "etc" / "apt" / "apt.conf.d" / "52github-runner-unattended-upgrades"
         self.reboot_required = self.host / "var" / "run" / "reboot-required"
         # Directories every host has already: the role puts files in them and creates no others of the system's.
-        for path in (self.sys_module, self.power_supply, self.reboot_required.parent, self.battery_unit.parent, self.modules_file.parent, self.sysctl_file.parent, self.apt_file.parent):
+        for path in (self.sys_module, self.power_supply, self.sysfs_net, self.reboot_required.parent, self.battery_unit.parent, self.wifi_rule.parent, self.modules_file.parent, self.sysctl_file.parent, self.apt_file.parent):
             path.mkdir(parents=True, exist_ok=True)
         self.make_stand_ins()
-        (self.state / "devices").write_text("wlp2s0:wifi\ntailscale0:tun\nlo:loopback\np2p-dev-wlp2s0:wifi-p2p\n")
+        (self.state / "devices").write_text("wlp2s0:wifi:connected\ntailscale0:tun:unmanaged\nlo:loopback:unmanaged\np2p-dev-wlp2s0:wifi-p2p:disconnected\n")
         (self.state / "power-save-wlp2s0").touch()
+        self.add_kernel_wifi_device("wlp2s0")
+
+    def add_kernel_wifi_device(self, name: str) -> None:
+        """Gives the stand-in sysfs a wireless network device, as cfg80211 does with its phy80211 link, and a wired one beside it that has none."""
+        (self.sysfs_net / name).mkdir(parents=True, exist_ok=True)
+        (self.sysfs_net / name / "phy80211").touch()
+        (self.sysfs_net / "enp3s0").mkdir(exist_ok=True)
 
     def make_stand_ins(self) -> None:
         log = 'echo "$(basename "$0") $*" >> "$STUB/calls.log"\n'
@@ -179,6 +189,7 @@ case "$3" in
   set) rm -f "$STUB/state/power-save-$device" ;;
 esac
 """)
+        stand_in(bin_dir / "udevadm", log)
         stand_in(bin_dir / "modprobe", log + r"""touch "$STUB/sys-module-$2"
 mkdir -p "$SYS_MODULE" && touch "$SYS_MODULE/$2"
 """)
@@ -196,6 +207,7 @@ esac
 simulate=no; for argument in "$@"; do [ "$argument" = --simulate ] && simulate=yes; done
 case " $* " in
   *" install "*unattended-upgrades*) [ "$simulate" = yes ] || touch "$state/package-unattended-upgrades" ;;
+  *" install "*" iw "*) [ "$simulate" = yes ] || touch "$state/package-iw" ;;
   *" install "*"--only-upgrade tailscale "*)
     if [ "$simulate" = no ] && [ -e "$state/tailscale-candidate" ]; then cp "$state/tailscale-candidate" "$state/tailscale-installed"; fi ;;
   *" dist-upgrade"*)
@@ -226,6 +238,7 @@ case "$2$4" in *"("*) echo "dpkg: error: version '(none)' has bad syntax" >&2; e
         stand_in(bin_dir / "dpkg-query", r"""case "$*" in
   *tailscale*) if [ -e "$STUB/state/tailscale-installed" ]; then printf 'ii '; else exit 1; fi ;;
   *unattended-upgrades*) if [ -e "$STUB/state/package-unattended-upgrades" ]; then printf 'ii '; else exit 1; fi ;;
+  *iw*) if [ -e "$STUB/state/package-iw" ]; then printf 'ii '; else exit 1; fi ;;
 esac
 """)
         # Stands in for the sudo that become runs, so that a test can see which tasks asked for privilege: it logs, then runs the command it was given as the connecting user.
@@ -243,6 +256,9 @@ exec "$@"
             "ansible_become": False,
             "github_runner_linux_host_logind_dropin": str(self.logind),
             "github_runner_linux_host_networkmanager_dropin": str(self.networkmanager),
+            "github_runner_linux_host_sysfs_net_dir": str(self.sysfs_net),
+            "github_runner_linux_host_wifi_udev_rule": str(self.wifi_rule),
+            "github_runner_linux_host_wifi_powersave_unit": str(self.wifi_unit),
             "github_runner_linux_host_modules_load_file": str(self.modules_file),
             "github_runner_linux_host_sysctl_file": str(self.sysctl_file),
             "github_runner_linux_host_sys_module_dir": str(self.sys_module),
@@ -279,7 +295,7 @@ exec "$@"
         return log.read_text().splitlines() if log.exists() else []
 
     def changes(self) -> list[str]:
-        return [call for call in self.calls() if re.match(r"^(systemctl (mask|kill|enable|disable|stop|set-default)|nmcli general|iw dev \S+ set|modprobe|sysctl -w|apt-get|shutdown)", call)]
+        return [call for call in self.calls() if re.match(r"^(systemctl (mask|kill|enable|disable|stop|set-default|daemon-reload)|nmcli general|iw dev \S+ set|udevadm|modprobe|sysctl -w|apt-get|shutdown)", call)]
 
     def changed(self, result: subprocess.CompletedProcess[str]) -> int:
         return int(re.search(r"changed=(\d+)", result.stdout).group(1))  # type: ignore[union-attr]
@@ -343,18 +359,40 @@ class RoleTest(Harness):
         self.assertEqual([call for call in self.calls()[before:] if re.match(r"^(nmcli general|iw dev \S+ set)", call)], [])
 
     def test_a_host_without_a_wifi_device_is_left_alone(self) -> None:
-        (self.state / "devices").write_text("enp3s0:ethernet\nlo:loopback\n")
+        (self.state / "devices").write_text("enp3s0:ethernet:connected\nlo:loopback:unmanaged\n")
+        shutil.rmtree(self.sysfs_net / "wlp2s0")
         result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.networkmanager.exists())
         self.assertEqual(self.changes(), [])
 
-    def test_a_host_without_networkmanager_is_refused_since_the_setting_was_asked_for(self) -> None:
+    def test_a_host_where_neither_stack_manages_a_wifi_device_is_refused_since_the_setting_was_asked_for(self) -> None:
         (self.state / "no-networkmanager").touch()
         result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("nmcli did not answer", re.sub(r"\s+", " ", result.stdout))
-        self.assertFalse(self.networkmanager.exists())
+        message = re.sub(r"\s+", " ", result.stdout)
+        self.assertIn("neither NetworkManager nor systemd-networkd manages a Wi-Fi device", message)
+        self.assertIn("nmcli: nmcli: not running", message)
+        self.assertIn("systemd-networkd: inactive", message)
+        self.assertIn("Wi-Fi devices the kernel has: wlp2s0", message)
+        self.assertFalse(self.networkmanager.exists() or self.wifi_unit.exists() or self.wifi_rule.exists())
+        self.assertEqual(self.changes(), [])
+
+    def test_a_host_with_no_stack_at_all_is_refused_even_without_a_wifi_device(self) -> None:
+        (self.state / "no-networkmanager").touch()
+        shutil.rmtree(self.sysfs_net / "wlp2s0")
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("neither NetworkManager nor systemd-networkd manages a Wi-Fi device", re.sub(r"\s+", " ", result.stdout))
+        self.assertEqual(self.changes(), [])
+
+    def test_networkmanager_alone_decides_when_it_manages_a_wifi_device_even_if_networkd_is_running(self) -> None:
+        (self.state / "active-systemd-networkd.service").touch()
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.networkmanager.is_file())
+        self.assertFalse(self.wifi_unit.exists() or self.wifi_rule.exists())
+        self.assertEqual(self.changes(), ["nmcli general reload conf", "iw dev wlp2s0 set power_save off"])
 
     def test_a_host_without_iw_gets_the_drop_in_and_is_told_the_radio_was_not_changed(self) -> None:
         (self.state / "no-iw").touch()
@@ -362,6 +400,111 @@ class RoleTest(Harness):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.networkmanager.is_file())
         self.assertIn("the drop-in applies when NetworkManager next activates its connection", re.sub(r"\s+", " ", result.stdout))
+
+    def networkd_host(self, device: str = "wifi0") -> None:
+        """Makes the host one without NetworkManager that runs systemd-networkd, with its one Wi-Fi interface named as a .link file would."""
+        (self.state / "no-networkmanager").touch()
+        (self.state / "active-systemd-networkd.service").touch()
+        shutil.rmtree(self.sysfs_net / "wlp2s0")
+        self.add_kernel_wifi_device(device)
+        (self.state / f"power-save-{device}").touch()
+
+    def test_wifi_power_save_under_networkd_is_a_udev_rule_a_unit_iw_and_the_radio_now(self) -> None:
+        self.networkd_host()
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["apt-get install --yes --no-install-recommends iw", "systemctl daemon-reload", "udevadm control --reload", "iw dev wifi0 set power_save off"])
+        self.assertFalse(self.networkmanager.exists())
+        unit = self.wifi_unit.read_text()
+        self.assertIn("\nBindsTo=sys-subsystem-net-devices-%i.device\n", unit)
+        self.assertIn("\nAfter=sys-subsystem-net-devices-%i.device\n", unit)
+        self.assertIn("\nType=oneshot\n", unit)
+        self.assertIn("\nExecStart=iw dev %i set power_save off\n", unit)
+        rule = self.wifi_rule.read_text()
+        self.assertIn('ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", TAG+="systemd", ENV{SYSTEMD_WANTS}+="github-runner-wifi-powersave@$name.service"\n', rule)
+        self.assertEqual((stat.S_IMODE(self.wifi_unit.stat().st_mode), stat.S_IMODE(self.wifi_rule.stat().st_mode)), (0o644, 0o644))
+        self.assertFalse((self.state / "power-save-wifi0").exists())
+
+    def test_a_second_networkd_run_changes_nothing(self) -> None:
+        self.networkd_host()
+        self.assertEqual(self.run_role(github_runner_linux_host_wifi_powersave_off=True).returncode, 0)
+        before = len(self.calls())
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if re.match(r"^(apt-get|udevadm|systemctl daemon-reload|iw dev \S+ set)", call)], [])
+
+    def test_networkd_installs_nothing_when_iw_is_already_there(self) -> None:
+        self.networkd_host()
+        (self.state / "package-iw").touch()
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["systemctl daemon-reload", "udevadm control --reload", "iw dev wifi0 set power_save off"])
+
+    def test_every_wifi_interface_the_kernel_has_is_switched_and_a_wired_one_is_not(self) -> None:
+        self.networkd_host()
+        self.add_kernel_wifi_device("wlan1")
+        (self.state / "power-save-wlan1").touch()
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(call for call in self.changes() if call.startswith("iw ")), ["iw dev wifi0 set power_save off", "iw dev wlan1 set power_save off"])
+
+    def test_a_networkd_radio_already_off_is_left_and_the_unit_and_rule_are_still_written(self) -> None:
+        self.networkd_host()
+        (self.state / "power-save-wifi0").unlink()
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.changes() if call.startswith("iw ")], [])
+        self.assertTrue(self.wifi_unit.is_file() and self.wifi_rule.is_file())
+
+    def test_a_networkd_check_run_reports_each_change_and_makes_none(self) -> None:
+        self.networkd_host()
+        result = self.run_role(check=True, github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.wifi_unit.exists() or self.wifi_rule.exists())
+        self.assertIn("apt-get install iw", result.stdout)
+        self.assertEqual([call for call in self.calls() if call.startswith("iw ")], [])
+
+    def test_a_networkd_check_run_with_iw_installed_reports_the_radio(self) -> None:
+        self.networkd_host()
+        (self.state / "package-iw").touch()
+        result = self.run_role(check=True, github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertIn("iw dev wifi0 set power_save off", result.stdout)
+
+    def test_a_networkd_host_without_a_wifi_device_is_left_alone(self) -> None:
+        self.networkd_host()
+        shutil.rmtree(self.sysfs_net / "wifi0")
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.wifi_unit.exists() or self.wifi_rule.exists())
+
+    def test_a_wifi_device_networkmanager_lists_as_unmanaged_is_left_to_networkd(self) -> None:
+        (self.state / "devices").write_text("wlp2s0:wifi:unmanaged\nlo:loopback:unmanaged\n")
+        (self.state / "active-systemd-networkd.service").touch()
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.networkmanager.exists())
+        self.assertTrue(self.wifi_unit.is_file() and self.wifi_rule.is_file())
+        self.assertIn("iw dev wlp2s0 set power_save off", self.changes())
+
+    def test_networkd_refuses_a_host_without_apt_before_changing_anything(self) -> None:
+        self.networkd_host()
+        result = self.run_role(os_family="RedHat", github_runner_linux_host_wifi_powersave_off=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs iw on a host without NetworkManager, installed with apt", re.sub(r"\s+", " ", result.stdout))
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.wifi_unit.exists() or self.wifi_rule.exists())
+
+    def test_networkd_fails_when_iw_cannot_read_the_radio_rather_than_leaving_it_unchanged(self) -> None:
+        self.networkd_host()
+        (self.state / "no-iw").touch()
+        result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("iw cannot read wifi0's power save", re.sub(r"\s+", " ", result.stdout))
 
     def test_a_host_that_is_not_linux_is_left_alone(self) -> None:
         result = self.run_role(system="Darwin", github_runner_linux_host_keep_awake=True, github_runner_linux_host_wifi_powersave_off=True)

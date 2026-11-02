@@ -17,10 +17,14 @@ github_runner_linux_host_lid_switch_settings:
 # Not settings: where the logind drop-in goes, which systemd-logind reads on top of /etc/systemd/logind.conf. Variables only so the tests can point it at a stand-in.
 github_runner_linux_host_logind_dropin: /etc/systemd/logind.conf.d/90-github-runner-keep-awake.conf
 
-# Whether NetworkManager is told not to power-save Wi-Fi (wifi.powersave = 2, disable). A Wi-Fi radio in power-save mode sleeps between beacons and drops or delays packets, which on a node of the cluster shows as the node flapping NotReady; it matters only for a host that is on Wi-Fi, and does nothing to a host without a Wi-Fi device. It sets the default for every connection that does not set its own, and applies to the radio now.
+# Whether the host's Wi-Fi is kept from power saving. A Wi-Fi radio in power-save mode sleeps between beacons and drops or delays packets, which on a node of the cluster shows as the node flapping NotReady; it matters only for a host that is on Wi-Fi, and does nothing to a host without a Wi-Fi device. On a host whose Wi-Fi NetworkManager manages, NetworkManager is told not to (wifi.powersave = 2, disable) for every connection that does not set its own; on a host without NetworkManager that runs systemd-networkd, a udev rule and a systemd unit run `iw dev <interface> set power_save off` for each Wi-Fi interface when it appears, and iw is installed. Both apply to the radio now. A host where neither stack manages a Wi-Fi device fails.
 github_runner_linux_host_wifi_powersave_off: false
 # Not settings: where the NetworkManager drop-in goes. The name sorts after Ubuntu's default-wifi-powersave-on.conf (wifi.powersave = 3), because NetworkManager reads its configuration files in alphabetical order and the last one to set a value wins. Variables only so the tests can point them at a stand-in.
 github_runner_linux_host_networkmanager_dropin: /etc/NetworkManager/conf.d/zz-github-runner-wifi-powersave.conf
+# Not settings: where the sysfs network class is read for the host's Wi-Fi devices, and where the udev rule and the systemd unit template of the systemd-networkd path go. The unit's name must end in @.service, since the rule instantiates it for each interface. Variables only so the tests can point them at a stand-in.
+github_runner_linux_host_sysfs_net_dir: /sys/class/net
+github_runner_linux_host_wifi_udev_rule: /etc/udev/rules.d/90-github-runner-wifi-powersave.rules
+github_runner_linux_host_wifi_powersave_unit: /etc/systemd/system/github-runner-wifi-powersave@.service
 
 # What k3s needs of the kernel (https://docs.k3s.io/installation/requirements and the sysctls kube-proxy and the CNI plugins rely on). true loads the kernel modules now and at boot (a modules-load.d file), and sets the sysctls now and at boot (a sysctl.d file). k3s loads the modules and sets some of the sysctls itself when it starts, but the bridge ones only exist once br_netfilter is loaded, and a host that sets them before k3s starts does not depend on that.
 github_runner_linux_host_k3s_prerequisites: false
