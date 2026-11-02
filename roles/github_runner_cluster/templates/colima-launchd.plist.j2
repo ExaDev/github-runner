@@ -1,10 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+{% if github_runner_cluster_runtime_at_boot | bool %}
+<!-- Managed by the github_runner_cluster role of the exadev.github_runner collection: changes are overwritten on its next run. Starts the Colima profile when the Mac starts, as the user named below, with nobody logged in; starting a profile that already runs does nothing. -->
+{% else %}
 <!-- Managed by the github_runner_cluster role of the exadev.github_runner collection: changes are overwritten on its next run. Starts the Colima profile at login; starting a profile that already runs does nothing. -->
+{% endif %}
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>{{ github_runner_cluster_runtime_launchd_label | e }}</string>
+{% if github_runner_cluster_runtime_at_boot | bool %}
+  <key>UserName</key>
+  <string>{{ ansible_facts['user_id'] | e }}</string>
+{% endif %}
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/env</string>
@@ -18,6 +26,10 @@
   <dict>
     <key>PATH</key>
     <string>{{ github_runner_cluster_runtime_path | e }}</string>
+{% if github_runner_cluster_runtime_at_boot | bool %}
+    <key>HOME</key>
+    <string>{{ ansible_facts['env']['HOME'] | e }}</string>
+{% endif %}
 {% if github_runner_cluster_runtime_colima_home | length > 0 %}
     <key>COLIMA_HOME</key>
     <string>{{ github_runner_cluster_runtime_colima_home | e }}</string>

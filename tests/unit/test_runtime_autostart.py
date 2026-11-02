@@ -1,11 +1,13 @@
-"""Tests for how the cluster role keeps a macOS host's container runtime running across reboots: the launchd agent template (tests/runtime_autostart/render_plist.yml), the variable defaults, the macOS-only guard in tasks/main.yml, and tasks/runtime.yml and tasks/end_checks.yml run through the role (tests/runtime_autostart/run.yml) against stand-ins for docker, colima, launchctl and plutil."""
+"""Tests for how the cluster role keeps a macOS host's container runtime running across reboots: the launchd agent and daemon template (tests/runtime_autostart/render_plist.yml), the variable defaults, the macOS-only guard in tasks/main.yml, and tasks/runtime.yml and tasks/end_checks.yml run through the role (tests/runtime_autostart/run.yml) against stand-ins for docker, colima, launchctl, plutil and sudo."""
 
 from __future__ import annotations
 
+import grp
 import json
 import os
 import platform
 import plistlib
+import pwd
 import re
 import shutil
 import subprocess
@@ -65,6 +67,16 @@ class DefaultsTest(unittest.TestCase):
         self.assertTrue(plist.startswith("{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/"))
         self.assertTrue(plist.endswith("{{ github_runner_cluster_runtime_launchd_label }}.plist"))
 
+    def test_the_node_profile_starts_at_boot_and_any_other_at_login_unless_a_host_says_so(self) -> None:
+        self.assertEqual(DEFAULTS["github_runner_cluster_runtime_autostart_at"], "auto")
+        self.assertEqual(DEFAULTS["github_runner_cluster_runtime_boot_profile"], "node")
+        spec = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())["argument_specs"]["main"]["options"]["github_runner_cluster_runtime_autostart_at"]
+        self.assertEqual((spec["default"], spec["choices"]), ("auto", ["auto", "login", "boot"]))
+
+    def test_the_daemon_is_in_the_system_launch_daemons_directory_and_owned_by_root(self) -> None:
+        self.assertEqual(DEFAULTS["github_runner_cluster_runtime_daemon_plist"], "/Library/LaunchDaemons/{{ github_runner_cluster_runtime_launchd_label }}.plist")
+        self.assertEqual((DEFAULTS["github_runner_cluster_runtime_daemon_owner"], DEFAULTS["github_runner_cluster_runtime_daemon_group"]), ("root", "wheel"))
+
     def test_the_node_container_follows_the_node_s_role(self) -> None:
         template = DEFAULTS["github_runner_cluster_node_container"]
         self.assertIn("github_runner_cluster_container_name", template)
@@ -72,7 +84,7 @@ class DefaultsTest(unittest.TestCase):
 
     def test_every_new_variable_is_in_the_readme(self) -> None:
         readme = (ROLE / "README.md").read_text()
-        for name in ("github_runner_cluster_runtime_autostart", "github_runner_cluster_runtime", "github_runner_cluster_colima_profile", "github_runner_cluster_runtime_path"):
+        for name in ("github_runner_cluster_runtime_autostart", "github_runner_cluster_runtime_autostart_at", "github_runner_cluster_runtime_boot_profile", "github_runner_cluster_runtime", "github_runner_cluster_colima_profile", "github_runner_cluster_runtime_path"):
             with self.subTest(name=name):
                 self.assertIn(f"`{name}`", readme)
 
@@ -121,8 +133,9 @@ class GuardTest(unittest.TestCase):
         gather = tasks[0]["ansible.builtin.setup"]
         self.assertEqual(gather["gather_subset"], ["!all", "!min", "user", "env"])
         self.assertEqual(tasks[0]["when"], "'user_uid' not in ansible_facts or 'env' not in ansible_facts")
-        used = (ROLE / "tasks" / "runtime.yml").read_text() + (ROLE / "defaults" / "main.yml").read_text()
-        self.assertEqual(set(re.findall(r"ansible_facts\['(\w+)'\]", used)) - {"system"}, {"user_uid", "env"})
+        used = "".join(path.read_text() for path in sorted((ROLE / "tasks").glob("runtime*.yml"))) + (ROLE / "defaults" / "main.yml").read_text() + (ROLE / "templates" / "colima-launchd.plist.j2").read_text()
+        # user_id is in the user subset gathered above, with user_uid.
+        self.assertEqual(set(re.findall(r"ansible_facts\['(\w+)'\]", used)) - {"system"}, {"user_uid", "user_id", "env"})
 
     def test_the_runtime_is_up_before_anything_reads_the_daemon(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
@@ -217,6 +230,45 @@ class PlistTest(unittest.TestCase):
             result = subprocess.run(["plutil", "-lint", handle.name], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_the_login_agent_names_no_user_and_sets_no_home(self) -> None:
+        # An agent runs as the user whose session loads it, and launchd ignores UserName for one; nothing of the daemon's keys leaks into it.
+        self.assertNotIn("UserName", self.plist)
+        self.assertNotIn("HOME", self.plist["EnvironmentVariables"])
+
+    def test_the_node_profile_gets_a_daemon_that_runs_as_the_connecting_user_with_its_home(self) -> None:
+        # Root's daemon would start the VM as root in /var/root; UserName makes it the user's, and a daemon is not given the user's HOME, which colima reads for its default home and for the Lima instance directory.
+        plist = plistlib.loads(render_plist(docker_context="colima-node", github_runner_cluster_runtime_colima_home="/Users/example/.colima-node"))
+        self.assertEqual(plist["Label"], "com.exadev.github-runner.colima.node")
+        self.assertEqual(plist["UserName"], "example")
+        self.assertEqual(plist["EnvironmentVariables"], {"PATH": DEFAULTS["github_runner_cluster_runtime_path"], "HOME": HOME, "COLIMA_HOME": "/Users/example/.colima-node"})
+        self.assertEqual(plist["ProgramArguments"], ["/usr/bin/env", "colima", "start", "--profile", "node", "--activate=false"])
+        self.assertIs(plist["RunAtLoad"], True)
+        self.assertNotIn("KeepAlive", plist)
+        self.assertIs(plist["AbandonProcessGroup"], True)
+        self.assertEqual(plist["StandardOutPath"], f"{HOME}/Library/Logs/com.exadev.github-runner.colima.node.log")
+
+    def test_a_host_can_choose_either_kind_for_any_profile(self) -> None:
+        self.assertEqual(plistlib.loads(render_plist(github_runner_cluster_runtime_autostart_at="boot"))["UserName"], "example")
+        self.assertNotIn("UserName", plistlib.loads(render_plist(docker_context="colima-node", github_runner_cluster_runtime_autostart_at="login")))
+        self.assertEqual(plistlib.loads(render_plist(github_runner_cluster_runtime_boot_profile="example", docker_context="colima-example"))["UserName"], "example")
+
+    def test_a_user_name_with_markup_characters_is_escaped_not_injected(self) -> None:
+        document = render_plist(docker_context="colima-node", ansible_facts={"user_id": "a&b<c>", "env": {"HOME": HOME}})
+        self.assertEqual(plistlib.loads(document)["UserName"], "a&b<c>")
+
+    @unittest.skipUnless(shutil.which("plutil"), "plutil is not installed")
+    def test_plutil_accepts_the_daemon(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".plist") as handle:
+            handle.write(render_plist(docker_context="colima-node"))
+            handle.flush()
+            result = subprocess.run(["plutil", "-lint", handle.name], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_daemons_comment_cannot_end_the_document_early_either(self) -> None:
+        comment = re.search(rb"<!--(.*?)-->", render_plist(docker_context="colima-node"), re.DOTALL)
+        assert comment is not None
+        self.assertNotIn(b"--", comment.group(1))
+
     def test_the_comment_cannot_end_the_document_early(self) -> None:
         # A double hyphen inside an XML comment is not well formed.
         comment = re.search(rb"<!--(.*?)-->", self.document, re.DOTALL)
@@ -224,12 +276,20 @@ class PlistTest(unittest.TestCase):
         self.assertNotIn(b"--", comment.group(1))
 
 
-# Stands in for docker, colima, launchctl and plutil, which are all this one script under four names. State is files in $RUNTIME_STUB: runtime-up (the Docker daemon answers), session (the user has a login session), loaded (the agent is loaded), <container>.state (what docker ps prints), colima-start-fails; every call is appended to calls.log with the Docker context it ran with. The Colima VM is the directory vm in $RUNTIME_STUB: its files are under vm/files, /proc/sys/net/bridge exists under vm/files only while br_netfilter is loaded, and a sysctl is the file vm/sysctl/<key> (a bridge key reads 1 once the module is loaded, as the kernel's default, unless the file says otherwise).
+# Stands in for docker, colima, launchctl, plutil and sudo, which are all this one script under five names. State is files in $RUNTIME_STUB: runtime-up (the Docker daemon answers), session (the user has a login session), loaded (the agent is loaded in it), daemon-loaded (the daemon is loaded into the system domain, which only root can change), <container>.state (what docker ps prints), colima-start-fails; every call is appended to calls.log with the Docker context it ran with. The Colima VM is the directory vm in $RUNTIME_STUB: its files are under vm/files, /proc/sys/net/bridge exists under vm/files only while br_netfilter is loaded, and a sysctl is the file vm/sysctl/<key> (a bridge key reads 1 once the module is loaded, as the kernel's default, unless the file says otherwise).
 STUB = """#!{python}
 import os, sys
 stub = os.environ["RUNTIME_STUB"]
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
+if name == "sudo":
+    # Does what sudo does for the role, which is to run the command as root: it marks the command with RUNTIME_ROOT, which the stand-in launchctl needs to change the system domain, and keeps its own calls out of calls.log.
+    with open(os.path.join(stub, "sudo.log"), "a") as sudo_log:
+        sudo_log.write(" ".join(args) + "\\n")
+    while args[0] != "/bin/sh":
+        args = args[1:]
+    os.environ["RUNTIME_ROOT"] = "1"
+    os.execv(args[0], args)
 with open(os.path.join(stub, "calls.log"), "a") as log:
     log.write(os.environ.get("DOCKER_CONTEXT", "-") + " " + name + " " + " ".join(args) + "\\n")
 with open(os.path.join(stub, "colima-home.log"), "a") as homes:
@@ -238,6 +298,9 @@ def exists(file):
     return os.path.exists(os.path.join(stub, file))
 def touch(file):
     open(os.path.join(stub, file), "w").close()
+def need_root():
+    if os.environ.get("RUNTIME_ROOT") != "1":
+        sys.exit("launchctl: Operation not permitted while changing the system domain as a user")
 if name == "docker" and args[:2] == ["context", "inspect"]:
     # Read from the context file alone, so it answers with the daemon down.
     if not exists("context-host"):
@@ -300,14 +363,19 @@ elif name == "colima":
         sys.exit("colima: the VM did not start")
     touch("runtime-up")
 elif name == "launchctl":
+    system = args[1] == "system" or args[1].startswith("system/")
     if args[0] == "print":
-        sys.exit(0 if exists("loaded" if args[1].count("/") == 2 else "session") else 113)
+        sys.exit(0 if exists("daemon-loaded" if system else "loaded" if args[1].count("/") == 2 else "session") else 113)
     elif args[0] == "bootstrap":
         if not os.path.exists(args[2]):
             sys.exit("Bootstrap failed: no such plist")
-        touch("loaded")
+        if system:
+            need_root()
+        touch("daemon-loaded" if system else "loaded")
     elif args[0] == "bootout":
-        os.remove(os.path.join(stub, "loaded"))
+        if system:
+            need_root()
+        os.remove(os.path.join(stub, "daemon-loaded" if system else "loaded"))
     else:
         sys.exit("unexpected launchctl call: " + " ".join(args))
 elif name == "plutil":
@@ -341,11 +409,14 @@ class RoleTest(unittest.TestCase):
         self.home.mkdir()
         self.bin = self.work / "bin"
         self.bin.mkdir()
-        for name in ("docker", "colima", "launchctl", "plutil"):
+        for name in ("docker", "colima", "launchctl", "plutil", "sudo"):
             tool = self.bin / name
             tool.write_text(STUB.format(python=sys.executable))
             tool.chmod(0o755)
         self.plist = self.home / "Library" / "LaunchAgents" / "com.exadev.github-runner.colima.default.plist"
+        # Stands in for /Library/LaunchDaemons, which exists on every Mac; the role's own path is narrowed to it below.
+        self.daemons = self.work / "LaunchDaemons"
+        self.daemons.mkdir()
         # What `docker ps` prints for the node's container once the runtime answers; the end checks need it running.
         (self.stub / "github-runner-k3s.state").write_text("running")
 
@@ -366,6 +437,11 @@ class RoleTest(unittest.TestCase):
             "github_runner_cluster_docker_cli_environment": {"DOCKER_CONTEXT": context} if context else {},
             "github_runner_cluster_effective_node_role": "server",
             "github_runner_cluster_runtime_path": f"{self.bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            # The tests are not root, so the daemon's property list is owned by the user running them and sits beside the stand-in daemon directory.
+            "runtime_user": "example",
+            "github_runner_cluster_runtime_daemon_plist": f"{self.daemons}/{{{{ github_runner_cluster_runtime_launchd_label }}}}.plist",
+            "github_runner_cluster_runtime_daemon_owner": pwd.getpwuid(os.getuid()).pw_name,
+            "github_runner_cluster_runtime_daemon_group": grp.getgrgid(os.getgid()).gr_name,
             **variables,
         }
         inventory = self.work / "inventory.yml"
@@ -422,15 +498,186 @@ class RoleTest(unittest.TestCase):
         self.assertIn("colima-example colima start --profile example --activate=false", self.calls())
 
     def test_a_profile_in_a_home_of_its_own_is_started_and_loaded_with_that_home(self) -> None:
-        # The bridged node profile: context colima-node, profile node, in ~/.colima-node. Without COLIMA_HOME colima would start a new profile of that name in ~/.colima.
+        # The bridged node profile: context colima-node, profile node, in ~/.colima-node. Without COLIMA_HOME colima would start a new profile of that name in ~/.colima. A login agent is chosen here, since the node profile is started at boot by default.
         self.state("session")
         node_home = f"{self.home}/.colima-node"
-        result = self.run_role(context="colima-node", context_host=f"unix://{node_home}/node/docker.sock")
+        result = self.run_role(context="colima-node", context_host=f"unix://{node_home}/node/docker.sock", github_runner_cluster_runtime_autostart_at="login")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_colima_ran_in(node_home)
         agent = plistlib.loads(self.home.joinpath("Library/LaunchAgents/com.exadev.github-runner.colima.node.plist").read_bytes())
         self.assertEqual(agent["EnvironmentVariables"]["COLIMA_HOME"], node_home)
         self.assertEqual(agent["ProgramArguments"][3:6], ["--profile", "node", "--activate=false"])
+        self.assertEqual(list(self.daemons.iterdir()), [])
+
+    LABEL = "com.exadev.github-runner.colima.node"
+
+    @property
+    def node_home(self) -> str:
+        return f"{self.home}/.colima-node"
+
+    @property
+    def node_daemon(self) -> Path:
+        return self.daemons / f"{self.LABEL}.plist"
+
+    @property
+    def node_agent(self) -> Path:
+        return self.home / "Library" / "LaunchAgents" / f"{self.LABEL}.plist"
+
+    def run_node(self, *extra: str, **variables: Any) -> subprocess.CompletedProcess[str]:
+        """Run the role for the bridged node profile (context colima-node, in ~/.colima-node), which is started at boot."""
+        return self.run_role(*extra, context="colima-node", context_host=f"unix://{self.node_home}/node/docker.sock", **variables)
+
+    def v2_19_agent(self) -> None:
+        """A host the previous release set up: the node profile's login agent installed, and loaded when the user has a session."""
+        self.node_agent.parent.mkdir(parents=True)
+        self.node_agent.write_text("<plist/>")
+        if (self.stub / "session").exists():
+            self.state("loaded")
+
+    def system_calls(self) -> list[str]:
+        """The launchctl calls that change the system domain, which the stand-in refuses without root."""
+        return [call for call in self.calls() if re.search(r"launchctl (bootstrap|bootout) system", call)]
+
+    def test_the_node_profile_is_started_by_a_daemon_at_boot_with_nobody_logged_in(self) -> None:
+        # The state of a Mac that has rebooted to the login window: no session, so no gui domain to load an agent into.
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["colima-node colima start --profile node --activate=false", f"colima-node launchctl bootstrap system {self.node_daemon}"])
+        daemon = plistlib.loads(self.node_daemon.read_bytes())
+        self.assertEqual((daemon["Label"], daemon["UserName"], daemon["RunAtLoad"]), (self.LABEL, "example", True))
+        self.assertEqual(daemon["EnvironmentVariables"], {"PATH": f"{self.bin}{os.pathsep}/usr/bin{os.pathsep}/bin", "HOME": str(self.home), "COLIMA_HOME": self.node_home})
+        self.assertEqual(self.node_daemon.stat().st_mode & 0o777, 0o644)
+        self.assertTrue((self.stub / "daemon-loaded").exists())
+        self.assertFalse(self.node_agent.exists())
+        self.assertFalse((self.home / "Library" / "LaunchAgents").exists())
+        self.assertNotIn("loads at the next login", result.stdout)
+
+    def test_the_daemon_is_written_and_loaded_as_root_and_nothing_else_is(self) -> None:
+        self.run_node()
+        sudo = (self.stub / "sudo.log").read_text().splitlines()
+        self.assertTrue(any(f"{self.LABEL}.plist" in line or "ansible" in line for line in sudo), sudo)
+        # The stand-in launchctl refuses the system domain without root, and the run passed, so the load and any unload went through sudo; the read-only calls and the colima start did not need it.
+        self.assertEqual(len(self.system_calls()), 1)
+
+    def test_the_daemon_is_also_installed_for_a_user_with_a_login_session_and_the_agent_never_is(self) -> None:
+        self.state("session")
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes()[-1], f"colima-node launchctl bootstrap system {self.node_daemon}")
+        self.assertFalse((self.stub / "loaded").exists())
+        self.assertEqual([call for call in self.calls() if "gui/" in call], [])
+
+    def test_a_running_node_profile_is_not_started_again_when_the_daemon_is_installed(self) -> None:
+        self.state("runtime-up")
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [f"colima-node launchctl bootstrap system {self.node_daemon}"])
+
+    def test_a_host_the_previous_release_set_up_moves_from_the_agent_to_the_daemon(self) -> None:
+        self.state("session", "runtime-up")
+        self.v2_19_agent()
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [f"colima-node launchctl bootstrap system {self.node_daemon}", f"colima-node launchctl bootout gui/{UID}/{self.LABEL}"])
+        self.assertFalse(self.node_agent.exists())
+        self.assertFalse((self.stub / "loaded").exists())
+        self.assertTrue((self.stub / "daemon-loaded").exists())
+        self.assertTrue(self.node_daemon.exists())
+
+    def test_an_agent_that_was_never_loaded_because_nobody_logged_in_is_only_deleted(self) -> None:
+        # What m1 looked like after its reboot: the agent file on disk, the login window up.
+        self.state("runtime-up")
+        self.v2_19_agent()
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.node_agent.exists())
+        self.assertEqual([call for call in self.calls() if "gui/" in call and "launchctl print gui/" not in call], [])
+        self.assertEqual(self.changes(), [f"colima-node launchctl bootstrap system {self.node_daemon}"])
+
+    def test_the_agent_of_another_profile_is_left_alone(self) -> None:
+        self.state("session", "runtime-up")
+        other = self.home / "Library" / "LaunchAgents" / "com.exadev.github-runner.colima.default.plist"
+        other.parent.mkdir(parents=True)
+        other.write_text("<plist/>")
+        self.run_node()
+        self.assertEqual(other.read_text(), "<plist/>")
+
+    def test_a_second_run_with_the_daemon_in_place_changes_nothing_and_loads_nothing(self) -> None:
+        self.state("runtime-up")
+        self.run_node()
+        before = self.calls()
+        sudo_before = (self.stub / "sudo.log").read_text()
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[len(before):] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print |colima ssh --profile \S+ -- (cat|test|sysctl -n) )", call)], [])
+        # The template runs as root to compare ownership; it is the only thing that does, and it changes nothing.
+        self.assertEqual(self.system_calls(), [call for call in before if "launchctl bootstrap system" in call])
+        self.assertTrue((self.stub / "sudo.log").read_text().startswith(sudo_before))
+
+    def test_a_changed_daemon_is_unloaded_before_it_is_loaded_again(self) -> None:
+        self.state("runtime-up")
+        self.run_node()
+        self.node_daemon.write_text(self.node_daemon.read_text().replace("start", "stop"))
+        before = len(self.changes())
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes()[before:], [f"colima-node launchctl bootout system/{self.LABEL}", f"colima-node launchctl bootstrap system {self.node_daemon}"])
+        self.assertIn("<string>start</string>", self.node_daemon.read_text())
+
+    def test_a_daemon_that_is_in_place_but_not_loaded_is_loaded(self) -> None:
+        self.state("runtime-up")
+        self.run_node()
+        (self.stub / "daemon-loaded").unlink()
+        result = self.run_node()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes()[-1], f"colima-node launchctl bootstrap system {self.node_daemon}")
+
+    def test_check_mode_installs_and_loads_nothing_and_removes_nothing(self) -> None:
+        self.state("session", "runtime-up")
+        self.v2_19_agent()
+        result = self.run_node("--check", "--diff")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.node_daemon.exists())
+        self.assertTrue(self.node_agent.exists())
+        self.assertIn("UserName", result.stdout, "the diff shows the daemon's property list")
+        self.assertGreater(self.recap(result)["changed"], 0)
+
+    def test_a_host_set_back_to_login_retires_the_daemon(self) -> None:
+        self.state("session", "runtime-up")
+        self.run_node()
+        result = self.run_node(github_runner_cluster_runtime_autostart_at="login")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes()[-2:], [f"colima-node launchctl bootstrap gui/{UID} {self.node_agent}", f"colima-node launchctl bootout system/{self.LABEL}"])
+        self.assertFalse(self.node_daemon.exists())
+        self.assertFalse((self.stub / "daemon-loaded").exists())
+        self.assertTrue(self.node_agent.exists())
+
+    def test_a_host_can_ask_for_a_daemon_for_any_profile(self) -> None:
+        self.state("runtime-up")
+        result = self.run_role(github_runner_cluster_runtime_autostart_at="boot")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(plistlib.loads((self.daemons / "com.exadev.github-runner.colima.default.plist").read_bytes())["UserName"], "example")
+        self.assertFalse(self.plist.exists())
+
+    def test_the_default_profile_keeps_its_login_agent_and_never_touches_the_system_domain(self) -> None:
+        self.state("session")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["colima colima start --profile default --activate=false", f"colima launchctl bootstrap gui/{UID} {self.plist}"])
+        self.assertEqual(list(self.daemons.iterdir()), [])
+        self.assertFalse((self.stub / "sudo.log").exists())
+        self.assertEqual([call for call in self.calls() if "system" in call], [])
+
+    def test_autostart_off_leaves_an_installed_daemon_and_agent_as_they_are(self) -> None:
+        self.state("runtime-up")
+        self.node_daemon.write_text("<plist/>")
+        self.v2_19_agent()
+        result = self.run_node(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.node_daemon.read_text(), self.node_agent.read_text()), ("<plist/>", "<plist/>"))
+        self.assertEqual(self.changes(), [])
 
     def test_the_variable_wins_over_the_context_and_the_context_is_not_read(self) -> None:
         self.state("session")
