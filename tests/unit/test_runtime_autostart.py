@@ -236,7 +236,7 @@ class PlistTest(unittest.TestCase):
         self.assertNotIn("HOME", self.plist["EnvironmentVariables"])
 
     def test_the_node_profile_gets_a_daemon_that_runs_as_the_connecting_user_with_its_home(self) -> None:
-        # Root's daemon would start the VM as root in /var/root; UserName makes it the user's, and a daemon is not given the user's HOME, which colima reads for its default home and for the Lima instance directory.
+        # A daemon is root's unless UserName says otherwise, which would start the VM as root; HOME is set because launchd.plist(5) does not promise one for a daemon and colima and lima take their home directory (the default COLIMA_HOME and the Lima instance directory) from $HOME.
         plist = plistlib.loads(render_plist(docker_context="colima-node", github_runner_cluster_runtime_colima_home="/Users/example/.colima-node"))
         self.assertEqual(plist["Label"], "com.exadev.github-runner.colima.node")
         self.assertEqual(plist["UserName"], "example")
