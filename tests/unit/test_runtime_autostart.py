@@ -176,6 +176,10 @@ class PlistTest(unittest.TestCase):
         plist = plistlib.loads(render_plist(docker_context="", github_runner_cluster_runtime="colima", github_runner_cluster_colima_profile="build"))
         self.assertEqual((plist["Label"], plist["ProgramArguments"][4]), ("com.exadev.github-runner.colima.build", "build"))
 
+    def test_a_profile_in_a_home_of_its_own_gets_that_home_in_the_agent(self) -> None:
+        plist = plistlib.loads(render_plist(docker_context="colima-example", github_runner_cluster_colima_home="/Users/example/.colima-example"))
+        self.assertEqual(plist["EnvironmentVariables"], {"PATH": DEFAULTS["github_runner_cluster_runtime_path"], "COLIMA_HOME": "/Users/example/.colima-example"})
+
     def test_a_path_with_markup_characters_is_escaped_not_injected(self) -> None:
         path = "/opt/a&b:/opt/<c>:/usr/bin"
         document = render_plist(github_runner_cluster_runtime_path=path)

@@ -25,7 +25,7 @@
   ansible.builtin.set_fact:
     # The PATH is what the agent gets too, so a run that works here is the run the agent repeats at login.
     github_runner_cluster_runtime_environment: >-
-      {{ github_runner_cluster_docker_cli_environment | combine({'PATH': github_runner_cluster_runtime_path}) }}
+      {{ github_runner_cluster_docker_cli_environment | combine({'PATH': github_runner_cluster_runtime_path}, ({'COLIMA_HOME': github_runner_cluster_colima_home} if github_runner_cluster_colima_home | length > 0 else {})) }}
     github_runner_cluster_runtime_down_message: >-
       {{
         {

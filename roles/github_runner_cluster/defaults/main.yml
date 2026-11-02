@@ -180,6 +180,8 @@ github_runner_cluster_runtime_autostart: true
 github_runner_cluster_runtime: auto
 # The Colima profile to start. Empty takes it from the Docker context (colima is the default profile, colima-<profile> another) and falls back to the default profile when the context names none.
 github_runner_cluster_colima_profile: ""
+# The directory the Colima profile lives in, as COLIMA_HOME: empty is Colima's own default (~/.colima). A profile in a home of its own (a bridged profile beside another that runs in the default home, which would share its network daemon) needs it set, because Colima falls back to the default home when the variable is missing, so the agent would start a different profile there. The role passes it to colima and to the launchd agent. The directory must exist: Colima falls back silently to the default home when it does not.
+github_runner_cluster_colima_home: ""
 # The PATH the agent runs colima with, and the role runs colima and docker with on a macOS host: both Homebrew prefixes (Apple Silicon and Intel), since launchd gives an agent only the system PATH and colima starts limactl and docker from the one it is given.
 github_runner_cluster_runtime_path: "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
 # Derived, never set directly: the agent's launchd label, one per Colima profile.
