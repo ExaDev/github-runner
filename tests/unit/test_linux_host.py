@@ -33,6 +33,7 @@ STEPS = [
     "github_runner_linux_host_unattended_upgrades",
     "github_runner_linux_host_upgrade",
 ]
+TAILSCALE = "github_runner_linux_host_tailscale_update"
 SYSCTLS = {"net.ipv4.ip_forward": "1", "net.bridge.bridge-nf-call-iptables": "1", "net.bridge.bridge-nf-call-ip6tables": "1"}
 
 
@@ -43,7 +44,19 @@ class DefaultsTest(unittest.TestCase):
                 self.assertIs(DEFAULTS[step], False)
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
         gated = [next(condition for condition in task["when"] if "| bool" in condition).split(" ")[0] for task in tasks if "when" in task and isinstance(task["when"], list)]
-        self.assertEqual(gated, STEPS)
+        self.assertEqual(gated, STEPS + [TAILSCALE])
+
+    def test_the_tailscale_update_is_the_one_step_that_is_on_by_default(self) -> None:
+        self.assertIs(DEFAULTS[TAILSCALE], True)
+
+    def test_the_tailscale_update_leaves_a_native_node_to_the_cluster_role_under_the_cluster_roles_own_defaults(self) -> None:
+        # The role reads the cluster role's two variables without loading its defaults, and falls back to these values when the host sets neither.
+        cluster = yaml.safe_load((ROOT / "roles" / "github_runner_cluster" / "defaults" / "main.yml").read_text())
+        self.assertEqual(cluster["github_runner_cluster_node_mode"], "compose")
+        self.assertIs(cluster["github_runner_cluster_native_tailscale_install"], True)
+        tasks = (ROLE / "tasks" / "tailscale_update.yml").read_text()
+        self.assertIn("github_runner_cluster_node_mode | default('compose')", tasks)
+        self.assertIn("github_runner_cluster_native_tailscale_install | default(true)", tasks)
 
     def test_the_k3s_prerequisites_are_the_modules_and_sysctls_k3s_needs(self) -> None:
         self.assertEqual(DEFAULTS["github_runner_linux_host_kernel_modules"], ["overlay", "br_netfilter"])
@@ -139,7 +152,7 @@ case "$1" in
   get-default) if [ -e "$state/default-target" ]; then cat "$state/default-target"; else echo graphical.target; fi ;;
   set-default) printf '%s\n' "$2" > "$state/default-target" ;;
   mask) touch "$state/masked-$2" ;;
-  enable) printf '%s\n' enabled > "$state/enabled-$2" ;;
+  enable) for name; do :; done; printf '%s\n' enabled > "$state/enabled-$name"; case " $* " in *" --now "*) touch "$state/active-$name" ;; esac ;;
   disable)
     if [ -e "$state/alias-$2" ]; then printf '%s\n' disabled > "$state/enabled-$(cat "$state/alias-$2")"; rm -f "$state/alias-$2"
     else printf '%s\n' disabled > "$state/enabled-$2"; for link in "$state"/alias-*; do [ -e "$link" ] && [ "$(cat "$link")" = "$2" ] && rm -f "$link"; done; true; fi ;;
@@ -183,6 +196,8 @@ esac
 simulate=no; for argument in "$@"; do [ "$argument" = --simulate ] && simulate=yes; done
 case " $* " in
   *" install "*unattended-upgrades*) [ "$simulate" = yes ] || touch "$state/package-unattended-upgrades" ;;
+  *" install "*"--only-upgrade tailscale "*)
+    if [ "$simulate" = no ] && [ -e "$state/tailscale-candidate" ]; then cp "$state/tailscale-candidate" "$state/tailscale-installed"; fi ;;
   *" dist-upgrade"*)
     if [ -e "$state/upgradable" ]; then
       echo "3 upgraded, 1 newly installed, 0 to remove and 0 not upgraded."
@@ -198,7 +213,16 @@ case " $* " in
     else echo "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."; fi ;;
 esac
 """)
+        stand_in(bin_dir / "apt-cache", log + r"""installed=$(cat "$STUB/state/tailscale-installed" 2>/dev/null || echo "(none)")
+candidate=$(cat "$STUB/state/tailscale-candidate" 2>/dev/null || echo "(none)")
+printf 'tailscale:\n  Installed: %s\n  Candidate: %s\n  Version table:\n' "$installed" "$candidate"
+""")
+        # Only the one comparison the role makes: whether the first version is newer than the second.
+        stand_in(bin_dir / "dpkg", log + r"""[ "$1" = --compare-versions ] && [ "$3" = gt ] || exit 2
+[ "$2" != "$4" ] && [ "$(printf '%s\n%s\n' "$2" "$4" | sort -V | tail -n1)" = "$2" ]
+""")
         stand_in(bin_dir / "dpkg-query", r"""case "$*" in
+  *tailscale*) if [ -e "$STUB/state/tailscale-installed" ]; then printf 'ii '; else exit 1; fi ;;
   *unattended-upgrades*) if [ -e "$STUB/state/package-unattended-upgrades" ]; then printf 'ii '; else exit 1; fi ;;
 esac
 """)
@@ -221,6 +245,8 @@ esac
             "github_runner_linux_host_unattended_upgrades_file": str(self.apt_file),
             "github_runner_linux_host_reboot_required_file": str(self.reboot_required),
             "github_runner_linux_host_reboot_timeout": 5,
+            # The other steps are about their own, and an installed Tailscale package would be upgraded in them: the update has tests of its own, which turn it on.
+            TAILSCALE: False,
             **variables,
         }}}}))
         env = {
@@ -716,6 +742,140 @@ class BaselineRoleTest(Harness):
         self.assertFalse([call for call in self.calls() if call.startswith("shutdown")])
         self.assertIn(f"reboot host: {self.reboot_required} exists", result.stdout)
         self.assertTrue((self.state / "upgradable").exists())
+
+
+class TailscaleUpdateTest(Harness):
+    """The Tailscale step: the installed package kept current and its service running, and nothing installed."""
+
+    def tailscale(self, installed: str | None = "1.100.0", candidate: str | None = "1.104.4", enabled: bool = True, active: bool = True) -> None:
+        """A host with the package at `installed` (None for not installed) while apt's newest release is `candidate` (None for no repository carrying it), and the tailscaled service enabled and active as given."""
+        if installed is not None:
+            (self.state / "tailscale-installed").write_text(installed)
+        if candidate is not None:
+            (self.state / "tailscale-candidate").write_text(candidate)
+        if enabled:
+            (self.state / "enabled-tailscaled").write_text("enabled\n")
+        if active:
+            (self.state / "active-tailscaled").touch()
+
+    def installed(self) -> str:
+        return (self.state / "tailscale-installed").read_text()
+
+    def update(self, *, check: bool = False, **variables: Any) -> subprocess.CompletedProcess[str]:
+        result = self.run_role(check=check, github_runner_linux_host_tailscale_update=True, **variables)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def writes(self) -> list[str]:
+        """The calls that change the host, without the reads and the index refresh."""
+        return [call for call in self.calls() if re.match(r"^(apt-get (?!update)|systemctl (enable|disable|stop|start|restart|mask)|dpkg )", call) and not call.startswith("dpkg --compare-versions")]
+
+    def test_an_older_package_gets_that_package_alone_upgraded_and_nothing_else(self) -> None:
+        self.tailscale()
+        result = self.update()
+        self.assertEqual(self.writes(), ["apt-get install --yes --no-install-recommends --only-upgrade tailscale"])
+        self.assertEqual(self.installed(), "1.104.4")
+        self.assertEqual(self.changed(result), 1)
+        self.assertEqual([call for call in self.calls() if call.startswith("apt-get")], ["apt-get update", "apt-get install --yes --no-install-recommends --only-upgrade tailscale"])
+
+    def test_a_second_run_changes_nothing(self) -> None:
+        self.tailscale()
+        self.update()
+        before = self.writes()
+        result = self.update()
+        self.assertEqual(self.writes(), before)
+        self.assertEqual(self.changed(result), 0)
+
+    def test_a_package_already_at_the_newest_release_is_not_touched(self) -> None:
+        self.tailscale(installed="1.104.4")
+        result = self.update()
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.changed(result), 0)
+
+    def test_a_package_newer_than_the_repositorys_is_not_downgraded(self) -> None:
+        self.tailscale(installed="1.106.0", candidate="1.104.4")
+        result = self.update()
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.installed(), "1.106.0")
+        self.assertEqual(self.changed(result), 0)
+
+    def test_a_package_no_repository_carries_is_not_touched(self) -> None:
+        self.tailscale(candidate=None)
+        result = self.update()
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.changed(result), 0)
+
+    def test_check_mode_reports_the_upgrade_and_changes_nothing(self) -> None:
+        self.tailscale()
+        result = self.run_role(check=True, github_runner_linux_host_tailscale_update=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual([call for call in self.calls() if call.startswith("apt-get")], [])
+        self.assertEqual(self.installed(), "1.100.0")
+        self.assertEqual(self.changed(result), 1)
+        self.assertIn("apt-get install --only-upgrade tailscale, from 1.100.0 to 1.104.4", result.stdout)
+
+    def test_with_the_variable_false_nothing_is_read_or_changed(self) -> None:
+        self.tailscale(active=False)
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.installed(), "1.100.0")
+
+    def test_a_host_without_the_package_is_skipped_with_a_message_and_nothing_is_installed(self) -> None:
+        self.tailscale(installed=None)
+        result = self.update()
+        self.assertEqual(self.writes(), [])
+        self.assertFalse((self.state / "tailscale-installed").exists())
+        self.assertIn("the package tailscale is not installed", result.stdout)
+        self.assertEqual(self.changed(result), 0)
+
+    def test_a_host_that_is_not_debian_is_skipped_with_a_message(self) -> None:
+        self.tailscale()
+        result = self.update(os_family="RedHat")
+        self.assertEqual(self.calls(), [])
+        self.assertIn("the package is apt's", result.stdout)
+
+    def test_a_stopped_or_disabled_service_is_enabled_and_started_once(self) -> None:
+        for enabled, active in ((False, True), (True, False), (False, False)):
+            with self.subTest(enabled=enabled, active=active):
+                for name in ("enabled-tailscaled", "active-tailscaled"):
+                    (self.state / name).unlink(missing_ok=True)
+                self.tailscale(installed="1.104.4", enabled=enabled, active=active)
+                (self.stubs / "calls.log").unlink(missing_ok=True)
+                result = self.update()
+                self.assertEqual(self.writes(), ["systemctl enable --now tailscaled"])
+                self.assertEqual(self.changed(result), 1)
+                self.assertEqual((self.state / "enabled-tailscaled").read_text(), "enabled\n")
+                self.assertTrue((self.state / "active-tailscaled").exists())
+                (self.stubs / "calls.log").unlink(missing_ok=True)
+                self.assertEqual(self.changed(self.update()), 0)
+                self.assertEqual(self.writes(), [])
+
+    def test_check_mode_reports_the_service_change_and_makes_none(self) -> None:
+        self.tailscale(installed="1.104.4", active=False)
+        result = self.run_role(check=True, github_runner_linux_host_tailscale_update=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.changed(result), 1)
+        self.assertFalse((self.state / "active-tailscaled").exists())
+
+    def test_a_native_node_of_the_cluster_is_left_to_the_cluster_role(self) -> None:
+        self.tailscale()
+        result = self.update(github_runner_cluster_node_mode="native")
+        self.assertEqual(self.writes(), [])
+        self.assertEqual(self.installed(), "1.100.0")
+        self.assertIn("whose cluster role installs the release it pins", result.stdout)
+
+    def test_a_native_node_whose_cluster_role_does_not_install_tailscale_is_kept_current(self) -> None:
+        self.tailscale()
+        self.update(github_runner_cluster_node_mode="native", github_runner_cluster_native_tailscale_install=False)
+        self.assertEqual(self.installed(), "1.104.4")
+
+    def test_a_node_in_compose_mode_is_kept_current(self) -> None:
+        self.tailscale()
+        self.update(github_runner_cluster_node_mode="compose")
+        self.assertEqual(self.installed(), "1.104.4")
 
 
 if __name__ == "__main__":
