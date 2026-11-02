@@ -70,6 +70,18 @@ argument_specs:
         type: path
         default: /Library/LaunchDaemons/com.tailscale.tailscaled.plist
         description: The launchd definition tailscaled install-system-daemon writes. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_macos_host_tailscale_update:
+        type: bool
+        default: true
+        description: "Whether the role keeps the Tailscale software it finds current: the Homebrew formula tailscale at its latest release, the system daemon refreshed (tailscaled install-system-daemon) when it differs from the formula or the running daemon differs from the installed one, and the standalone app too when it is installed as the Homebrew cask. Nothing is installed that is not already, and no tailnet is joined. Skipped when github_runner_macos_host_tailscale is false."
+      github_runner_macos_host_tailscale_daemon_binary:
+        type: path
+        default: /usr/local/bin/tailscaled
+        description: "The daemon tailscaled install-system-daemon installs and the launchd definition starts. Not a setting, and a variable only so the tests can point it at a stand-in."
+      github_runner_macos_host_tailscale_app_cask:
+        type: str
+        default: tailscale-app
+        description: "The Homebrew cask of Tailscale's standalone app, kept current only when it is installed. Not a setting, and a variable only so the tests can point it at a stand-in."
       github_runner_macos_host_tailscale_auth_key:
         type: str
         default: ""

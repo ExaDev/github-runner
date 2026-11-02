@@ -34,6 +34,11 @@ github_runner_macos_host_tailscale: true
 github_runner_macos_host_homebrew_prefix: ""
 # Not a setting: tailscaled install-system-daemon writes exactly this file, and its presence is how the role knows the daemon is installed. It is a variable only so the tests can point it at a stand-in.
 github_runner_macos_host_tailscale_plist: /Library/LaunchDaemons/com.tailscale.tailscaled.plist
+# Whether the role keeps the Tailscale software it finds current. The Homebrew formula is brought to its latest release (the formula and no other), and when the installed daemon differs from the formula's release, or the running daemon from the installed one, tailscaled install-system-daemon is run again so the daemon runs the new release: the daemon is a copy of the formula's binary (or a link to it, started once), so upgrading the formula alone leaves the old one running. Tailscale's standalone app, when it is installed as the Homebrew cask, is kept current as well; it is never installed. A host with none of them is skipped with a message, and the role never joins or logs in to a tailnet. Replacing the daemon restarts it, which drops the host's tailnet connections for a moment (its login is kept), and upgrading the app restarts its network extension. Part of the Tailscale part, so github_runner_macos_host_tailscale false skips it too.
+github_runner_macos_host_tailscale_update: true
+# Not settings: where tailscaled install-system-daemon puts the daemon that the launchd definition starts, and the Homebrew cask of Tailscale's standalone app. Variables only so the tests can point them at stand-ins.
+github_runner_macos_host_tailscale_daemon_binary: /usr/local/bin/tailscaled
+github_runner_macos_host_tailscale_app_cask: tailscale-app
 # A Tailscale auth key (a secret only the tailnet's owner can create, from any source Ansible reads), empty by default. Set, the role runs tailscale up with it on a host whose daemon the role manages (the Homebrew formula's tailscale is installed) and whose tailnet login is still needed; empty, the role never joins or re-authenticates a tailnet.
 github_runner_macos_host_tailscale_auth_key: ""
 # Further arguments for tailscale up, such as --hostname=example or --advertise-tags=tag:example. Used only when the auth key is set.
