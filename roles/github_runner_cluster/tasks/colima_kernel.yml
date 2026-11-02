@@ -1,0 +1,116 @@
+---
+# Colima hosts only (runtime.yml includes it once the runtime answers). Makes the Linux VM the node runs in load br_netfilter and set the bridge sysctls, now and at every VM boot: a modules-load.d file and a sysctl.d file in the VM for boot, and modprobe and sysctl -w for now. Without the module, bridged pod traffic skips iptables, so a pod that talks to a Service whose only backend pod is on the same node gets no reply (the Service's reverse NAT never applies); pods on other nodes keep working, which hides it until a single-backend Service such as CoreDNS is rescheduled onto this node. See the repository README's note on br_netfilter. Idempotent: a file is written only when its content differs, the module is loaded only when the VM has no bridge sysctl directory, and a sysctl is set only when its value differs. Under --check each change is reported and none is made. Every command runs in the VM through colima ssh, as the VM's user with sudo, and needs no become on the host.
+
+- name: Work out the files the VM keeps for the module and the sysctls
+  ansible.builtin.set_fact:
+    github_runner_cluster_colima_vm_files:
+      - path: "{{ github_runner_cluster_colima_modules_load_file }}"
+        content: |-
+          # Managed by the exadev.github_runner collection's github_runner_cluster role. Do not edit by hand.
+          {{ github_runner_cluster_colima_kernel_module }}
+      - path: "{{ github_runner_cluster_colima_sysctl_file }}"
+        content: |-
+          # Managed by the exadev.github_runner collection's github_runner_cluster role. Do not edit by hand.
+          {% for key, value in github_runner_cluster_colima_sysctl_settings.items() %}
+          {{ key }} = {{ value }}
+          {% endfor %}
+
+- name: Read the files in the VM
+  # A file the VM does not have reads as no content, which differs from the wanted one.
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['cat', item.path] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  loop: "{{ github_runner_cluster_colima_vm_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: github_runner_cluster_colima_vm_file_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Write the files in the VM whose content differs
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'tee', item.item.path] }}"
+    stdin: "{{ item.item.content | trim }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  loop: "{{ github_runner_cluster_colima_vm_file_state.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.content | trim
+    - not ansible_check_mode
+
+- name: Report the files in the VM a real run would write
+  ansible.builtin.debug:
+    msg: "write {{ item.item.path }} in the VM"
+  loop: "{{ github_runner_cluster_colima_vm_file_state.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.content | trim
+    - ansible_check_mode
+
+- name: Read whether the VM has loaded the module
+  # The bridge sysctl directory is what the sysctls need and what the module's absence takes away, so it is the one thing read: it also holds for a kernel with the module built in, which modprobe would report as loaded every run.
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['test', '-d', github_runner_cluster_colima_bridge_proc_dir] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_colima_module
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Load the module in the VM
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'modprobe', '--', github_runner_cluster_colima_kernel_module] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  changed_when: true
+  when:
+    - github_runner_cluster_colima_module.rc != 0
+    - not ansible_check_mode
+
+- name: Report the module a real run would load in the VM
+  ansible.builtin.debug:
+    msg: "modprobe {{ github_runner_cluster_colima_kernel_module }} in the VM"
+  changed_when: true
+  when:
+    - github_runner_cluster_colima_module.rc != 0
+    - ansible_check_mode
+
+- name: Read the sysctls in the VM
+  # A key that does not exist yet (a bridge key before the module is loaded, which a real run has done by now) reads as no value, which differs from the wanted one.
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sysctl', '-n', item.key] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  loop: "{{ github_runner_cluster_colima_sysctl_settings | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  register: github_runner_cluster_colima_sysctls
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Set the sysctls in the VM whose value differs
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'sysctl', '-w', item.item.key ~ '=' ~ item.item.value] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  loop: "{{ github_runner_cluster_colima_sysctls.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.value | string
+    - not ansible_check_mode
+
+- name: Report the sysctls a real run would set in the VM
+  ansible.builtin.debug:
+    msg: "sysctl -w {{ item.item.key }}={{ item.item.value }} in the VM"
+  loop: "{{ github_runner_cluster_colima_sysctls.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.value | string
+    - ansible_check_mode

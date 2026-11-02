@@ -27,6 +27,8 @@ DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_
 UID = 501
 HOME = "/Users/example"
 DARWIN_ONLY = "ansible_facts['system'] == 'Darwin'"
+MODULES_FILE = "/etc/modules-load.d/br_netfilter.conf"
+SYSCTL_FILE = "/etc/sysctl.d/90-github-runner-br-netfilter.conf"
 
 
 def ansible_env() -> dict[str, str]:
@@ -76,6 +78,27 @@ class DefaultsTest(unittest.TestCase):
 
 
 class GuardTest(unittest.TestCase):
+    def test_the_vm_needs_the_module_and_both_bridge_sysctls_on(self) -> None:
+        self.assertEqual(DEFAULTS["github_runner_cluster_colima_kernel_module"], "br_netfilter")
+        self.assertEqual(DEFAULTS["github_runner_cluster_colima_sysctl_settings"], {"net.bridge.bridge-nf-call-iptables": 1, "net.bridge.bridge-nf-call-ip6tables": 1})
+        self.assertEqual(DEFAULTS["github_runner_cluster_colima_bridge_proc_dir"], "/proc/sys/net/bridge")
+        self.assertEqual(DEFAULTS["github_runner_cluster_colima_modules_load_file"], MODULES_FILE)
+        self.assertEqual(DEFAULTS["github_runner_cluster_colima_sysctl_file"], SYSCTL_FILE)
+
+    def test_the_vm_is_prepared_last_in_the_runtime_tasks_and_only_for_colima_once_it_answers(self) -> None:
+        tasks = yaml.safe_load((ROLE / "tasks" / "runtime.yml").read_text())
+        names = [task.get("ansible.builtin.include_tasks") or ("fail" if "ansible.builtin.fail" in task else None) for task in tasks]
+        self.assertEqual(names[-2:], ["fail", "colima_kernel.yml"])
+        self.assertEqual(tasks[-1]["when"], ["github_runner_cluster_effective_runtime.kind == 'colima'", "github_runner_cluster_runtime_up | bool"])
+        self.assertNotIn("github_runner_cluster_runtime_autostart", json.dumps(tasks[-1]))
+
+    def test_the_readmes_say_what_the_role_does_to_the_vm(self) -> None:
+        readme = (ROLE / "README.md").read_text()
+        self.assertIn("**Colima kernel.**", readme)
+        self.assertIn(MODULES_FILE, readme)
+        self.assertIn(SYSCTL_FILE, readme)
+        self.assertIn("colima_kernel.yml", (ROOT / "README.md").read_text())
+
     def test_both_includes_run_on_macos_only(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
         blocks = [task for task in tasks if "block" in task]
@@ -201,7 +224,7 @@ class PlistTest(unittest.TestCase):
         self.assertNotIn(b"--", comment.group(1))
 
 
-# Stands in for docker, colima, launchctl and plutil, which are all this one script under four names. State is files in $RUNTIME_STUB: runtime-up (the Docker daemon answers), session (the user has a login session), loaded (the agent is loaded), <container>.state (what docker ps prints), colima-start-fails; every call is appended to calls.log with the Docker context it ran with.
+# Stands in for docker, colima, launchctl and plutil, which are all this one script under four names. State is files in $RUNTIME_STUB: runtime-up (the Docker daemon answers), session (the user has a login session), loaded (the agent is loaded), <container>.state (what docker ps prints), colima-start-fails; every call is appended to calls.log with the Docker context it ran with. The Colima VM is the directory vm in $RUNTIME_STUB: its files are under vm/files, /proc/sys/net/bridge exists under vm/files only while br_netfilter is loaded, and a sysctl is the file vm/sysctl/<key> (a bridge key reads 1 once the module is loaded, as the kernel's default, unless the file says otherwise).
 STUB = """#!{python}
 import os, sys
 stub = os.environ["RUNTIME_STUB"]
@@ -224,6 +247,45 @@ if name == "docker":
             print(open(os.path.join(stub, container + ".state")).read(), end="")
     else:
         sys.exit("unexpected docker call: " + " ".join(args))
+elif name == "colima" and args[0] == "ssh":
+    if not exists("runtime-up"):
+        sys.exit("colima: the VM is not running")
+    command = args[args.index("--") + 1:]
+    sudo = command[0] == "sudo"
+    if sudo:
+        command = command[1:]
+    vm = os.path.join(stub, "vm")
+    def vm_file(path):
+        return os.path.join(vm, "files", path.lstrip("/"))
+    def sysctl_file(key):
+        return os.path.join(vm, "sysctl", key)
+    if command[0] == "cat":
+        if not os.path.exists(vm_file(command[1])):
+            sys.exit("cat: " + command[1] + ": No such file or directory")
+        print(open(vm_file(command[1])).read(), end="")
+    elif command[0] == "test" and command[1] == "-d":
+        sys.exit(0 if os.path.isdir(vm_file(command[2])) else 1)
+    elif command[0] == "sysctl" and command[1] == "-n":
+        if command[2].startswith("net.bridge.") and not os.path.isdir(vm_file("/proc/sys/net/bridge")):
+            sys.exit("sysctl: cannot stat /proc/sys/" + command[2].replace(".", "/") + ": No such file or directory")
+        print(open(sysctl_file(command[2])).read().strip() if os.path.exists(sysctl_file(command[2])) else "1")
+    elif sudo and command[0] == "sysctl" and command[1] == "-w":
+        key, value = command[2].split("=")
+        if key.startswith("net.bridge.") and not os.path.isdir(vm_file("/proc/sys/net/bridge")):
+            sys.exit("sysctl: cannot stat /proc/sys/" + key.replace(".", "/") + ": No such file or directory")
+        os.makedirs(os.path.dirname(sysctl_file(key)), exist_ok=True)
+        open(sysctl_file(key), "w").write(value)
+    elif sudo and command[0] == "modprobe":
+        if command[-1] != "br_netfilter":
+            sys.exit("modprobe: FATAL: Module " + command[-1] + " not found")
+        os.makedirs(vm_file("/proc/sys/net/bridge"), exist_ok=True)
+    elif sudo and command[0] == "tee":
+        os.makedirs(os.path.dirname(vm_file(command[1])), exist_ok=True)
+        content = sys.stdin.read()
+        open(vm_file(command[1]), "w").write(content)
+        print(content, end="")
+    else:
+        sys.exit("unexpected colima ssh call: " + " ".join(command))
 elif name == "colima":
     if args[0] != "start" or args[-1] != "--activate=false":
         sys.exit("unexpected colima call: " + " ".join(args))
@@ -307,7 +369,14 @@ class RoleTest(unittest.TestCase):
         return log.read_text().splitlines() if log.exists() else []
 
     def changes(self) -> list[str]:
-        return [call for call in self.calls() if re.match(r"\S+ (colima|launchctl (bootstrap|bootout))", call)]
+        return [call for call in self.calls() if re.match(r"\S+ (colima start|launchctl (bootstrap|bootout))", call)]
+
+    def vm_changes(self) -> list[str]:
+        """The commands run as root in the Colima VM, in order, without the colima ssh prefix."""
+        return [match.group(1) for call in self.calls() if (match := re.match(r"\S+ colima ssh --profile \S+ -- (sudo .*)", call))]
+
+    def vm_file(self, path: str) -> Path:
+        return self.stub / "vm" / "files" / path.lstrip("/")
 
     def recap(self, result: subprocess.CompletedProcess[str]) -> dict[str, int]:
         match = re.search(r"node1\s+: ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)", result.stdout)
@@ -338,7 +407,7 @@ class RoleTest(unittest.TestCase):
         result = self.run_role()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps)|launchctl print)", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n) )", call)], [])
         self.assertNotIn("bootstrap", " ".join(self.calls()[len(before) :]))
 
     def test_a_running_runtime_is_not_started_again_but_still_gets_the_agent(self) -> None:
@@ -440,6 +509,99 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertGreater(self.recap(result)["changed"], 0)
         self.assertIn("stop", self.plist.read_text())
+
+    def test_a_colima_vm_without_the_module_gets_the_files_that_load_it_and_the_module(self) -> None:
+        self.state("runtime-up")
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.vm_changes(), [f"sudo tee {MODULES_FILE}", f"sudo tee {SYSCTL_FILE}", "sudo modprobe -- br_netfilter"])
+        self.assertEqual(self.vm_file(MODULES_FILE).read_text().splitlines()[-1], "br_netfilter")
+        self.assertEqual(self.vm_file(SYSCTL_FILE).read_text().splitlines()[1:], ["net.bridge.bridge-nf-call-iptables = 1", "net.bridge.bridge-nf-call-ip6tables = 1"])
+        self.assertTrue(self.vm_file("/proc/sys/net/bridge").is_dir())
+
+    def test_a_second_run_changes_nothing_in_the_vm(self) -> None:
+        self.state("runtime-up")
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        before = self.calls()
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[len(before) :] if " sudo " in call], [])
+
+    def test_the_module_is_loaded_again_when_a_restarted_vm_has_lost_it_and_the_files_are_left_alone(self) -> None:
+        self.state("runtime-up")
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        shutil.rmtree(self.vm_file("/proc"))
+        before = len(self.vm_changes())
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.vm_changes()[before:], ["sudo modprobe -- br_netfilter"])
+
+    def test_a_loaded_module_is_not_loaded_again_but_the_files_are_still_written(self) -> None:
+        self.state("runtime-up")
+        self.vm_file("/proc/sys/net/bridge").mkdir(parents=True)
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.vm_changes(), [f"sudo tee {MODULES_FILE}", f"sudo tee {SYSCTL_FILE}"])
+
+    def test_the_file_a_person_wrote_by_hand_is_replaced_by_the_managed_one(self) -> None:
+        self.state("runtime-up")
+        self.vm_file(MODULES_FILE).parent.mkdir(parents=True)
+        self.vm_file(MODULES_FILE).write_text("br_netfilter\n")
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertIn(f"sudo tee {MODULES_FILE}", self.vm_changes())
+        self.assertIn("Managed by the exadev.github_runner collection", self.vm_file(MODULES_FILE).read_text())
+
+    def test_a_bridge_sysctl_that_is_off_is_set_after_the_module_is_loaded(self) -> None:
+        self.state("runtime-up")
+        (self.stub / "vm" / "sysctl").mkdir(parents=True)
+        (self.stub / "vm" / "sysctl" / "net.bridge.bridge-nf-call-iptables").write_text("0")
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.vm_changes()[2:], ["sudo modprobe -- br_netfilter", "sudo sysctl -w net.bridge.bridge-nf-call-iptables=1"])
+
+    def test_the_vm_of_the_hosts_profile_is_the_one_prepared(self) -> None:
+        self.state("runtime-up")
+        self.run_role(context="colima-example", github_runner_cluster_runtime_autostart=False)
+        ssh_calls = [call for call in self.calls() if " colima ssh " in call]
+        self.assertTrue(ssh_calls)
+        self.assertTrue(all(call.startswith("colima-example colima ssh --profile example -- ") for call in ssh_calls), ssh_calls)
+
+    def test_the_vm_is_prepared_with_the_agent_installed_as_well(self) -> None:
+        self.state("session")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), ["colima colima start --profile default --activate=false", f"colima launchctl bootstrap gui/{UID} {self.plist}"])
+        self.assertEqual(self.vm_changes()[-1], "sudo modprobe -- br_netfilter")
+
+    def test_check_mode_reports_what_the_vm_needs_and_changes_none_of_it(self) -> None:
+        self.state("runtime-up")
+        result = self.run_role("--check", github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.vm_changes(), [])
+        self.assertFalse((self.stub / "vm").exists())
+        for reported in (f"write {MODULES_FILE} in the VM", f"write {SYSCTL_FILE} in the VM", "modprobe br_netfilter in the VM"):
+            self.assertIn(reported, result.stdout)
+
+    def test_a_vm_that_would_only_be_started_by_a_check_run_is_not_read(self) -> None:
+        self.state("session")
+        result = self.run_role("--check")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.calls() if " colima ssh " in call], [])
+
+    def test_a_runtime_that_is_not_colima_leaves_the_kernel_alone(self) -> None:
+        self.state("runtime-up")
+        for context in ("desktop-linux", "orbstack"):
+            with self.subTest(context=context):
+                result = self.run_role(context=context, github_runner_cluster_runtime_autostart=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual([call for call in self.calls() if " colima " in call], [])
+
+    def test_a_stopped_runtime_that_is_not_started_fails_before_the_vm_is_touched(self) -> None:
+        self.state("session")
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(self.vm_changes(), [])
+        self.assertEqual([call for call in self.calls() if " colima " in call], [])
 
     def test_the_end_checks_pass_with_the_runtime_up_and_the_container_running(self) -> None:
         self.state("runtime-up")
