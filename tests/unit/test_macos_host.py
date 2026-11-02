@@ -34,6 +34,7 @@ assert _spec is not None and _spec.loader is not None
 macos_host = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(macos_host)
 changes = macos_host.macos_host_pmset_ac_changes
+sleep_disabled = macos_host.macos_host_pmset_sleep_disabled
 
 # What pmset -g custom prints on a MacBook Air that sleeps on AC power, and the wanted values the role defaults to.
 BATTERY = """Battery Power:
@@ -60,6 +61,11 @@ def report(**overrides: str | None) -> str:
     settings = {**AC_SETTINGS, **overrides}
     lines = [f" {name:<20} {value}" for name, value in settings.items() if value is not None]
     return BATTERY + "AC Power:\n Sleep On Power Button 1\n" + "\n".join(lines) + "\n"
+
+
+def system_report(*lines: str) -> str:
+    """Render pmset -g's output, with the given lines among the settings in force."""
+    return "System-wide power settings:\nCurrently in use:\n standby              1\n" + "".join(f" {line}\n" for line in lines) + " womp                 1\n"
 
 
 class FilterTest(unittest.TestCase):
@@ -99,8 +105,41 @@ class FilterTest(unittest.TestCase):
             changes(report(), ["sleep"])
 
     def test_the_filter_is_registered_under_the_name_the_role_uses(self) -> None:
-        self.assertEqual(set(macos_host.FilterModule().filters()), {"macos_host_pmset_ac_changes"})
+        self.assertEqual(set(macos_host.FilterModule().filters()), {"macos_host_pmset_ac_changes", "macos_host_pmset_sleep_disabled"})
         self.assertIn("exadev.github_runner.macos_host_pmset_ac_changes", (ROLE / "tasks" / "power.yml").read_text())
+
+
+class SleepDisabledFilterTest(unittest.TestCase):
+    def test_a_mac_that_reports_sleep_disabled_as_one_is_disabled(self) -> None:
+        self.assertIs(sleep_disabled(system_report("SleepDisabled        1")), True)
+
+    def test_a_mac_that_reports_it_as_zero_is_not(self) -> None:
+        self.assertIs(sleep_disabled(system_report("SleepDisabled        0")), False)
+
+    def test_a_mac_that_does_not_list_the_setting_is_not(self) -> None:
+        self.assertIs(sleep_disabled(system_report()), False)
+
+    def test_the_separator_and_indentation_do_not_matter(self) -> None:
+        for line in ("SleepDisabled\t\t1", "SleepDisabled 1", "  SleepDisabled      1  ", "\tSleepDisabled\t1"):
+            with self.subTest(line=line):
+                self.assertIs(sleep_disabled("System-wide power settings:\nCurrently in use:\n" + line + "\n"), True)
+
+    def test_the_setting_is_found_wherever_it_is_listed(self) -> None:
+        self.assertIs(sleep_disabled(system_report("hibernatemode        3", "SleepDisabled        1", "disksleep            10")), True)
+
+    def test_another_setting_or_value_is_not_it(self) -> None:
+        for line in ("SleepDisabledX       1", "NotSleepDisabled     1", "SleepDisabled        10", "SleepDisabled        1 0", "sleep                1", "Sleep On Power Button 1"):
+            with self.subTest(line=line):
+                self.assertIs(sleep_disabled(system_report(line)), False)
+
+    def test_output_that_is_not_pmsets_is_refused(self) -> None:
+        for text in ("", "pmset: command not found\n", "SleepDisabled 1\n"):
+            with self.subTest(text=text), self.assertRaisesRegex(Exception, "no 'Currently in use:' section"):
+                sleep_disabled(text)
+
+    def test_a_report_of_the_wrong_type_is_refused(self) -> None:
+        with self.assertRaisesRegex(Exception, "report must be a string"):
+            sleep_disabled(None)
 
 
 class DefaultsTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""Filter the github_runner_macos_host role uses to compare the AC Power settings pmset reports with the ones it wants."""
+"""Filters the github_runner_macos_host role uses to compare what pmset reports with what it wants: the AC Power settings, and whether sleep is disabled system-wide."""
 
 from __future__ import annotations
 
@@ -8,6 +8,10 @@ from ansible.errors import AnsibleFilterError
 
 # The header pmset -g custom prints above the AC Power profile's settings; the next unindented line ends the profile.
 AC_HEADER = "AC Power:"
+# The header pmset -g prints above the settings in force, among them SleepDisabled once disablesleep is on.
+IN_USE_HEADER = "Currently in use:"
+# The setting pmset -a disablesleep 1 turns on. Unlike the AC Power settings it is system-wide, so pmset -g custom does not list it.
+SLEEP_DISABLED = "SleepDisabled"
 
 
 def _ac_settings(report: str) -> dict[str, str]:
@@ -57,9 +61,29 @@ def macos_host_pmset_ac_changes(report: Any, wanted: Any) -> list[str]:
     return arguments
 
 
+def macos_host_pmset_sleep_disabled(report: Any) -> bool:
+    """Return whether ``pmset -g`` reports sleep as disabled, which is what ``pmset -a disablesleep 1`` sets and the only thing that stops a MacBook with its lid closed from sleeping (``sleep 0`` does not cover clamshell sleep).
+
+    A report with no ``SleepDisabled`` line gives ``False`` like one that says ``SleepDisabled 0``, since a Mac that never had the setting turned on does not list it.
+
+    :param report: the output of ``pmset -g``.
+    :returns: ``True`` when ``SleepDisabled`` is ``1``.
+    :raises AnsibleFilterError: ``report`` is not a string with a ``Currently in use:`` section, so it is not what ``pmset -g`` prints.
+    """
+    if not isinstance(report, str):
+        raise AnsibleFilterError(f"The pmset report must be a string, not {type(report).__name__}.")
+    lines = [line.split() for line in report.splitlines()]
+    if not any(" ".join(words) == IN_USE_HEADER for words in lines):
+        raise AnsibleFilterError(f"The output has no {IN_USE_HEADER!r} section, so it is not the output of pmset -g: {report!r}.")
+    return any(len(words) == 2 and words[0] == SLEEP_DISABLED and words[1] == "1" for words in lines)
+
+
 class FilterModule:
     """Registers the macOS host filter with Ansible."""
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"macos_host_pmset_ac_changes": macos_host_pmset_ac_changes}
+        return {
+            "macos_host_pmset_ac_changes": macos_host_pmset_ac_changes,
+            "macos_host_pmset_sleep_disabled": macos_host_pmset_sleep_disabled,
+        }
