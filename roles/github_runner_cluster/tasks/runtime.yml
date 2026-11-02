@@ -17,6 +17,13 @@
       - env
   when: "'user_uid' not in ansible_facts or 'env' not in ansible_facts"
 
+- name: Check when the Colima profile is to be started
+  # Before anything changes. Not in meta/argument_specs.yml, which declares the native node's variables only.
+  ansible.builtin.assert:
+    that: github_runner_cluster_runtime_autostart_at in ['auto', 'login', 'boot']
+    fail_msg: "github_runner_cluster_runtime_autostart_at must be auto, login or boot, not {{ github_runner_cluster_runtime_autostart_at | quote }}."
+    quiet: true
+
 - name: Work out which container runtime this host runs
   ansible.builtin.set_fact:
     github_runner_cluster_effective_runtime: >-

@@ -70,8 +70,6 @@ class DefaultsTest(unittest.TestCase):
     def test_the_node_profile_starts_at_boot_and_any_other_at_login_unless_a_host_says_so(self) -> None:
         self.assertEqual(DEFAULTS["github_runner_cluster_runtime_autostart_at"], "auto")
         self.assertEqual(DEFAULTS["github_runner_cluster_runtime_boot_profile"], "node")
-        spec = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())["argument_specs"]["main"]["options"]["github_runner_cluster_runtime_autostart_at"]
-        self.assertEqual((spec["default"], spec["choices"]), ("auto", ["auto", "login", "boot"]))
 
     def test_the_daemon_is_in_the_system_launch_daemons_directory_and_owned_by_root(self) -> None:
         self.assertEqual(DEFAULTS["github_runner_cluster_runtime_daemon_plist"], "/Library/LaunchDaemons/{{ github_runner_cluster_runtime_launchd_label }}.plist")
@@ -660,6 +658,13 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(plistlib.loads((self.daemons / "com.exadev.github-runner.colima.default.plist").read_bytes())["UserName"], "example")
         self.assertFalse(self.plist.exists())
+
+    def test_a_value_that_is_not_a_choice_is_refused_before_anything_changes(self) -> None:
+        self.state("session")
+        result = self.run_node(github_runner_cluster_runtime_autostart_at="sometimes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be auto, login or boot, not sometimes", result.stdout)
+        self.assertEqual(self.calls(), [])
 
     def test_the_default_profile_keeps_its_login_agent_and_never_touches_the_system_domain(self) -> None:
         self.state("session")
