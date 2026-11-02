@@ -13,6 +13,9 @@ container_runtime = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(container_runtime)
 
 runtime = container_runtime.cluster_container_runtime
+colima_home = container_runtime.cluster_colima_home
+AnsibleFilterError = container_runtime.AnsibleFilterError
+HOME = "/Users/example"
 
 
 class AutoDetectionTest(unittest.TestCase):
@@ -85,6 +88,47 @@ class InvalidInputTest(unittest.TestCase):
 
     def test_the_filter_is_registered(self) -> None:
         self.assertIs(container_runtime.FilterModule().filters()["cluster_container_runtime"], runtime)
+        self.assertIs(container_runtime.FilterModule().filters()["cluster_colima_home"], colima_home)
+
+
+class ColimaHomeTest(unittest.TestCase):
+    def test_a_profile_in_a_home_of_its_own_names_it(self) -> None:
+        self.assertEqual(colima_home("unix:///Users/example/.colima-node/node/docker.sock", "node", HOME), "/Users/example/.colima-node")
+
+    def test_the_default_home_is_no_variable_at_all(self) -> None:
+        self.assertEqual(colima_home("unix:///Users/example/.colima/default/docker.sock", "default", HOME), "")
+        self.assertEqual(colima_home("unix:///Users/example/.colima/build/docker.sock", "build", HOME), "")
+
+    def test_a_home_that_only_starts_like_the_default_is_a_home_of_its_own(self) -> None:
+        self.assertEqual(colima_home("unix:///Users/example/.colima2/build/docker.sock", "build", HOME), "/Users/example/.colima2")
+
+    def test_the_endpoint_is_trimmed_as_docker_prints_it(self) -> None:
+        self.assertEqual(colima_home("unix:///Users/example/.colima-node/node/docker.sock\n", "node", HOME), "/Users/example/.colima-node")
+
+    def test_an_endpoint_that_is_not_the_profiles_socket_is_refused(self) -> None:
+        for endpoint in (
+            "",
+            "unix:///var/run/docker.sock",
+            "unix:///Users/example/.colima-node/other/docker.sock",
+            "unix:///Users/example/.colima-node/node/other.sock",
+            "tcp://127.0.0.1:2375",
+            "ssh://example@host/Users/example/.colima-node/node/docker.sock",
+            "unix://relative/node/docker.sock",
+            "unix://node/docker.sock",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaisesRegex(AnsibleFilterError, "set github_runner_cluster_colima_home"):
+                    colima_home(endpoint, "node", HOME)
+
+    def test_a_profile_that_is_not_a_valid_name_is_refused(self) -> None:
+        with self.assertRaisesRegex(AnsibleFilterError, "not a valid profile name"):
+            colima_home("unix:///Users/example/.colima-node/no de/docker.sock", "no de", HOME)
+
+    def test_a_value_that_is_not_a_string_is_refused(self) -> None:
+        for args in ((1, "node", HOME), ("unix:///a/node/docker.sock", ["node"], HOME), ("unix:///a/node/docker.sock", "node", 3)):
+            with self.subTest(args=args):
+                with self.assertRaises(AnsibleFilterError):
+                    colima_home(*args)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import re
 from typing import Any
 
@@ -11,6 +12,11 @@ RUNTIME_CHOICES = ("auto", "colima", "docker_desktop", "other")
 # Colima names the Docker context of its default profile "colima" and any other profile's "colima-<profile>".
 COLIMA_CONTEXT = "colima"
 COLIMA_DEFAULT_PROFILE = "default"
+# Colima's default home, which it falls back to when COLIMA_HOME is not set, relative to the user's home directory.
+COLIMA_DEFAULT_HOME = ".colima"
+# The Docker socket Colima creates in a profile's directory, <COLIMA_HOME>/<profile>/docker.sock, and so the endpoint of the Docker context it creates for the profile.
+COLIMA_SOCKET = "docker.sock"
+UNIX_SCHEME = "unix://"
 # Docker Desktop's own context for its Linux engine.
 DOCKER_DESKTOP_CONTEXTS = ("desktop-linux",)
 # Lima's rule for an instance name, which is what a Colima profile becomes. It also keeps the value free of every character that would need escaping in a launchd property list or on a command line.
@@ -66,9 +72,35 @@ def cluster_container_runtime(context: Any, requested: Any = "auto", colima_prof
     return {"kind": "colima", "colima_profile": profile or context_profile or COLIMA_DEFAULT_PROFILE}
 
 
+def cluster_colima_home(endpoint: Any, profile: Any, user_home: Any) -> str:
+    """Return the ``COLIMA_HOME`` a Colima profile needs, read from the endpoint of the Docker context Colima made for it.
+
+    Colima puts a profile's Docker socket at ``<COLIMA_HOME>/<profile>/docker.sock`` and points the profile's context at it, so the context says where the profile lives. A command that starts the profile has to run with that ``COLIMA_HOME``, because Colima falls back to ``~/.colima`` when the variable is missing and would then start a different profile of the same name there.
+
+    :param endpoint: The Docker host of the profile's context, ``unix://<COLIMA_HOME>/<profile>/docker.sock``.
+    :param profile: The Colima profile the context belongs to.
+    :param user_home: The home directory of the user the profile belongs to.
+    :returns: The directory, or an empty string when it is ``<user_home>/.colima``, the home Colima uses when ``COLIMA_HOME`` is not set, so a profile in the default home keeps running with no variable.
+    :raises AnsibleFilterError: a value is not a string, the profile is not a valid profile name, or the endpoint is not the socket of that profile in an absolute directory.
+    """
+    host = _text("The Docker context's endpoint", endpoint)
+    profile_name = _text("The Colima profile", profile)
+    home = _text("The user's home directory", user_home)
+    if not PROFILE_PATTERN.match(profile_name):
+        raise AnsibleFilterError(f"The Colima profile {profile_name!r} is not a valid profile name: use letters and digits, separated by single dots, hyphens or underscores.")
+    path = host.removeprefix(UNIX_SCHEME) if host.startswith(UNIX_SCHEME) else ""
+    profile_directory, socket = posixpath.split(path)
+    colima_home, directory = posixpath.split(profile_directory)
+    if socket != COLIMA_SOCKET or directory != profile_name or not posixpath.isabs(colima_home):
+        raise AnsibleFilterError(f"The Docker context's endpoint {host!r} is not the socket of the Colima profile {profile_name!r} (unix://<COLIMA_HOME>/{profile_name}/{COLIMA_SOCKET}), so the role cannot tell where that profile lives: set github_runner_cluster_colima_home.")
+    if colima_home == posixpath.join(home, COLIMA_DEFAULT_HOME):
+        return ""
+    return colima_home
+
+
 class FilterModule:
     """Registers the container runtime filter with Ansible."""
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"cluster_container_runtime": cluster_container_runtime}
+        return {"cluster_container_runtime": cluster_container_runtime, "cluster_colima_home": cluster_colima_home}
