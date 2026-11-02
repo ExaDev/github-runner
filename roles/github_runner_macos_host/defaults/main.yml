@@ -25,6 +25,9 @@ github_runner_macos_host_power_ac_powernap: 1
 # Keep TCP connections alive while the Mac sleeps, 1 on, 0 off.
 github_runner_macos_host_power_ac_tcpkeepalive: 1
 
+# Keep the Mac awake with its lid closed. sleep 0 above does not cover clamshell sleep, so a MacBook with the lid closed still enters Maintenance Sleep and DarkWake cycles (VMs and k3s nodes on it then see minute-long time jumps and the node goes NotReady); only pmset -a disablesleep 1 stops that. It is system-wide, not an AC Power setting. True sets it when pmset -g does not report SleepDisabled 1. False leaves the setting as the host has it and never turns it back off, so undoing it is pmset -a disablesleep 0 by hand. Part of the power settings, so github_runner_macos_host_power false skips it too.
+github_runner_macos_host_disable_sleep: true
+
 # The host's own Tailscale client, installed from the Homebrew formula and run as the tailscaled system daemon (a launchd daemon that starts at boot, before anyone logs in, so the host stays reachable on its tailnet). The role installs and starts the daemon and never joins a tailnet unless github_runner_macos_host_tailscale_auth_key is set. A host whose daemon is already installed, by this role or by hand, is left entirely alone.
 github_runner_macos_host_tailscale: true
 # The Homebrew prefix, whose bin directory holds the formula's tailscaled and tailscale. Empty takes /opt/homebrew on Apple silicon and /usr/local on Intel, from the host's machine fact.
