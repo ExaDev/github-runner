@@ -1,0 +1,34 @@
+name: Runner build image
+
+# Builds the reference build runner image (tool-images/build) natively on amd64 and arm64, with its default ids and with RUNNER_UID and RUNNER_GID set to another id, and checks the runner user in each (tests/runner_build/run.sh): its ids, no file left with the stock ids once they change, and that it can still write its home, run its own programs, use sudo and reach the docker group. Only on changes that can affect them. Builds nothing it publishes.
+
+on:
+  pull_request:
+    paths:
+      - tool-images/build/**
+      - tests/runner_build/**
+      - .github/workflows/runner-build.yml
+  workflow_dispatch:
+
+concurrency:
+  group: runner-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  runner-ids:
+    name: Runner ids (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - {arch: amd64, runner: ubuntu-latest}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and check the image with each set of ids
+        run: tests/runner_build/run.sh
