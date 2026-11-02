@@ -1,3 +1,9 @@
+## [2.18.2](https://github.com/ExaDev/github-runner/compare/v2.18.1...v2.18.2) (2026-11-02)
+
+### Bug Fixes
+
+* **macos-host:** install no daemon beside the standalone Tailscale app ([224418b](https://github.com/ExaDev/github-runner/commit/224418b5194181bdd71edd82ba37feed4cb8055f))
+
 ## [2.18.1](https://github.com/ExaDev/github-runner/compare/v2.18.0...v2.18.1) (2026-11-02)
 
 ### Bug Fixes
