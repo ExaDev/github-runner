@@ -33,10 +33,6 @@
 - name: Keep Homebrew and mise at their latest release
   ansible.builtin.include_tasks: packages.yml
 
-- name: Make Homebrew and mise available to the connecting user's shell
-  ansible.builtin.include_tasks: shell_integration.yml
-  when: github_runner_host_tools_shell_integration | bool
-
 - name: Write the global mise defaults
   ansible.builtin.include_tasks: mise_config.yml
   when:

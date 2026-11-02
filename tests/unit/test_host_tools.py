@@ -1,4 +1,4 @@
-"""Tests the github_runner_host_tools role: the filters that pick the Homebrew prefix, write the shell startup lines and render mise's configuration, the package-install security settings for npm and pnpm the role writes, the defaults against the argument specs and README, how site.yml wires the role, and the role's tasks (tests/host_tools/run.yml) against stand-ins for brew, sudo, apt-get, dpkg-query, getent, dscl and Homebrew's installer on PATH, so no package, shell startup file outside a temporary home or privilege is ever touched and nothing is downloaded."""
+"""Tests the github_runner_host_tools role: the filters that pick the Homebrew prefix, write the shell startup lines and render mise's configuration, the package-install security settings for npm and pnpm and the shell environment variables the role writes, the defaults against the argument specs and README, how site.yml wires the role, and the role's tasks (tests/host_tools/run.yml) against stand-ins for brew, sudo, apt-get, dpkg-query, getent, dscl and Homebrew's installer on PATH, so no package, shell startup file outside a temporary home or privilege is ever touched and nothing is downloaded."""
 
 from __future__ import annotations
 
@@ -145,6 +145,7 @@ PNPM_CONFIG = {"Darwin": "Library/Preferences/pnpm/config.yaml", "Linux": ".conf
 PNPM_SETTINGS = {"minimumReleaseAge": 10080, "saveExact": True}
 PNPM_USER = "# Mine.\nstoreDir: /somewhere/store   # the store\n\n# The age, in minutes.\nminimumReleaseAge: 1440\n\n# Exclusions.\nminimumReleaseAgeExclude:\n- old-one\n\nregistry: https://registry.example.test/\n"
 PNPM_MERGED = "# Mine.\nstoreDir: /somewhere/store   # the store\n\n# The age, in minutes.\nminimumReleaseAge: 10080\n\n# Exclusions.\nminimumReleaseAgeExclude:\n  - example-a\n\nregistry: https://registry.example.test/\nsaveExact: true\n"
+ENV_BLOCK_UV = "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools env-UV_PYTHON_DOWNLOADS\nexport UV_PYTHON_DOWNLOADS=never\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools env-UV_PYTHON_DOWNLOADS\n"
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -164,7 +165,7 @@ def mise_block(prefix: Path, shell: str) -> str:
 
 class FilterRegistrationTest(unittest.TestCase):
     def test_the_filters_are_registered_under_the_names_the_role_uses(self) -> None:
-        self.assertEqual(set(host_tools.FilterModule().filters()), {"host_tools_homebrew_prefix", "host_tools_shell_integrations", "host_tools_mise_toml", "host_tools_npmrc", "host_tools_yaml_merge"})
+        self.assertEqual(set(host_tools.FilterModule().filters()), {"host_tools_homebrew_prefix", "host_tools_shell_integrations", "host_tools_shell_env", "host_tools_mise_toml", "host_tools_npmrc", "host_tools_yaml_merge"})
         used = set(re.findall(r"exadev\.github_runner\.(host_tools_\w+)", "".join(path.read_text() for path in (ROLE / "tasks").glob("*.yml"))))
         self.assertEqual(used, set(host_tools.FilterModule().filters()))
 
@@ -288,10 +289,10 @@ class TasksTest(unittest.TestCase):
     def test_the_pnpm_config_paths_are_the_ones_pnpm_documents(self) -> None:
         self.assertEqual(VARS["github_runner_host_tools_pnpm_config_files"], {"Darwin": "Library/Preferences/pnpm/config.yaml", "Linux": ".config/pnpm/config.yaml"})
 
-    def test_the_package_install_settings_write_nothing_by_default(self) -> None:
-        for name in ("npm_settings", "npm_min_release_age_exclude", "pnpm_settings", "pnpm_minimum_release_age_exclude"):
+    def test_the_package_install_settings_and_the_shell_environment_write_nothing_by_default(self) -> None:
+        for name in ("npm_settings", "npm_min_release_age_exclude", "pnpm_settings", "pnpm_minimum_release_age_exclude", "shell_env"):
             with self.subTest(name=name):
-                self.assertEqual(DEFAULTS[f"github_runner_host_tools_{name}"], {} if name.endswith("_settings") else [])
+                self.assertEqual(DEFAULTS[f"github_runner_host_tools_{name}"], {} if name.endswith(("_settings", "_env")) else [])
 
     def test_the_mise_configuration_goes_to_conf_d_and_never_to_config_toml(self) -> None:
         paths = [str(module.get("dest") or module.get("path")) for _, task in self.tasks() for key, module in task.items() if key.startswith("ansible.builtin.") and isinstance(module, dict) and (module.get("dest") or module.get("path"))]
@@ -722,7 +723,7 @@ class RoleTest(unittest.TestCase):
         self.assertFalse(self.fleet_file().exists())
 
 
-    # Package-install security settings. The tests turn Homebrew and mise off, so they need none of the stand-ins and a host with no tool installed is enough.
+    # Package-install security settings and the shell environment. The tests turn Homebrew and mise off, so they need none of the stand-ins and a host with no tool installed is enough.
 
     def run_settings(self, *extra: str, **variables: Any) -> subprocess.CompletedProcess[str]:
         return self.run_role(*extra, github_runner_host_tools_homebrew=False, github_runner_host_tools_mise=False, **variables)
@@ -796,8 +797,7 @@ class RoleTest(unittest.TestCase):
     def test_a_changed_value_is_rewritten_in_the_block(self) -> None:
         self.ok(self.run_settings(github_runner_host_tools_npm_settings={"min-release-age": 3}))
         self.ok(self.run_settings(github_runner_host_tools_npm_settings={"min-release-age": 7}))
-        self.assertEqual(self.npmrc().read_text().count("min-release-age"), 3)
-        self.assertIn("\nmin-release-age=7\n", self.npmrc().read_text())
+        self.assertEqual(self.npmrc().read_text(), NPM_MARKS[0] + "min-release-age=7\n" + NPM_MARKS[1])
 
     def test_a_key_the_user_sets_outside_the_block_is_kept_and_reported_and_the_role_does_not_write_it(self) -> None:
         self.npmrc().write_text(NPMRC_USER + "min-release-age=30\n# ignore-scripts=false\n")
@@ -870,7 +870,7 @@ class RoleTest(unittest.TestCase):
         self.assertNotIn(NPMRC_TOKEN, self.squashed(result))
 
     def test_a_host_the_role_does_not_support_gets_no_package_install_settings(self) -> None:
-        result = self.run_settings(system="FreeBSD", os_family="FreeBSD", github_runner_host_tools_npm_settings=NPM_SETTINGS, github_runner_host_tools_pnpm_settings={"saveExact": True})
+        result = self.run_settings(system="FreeBSD", os_family="FreeBSD", github_runner_host_tools_npm_settings=NPM_SETTINGS, github_runner_host_tools_pnpm_settings={"saveExact": True}, github_runner_host_tools_shell_env={"A": "b"})
         self.ok(result)
         self.assertEqual(list(self.home.iterdir()), [])
 
@@ -950,6 +950,92 @@ class RoleTest(unittest.TestCase):
         self.assertTrue(self.npmrc().exists())
         self.assertTrue(self.pnpm_config().exists())
 
+    # Shell environment variables.
+
+    def test_a_shell_variable_goes_into_zshenv_as_a_managed_block_and_a_second_run_changes_nothing(self) -> None:
+        variables = {"github_runner_host_tools_shell_env": {"UV_PYTHON_DOWNLOADS": "never"}}
+        self.ok(self.run_settings(**variables))
+        self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV)
+        result = self.run_settings(**variables)
+        self.ok(result)
+        self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_bash_gets_the_variable_in_bashrc(self) -> None:
+        self.ok(self.run_settings(system="Linux", os_family="Debian", machine="x86_64", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV)
+        self.assertFalse((self.home / ".zshenv").exists())
+
+    def test_a_value_with_quotes_and_dollar_signs_reaches_the_variable_exactly_in_the_shell_that_reads_the_file(self) -> None:
+        value = "it's \"$HOME\" `id` $(id) ${HOME} \\n; echo injected"
+        self.ok(self.run_settings(system="Linux", os_family="Debian", machine="x86_64", github_runner_host_tools_shell_env={"EXAMPLE_VALUE": value, "EXAMPLE_FLAG": True, "EXAMPLE_COUNT": 3}))
+        for shell in ("sh", "bash"):
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, "-c", '. "$1"\nprintf "%s|%s|%s" "$EXAMPLE_VALUE" "$EXAMPLE_FLAG" "$EXAMPLE_COUNT"', shell, str(self.home / ".bashrc")], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home"})
+                self.assertEqual(result.stdout, f"{value}|true|3")
+
+    def test_a_variable_a_startup_file_assigns_already_is_not_added_in_any_file_of_that_shell(self) -> None:
+        for name in (".zshenv", ".zshrc", ".zprofile"):
+            with self.subTest(file=name):
+                (self.home / ".zshrc").unlink(missing_ok=True)
+                (self.home / ".zshenv").unlink(missing_ok=True)
+                (self.home / ".zprofile").unlink(missing_ok=True)
+                (self.home / name).write_text("export UV_PYTHON_DOWNLOADS=automatic\n")
+                self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never", "EXAMPLE_OTHER": "x"}))
+                self.assertEqual((self.home / name).read_text().count("UV_PYTHON_DOWNLOADS"), 1)
+                self.assertIn("automatic", (self.home / name).read_text())
+                self.assertEqual("".join(path.read_text() for path in self.home.iterdir()).count("UV_PYTHON_DOWNLOADS"), 1)
+                self.assertIn("EXAMPLE_OTHER", "".join(path.read_text() for path in self.home.iterdir()))
+
+    def test_a_commented_out_assignment_does_not_count_as_set(self) -> None:
+        (self.home / ".zshrc").write_text("# export UV_PYTHON_DOWNLOADS=automatic\n")
+        self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV)
+
+    def test_a_changed_value_updates_the_roles_own_block_in_place(self) -> None:
+        self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "automatic"}))
+        self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV)
+
+    def test_the_variables_are_written_whether_or_not_the_shell_integration_is_on(self) -> None:
+        for integration in (True, False):
+            with self.subTest(integration=integration):
+                (self.home / ".zshenv").unlink(missing_ok=True)
+                self.ok(self.run_settings(github_runner_host_tools_shell_integration=integration, github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+                self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV)
+
+    def test_the_variables_come_with_homebrew_and_mise_lines_in_the_same_file_when_both_are_wanted(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        self.ok(self.run_role(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".zshenv").read_text(), homebrew_block(self.prefix) + mise_block(self.prefix, "zsh") + ENV_BLOCK_UV)
+
+    def test_a_login_shell_the_role_does_not_set_up_gets_no_variables(self) -> None:
+        (self.stub / "shell").write_text("/usr/bin/fish")
+        result = self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+        self.ok(result)
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertIn("so no startup file was changed", self.squashed(result))
+
+    def test_an_existing_startup_file_keeps_its_mode_and_its_other_lines(self) -> None:
+        startup = self.home / ".zshenv"
+        startup.write_text("export EXAMPLE=1\n")
+        startup.chmod(0o600)
+        self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual(self.mode(startup), 0o600)
+        self.assertEqual(startup.read_text(), "export EXAMPLE=1\n" + ENV_BLOCK_UV)
+
+    def test_a_name_a_shell_would_not_accept_is_refused_before_any_file_is_changed(self) -> None:
+        result = self.run_settings(github_runner_host_tools_shell_env={"NOT-A-NAME": "x"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a name a shell accepts", self.squashed(result))
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_check_mode_reports_a_variable_and_writes_nothing(self) -> None:
+        result = self.run_settings("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+        self.ok(result)
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
 
 
 if __name__ == "__main__":

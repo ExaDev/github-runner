@@ -1,5 +1,5 @@
 ---
-# Adds Homebrew's shellenv and the mise activation to the connecting user's shell, and only what is missing: a line goes into a startup file only when none of the shell's startup files has an equivalent already, so a host that was set up by hand, or by a dotfiles manager, is left exactly as it is. The user's login shell is read from the account database, never assumed.
+# Adds Homebrew's shellenv, the mise activation and the environment variables of github_runner_host_tools_shell_env to the connecting user's shell, and only what is missing: a line goes into a startup file only when none of the shell's startup files has an equivalent already, so a host that was set up by hand, or by a dotfiles manager, is left exactly as it is. The user's login shell is read from the account database, never assumed.
 
 - name: Read the connecting user's account entry on Linux
   ansible.builtin.command:
@@ -28,8 +28,8 @@
   when: github_runner_host_tools_shell not in github_runner_host_tools_shell_files
 
 - name: Add what each shell startup file is missing
-  # The list is empty for a shell the role does not set up, because a loop is evaluated before its when and the filter refuses a shell it does not know.
+  # The list is empty for a shell the role does not set up, because a loop is evaluated before its when and the filter refuses a shell it does not know. Homebrew's and mise's lines come first, only when the integration is on and Homebrew is managed (the prefix is worked out only then), and the environment variables follow.
   ansible.builtin.include_tasks: shell_integration_line.yml
-  loop: "{{ (github_runner_host_tools_effective_prefix | exadev.github_runner.host_tools_shell_integrations(github_runner_host_tools_shell, github_runner_host_tools_homebrew | bool, github_runner_host_tools_mise | bool)) if github_runner_host_tools_shell in github_runner_host_tools_shell_files else [] }}"
+  loop: "{{ (((github_runner_host_tools_effective_prefix | exadev.github_runner.host_tools_shell_integrations(github_runner_host_tools_shell, github_runner_host_tools_homebrew | bool, github_runner_host_tools_mise | bool)) if github_runner_host_tools_shell_integration | bool and github_runner_host_tools_homebrew | bool else []) + (github_runner_host_tools_shell_env | exadev.github_runner.host_tools_shell_env)) if github_runner_host_tools_shell in github_runner_host_tools_shell_files else [] }}"
   loop_control:
     loop_var: github_runner_host_tools_integration

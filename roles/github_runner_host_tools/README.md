@@ -1,6 +1,6 @@
 # github_runner_host_tools
 
-Homebrew and [mise](https://mise.jdx.dev) on every host of the fleet, Mac or Linux: installed when missing, kept at their latest release and made available to the connecting user's shell, and the package-install security settings of npm and pnpm, written from variables. It runs on macOS (Apple silicon and Intel) and on Debian-family Linux (Debian and Ubuntu) and skips any other host with a message, so it can be applied to a mixed inventory. `playbooks/site.yml` runs it for every cluster host, before the two host baseline plays and the fleet play.
+Homebrew and [mise](https://mise.jdx.dev) on every host of the fleet, Mac or Linux: installed when missing, kept at their latest release and made available to the connecting user's shell, and the package-install security settings of npm and pnpm and the shell environment variables a host asks for, written from variables. It runs on macOS (Apple silicon and Intel) and on Debian-family Linux (Debian and Ubuntu) and skips any other host with a message, so it can be applied to a mixed inventory. `playbooks/site.yml` runs it for every cluster host, before the two host baseline plays and the fleet play.
 
 ## Privileges
 
@@ -123,6 +123,18 @@ github_runner_host_tools_pnpm_minimum_release_age_exclude:
 
 The role sets each key it is given and edits nothing else: every other key, comment and blank line stays byte for byte, a key that already holds the value is not touched (so a second run changes nothing and a file that is right is not rewritten), and a list is written indented under its key. A comment on the same line as a rewritten key goes with its old value. The result is parsed and compared with what the merge should hold before it is written, and a file whose layout the merge cannot edit safely (not YAML, not a mapping at the top, a flow-style mapping, several documents) fails the run with a message and is left as it is. Setting `minimumReleaseAgeExclude` in both variables fails the run before anything is written. The role never changes the mode of an existing file, a new one gets the user's umask, and a symlink stays one with its target edited. A key dropped from the variable is left in the file, since the role cannot tell which keys in a YAML file it wrote.
 
+## Shell environment
+
+`github_runner_host_tools_shell_env` is a mapping of environment variable names to string, number or boolean values, for example `UV_PYTHON_DOWNLOADS: never`. Each variable gets its own managed block with one `export` line in the shell's startup file (`.zshenv` for zsh, `.bashrc` for bash, as under Shell integration), so a command run over SSH sees it:
+
+```sh
+export UV_PYTHON_DOWNLOADS=never
+```
+
+The same discipline as the Homebrew and mise lines applies: a variable is added only when none of that shell's startup files assigns it already (`NAME=` or `export NAME=` outside a comment, whatever the value), so a value the user chose is never overridden, and a block the role wrote earlier is kept current when the value changes. The value is quoted for the shell (`shlex.quote`: single quotes, with an embedded single quote written as `'"'"'`), so spaces, quotes, `$`, backticks and `;` reach the variable exactly as given in zsh and bash alike. A name the shell does not accept, and a value of more than one line, fail the run with a message. A boolean is written as `true` or `false`.
+
+The variables are written whether or not `github_runner_host_tools_shell_integration` is on, and without Homebrew: that variable covers only the Homebrew and mise lines, and a mapping the host gives is the host asking for the variables. A user whose login shell is neither zsh nor bash is left alone with a message. A variable dropped from the mapping keeps its line.
+
 ## Variables
 
 - `github_runner_host_tools_homebrew` (default true): install Homebrew when it is missing and run `brew update` on every run.
@@ -134,6 +146,7 @@ The role sets each key it is given and edits nothing else: every other key, comm
 - `github_runner_host_tools_npm_min_release_age_exclude` (default an empty list): package names or patterns written as `min-release-age-exclude[]=NAME` lines in the same block.
 - `github_runner_host_tools_pnpm_settings` (default an empty mapping): top-level keys and values merged into pnpm's global `config.yaml`.
 - `github_runner_host_tools_pnpm_minimum_release_age_exclude` (default an empty list): package names or patterns written under `minimumReleaseAgeExclude` in that file.
+- `github_runner_host_tools_shell_env` (default an empty mapping): environment variables written as `export` lines in the shell's startup file; see Shell environment above.
 - `github_runner_host_tools_homebrew_prefix` (default empty): the Homebrew prefix. Empty takes the prefix described under Homebrew. Not a setting; a variable only so the tests can point it at a stand-in.
 - `github_runner_host_tools_homebrew_install_base_url`: where the installer is downloaded from, as `<this>/<commit>/install.sh`. Not a setting; a variable only so the tests can point it at a stand-in.
 
@@ -157,14 +170,16 @@ github_runner_host_tools_mise_config:
 ```
 
 ```yaml
-# host_vars/example.yml: refuse packages younger than a week and skip install scripts
+# host_vars/example.yml: refuse packages younger than a week and skip install scripts, and keep uv from downloading Pythons
 github_runner_host_tools_npm_settings:
   min-release-age: 7
   ignore-scripts: true
 github_runner_host_tools_pnpm_settings:
   minimumReleaseAge: 10080
+github_runner_host_tools_shell_env:
+  UV_PYTHON_DOWNLOADS: never
 ```
 
 ## Testing
 
-`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. They also check the package-install settings: that nothing is read or written when the variables are empty, that the `.npmrc` block holds only the role's lines, keeps the user's lines and credentials (made-up values) out of the output, is idempotent and shrinks as entries are dropped, that a key the user sets outside the block is kept and reported, that a new `.npmrc` is `0600` and no existing file or symlink changes mode, that the pnpm merge keeps unrelated keys and comments. Nothing is downloaded and no real package manager, privilege or startup file is touched.
+`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. They also check the package-install settings and the shell variables: that nothing is read or written when the variables are empty, that the `.npmrc` block holds only the role's lines, keeps the user's lines and credentials (made-up values) out of the output, is idempotent and shrinks as entries are dropped, that a key the user sets outside the block is kept and reported, that a new `.npmrc` is `0600` and no existing file or symlink changes mode, that the pnpm merge keeps unrelated keys and comments, and that a shell variable's value, quotes and dollar signs included, round-trips through `sh` and `bash` reading the written file. Nothing is downloaded and no real package manager, privilege or startup file is touched.

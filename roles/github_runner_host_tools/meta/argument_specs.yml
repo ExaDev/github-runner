@@ -2,7 +2,7 @@
 # The role's variables, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it.
 argument_specs:
   main:
-    short_description: Installs Homebrew and mise, keeps them at their latest release and makes them available to the connecting user's shell, and sets npm and pnpm package-install security settings when the variables for them are given.
+    short_description: Installs Homebrew and mise, keeps them at their latest release and makes them available to the connecting user's shell, and sets npm and pnpm package-install security settings and shell environment variables when the variables for them are given.
     description:
       - Runs on macOS and Debian-family Linux hosts and skips any other with a message. Homebrew refuses to run as root, so the connecting user must not be root; the tasks that need privilege (the Linux prerequisites packages and the installer's own sudo) use become or sudo, so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
     options:
@@ -48,6 +48,10 @@ argument_specs:
         elements: str
         default: []
         description: Package names or patterns exempt from minimumReleaseAge, written as the list under minimumReleaseAgeExclude in pnpm's global config.yaml.
+      github_runner_host_tools_shell_env:
+        type: dict
+        default: {}
+        description: Environment variables for the connecting user's shell, as a mapping of names to string, number or boolean values, each written as a quoted export line in a managed block of the shell's startup file unless a startup file of the shell assigns it already.
       github_runner_host_tools_homebrew_prefix:
         type: str
         default: ""
