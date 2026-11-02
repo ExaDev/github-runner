@@ -82,6 +82,10 @@ argument_specs:
         type: str
         default: tailscale-app
         description: "The Homebrew cask of Tailscale's standalone app, kept current only when it is installed. Not a setting, and a variable only so the tests can point it at a stand-in."
+      github_runner_macos_host_tailscale_app_bundle:
+        type: path
+        default: /Applications/Tailscale.app
+        description: "Where Tailscale's standalone app lives. A host that has it is its own Tailscale client, so the role installs no daemon beside it. Not a setting, and a variable only so the tests can point it at a stand-in."
       github_runner_macos_host_tailscale_auth_key:
         type: str
         default: ""
