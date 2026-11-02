@@ -4,7 +4,7 @@ argument_specs:
   main:
     short_description: 'Prepares a Linux host that carries a k3s node: keeps it awake, headless and up to date, and ready for k3s.'
     description:
-      - Runs on Linux hosts only and does nothing on any other. Every step is off by default and behind a variable of its own. Its tasks that change the host use become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
+      - Runs on Linux hosts only and does nothing on any other. Every step but the Tailscale update is off by default, and each is behind a variable of its own. Its tasks that change the host use become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
     options:
       github_runner_linux_host_keep_awake:
         type: bool
@@ -161,3 +161,7 @@ argument_specs:
         type: path
         default: /var/run/reboot-required
         description: The file that says an upgrade needs a reboot. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_tailscale_update:
+        type: bool
+        default: true
+        description: "Whether the host's Tailscale client is kept current, the one step that is on by default: when the package tailscale is installed and apt has a newer release of it, only that package is upgraded (apt-get install --only-upgrade tailscale), and the tailscaled service is enabled and started if it is not. Nothing is installed and no tailnet is joined. A host without the package, a host that is not Debian or Ubuntu, and a native node of the cluster (whose cluster role installs the release it pins) are skipped with a message."

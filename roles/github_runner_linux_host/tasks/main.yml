@@ -1,5 +1,5 @@
 ---
-# Linux hosts only. Every step is off by default, each behind a variable of its own, and every one is skipped on any other host, so the role can be applied to a mixed inventory. The tasks that change the host use become (sudo); everything the role only reads runs as the connecting user.
+# Linux hosts only. Every step but the last, the Tailscale update, is off by default, each behind a variable of its own, and every one is skipped on any other host, so the role can be applied to a mixed inventory. The tasks that change the host use become (sudo); everything the role only reads runs as the connecting user.
 
 - name: Read which operating system the host has
   # Only the platform subset, the cheapest that holds it, and only when the caller did not gather it: a play with gather_facts: false leaves ansible_facts without it. Read-only, so it runs under --check too.
@@ -58,3 +58,9 @@
   when:
     - ansible_facts['system'] == 'Linux'
     - github_runner_linux_host_upgrade | bool
+
+- name: Keep the host's Tailscale client current
+  ansible.builtin.include_tasks: tailscale_update.yml
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - github_runner_linux_host_tailscale_update | bool
