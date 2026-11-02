@@ -188,6 +188,17 @@ github_runner_cluster_runtime_path: "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/l
 github_runner_cluster_runtime_launchd_label: "com.exadev.github-runner.colima.{{ github_runner_cluster_effective_runtime.colima_profile }}"
 # Derived, never set directly: where the agent's property list lives, in the connecting user's own LaunchAgents directory.
 github_runner_cluster_runtime_agent_plist: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ github_runner_cluster_runtime_launchd_label }}.plist"
+# What the Colima VM's kernel needs for the node, loaded and set now and at every VM boot on every run (tasks/colima_kernel.yml). A pod that talks to a Service whose only backend is on the same node gets no reply unless bridged traffic passes through iptables, and that needs the br_netfilter module and the two sysctls below. Constants, not settings; variables only so the tests can narrow them.
+github_runner_cluster_colima_kernel_module: br_netfilter
+github_runner_cluster_colima_sysctl_settings:
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+# Not settings: the directory that exists in the VM exactly while the module is loaded (the bridge sysctls live under it), and the files in the VM that load the module and set the sysctls at boot. The module file keeps the name the repository README's note has long told people to create by hand, so a host that has one is adopted, not duplicated.
+github_runner_cluster_colima_bridge_proc_dir: /proc/sys/net/bridge
+github_runner_cluster_colima_modules_load_file: /etc/modules-load.d/br_netfilter.conf
+github_runner_cluster_colima_sysctl_file: /etc/sysctl.d/90-github-runner-br-netfilter.conf
+# Derived, never set directly: the command that runs another command in the profile's VM as the VM's user, which has passwordless sudo.
+github_runner_cluster_colima_vm_command: "{{ ['colima', 'ssh', '--profile', github_runner_cluster_effective_runtime.colima_profile, '--'] }}"
 
 # The directory on the target host the role manages as this host's Compose project: it copies the collection's docker-compose.yml and k3s/ build context there, templates .env there, and k3s writes the kubeconfig to its kubeconfig/ subdirectory. Needs no checkout of anything on the host. The default reads HOME from the target's gathered facts, so it is the connecting user's home on that host, not the control node's.
 github_runner_cluster_dir: "{{ ansible_facts['env']['HOME'] }}/{{ github_runner_cluster_dir_name }}"
