@@ -436,6 +436,8 @@ class RoleTest(unittest.TestCase):
         self.plist = self.stub / "LaunchDaemons" / PLIST_NAME
         # Where tailscaled install-system-daemon puts the daemon it installs.
         self.daemon_binary = self.stub / "usr-local-bin" / "tailscaled"
+        # Where the standalone app would be; absent unless a test creates it.
+        self.app_bundle = self.stub / "Applications" / "Tailscale.app"
         self.set_power(sleepdisabled="0", sleep="1", displaysleep="10", disksleep="10")
 
     def set_power(self, sleepdisabled: str | None = "1", **overrides: str) -> None:
@@ -493,6 +495,7 @@ class RoleTest(unittest.TestCase):
             "github_runner_macos_host_homebrew_prefix": str(self.prefix),
             "github_runner_macos_host_tailscale_plist": str(self.plist),
             "github_runner_macos_host_tailscale_daemon_binary": str(self.daemon_binary),
+            "github_runner_macos_host_tailscale_app_bundle": str(self.app_bundle),
             # The install and join tests are about those, and a stand-in formula that is installed would otherwise be upgraded on their second runs: the update has tests of its own, which turn it on.
             "github_runner_macos_host_tailscale_update": False,
             **variables,
@@ -736,6 +739,15 @@ class RoleTest(unittest.TestCase):
         result = self.run_role()
         self.ok(result)
         self.assertEqual(self.calls(), READS)
+        self.assertEqual(self.recap(result)["changed"], 0)
+
+    def test_a_host_running_the_standalone_app_gets_no_daemon_beside_it(self) -> None:
+        self.set_power()
+        self.app_bundle.mkdir(parents=True)
+        result = self.run_role()
+        self.ok(result)
+        self.assertEqual(self.calls(), READS)
+        self.assertFalse(self.plist.exists())
         self.assertEqual(self.recap(result)["changed"], 0)
 
     def test_a_hand_built_daemon_stays_alone_even_with_an_auth_key_and_no_formula(self) -> None:

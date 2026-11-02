@@ -13,9 +13,18 @@
     path: "{{ github_runner_macos_host_tailscale_plist }}"
   register: github_runner_macos_host_tailscale_daemon
 
-# A host that already has the definition, installed by this role earlier or by hand, is left alone: nothing below runs, so a hand-built daemon is never replaced by the formula's.
+- name: Look for the standalone Tailscale app
+  # The app carries its own client in a system network extension, which the formula's daemon would conflict with (both want the host's one tailnet connection), so a host that has the app is its own Tailscale client already.
+  ansible.builtin.stat:
+    path: "{{ github_runner_macos_host_tailscale_app_bundle }}"
+    get_checksum: false
+  register: github_runner_macos_host_tailscale_app_bundle_stat
+
+# A host that already has the definition, installed by this role earlier or by hand, or the standalone app, is left alone: nothing below runs, so a hand-built daemon is never replaced by the formula's and the app is never given a second client.
 - name: Install the daemon
-  when: not github_runner_macos_host_tailscale_daemon.stat.exists
+  when:
+    - not github_runner_macos_host_tailscale_daemon.stat.exists
+    - not github_runner_macos_host_tailscale_app_bundle_stat.stat.exists
   block:
     - name: Install the Tailscale Homebrew formula
       community.general.homebrew:
