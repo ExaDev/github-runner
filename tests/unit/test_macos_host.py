@@ -106,7 +106,9 @@ class FilterTest(unittest.TestCase):
 
     def test_the_filter_is_registered_under_the_name_the_role_uses(self) -> None:
         self.assertEqual(set(macos_host.FilterModule().filters()), {"macos_host_pmset_ac_changes", "macos_host_pmset_sleep_disabled"})
-        self.assertIn("exadev.github_runner.macos_host_pmset_ac_changes", (ROLE / "tasks" / "power.yml").read_text())
+        power_tasks = (ROLE / "tasks" / "power.yml").read_text()
+        self.assertIn("exadev.github_runner.macos_host_pmset_ac_changes", power_tasks)
+        self.assertIn("exadev.github_runner.macos_host_pmset_sleep_disabled", power_tasks)
 
 
 class SleepDisabledFilterTest(unittest.TestCase):
@@ -152,6 +154,10 @@ class DefaultsTest(unittest.TestCase):
         names = set(re.findall(r"github_runner_macos_host_power_ac_(\w+)", power_tasks))
         self.assertEqual(names, set(WANTED))
         self.assertEqual(set(re.findall(r"'(\w+)': github_runner_macos_host_power_ac_", power_tasks)), set(WANTED))
+
+    def test_sleep_is_disabled_by_default_and_the_role_has_one_variable_for_it(self) -> None:
+        self.assertIs(DEFAULTS["github_runner_macos_host_disable_sleep"], True)
+        self.assertIn("github_runner_macos_host_disable_sleep | bool", (ROLE / "tasks" / "power.yml").read_text())
 
     def test_passwordless_sudo_is_off_by_default_and_is_for_the_connecting_user(self) -> None:
         self.assertIs(DEFAULTS["github_runner_macos_host_sudoers_nopasswd"], False)
@@ -260,7 +266,7 @@ class WiringTest(unittest.TestCase):
         for path in sorted(ROLE.glob("tasks/*.yml")):
             text = path.read_text()
             with self.subTest(path=path.name):
-                self.assertEqual(len(re.findall(r"^\s*become: true", text, re.MULTILINE)), {"power.yml": 1, "sudoers.yml": 1, "tailscale.yml": 2}.get(path.name, 0))
+                self.assertEqual(len(re.findall(r"^\s*become: true", text, re.MULTILINE)), {"power.yml": 2, "sudoers.yml": 1, "tailscale.yml": 2}.get(path.name, 0))
 
     def test_every_task_that_runs_on_the_host_is_guarded_to_macos(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
@@ -274,7 +280,7 @@ class WiringTest(unittest.TestCase):
         self.assertIn("github_runner_macos_host_tailscale: false", text)
 
 
-# Stands in for pmset, brew, tailscaled, tailscale and sudo, which are all this one script under five names. State is files in $MACOS_HOST_STUB: pmset.ac (one "name value" line per AC Power setting), brew.installed, daemon.up and login.state (what tailscale status reports), LaunchDaemons/ (where tailscaled install-system-daemon writes its definition); every call is appended to calls.log as "<tool> root=<0|1> <arguments>". The sudo stand-in does what sudo does for the role, which is to run the command as root: it marks the command with MACOS_HOST_ROOT, and a stand-in that changes the host refuses to without it, as the real one does for a user who is not root. A key given to tailscale up is logged only as a hash of it.
+# Stands in for pmset, brew, tailscaled, tailscale and sudo, which are all this one script under five names. State is files in $MACOS_HOST_STUB: pmset.ac (one "name value" line per AC Power setting), sleepdisabled (what pmset -g reports as SleepDisabled, absent when the Mac lists no such line), brew.installed, daemon.up and login.state (what tailscale status reports), LaunchDaemons/ (where tailscaled install-system-daemon writes its definition); every call is appended to calls.log as "<tool> root=<0|1> <arguments>". The sudo stand-in does what sudo does for the role, which is to run the command as root: it marks the command with MACOS_HOST_ROOT, and a stand-in that changes the host refuses to without it, as the real one does for a user who is not root. A key given to tailscale up is logged only as a hash of it.
 STUB = """#!{python}
 import hashlib, json, os, sys
 stub = os.environ["MACOS_HOST_STUB"]
@@ -306,6 +312,13 @@ if name == "pmset":
         print("Battery Power:\\n sleep 1\\n womp 0\\nAC Power:\\n Sleep On Power Button 1")
         for key, value in settings.items():
             print(" %-20s %s" % (key, value))
+    elif args == ["-g"]:
+        print("System-wide power settings:\\nCurrently in use:\\n standby              1")
+        if os.path.exists(path("sleepdisabled")):
+            print(" SleepDisabled        " + read("sleepdisabled"))
+    elif args[:2] == ["-a", "disablesleep"]:
+        need_root()
+        write("sleepdisabled", args[2])
     elif args[0] == "-c":
         need_root()
         settings = dict(line.split(" ", 1) for line in read("pmset.ac").splitlines())
@@ -357,6 +370,10 @@ else:
 """
 
 
+# The two reads of pmset the role makes when it has nothing to change, in order: the AC Power profile, then the system-wide settings.
+READS = ["pmset root=0 -g custom", "pmset root=0 -g"]
+
+
 def key_hash(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:8]
 
@@ -377,11 +394,20 @@ class RoleTest(unittest.TestCase):
             tool.write_text(STUB.format(python=sys.executable))
             tool.chmod(0o755)
         self.plist = self.stub / "LaunchDaemons" / PLIST_NAME
-        self.set_power(sleep="1", displaysleep="10", disksleep="10")
+        self.set_power(sleepdisabled="0", sleep="1", displaysleep="10", disksleep="10")
 
-    def set_power(self, **overrides: str) -> None:
+    def set_power(self, sleepdisabled: str | None = "1", **overrides: str) -> None:
+        """Set the AC Power settings (in line with the defaults unless overridden) and what pmset -g reports as SleepDisabled (on unless given, None for no such line)."""
+        sleep_state = self.stub / "sleepdisabled"
+        if sleepdisabled is None:
+            sleep_state.unlink(missing_ok=True)
+        else:
+            sleep_state.write_text(sleepdisabled)
         settings = {"sleep": "0", "displaysleep": "0", "disksleep": "0", "womp": "1", "standby": "1", "powernap": "1", "tcpkeepalive": "1", **overrides}
         (self.stub / "pmset.ac").write_text("".join(f"{name} {value}\n" for name, value in settings.items()))
+
+    def sleep_disabled(self) -> str:
+        return (self.stub / "sleepdisabled").read_text()
 
     def power(self) -> dict[str, str]:
         return dict(line.split(" ", 1) for line in (self.stub / "pmset.ac").read_text().splitlines())
@@ -426,7 +452,7 @@ class RoleTest(unittest.TestCase):
     def writes(self, *tools: str) -> list[str]:
         """The calls that change the host, without the read-only ones the role makes to find out."""
         wanted = tools or ("pmset", "brew", "tailscaled", "tailscale")
-        read_only = re.compile(r"(pmset root=0 -g custom|brew root=0 info .*|tailscale root=0 status .*)$")
+        read_only = re.compile(r"(pmset root=0 -g( custom)?|brew root=0 info .*|tailscale root=0 status .*)$")
         return [call for call in self.calls() if call.split(" ")[0] in wanted and not read_only.match(call)]
 
     def recap(self, result: subprocess.CompletedProcess[str]) -> dict[str, int]:
@@ -485,8 +511,8 @@ class RoleTest(unittest.TestCase):
         self.ok(result)
         self.assertEqual(self.power()["sleep"], "0")
         self.assertEqual((self.power()["displaysleep"], self.power()["disksleep"]), ("0", "0"))
-        self.assertEqual([call for call in self.writes("pmset")], ["pmset root=1 -c sleep 0 displaysleep 0 disksleep 0"])
-        self.assertEqual(self.recap(result)["changed"], 1)
+        self.assertEqual([call for call in self.writes("pmset")], ["pmset root=1 -c sleep 0 displaysleep 0 disksleep 0", "pmset root=1 -a disablesleep 1"])
+        self.assertEqual(self.recap(result)["changed"], 2)
 
     def test_a_second_run_changes_nothing_and_does_not_ask_for_root(self) -> None:
         self.run_role(github_runner_macos_host_tailscale=False)
@@ -494,14 +520,14 @@ class RoleTest(unittest.TestCase):
         result = self.run_role(github_runner_macos_host_tailscale=False)
         self.ok(result)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual(self.calls()[len(before) :], ["pmset root=0 -g custom"])
-        self.assertEqual(len(self.sudo_calls()), 1)
+        self.assertEqual(self.calls()[len(before) :], READS)
+        self.assertEqual(len(self.sudo_calls()), 2)
 
     def test_a_mac_already_in_line_is_only_read(self) -> None:
         self.set_power()
         result = self.run_role(github_runner_macos_host_tailscale=False)
         self.ok(result)
-        self.assertEqual(self.calls(), ["pmset root=0 -g custom"])
+        self.assertEqual(self.calls(), READS)
         self.assertEqual(self.sudo_calls(), [])
         self.assertEqual(self.recap(result)["changed"], 0)
 
@@ -512,14 +538,80 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(self.writes("pmset"), ["pmset root=1 -c sleep 15 womp 0"])
         self.assertEqual((self.power()["sleep"], self.power()["womp"]), ("15", "0"))
 
+    def test_sleep_is_disabled_once_as_root_and_then_left_alone(self) -> None:
+        self.set_power(sleepdisabled="0")
+        result = self.run_role(github_runner_macos_host_tailscale=False)
+        self.ok(result)
+        self.assertEqual(self.writes("pmset"), ["pmset root=1 -a disablesleep 1"])
+        self.assertEqual(self.sleep_disabled(), "1")
+        self.assertEqual(self.recap(result)["changed"], 1)
+        before = self.calls()
+        result = self.run_role(github_runner_macos_host_tailscale=False)
+        self.ok(result)
+        self.assertEqual(self.calls()[len(before) :], READS)
+        self.assertEqual(len(self.sudo_calls()), 1)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_mac_that_lists_no_sleep_disabled_setting_gets_it_set(self) -> None:
+        self.set_power(sleepdisabled=None)
+        result = self.run_role(github_runner_macos_host_tailscale=False)
+        self.ok(result)
+        self.assertEqual(self.writes("pmset"), ["pmset root=1 -a disablesleep 1"])
+        self.assertEqual(self.sleep_disabled(), "1")
+
+    def test_a_mac_whose_sleep_is_already_disabled_is_only_read(self) -> None:
+        self.set_power()
+        result = self.run_role(github_runner_macos_host_tailscale=False)
+        self.ok(result)
+        self.assertEqual(self.calls(), READS)
+        self.assertEqual(self.sudo_calls(), [])
+        self.assertEqual(self.recap(result)["changed"], 0)
+
+    def test_with_the_variable_false_pmset_is_not_asked_about_sleep_and_nothing_is_turned_off(self) -> None:
+        for state in ("0", "1"):
+            with self.subTest(state=state):
+                self.set_power(sleepdisabled=state)
+                (self.stub / "calls.log").unlink(missing_ok=True)
+                result = self.run_role(github_runner_macos_host_tailscale=False, github_runner_macos_host_disable_sleep=False)
+                self.ok(result)
+                self.assertEqual(self.calls(), ["pmset root=0 -g custom"])
+                self.assertEqual(self.sudo_calls(), [])
+                self.assertEqual(self.sleep_disabled(), state)
+                self.assertEqual(self.recap(result)["changed"], 0)
+
+    def test_with_the_power_settings_off_sleep_is_left_alone_too(self) -> None:
+        self.set_power(sleepdisabled="0")
+        result = self.run_role(github_runner_macos_host_tailscale=False, github_runner_macos_host_power=False)
+        self.ok(result)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.sleep_disabled(), "0")
+
+    def test_check_mode_reports_disabling_sleep_and_makes_no_call_that_changes_it(self) -> None:
+        self.set_power(sleepdisabled="0")
+        result = self.run_role("--check", github_runner_macos_host_tailscale=False)
+        self.ok(result)
+        self.assertEqual(self.calls(), READS)
+        self.assertEqual(self.sudo_calls(), [])
+        self.assertEqual(self.sleep_disabled(), "0")
+        self.assertEqual(self.recap(result)["changed"], 1, result.stdout)
+        self.assertIn("pmset -a disablesleep 1", result.stdout)
+
+    def test_a_value_that_is_not_a_boolean_for_the_variable_is_refused(self) -> None:
+        result = self.run_role(github_runner_macos_host_disable_sleep="maybe")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("github_runner_macos_host_disable_sleep", result.stdout)
+        self.assertEqual(self.calls(), [])
+
     def test_check_mode_changes_nothing_and_reports_the_change(self) -> None:
         result = self.run_role("--check", github_runner_macos_host_tailscale=False)
         self.ok(result)
         self.assertEqual(self.power()["sleep"], "1")
-        self.assertEqual(self.calls(), ["pmset root=0 -g custom"])
+        self.assertEqual(self.calls(), READS)
         self.assertEqual(self.sudo_calls(), [], "a dry run needs no privilege")
-        self.assertEqual(self.recap(result)["changed"], 1, result.stdout)
+        self.assertEqual(self.recap(result)["changed"], 2, result.stdout)
         self.assertIn("pmset -c sleep 0 displaysleep 0 disksleep 0", result.stdout)
+        self.assertIn("pmset -a disablesleep 1", result.stdout)
+        self.assertEqual(self.sleep_disabled(), "0")
 
     def test_check_mode_on_a_mac_already_in_line_reports_nothing(self) -> None:
         self.set_power()
@@ -562,14 +654,14 @@ class RoleTest(unittest.TestCase):
         result = self.run_role()
         self.ok(result)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual(self.calls()[len(before) :], ["pmset root=0 -g custom"])
+        self.assertEqual(self.calls()[len(before) :], READS)
 
     def test_a_host_that_already_has_the_daemon_is_left_entirely_alone(self) -> None:
         self.set_power()
         self.hand_built_daemon()
         result = self.run_role()
         self.ok(result)
-        self.assertEqual(self.calls(), ["pmset root=0 -g custom"])
+        self.assertEqual(self.calls(), READS)
         self.assertEqual(self.recap(result)["changed"], 0)
 
     def test_a_hand_built_daemon_stays_alone_even_with_an_auth_key_and_no_formula(self) -> None:
@@ -577,14 +669,14 @@ class RoleTest(unittest.TestCase):
         self.hand_built_daemon()
         result = self.run_role(github_runner_macos_host_tailscale_auth_key=AUTH_KEY)
         self.ok(result)
-        self.assertEqual(self.calls(), ["pmset root=0 -g custom"])
+        self.assertEqual(self.calls(), READS)
         self.assertEqual(self.sudo_calls(), [])
 
     def test_the_tailscale_part_can_be_turned_off(self) -> None:
         self.set_power()
         result = self.run_role(github_runner_macos_host_tailscale=False)
         self.ok(result)
-        self.assertEqual(self.calls(), ["pmset root=0 -g custom"])
+        self.assertEqual(self.calls(), READS)
 
     def test_check_mode_reports_the_daemon_install_and_installs_nothing(self) -> None:
         self.set_power()

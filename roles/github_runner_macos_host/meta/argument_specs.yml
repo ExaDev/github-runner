@@ -54,6 +54,10 @@ argument_specs:
         default: 1
         choices: [0, 1]
         description: Keeping TCP connections alive during sleep on AC power, 1 on and 0 off.
+      github_runner_macos_host_disable_sleep:
+        type: bool
+        default: true
+        description: Whether the role keeps the Mac awake with its lid closed, with pmset -a disablesleep 1 when pmset -g does not report SleepDisabled 1. False leaves the setting as it is and never turns it off. Skipped with github_runner_macos_host_power false.
       github_runner_macos_host_tailscale:
         type: bool
         default: true

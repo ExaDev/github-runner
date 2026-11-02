@@ -1,5 +1,5 @@
 ---
-# pmset is found on the PATH (it is in /usr/bin), so the tests can stand in for it. The AC Power profile only (pmset -c): a laptop on battery keeps its own settings. pmset -g custom is the read, and a setting is written only when it differs from the wanted value there, so a Mac already in line is untouched and a second run changes nothing.
+# pmset is found on the PATH (it is in /usr/bin), so the tests can stand in for it. The AC Power profile only (pmset -c): a laptop on battery keeps its own settings. pmset -g custom is the read, and a setting is written only when it differs from the wanted value there, so a Mac already in line is untouched and a second run changes nothing. System-wide disablesleep (pmset -a) is the same, read from pmset -g.
 
 - name: Read the power settings in force
   ansible.builtin.command:
@@ -38,4 +38,40 @@
   when:
     - ansible_check_mode
     - github_runner_macos_host_power_changes | length > 0
+  changed_when: true
+
+# sleep 0 does not cover clamshell sleep: a MacBook with its lid closed still enters Maintenance Sleep and DarkWake cycles, so the VMs and k3s nodes on it see time jump and the node goes NotReady. Only pmset -a disablesleep 1 (SleepDisabled 1 in pmset -g) stops that. It is system-wide, not per power profile, so it is -a and not -c. The role only turns it on: with the variable false it leaves the setting as it finds it, and never turns it off.
+
+- name: Read whether sleep is disabled system-wide
+  when: github_runner_macos_host_disable_sleep | bool
+  ansible.builtin.command:
+    argv: [pmset, -g]
+  register: github_runner_macos_host_pmset_system
+  changed_when: false
+  # Read-only, so it also runs under --check and the run can say what would change.
+  check_mode: false
+
+- name: Work out whether sleep still needs disabling
+  when: github_runner_macos_host_disable_sleep | bool
+  ansible.builtin.set_fact:
+    github_runner_macos_host_sleep_disable_needed: "{{ not (github_runner_macos_host_pmset_system.stdout | exadev.github_runner.macos_host_pmset_sleep_disabled) }}"
+
+- name: Disable sleep system-wide
+  become: true
+  ansible.builtin.command:
+    argv: [pmset, -a, disablesleep, "1"]
+  when:
+    - github_runner_macos_host_disable_sleep | bool
+    - github_runner_macos_host_sleep_disable_needed | bool
+    - not ansible_check_mode
+  changed_when: true
+
+- name: Report that a real run would disable sleep
+  # Under --check the task above does not run, so that no privilege is needed to review a run; this reports the same change instead.
+  ansible.builtin.debug:
+    msg: "pmset -a disablesleep 1"
+  when:
+    - github_runner_macos_host_disable_sleep | bool
+    - github_runner_macos_host_sleep_disable_needed | bool
+    - ansible_check_mode
   changed_when: true
