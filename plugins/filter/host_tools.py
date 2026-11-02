@@ -223,7 +223,7 @@ def host_tools_npmrc(settings: Any, excludes: Any, existing: Any, marker: Any) -
         raise AnsibleFilterError(f"The npm exclusions must be a list, not {type(excludes).__name__}.")
     if not isinstance(existing, str) or not isinstance(marker, str):
         raise AnsibleFilterError("The npmrc text and the block's marker must be strings.")
-    outside = [line for line in _outside_block(existing, marker) if not line.lstrip().startswith((";", "#"))]
+    outside = _outside_block(existing, marker)
     lines: list[str] = []
     shadowed: list[str] = []
     for key, value in settings.items():
