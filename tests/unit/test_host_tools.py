@@ -781,6 +781,14 @@ class RoleTest(unittest.TestCase):
                 self.assertEqual(self.mode(self.npmrc()), mode)
                 self.assertEqual(self.npmrc().read_text(), NPMRC_USER + NPM_BLOCK_SETTINGS)
 
+    def test_an_existing_empty_npmrc_keeps_its_mode_too(self) -> None:
+        # An empty file is the case where copy sees the content as unchanged and goes on to look at attributes, which is why the role never asks it to set a mode on an existing file.
+        self.npmrc().write_text("")
+        self.npmrc().chmod(0o644)
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS))
+        self.assertEqual(self.mode(self.npmrc()), 0o644)
+        self.assertEqual(self.npmrc().read_text(), NPM_BLOCK_SETTINGS)
+
     def test_dropping_an_entry_removes_its_line_and_dropping_all_removes_the_block(self) -> None:
         self.npmrc().write_text(NPMRC_USER)
         self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS, github_runner_host_tools_npm_min_release_age_exclude=["example-a", "example-b"]))

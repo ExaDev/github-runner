@@ -40,7 +40,7 @@
       when: github_runner_host_tools_npmrc_plan['shadowed'] | length > 0
 
     - name: Create ~/.npmrc when it does not exist
-      # After the lines are worked out, so a value the filter refuses leaves no file behind. 0600 because an npmrc can hold credentials. Only when the file is missing: copy would apply the mode to an existing file too, and the role never changes the mode of a file the user has.
+      # After the lines are worked out, so a value the filter refuses leaves no file behind. 0600 because an npmrc can hold credentials. Only when the file is missing, so the role never asks copy to set a mode on a file the user has, whatever copy would do with its content.
       ansible.builtin.copy:
         content: ""
         dest: "{{ ansible_facts['user_dir'] }}/.npmrc"
@@ -51,10 +51,9 @@
         - github_runner_host_tools_npm_settings | length > 0 or github_runner_host_tools_npm_min_release_age_exclude | length > 0
 
     - name: Write the block  # noqa: risky-file-permissions
-      # No mode is passed on purpose, so an existing file keeps the mode it has (blockinfile always edits the target of a symlink, so an npmrc that is a link stays one). With no lines the block is removed.
+      # No mode is passed on purpose, so an existing file keeps the mode it has (blockinfile always edits the target of a symlink, so an npmrc that is a link stays one). With no lines the block is empty, and an empty block removes the block and its markers (the module documents it).
       ansible.builtin.blockinfile:
         path: "{{ ansible_facts['user_dir'] }}/.npmrc"
         marker: "{{ github_runner_host_tools_npmrc_marker }}"
         block: "{{ github_runner_host_tools_npmrc_plan['lines'] | join('\n') }}"
-        state: "{{ 'present' if github_runner_host_tools_npmrc_plan['lines'] | length > 0 else 'absent' }}"
         create: true
