@@ -1,4 +1,4 @@
-"""Filters the github_runner_host_tools role uses: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell, mise's configuration rendered to TOML, the managed lines of an npmrc file and a YAML file merged with settings."""
+"""Filters the github_runner_host_tools role uses: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell or set environment variables in it, mise's configuration rendered to TOML, the managed lines of an npmrc file and a YAML file merged with settings."""
 
 from __future__ import annotations
 
@@ -23,6 +23,9 @@ BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 # TOML basic strings escape these by name; every other control character is written as a \u escape.
 STRING_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}
 
+
+# The name of an environment variable the shell accepts in an assignment.
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # The npmrc key whose values are a list, written as one key[]=value line for each. It has a variable of its own, so the scalar settings refuse it.
 NPM_LIST_KEY = "min-release-age-exclude"
@@ -68,6 +71,41 @@ def host_tools_shell_integrations(prefix: Any, shell: Any, homebrew: Any, mise: 
     if mise:
         integrations.append({"name": "mise", "pattern": "^[^#]*mise activate", "line": f'[ -x {mise_binary} ] && eval "$({mise_binary} activate {shell})"'})
     return integrations
+
+
+def _env_value(name: str, value: Any) -> str:
+    """Return the text of an environment variable's value: a string as it is, a boolean as true or false, a number as its digits.
+
+    :raises AnsibleFilterError: the value is none of those, or is a string of more than one line or with a NUL, which a startup file line cannot hold.
+    """
+    # bool is a subclass of int, so it has to be tested first.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        if any(char in value for char in "\n\r\x00"):
+            raise AnsibleFilterError(f"The value of {name} must be one line without a NUL.")
+        return str(value)
+    raise AnsibleFilterError(f"The value of {name} must be a string, a number or a boolean, not {type(value).__name__}.")
+
+
+def host_tools_shell_env(env: Any) -> list[dict[str, str]]:
+    """Return the startup lines that set environment variables in a shell, in the shape host_tools_shell_integrations returns.
+
+    Each value is quoted for the shell with ``shlex.quote``, so it reaches the variable exactly as given whatever it holds (spaces, quotes, ``$``, backticks), in zsh and in bash alike. ``pattern`` is an extended regular expression that matches a line of a startup file that already assigns the variable, outside a comment, whatever its value, so a value the user chose is never overridden, and ``name`` tells the lines apart.
+
+    :param env: a mapping of variable names to string, number or boolean values. :returns: ``[{"name", "pattern", "line"}, ...]`` in the mapping's order, with a dictionary for each variable. :raises AnsibleFilterError: ``env`` is not a mapping, a name is not one the shell accepts, or a value is not a single-line string, a number or a boolean.
+    """
+    if not isinstance(env, dict):
+        raise AnsibleFilterError(f"The shell environment must be a mapping, not {type(env).__name__}.")
+    lines: list[dict[str, str]] = []
+    for name, value in env.items():
+        if not isinstance(name, str) or not ENV_NAME.match(name):
+            raise AnsibleFilterError(f"{name!r} is not a name a shell accepts for an environment variable.")
+        text = _env_value(name, value)
+        lines.append({"name": f"env-{name}", "pattern": f"^[[:space:]]*(export[[:space:]]+)?{name}=", "line": f"export {name}={shlex.quote(text)}"})
+    return lines
 
 
 def _key(name: Any) -> str:
@@ -317,6 +355,7 @@ class FilterModule:
         return {
             "host_tools_homebrew_prefix": host_tools_homebrew_prefix,
             "host_tools_shell_integrations": host_tools_shell_integrations,
+            "host_tools_shell_env": host_tools_shell_env,
             "host_tools_mise_toml": host_tools_mise_toml,
             "host_tools_npmrc": host_tools_npmrc,
             "host_tools_yaml_merge": host_tools_yaml_merge,

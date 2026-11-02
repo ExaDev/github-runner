@@ -1,9 +1,10 @@
-"""Tests the filters of the github_runner_host_tools role in plugins/filter/host_tools.py: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell, mise's configuration rendered to TOML, the lines of the managed block of an npmrc file and a YAML file merged with settings, against golden strings."""
+"""Tests the filters of the github_runner_host_tools role in plugins/filter/host_tools.py: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell or set environment variables in it, mise's configuration rendered to TOML, the lines of the managed block of an npmrc file and a YAML file merged with settings, against golden strings."""
 
 from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -114,6 +115,67 @@ class MiseTomlFilterTest(unittest.TestCase):
         for label, (config, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
                 host_tools.host_tools_mise_toml(config)
+
+
+def grep_finds(pattern: str, text: str) -> bool:
+    """Whether grep -E, which the role runs the pattern with, finds the pattern in a line."""
+    return subprocess.run(["grep", "-E", "-q", "-e", pattern], input=text + "\n", capture_output=True, text=True, check=False).returncode == 0
+
+
+class ShellEnvFilterTest(unittest.TestCase):
+    def test_a_variable_becomes_a_quoted_export_line_and_a_pattern_that_finds_an_assignment_of_it(self) -> None:
+        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"})
+        self.assertEqual(item, {"name": "env-UV_PYTHON_DOWNLOADS", "pattern": "^[[:space:]]*(export[[:space:]]+)?UV_PYTHON_DOWNLOADS=", "line": "export UV_PYTHON_DOWNLOADS=never"})
+
+    def test_the_variables_come_out_in_the_order_of_the_mapping(self) -> None:
+        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_env({"B": "1", "A": "2"})], ["env-B", "env-A"])
+
+    def test_an_empty_mapping_has_no_lines(self) -> None:
+        self.assertEqual(host_tools.host_tools_shell_env({}), [])
+
+    def test_a_value_reaches_the_variable_exactly_as_given_whatever_it_holds(self) -> None:
+        values = ["it's", 'say "hi"', "$HOME", "${HOME}", "`id`", "$(id)", "a b  c", "back\\slash", "tab\there", "*", "; echo injected", "", "-n", "'", "''", "\"'\"", "é"]
+        for value in values:
+            with self.subTest(value=value):
+                [item] = host_tools.host_tools_shell_env({"EXAMPLE": value})
+                for shell in ("sh", "bash"):
+                    result = subprocess.run([shell, "-c", item["line"] + '\nprintf %s "$EXAMPLE"'], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home"})
+                    self.assertEqual(result.stdout, value)
+                    self.assertEqual(result.stderr, "")
+
+    def test_a_dollar_sign_and_a_single_quote_are_quoted_and_not_expanded(self) -> None:
+        self.assertEqual(host_tools.host_tools_shell_env({"A": "$HOME"})[0]["line"], "export A='$HOME'")
+        self.assertEqual(host_tools.host_tools_shell_env({"A": "it's"})[0]["line"], "export A='it'\"'\"'s'")
+
+    def test_a_boolean_is_true_or_false_and_a_number_is_its_digits(self) -> None:
+        lines = {item["name"]: item["line"] for item in host_tools.host_tools_shell_env({"A": True, "B": False, "C": 3, "D": 0.5})}
+        self.assertEqual(lines, {"env-A": "export A=true", "env-B": "export B=false", "env-C": "export C=3", "env-D": "export D=0.5"})
+
+    def test_the_pattern_finds_an_assignment_with_or_without_export_and_not_a_comment_or_another_variable(self) -> None:
+        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"})
+        for text in ("UV_PYTHON_DOWNLOADS=automatic", "export UV_PYTHON_DOWNLOADS=automatic", "  export   UV_PYTHON_DOWNLOADS='x'", "\texport UV_PYTHON_DOWNLOADS="):
+            with self.subTest(text=text):
+                self.assertTrue(grep_finds(item["pattern"], text))
+        for text in ("# export UV_PYTHON_DOWNLOADS=never", "export OTHER_UV_PYTHON_DOWNLOADS=never", "echo UV_PYTHON_DOWNLOADS=never", "UV_PYTHON_DOWNLOADS_MORE=never"):
+            with self.subTest(text=text):
+                self.assertFalse(grep_finds(item["pattern"], text))
+
+    def test_what_a_shell_would_not_take_is_refused(self) -> None:
+        cases = {
+            "not a mapping": (["A"], "must be a mapping"),
+            "name with a hyphen": ({"A-B": "1"}, "not a name a shell accepts"),
+            "name starting with a digit": ({"1A": "1"}, "not a name a shell accepts"),
+            "empty name": ({"": "1"}, "not a name a shell accepts"),
+            "name with a space": ({"A B": "1"}, "not a name a shell accepts"),
+            "name that is not a string": ({1: "1"}, "not a name a shell accepts"),
+            "value with a newline": ({"A": "a\nb"}, "one line"),
+            "value with a NUL": ({"A": "a\x00b"}, "one line"),
+            "list value": ({"A": ["a"]}, "must be a string, a number or a boolean"),
+            "null value": ({"A": None}, "must be a string, a number or a boolean"),
+        }
+        for label, (env, message) in cases.items():
+            with self.subTest(label), self.assertRaisesRegex(Exception, message):
+                host_tools.host_tools_shell_env(env)
 
 
 MARKER = "# {mark} ANSIBLE MANAGED BLOCK example"
