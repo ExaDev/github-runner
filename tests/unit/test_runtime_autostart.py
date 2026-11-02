@@ -200,7 +200,7 @@ class PlistTest(unittest.TestCase):
         self.assertEqual((plist["Label"], plist["ProgramArguments"][4]), ("com.exadev.github-runner.colima.build", "build"))
 
     def test_a_profile_in_a_home_of_its_own_gets_that_home_in_the_agent(self) -> None:
-        plist = plistlib.loads(render_plist(docker_context="colima-example", github_runner_cluster_colima_home="/Users/example/.colima-example"))
+        plist = plistlib.loads(render_plist(docker_context="colima-example", github_runner_cluster_runtime_colima_home="/Users/example/.colima-example"))
         self.assertEqual(plist["EnvironmentVariables"], {"PATH": DEFAULTS["github_runner_cluster_runtime_path"], "COLIMA_HOME": "/Users/example/.colima-example"})
 
     def test_a_path_with_markup_characters_is_escaped_not_injected(self) -> None:
@@ -232,11 +232,18 @@ name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 with open(os.path.join(stub, "calls.log"), "a") as log:
     log.write(os.environ.get("DOCKER_CONTEXT", "-") + " " + name + " " + " ".join(args) + "\\n")
+with open(os.path.join(stub, "colima-home.log"), "a") as homes:
+    homes.write(name + " " + " ".join(args) + " " + os.environ.get("COLIMA_HOME", "-") + "\\n")
 def exists(file):
     return os.path.exists(os.path.join(stub, file))
 def touch(file):
     open(os.path.join(stub, file), "w").close()
-if name == "docker":
+if name == "docker" and args[:2] == ["context", "inspect"]:
+    # Read from the context file alone, so it answers with the daemon down.
+    if not exists("context-host"):
+        sys.exit("context inspect: no context-host file")
+    print(open(os.path.join(stub, "context-host")).read(), end="")
+elif name == "docker":
     if not exists("runtime-up"):
         sys.exit("Cannot connect to the Docker daemon")
     if args[0] == "info":
@@ -346,7 +353,10 @@ class RoleTest(unittest.TestCase):
         for flag in flags:
             (self.stub / flag).write_text("")
 
-    def run_role(self, *extra: str, tasks: str = "runtime,end_checks", context: str = "colima", system: str = "Darwin", **variables: Any) -> subprocess.CompletedProcess[str]:
+    def run_role(self, *extra: str, tasks: str = "runtime,end_checks", context: str = "colima", context_host: str | None = None, system: str = "Darwin", **variables: Any) -> subprocess.CompletedProcess[str]:
+        # The endpoint Colima gives its profile's context: the profile's socket in the default home, unless a test says where else.
+        profile = context.removeprefix("colima-") if context.startswith("colima-") else "default"
+        (self.stub / "context-host").write_text(context_host if context_host is not None else f"unix://{self.home}/.colima/{profile}/docker.sock")
         host = {
             "runtime_system": system,
             "runtime_uid": UID,
@@ -367,6 +377,17 @@ class RoleTest(unittest.TestCase):
     def calls(self) -> list[str]:
         log = self.stub / "calls.log"
         return log.read_text().splitlines() if log.exists() else []
+
+    def colima_homes(self) -> list[str]:
+        """The COLIMA_HOME (`-` for none) of every colima call, as `<args> <home>` lines."""
+        log = self.stub / "colima-home.log"
+        return [line.removeprefix("colima ") for line in log.read_text().splitlines() if line.startswith("colima ")] if log.exists() else []
+
+    def assert_colima_ran_in(self, home: str) -> None:
+        """Every colima call (the start and the VM's kernel settings alike) ran with `home`, and the start was among them."""
+        homes = self.colima_homes()
+        self.assertTrue(any(line.startswith("start ") for line in homes), homes)
+        self.assertEqual([line for line in homes if not line.endswith(f" {home}")], [])
 
     def changes(self) -> list[str]:
         return [call for call in self.calls() if re.match(r"\S+ (colima start|launchctl (bootstrap|bootout))", call)]
@@ -400,15 +421,64 @@ class RoleTest(unittest.TestCase):
         self.assertTrue(all(call.startswith("colima-example ") for call in docker_calls), docker_calls)
         self.assertIn("colima-example colima start --profile example --activate=false", self.calls())
 
-    def test_a_second_run_changes_nothing(self) -> None:
+    def test_a_profile_in_a_home_of_its_own_is_started_and_loaded_with_that_home(self) -> None:
+        # The bridged node profile: context colima-node, profile node, in ~/.colima-node. Without COLIMA_HOME colima would start a new profile of that name in ~/.colima.
+        self.state("session")
+        node_home = f"{self.home}/.colima-node"
+        result = self.run_role(context="colima-node", context_host=f"unix://{node_home}/node/docker.sock")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_colima_ran_in(node_home)
+        agent = plistlib.loads(self.home.joinpath("Library/LaunchAgents/com.exadev.github-runner.colima.node.plist").read_bytes())
+        self.assertEqual(agent["EnvironmentVariables"]["COLIMA_HOME"], node_home)
+        self.assertEqual(agent["ProgramArguments"][3:6], ["--profile", "node", "--activate=false"])
+
+    def test_the_variable_wins_over_the_context_and_the_context_is_not_read(self) -> None:
+        self.state("session")
+        result = self.run_role(context="colima-node", github_runner_cluster_colima_home="/elsewhere")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_colima_ran_in("/elsewhere")
+        self.assertFalse([call for call in self.calls() if " docker context " in call])
+
+    def test_a_profile_in_the_default_home_runs_with_no_variable(self) -> None:
         self.state("session")
         self.run_role()
+        self.assert_colima_ran_in("-")
+        self.assertNotIn("COLIMA_HOME", plistlib.loads(self.plist.read_bytes())["EnvironmentVariables"])
+
+    def test_a_context_that_is_not_the_profiles_socket_fails_before_anything_changes(self) -> None:
+        self.state("session")
+        result = self.run_role(context="colima-node", context_host="tcp://127.0.0.1:2375")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("set github_runner_cluster_colima_home", result.stdout)
+        self.assertEqual(self.changes(), [])
+
+    def test_a_stopped_profile_in_a_home_of_its_own_is_started_under_check_mode_reading_only(self) -> None:
+        self.state("session")
+        result = self.run_role("--check", context="colima-node", context_host=f"unix://{self.home}/.colima-node/node/docker.sock")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+
+    def test_docker_desktop_and_other_runtimes_read_no_context(self) -> None:
+        for context in ("desktop-linux", "orbstack"):
+            with self.subTest(context=context):
+                self.run_role(context=context)
+                self.assertFalse([call for call in self.calls() if " docker context " in call])
+
+    def assert_a_second_run_changes_nothing(self, context: str, context_host: str | None) -> None:
+        self.state("session")
+        self.run_role(context=context, context_host=context_host)
         before = self.calls()
-        result = self.run_role()
+        result = self.run_role(context=context, context_host=context_host)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n) )", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n) )", call)], [])
         self.assertNotIn("bootstrap", " ".join(self.calls()[len(before) :]))
+
+    def test_a_second_run_changes_nothing(self) -> None:
+        self.assert_a_second_run_changes_nothing("colima", None)
+
+    def test_a_second_run_changes_nothing_for_a_profile_in_a_home_of_its_own(self) -> None:
+        self.assert_a_second_run_changes_nothing("colima-node", f"unix://{self.home}/.colima-node/node/docker.sock")
 
     def test_a_running_runtime_is_not_started_again_but_still_gets_the_agent(self) -> None:
         self.state("session", "runtime-up")
