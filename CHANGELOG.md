@@ -1,3 +1,9 @@
+## [2.20.0](https://github.com/ExaDev/github-runner/compare/v2.19.0...v2.20.0) (2026-11-02)
+
+### Features
+
+* **linux-host:** keep Wi-Fi from power saving under systemd-networkd ([5355db6](https://github.com/ExaDev/github-runner/commit/5355db691a1f47569c9d49dcd212ea79ae656488))
+
 ## [2.19.0](https://github.com/ExaDev/github-runner/compare/v2.18.3...v2.19.0) (2026-11-02)
 
 ### Features
