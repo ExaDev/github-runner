@@ -1,3 +1,18 @@
+## [2.18.0](https://github.com/ExaDev/github-runner/compare/v2.17.0...v2.18.0) (2026-11-02)
+
+### Features
+
+* **linux-host:** keep an installed Tailscale package current ([bad4e61](https://github.com/ExaDev/github-runner/commit/bad4e61e43b446e1df5200d411f99b7edf060276))
+* **macos-host:** keep the Tailscale formula, daemon and app current ([04948c7](https://github.com/ExaDev/github-runner/commit/04948c78f3ef076ca32bb7f3e5a892916a4165fd))
+
+### Documentation
+
+* name the Tailscale update variables in the collection README ([5cf47ee](https://github.com/ExaDev/github-runner/commit/5cf47ee2c1a4ed5c8ea6d6c800439eada62a49fb))
+
+### Tests
+
+* **linux-host:** watch which Tailscale tasks ask for privilege ([087db03](https://github.com/ExaDev/github-runner/commit/087db03f6fb126ad5d3fa788118a3d7c82282713))
+
 ## [2.17.0](https://github.com/ExaDev/github-runner/compare/v2.16.0...v2.17.0) (2026-11-02)
 
 ### Features
