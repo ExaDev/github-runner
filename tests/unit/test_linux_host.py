@@ -219,6 +219,8 @@ printf 'tailscale:\n  Installed: %s\n  Candidate: %s\n  Version table:\n' "$inst
 """)
         # Only the one comparison the role makes: whether the first version is newer than the second.
         stand_in(bin_dir / "dpkg", log + r"""[ "$1" = --compare-versions ] && [ "$3" = gt ] || exit 2
+# Like dpkg, refuse a version that is not one: apt-cache policy prints (none) for a package that is not installed.
+case "$2$4" in *"("*) echo "dpkg: error: version '(none)' has bad syntax" >&2; exit 2 ;; esac
 [ "$2" != "$4" ] && [ "$(printf '%s\n%s\n' "$2" "$4" | sort -V | tail -n1)" = "$2" ]
 """)
         stand_in(bin_dir / "dpkg-query", r"""case "$*" in
@@ -226,13 +228,17 @@ printf 'tailscale:\n  Installed: %s\n  Candidate: %s\n  Version table:\n' "$inst
   *unattended-upgrades*) if [ -e "$STUB/state/package-unattended-upgrades" ]; then printf 'ii '; else exit 1; fi ;;
 esac
 """)
+        # Stands in for the sudo that become runs, so that a test can see which tasks asked for privilege: it logs, then runs the command it was given as the connecting user.
+        stand_in(bin_dir / "sudo", log + r"""while [ "$1" != /bin/sh ]; do shift; done
+exec "$@"
+""")
         stand_in(bin_dir / "uname", r"""echo 6.14.0-test
 """)
         stand_in(bin_dir / "shutdown", log)
 
     def run_role(self, *args: str, check: bool = False, system: str = "Linux", os_family: str = "Debian", **variables: Any) -> subprocess.CompletedProcess[str]:
         inventory = self.tmp / "inventory.yml"
-        inventory.write_text(yaml.safe_dump({"all": {"hosts": {"host": {
+        host = {
             "ansible_connection": "local",
             "ansible_become": False,
             "github_runner_linux_host_logind_dropin": str(self.logind),
@@ -248,7 +254,9 @@ esac
             # The other steps are about their own, and an installed Tailscale package would be upgraded in them: the update has tests of its own, which turn it on.
             TAILSCALE: False,
             **variables,
-        }}}}))
+        }
+        # A variable given as None is left out: ansible_become is False above so that no test needs sudo, and a test that watches which tasks ask for it passes None for it.
+        inventory.write_text(yaml.safe_dump({"all": {"hosts": {"host": {name: value for name, value in host.items() if value is not None}}}}))
         env = {
             **os.environ,
             "PATH": f"{self.bin}:{os.environ['PATH']}",
@@ -762,9 +770,13 @@ class TailscaleUpdateTest(Harness):
         return (self.state / "tailscale-installed").read_text()
 
     def update(self, *, check: bool = False, **variables: Any) -> subprocess.CompletedProcess[str]:
-        result = self.run_role(check=check, github_runner_linux_host_tailscale_update=True, **variables)
+        # become goes through the stand-in sudo, whose calls show which tasks ask for privilege.
+        result = self.run_role(check=check, github_runner_linux_host_tailscale_update=True, ansible_become=None, ansible_become_exe=str(self.bin / "sudo"), **variables)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
+
+    def sudo_calls(self) -> list[str]:
+        return [call for call in self.calls() if call.startswith("sudo ")]
 
     def writes(self) -> list[str]:
         """The calls that change the host, without the reads and the index refresh."""
@@ -777,6 +789,7 @@ class TailscaleUpdateTest(Harness):
         self.assertEqual(self.installed(), "1.104.4")
         self.assertEqual(self.changed(result), 1)
         self.assertEqual([call for call in self.calls() if call.startswith("apt-get")], ["apt-get update", "apt-get install --yes --no-install-recommends --only-upgrade tailscale"])
+        self.assertEqual(len(self.sudo_calls()), 2, "the index refresh and the upgrade take root, and nothing else does")
 
     def test_a_second_run_changes_nothing(self) -> None:
         self.tailscale()
@@ -807,9 +820,9 @@ class TailscaleUpdateTest(Harness):
 
     def test_check_mode_reports_the_upgrade_and_changes_nothing(self) -> None:
         self.tailscale()
-        result = self.run_role(check=True, github_runner_linux_host_tailscale_update=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.update(check=True)
         self.assertEqual(self.writes(), [])
+        self.assertEqual(self.sudo_calls(), [], "a dry run needs no privilege")
         self.assertEqual([call for call in self.calls() if call.startswith("apt-get")], [])
         self.assertEqual(self.installed(), "1.100.0")
         self.assertEqual(self.changed(result), 1)
@@ -845,6 +858,7 @@ class TailscaleUpdateTest(Harness):
                 (self.stubs / "calls.log").unlink(missing_ok=True)
                 result = self.update()
                 self.assertEqual(self.writes(), ["systemctl enable --now tailscaled"])
+                self.assertEqual(len(self.sudo_calls()), 2, "the index refresh and the service change")
                 self.assertEqual(self.changed(result), 1)
                 self.assertEqual((self.state / "enabled-tailscaled").read_text(), "enabled\n")
                 self.assertTrue((self.state / "active-tailscaled").exists())
@@ -854,9 +868,9 @@ class TailscaleUpdateTest(Harness):
 
     def test_check_mode_reports_the_service_change_and_makes_none(self) -> None:
         self.tailscale(installed="1.104.4", active=False)
-        result = self.run_role(check=True, github_runner_linux_host_tailscale_update=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.update(check=True)
         self.assertEqual(self.writes(), [])
+        self.assertEqual(self.sudo_calls(), [], "a dry run needs no privilege")
         self.assertEqual(self.changed(result), 1)
         self.assertFalse((self.state / "active-tailscaled").exists())
 
