@@ -1,4 +1,4 @@
-"""Tests the filters of the github_runner_host_tools role in plugins/filter/host_tools.py: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell, and mise's configuration rendered to TOML against golden strings."""
+"""Tests the filters of the github_runner_host_tools role in plugins/filter/host_tools.py: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell, mise's configuration rendered to TOML, the lines of the managed block of an npmrc file and a YAML file merged with settings, against golden strings."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import importlib.util
 import re
 import unittest
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugins" / "filter" / "host_tools.py"
@@ -112,6 +114,187 @@ class MiseTomlFilterTest(unittest.TestCase):
         for label, (config, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
                 host_tools.host_tools_mise_toml(config)
+
+
+MARKER = "# {mark} ANSIBLE MANAGED BLOCK example"
+
+
+class NpmrcFilterTest(unittest.TestCase):
+    def test_settings_then_exclusions_come_out_as_lines_in_the_order_given(self) -> None:
+        result = host_tools.host_tools_npmrc({"min-release-age": 7, "ignore-scripts": True, "fund": False}, ["example-a", "@example/*"], "", MARKER)
+        self.assertEqual(result, {"lines": ["min-release-age=7", "ignore-scripts=true", "fund=false", "min-release-age-exclude[]=example-a", "min-release-age-exclude[]=@example/*"], "shadowed": []})
+
+    def test_a_string_a_float_and_a_value_with_a_variable_reference_are_written_as_given(self) -> None:
+        result = host_tools.host_tools_npmrc({"registry": "https://registry.example.test/", "ratio": 0.5, "cache": "${HOME}/.npm-cache"}, [], "", MARKER)
+        self.assertEqual(result["lines"], ["registry=https://registry.example.test/", "ratio=0.5", "cache=${HOME}/.npm-cache"])
+
+    def test_nothing_set_has_no_lines(self) -> None:
+        self.assertEqual(host_tools.host_tools_npmrc({}, [], "registry=x\n", MARKER), {"lines": [], "shadowed": []})
+
+    def test_a_key_the_file_sets_outside_the_block_is_left_out_and_named(self) -> None:
+        existing = "registry=https://registry.example.test/\nmin-release-age=30\n"
+        result = host_tools.host_tools_npmrc({"min-release-age": 7, "ignore-scripts": True}, [], existing, MARKER)
+        self.assertEqual(result, {"lines": ["ignore-scripts=true"], "shadowed": ["min-release-age"]})
+
+    def test_the_users_key_is_found_with_spaces_around_the_equals_sign_indented_and_with_no_value(self) -> None:
+        for line in ("min-release-age = 30", "  min-release-age=30", "min-release-age", "min-release-age ="):
+            with self.subTest(line=line):
+                self.assertEqual(host_tools.host_tools_npmrc({"min-release-age": 7}, [], line + "\n", MARKER)["shadowed"], ["min-release-age"])
+
+    def test_a_comment_or_another_key_with_the_same_beginning_is_not_the_users_key(self) -> None:
+        existing = "# min-release-age=30\n; min-release-age=30\nmin-release-age-exclude[]=a\nmin-release-agent=1\nfoo=min-release-age=3\n"
+        result = host_tools.host_tools_npmrc({"min-release-age": 7}, [], existing, MARKER)
+        self.assertEqual(result, {"lines": ["min-release-age=7"], "shadowed": []})
+
+    def test_the_roles_own_block_is_not_the_users_key_so_a_changed_value_is_rewritten(self) -> None:
+        existing = "registry=x\n# BEGIN ANSIBLE MANAGED BLOCK example\nmin-release-age=3\nmin-release-age-exclude[]=a\n# END ANSIBLE MANAGED BLOCK example\n"
+        result = host_tools.host_tools_npmrc({"min-release-age": 7}, ["a"], existing, MARKER)
+        self.assertEqual(result, {"lines": ["min-release-age=7", "min-release-age-exclude[]=a"], "shadowed": []})
+
+    def test_a_key_outside_the_block_is_found_after_it_as_well(self) -> None:
+        existing = "# BEGIN ANSIBLE MANAGED BLOCK example\nfund=false\n# END ANSIBLE MANAGED BLOCK example\nfund=true\n"
+        self.assertEqual(host_tools.host_tools_npmrc({"fund": False}, [], existing, MARKER)["shadowed"], ["fund"])
+
+    def test_a_begin_marker_with_no_end_is_not_a_block(self) -> None:
+        existing = "# BEGIN ANSIBLE MANAGED BLOCK example\nfund=false\n"
+        self.assertEqual(host_tools.host_tools_npmrc({"fund": False}, [], existing, MARKER)["shadowed"], ["fund"])
+
+    def test_an_exclusion_the_file_lists_outside_the_block_is_not_written_again(self) -> None:
+        existing = "min-release-age-exclude[]=example-a\nmin-release-age-exclude[] = \"@example/b\"\n"
+        result = host_tools.host_tools_npmrc({}, ["example-a", "@example/b", "example-c"], existing, MARKER)
+        self.assertEqual(result, {"lines": ["min-release-age-exclude[]=example-c"], "shadowed": []})
+
+    def test_an_exclusion_given_twice_is_written_once(self) -> None:
+        self.assertEqual(host_tools.host_tools_npmrc({}, ["a", "a"], "", MARKER)["lines"], ["min-release-age-exclude[]=a"])
+
+    def test_other_lines_of_the_file_never_reach_the_result_or_an_error(self) -> None:
+        secret = "//registry.example.test/:_authToken=made-up-token-0000"
+        result = host_tools.host_tools_npmrc({"fund": False}, ["a"], secret + "\n", MARKER)
+        self.assertNotIn("made-up-token-0000", repr(result))
+        with self.assertRaises(Exception) as caught:
+            host_tools.host_tools_npmrc({"fund": "a;b"}, [], secret + "\n", MARKER)
+        self.assertNotIn("made-up-token-0000", str(caught.exception))
+
+    def test_what_an_npmrc_would_not_read_back_as_given_is_refused(self) -> None:
+        cases = {
+            "settings not a mapping": ([], [], "must be a mapping"),
+            "exclusions not a list": ({}, {"a": 1}, "must be a list"),
+            "key with a space": ({"a b": 1}, [], "not a key"),
+            "empty key": ({"": 1}, [], "not a key"),
+            "key that is a list": ({"min-release-age-exclude": "a"}, [], "variable of its own"),
+            "key with brackets": ({"a[]": 1}, [], "not a key"),
+            "value with a comment character": ({"a": "x # y"}, [], "would not read it back"),
+            "value with a semicolon": ({"a": "x;y"}, [], "would not read it back"),
+            "value with a quote": ({"a": "'x'"}, [], "would not read it back"),
+            "value with a backslash": ({"a": "x\\y"}, [], "would not read it back"),
+            "value with a newline": ({"a": "x\ny"}, [], "would not read it back"),
+            "value with surrounding space": ({"a": " x"}, [], "would not read it back"),
+            "list value": ({"a": ["x"]}, [], "must be a string, a number or a boolean"),
+            "null value": ({"a": None}, [], "must be a string, a number or a boolean"),
+            "infinite value": ({"a": float("inf")}, [], "finite"),
+            "exclusion with a space": ({}, ["a b"], "not a package name"),
+            "exclusion that is not a string": ({}, [1], "not a package name"),
+            "exclusion that would end the line early": ({}, ["a\nb"], "not a package name"),
+        }
+        for label, (settings, excludes, message) in cases.items():
+            with self.subTest(label), self.assertRaisesRegex(Exception, message):
+                host_tools.host_tools_npmrc(settings, excludes, "", MARKER)
+
+
+class YamlMergeFilterTest(unittest.TestCase):
+    def merge(self, existing: str, settings: dict) -> str:
+        return host_tools.host_tools_yaml_merge(existing, settings)
+
+    def test_a_new_file_is_the_settings_alone_with_lists_indented(self) -> None:
+        self.assertEqual(self.merge("", {"minimumReleaseAge": 10080, "saveExact": True, "minimumReleaseAgeExclude": ["a", "@b/c"]}), "minimumReleaseAge: 10080\nsaveExact: true\nminimumReleaseAgeExclude:\n  - a\n  - '@b/c'\n")
+
+    def test_a_nested_mapping_is_rendered_and_read_back(self) -> None:
+        result = self.merge("", {"catalog": {"react": "^19.0.0"}})
+        self.assertEqual(result, "catalog:\n  react: ^19.0.0\n")
+        self.assertEqual(yaml.safe_load(result), {"catalog": {"react": "^19.0.0"}})
+
+    def test_a_string_that_looks_like_another_type_stays_a_string(self) -> None:
+        result = self.merge("", {"a": "7", "b": "true", "c": "null"})
+        self.assertEqual(yaml.safe_load(result), {"a": "7", "b": "true", "c": "null"})
+
+    def test_unrelated_keys_comments_and_blank_lines_are_kept_byte_for_byte(self) -> None:
+        existing = "# pnpm settings\nstoreDir: /somewhere/store   # the store\n\n# the age\nminimumReleaseAge: 1440\n\n# registries\nregistry: https://registry.example.test/\n"
+        self.assertEqual(self.merge(existing, {"minimumReleaseAge": 10080}), existing.replace("minimumReleaseAge: 1440", "minimumReleaseAge: 10080"))
+
+    def test_a_key_that_holds_the_value_is_not_touched_and_the_text_comes_back_unchanged(self) -> None:
+        existing = "minimumReleaseAge:   10080   # a week\nsaveExact: yes\nlist: [a,   b]\n"
+        self.assertEqual(self.merge(existing, {"minimumReleaseAge": 10080}), existing)
+        self.assertEqual(self.merge(existing, {"list": ["a", "b"]}), existing)
+
+    def test_a_value_of_another_type_counts_as_different(self) -> None:
+        self.assertEqual(self.merge("a: 1\n", {"a": True}), "a: true\n")
+        self.assertEqual(self.merge("a: 1\n", {"a": 1.0}), "a: 1.0\n")
+        self.assertEqual(self.merge("a: '1'\n", {"a": 1}), "a: 1\n")
+
+    def test_a_list_is_replaced_with_its_items_whatever_layout_it_had(self) -> None:
+        for before in ("a:\n- x\n- y\n", "a:\n  - x\n  - y\n", "a: [x, y]\n", "a:\n  - x\n  # note\n  - y\n"):
+            with self.subTest(before=before):
+                self.assertEqual(self.merge(before + "z: 1\n", {"a": ["p"]}), "a:\n  - p\nz: 1\n")
+
+    def test_comments_before_the_next_key_stay_with_it(self) -> None:
+        self.assertEqual(self.merge("a:\n- x\n\n# about b\nb: 1\n", {"a": ["p"]}), "a:\n  - p\n\n# about b\nb: 1\n")
+
+    def test_a_key_that_is_missing_is_appended_after_the_last_line_even_with_no_final_newline(self) -> None:
+        self.assertEqual(self.merge("a: 1", {"b": 2}), "a: 1\nb: 2\n")
+        self.assertEqual(self.merge("a: 1\n# end\n", {"b": 2}), "a: 1\n# end\nb: 2\n")
+
+    def test_a_quoted_key_is_found(self) -> None:
+        self.assertEqual(self.merge('"a": 1\n\'b\': 2\n', {"a": 3, "b": 4}), "a: 3\nb: 4\n")
+
+    def test_a_key_that_only_begins_like_another_is_not_it(self) -> None:
+        self.assertEqual(self.merge("ab: 1\nabc: 2\n", {"a": 3}), "ab: 1\nabc: 2\na: 3\n")
+
+    def test_a_key_that_is_the_start_of_a_nested_one_is_not_a_top_level_key(self) -> None:
+        self.assertEqual(self.merge("outer:\n  a: 1\n", {"a": 3}), "outer:\n  a: 1\na: 3\n")
+
+    def test_windows_line_endings_elsewhere_in_the_file_are_kept(self) -> None:
+        self.assertEqual(self.merge("a: 1\r\nb: 2\r\n", {"a": 3}), "a: 3\nb: 2\r\n")
+
+    def test_a_document_start_marker_is_kept(self) -> None:
+        self.assertEqual(self.merge("---\na: 1\n", {"b": 2}), "---\na: 1\nb: 2\n")
+
+    def test_an_empty_or_comment_only_file_takes_the_settings(self) -> None:
+        self.assertEqual(self.merge("# nothing yet\n", {"a": 1}), "# nothing yet\na: 1\n")
+        self.assertEqual(self.merge("{}\n", {}), "{}\n")
+
+    def test_no_settings_return_the_text_unchanged(self) -> None:
+        self.assertEqual(self.merge("a: 1\n", {}), "a: 1\n")
+
+    def test_a_merge_twice_is_the_merge_once(self) -> None:
+        once = self.merge("# keep\nb: 1\n", {"a": ["x", "y"], "c": {"d": 1}})
+        self.assertEqual(self.merge(once, {"a": ["x", "y"], "c": {"d": 1}}), once)
+
+    def test_ansible_style_subclasses_of_the_plain_types_are_accepted(self) -> None:
+        class Text(str):
+            pass
+
+        class Mapping(dict):  # type: ignore[type-arg]
+            pass
+
+        self.assertEqual(self.merge("", Mapping({Text("a"): [Text("x")], "b": Mapping({"c": Text("d")})})), "a:\n  - x\nb:\n  c: d\n")
+
+    def test_what_cannot_be_merged_is_refused_and_nothing_is_returned(self) -> None:
+        cases = {
+            "existing not text": (None, {"a": 1}, "must be text"),
+            "settings not a mapping": ("", [1], "must be a mapping"),
+            "not YAML": ("a: [1\n", {"b": 1}, "not valid YAML"),
+            "a list at the top": ("- a\n- b\n", {"b": 1}, "not a mapping at the top"),
+            "a scalar at the top": ("just text\n", {"b": 1}, "not a mapping at the top"),
+            "a flow mapping at the top": ("{a: 1}\n", {"b": 2}, "cannot edit safely"),
+            "several documents": ("a: 1\n---\nb: 2\n", {"c": 1}, "not valid YAML"),
+            "a null value": ("", {"a": None}, "must be a string, a number"),
+            "a non-string key": ("", {"a": {1: 2}}, "string keys"),
+            "an infinite value": ("", {"a": float("inf")}, "finite"),
+            "an object": ("", {"a": object()}, "must be a string, a number"),
+        }
+        for label, (existing, settings, message) in cases.items():
+            with self.subTest(label), self.assertRaisesRegex(Exception, message):
+                host_tools.host_tools_yaml_merge(existing, settings)
 
 
 if __name__ == "__main__":

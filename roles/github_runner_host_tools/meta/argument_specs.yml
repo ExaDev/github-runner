@@ -2,7 +2,7 @@
 # The role's variables, checked when the role runs. defaults/main.yml holds each default and the reasoning behind it.
 argument_specs:
   main:
-    short_description: Installs Homebrew and mise, keeps them at their latest release and makes them available to the connecting user's shell.
+    short_description: Installs Homebrew and mise, keeps them at their latest release and makes them available to the connecting user's shell, and sets npm and pnpm package-install security settings when the variables for them are given.
     description:
       - Runs on macOS and Debian-family Linux hosts and skips any other with a message. Homebrew refuses to run as root, so the connecting user must not be root; the tasks that need privilege (the Linux prerequisites packages and the installer's own sudo) use become or sudo, so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
     options:
@@ -30,6 +30,24 @@ argument_specs:
         type: dict
         default: {}
         description: Global mise defaults, as a mapping with the tables tools and settings. Empty writes nothing; otherwise it is rendered to ~/.config/mise/conf.d/00-fleet.toml.
+      github_runner_host_tools_npm_settings:
+        type: dict
+        default: {}
+        description: npm settings as a mapping of npmrc keys to string, number or boolean values, written to ~/.npmrc inside one managed block (min-release-age is in days). Empty writes nothing. A key the file already sets outside the block is kept and reported.
+      github_runner_host_tools_npm_min_release_age_exclude:
+        type: list
+        elements: str
+        default: []
+        description: Package names or patterns exempt from min-release-age, written to the same block as min-release-age-exclude[]=NAME lines.
+      github_runner_host_tools_pnpm_settings:
+        type: dict
+        default: {}
+        description: pnpm settings as a mapping of top-level keys to values, merged into pnpm's global config.yaml (minimumReleaseAge is in minutes). Empty writes nothing. Other keys and comments in the file are kept.
+      github_runner_host_tools_pnpm_minimum_release_age_exclude:
+        type: list
+        elements: str
+        default: []
+        description: Package names or patterns exempt from minimumReleaseAge, written as the list under minimumReleaseAgeExclude in pnpm's global config.yaml.
       github_runner_host_tools_homebrew_prefix:
         type: str
         default: ""

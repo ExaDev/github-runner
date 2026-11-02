@@ -15,3 +15,11 @@ github_runner_host_tools_apt_prerequisites:
   - curl
   - file
   - git
+
+# Where pnpm reads its global config.yaml on each operating system, relative to the user's home (https://pnpm.io/cli/config). pnpm looks in $XDG_CONFIG_HOME/pnpm first when that is set, which a role that runs over a non-interactive SSH session cannot know, so the role writes the platform's own location.
+github_runner_host_tools_pnpm_config_files:
+  Darwin: Library/Preferences/pnpm/config.yaml
+  Linux: .config/pnpm/config.yaml
+
+# The marker lines of the block the role manages in ~/.npmrc, with {mark} where BEGIN and END go. A block with these markers is the role's own, and everything outside it is the user's.
+github_runner_host_tools_npmrc_marker: "# {mark} ANSIBLE MANAGED BLOCK github_runner_host_tools npm"

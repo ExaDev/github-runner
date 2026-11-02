@@ -15,6 +15,16 @@ github_runner_host_tools_homebrew_install_sha256: 5f333bbe53bc490e51e7ccb1df8779
 # Global mise defaults, as a mapping of mise's own configuration tables. Empty (the default) writes nothing and leaves any existing file alone. Otherwise the role renders it to ~/.config/mise/conf.d/00-fleet.toml, never to config.toml, which is the host's own and takes precedence over conf.d. Two tables are understood: tools (a tool name, quoted in the file if it needs it, to a version string or a list of them) and settings (a setting name to a string, number, boolean or a list of those). For example {tools: {node: "22", python: ["3.13", "3.12"]}, settings: {experimental: true}}.
 github_runner_host_tools_mise_config: {}
 
+# Package-install security settings for npm and pnpm. All empty by default, and empty they write nothing, so a host that sets none of them sees no change.
+# npm settings, as a mapping of npmrc keys to string, number or boolean values, written to the connecting user's ~/.npmrc inside one block between ANSIBLE MANAGED BLOCK marker lines, for example {min-release-age: 7, ignore-scripts: true} (min-release-age is in days). A key the file already sets outside the block is the user's own: it is kept, the role's value is not written, and the run says so. Dropping a key here, or all of them, removes its line, and the block with the last one. The file can hold credentials, so the role never prints it, never changes the mode of an existing one, and creates a missing one with mode 0600.
+github_runner_host_tools_npm_settings: {}
+# Package names or patterns exempt from min-release-age, each written to the same block as a min-release-age-exclude[]=NAME line. A name the file already lists outside the block is not written again.
+github_runner_host_tools_npm_min_release_age_exclude: []
+# pnpm settings, as a mapping of top-level keys of pnpm's global config.yaml to values, merged into that file (~/Library/Preferences/pnpm/config.yaml on macOS, ~/.config/pnpm/config.yaml on Linux), for example {minimumReleaseAge: 10080, saveExact: true} (minimumReleaseAge is in minutes). Each key named here is set to the value given; every other key and comment in the file stays as it is, and a file that holds the values already is not rewritten. A key dropped from the mapping is left in the file.
+github_runner_host_tools_pnpm_settings: {}
+# Package names or patterns exempt from minimumReleaseAge. A list for minimumReleaseAgeExclude, which replaces whatever list the file holds under that key when this is not empty; do not set the key in github_runner_host_tools_pnpm_settings as well.
+github_runner_host_tools_pnpm_minimum_release_age_exclude: []
+
 # Not a setting: the Homebrew prefix. Empty takes /opt/homebrew on Apple silicon, /usr/local on Intel and /home/linuxbrew/.linuxbrew on Linux, which are the only places Homebrew supports. It is a variable only so the tests can point it at a stand-in.
 github_runner_host_tools_homebrew_prefix: ""
 # Not a setting: where the commit's install.sh is downloaded from, as <this>/<commit>/install.sh. It is a variable only so the tests can point it at a stand-in.

@@ -1,4 +1,4 @@
-"""Tests the github_runner_host_tools role: the filters that pick the Homebrew prefix, write the shell startup lines and render mise's configuration, the defaults against the argument specs and README, how site.yml wires the role, and the role's tasks (tests/host_tools/run.yml) against stand-ins for brew, sudo, apt-get, dpkg-query, getent, dscl and Homebrew's installer on PATH, so no package, shell startup file outside a temporary home or privilege is ever touched and nothing is downloaded."""
+"""Tests the github_runner_host_tools role: the filters that pick the Homebrew prefix, write the shell startup lines and render mise's configuration, the package-install security settings for npm and pnpm the role writes, the defaults against the argument specs and README, how site.yml wires the role, and the role's tasks (tests/host_tools/run.yml) against stand-ins for brew, sudo, apt-get, dpkg-query, getent, dscl and Homebrew's installer on PATH, so no package, shell startup file outside a temporary home or privilege is ever touched and nothing is downloaded."""
 
 from __future__ import annotations
 
@@ -133,6 +133,20 @@ STAND_INS = ("sudo", "getent", "dscl", "dpkg-query", "apt-get")
 READ_ONLY = re.compile(r"(brew root=0 (info .*|update)|dpkg-query .*|getent .*|dscl .*|sudo .*)$")
 
 
+# A made-up credential, so the tests can check that no run prints the file it sits in.
+NPMRC_TOKEN = "made-up-token-0000"
+NPMRC_USER = f"registry=https://registry.example.test/\n//registry.example.test/:_authToken={NPMRC_TOKEN}\n"
+# The test inventory is written with sorted keys, so the block lists these in that order.
+NPM_SETTINGS = {"ignore-scripts": True, "min-release-age": 7}
+NPM_MARKS = ("# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools npm\n", "# END ANSIBLE MANAGED BLOCK github_runner_host_tools npm\n")
+NPM_BLOCK_SETTINGS = NPM_MARKS[0] + "ignore-scripts=true\nmin-release-age=7\n" + NPM_MARKS[1]
+NPM_BLOCK = NPM_MARKS[0] + "ignore-scripts=true\nmin-release-age=7\nmin-release-age-exclude[]=example-a\nmin-release-age-exclude[]=@example/*\n" + NPM_MARKS[1]
+PNPM_CONFIG = {"Darwin": "Library/Preferences/pnpm/config.yaml", "Linux": ".config/pnpm/config.yaml"}
+PNPM_SETTINGS = {"minimumReleaseAge": 10080, "saveExact": True}
+PNPM_USER = "# Mine.\nstoreDir: /somewhere/store   # the store\n\n# The age, in minutes.\nminimumReleaseAge: 1440\n\n# Exclusions.\nminimumReleaseAgeExclude:\n- old-one\n\nregistry: https://registry.example.test/\n"
+PNPM_MERGED = "# Mine.\nstoreDir: /somewhere/store   # the store\n\n# The age, in minutes.\nminimumReleaseAge: 10080\n\n# Exclusions.\nminimumReleaseAgeExclude:\n  - example-a\n\nregistry: https://registry.example.test/\nsaveExact: true\n"
+
+
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     """Serves a directory without writing a line to the test output for every request."""
 
@@ -150,7 +164,7 @@ def mise_block(prefix: Path, shell: str) -> str:
 
 class FilterRegistrationTest(unittest.TestCase):
     def test_the_filters_are_registered_under_the_names_the_role_uses(self) -> None:
-        self.assertEqual(set(host_tools.FilterModule().filters()), {"host_tools_homebrew_prefix", "host_tools_shell_integrations", "host_tools_mise_toml"})
+        self.assertEqual(set(host_tools.FilterModule().filters()), {"host_tools_homebrew_prefix", "host_tools_shell_integrations", "host_tools_mise_toml", "host_tools_npmrc", "host_tools_yaml_merge"})
         used = set(re.findall(r"exadev\.github_runner\.(host_tools_\w+)", "".join(path.read_text() for path in (ROLE / "tasks").glob("*.yml"))))
         self.assertEqual(used, set(host_tools.FilterModule().filters()))
 
@@ -250,9 +264,34 @@ class TasksTest(unittest.TestCase):
                     self.assertNotIn("become", task)
 
     def test_the_shell_integration_never_sets_a_mode_on_a_startup_file(self) -> None:
-        [block] = [task["ansible.builtin.blockinfile"] for name, task in self.tasks() if "ansible.builtin.blockinfile" in task]
+        [block] = [task["ansible.builtin.blockinfile"] for name, task in self.tasks() if "ansible.builtin.blockinfile" in task and name == "shell_integration_line.yml"]
         self.assertNotIn("mode", block)
         self.assertIs(block["create"], True)
+
+    def test_the_npm_settings_block_never_sets_a_mode_and_a_missing_npmrc_is_created_private(self) -> None:
+        [block] = [task["ansible.builtin.blockinfile"] for name, task in self.tasks() if "ansible.builtin.blockinfile" in task and name == "npm_settings.yml"]
+        self.assertNotIn("mode", block)
+        [created] = [task for name, task in self.tasks() if name == "npm_settings.yml" and task.get("name") == "Create ~/.npmrc when it does not exist"]
+        self.assertEqual(created["ansible.builtin.copy"]["mode"], "0600")
+        self.assertIs(created["ansible.builtin.copy"]["force"], False)
+        self.assertIn("not github_runner_host_tools_npmrc.stat.exists", created["when"])
+
+    def test_the_npmrc_is_never_shown_or_logged(self) -> None:
+        [read] = [task for name, task in self.tasks() if name == "npm_settings.yml" and "ansible.builtin.slurp" in task]
+        self.assertIs(read["no_log"], True)
+
+    def test_the_pnpm_config_is_written_without_a_mode_and_through_a_symlink(self) -> None:
+        [write] = [task["ansible.builtin.copy"] for name, task in self.tasks() if name == "pnpm_settings.yml" and "ansible.builtin.copy" in task]
+        self.assertNotIn("mode", write)
+        self.assertIs(write["follow"], True)
+
+    def test_the_pnpm_config_paths_are_the_ones_pnpm_documents(self) -> None:
+        self.assertEqual(VARS["github_runner_host_tools_pnpm_config_files"], {"Darwin": "Library/Preferences/pnpm/config.yaml", "Linux": ".config/pnpm/config.yaml"})
+
+    def test_the_package_install_settings_write_nothing_by_default(self) -> None:
+        for name in ("npm_settings", "npm_min_release_age_exclude", "pnpm_settings", "pnpm_minimum_release_age_exclude"):
+            with self.subTest(name=name):
+                self.assertEqual(DEFAULTS[f"github_runner_host_tools_{name}"], {} if name.endswith("_settings") else [])
 
     def test_the_mise_configuration_goes_to_conf_d_and_never_to_config_toml(self) -> None:
         paths = [str(module.get("dest") or module.get("path")) for _, task in self.tasks() for key, module in task.items() if key.startswith("ansible.builtin.") and isinstance(module, dict) and (module.get("dest") or module.get("path"))]
@@ -681,6 +720,236 @@ class RoleTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("renders only tools and settings", self.squashed(result))
         self.assertFalse(self.fleet_file().exists())
+
+
+    # Package-install security settings. The tests turn Homebrew and mise off, so they need none of the stand-ins and a host with no tool installed is enough.
+
+    def run_settings(self, *extra: str, **variables: Any) -> subprocess.CompletedProcess[str]:
+        return self.run_role(*extra, github_runner_host_tools_homebrew=False, github_runner_host_tools_mise=False, **variables)
+
+    def npmrc(self) -> Path:
+        return self.home / ".npmrc"
+
+    def pnpm_config(self, system: str = "Darwin") -> Path:
+        return self.home / PNPM_CONFIG[system]
+
+    def mode(self, path: Path) -> int:
+        return stat.S_IMODE(path.stat().st_mode)
+
+    def test_no_package_install_variable_set_leaves_every_file_alone_and_unread(self) -> None:
+        self.npmrc().write_text(NPMRC_USER)
+        self.npmrc().chmod(0o640)
+        self.pnpm_config().parent.mkdir(parents=True)
+        self.pnpm_config().write_text(PNPM_USER)
+        before = (self.npmrc().stat().st_mtime_ns, self.pnpm_config().stat().st_mtime_ns)
+        result = self.run_settings()
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER)
+        self.assertEqual(self.mode(self.npmrc()), 0o640)
+        self.assertEqual(self.pnpm_config().read_text(), PNPM_USER)
+        self.assertEqual((self.npmrc().stat().st_mtime_ns, self.pnpm_config().stat().st_mtime_ns), before)
+        self.assertNotIn(NPMRC_TOKEN, self.squashed(result))
+
+    def test_no_package_install_variable_set_creates_no_file_on_a_clean_home(self) -> None:
+        self.ok(self.run_settings())
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_npm_settings_go_into_one_block_after_the_users_own_lines_and_a_second_run_changes_nothing(self) -> None:
+        self.npmrc().write_text(NPMRC_USER)
+        variables = {"github_runner_host_tools_npm_settings": NPM_SETTINGS, "github_runner_host_tools_npm_min_release_age_exclude": ["example-a", "@example/*"]}
+        result = self.run_settings(**variables)
+        self.ok(result)
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER + NPM_BLOCK)
+        self.assertNotIn(NPMRC_TOKEN, self.squashed(result))
+        result = self.run_settings(**variables)
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER + NPM_BLOCK)
+
+    def test_a_new_npmrc_is_private_and_an_existing_ones_mode_is_kept(self) -> None:
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS))
+        self.assertEqual(self.mode(self.npmrc()), 0o600)
+        self.assertEqual(self.npmrc().read_text(), "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools npm\nignore-scripts=true\nmin-release-age=7\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools npm\n")
+        for mode in (0o644, 0o640, 0o400):
+            with self.subTest(mode=oct(mode)):
+                self.npmrc().chmod(0o600)
+                self.npmrc().write_text(NPMRC_USER)
+                self.npmrc().chmod(mode)
+                self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS))
+                self.assertEqual(self.mode(self.npmrc()), mode)
+                self.assertEqual(self.npmrc().read_text(), NPMRC_USER + NPM_BLOCK_SETTINGS)
+
+    def test_dropping_an_entry_removes_its_line_and_dropping_all_removes_the_block(self) -> None:
+        self.npmrc().write_text(NPMRC_USER)
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS, github_runner_host_tools_npm_min_release_age_exclude=["example-a", "example-b"]))
+        self.assertIn("min-release-age-exclude[]=example-b\n", self.npmrc().read_text())
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings={"min-release-age": 7}, github_runner_host_tools_npm_min_release_age_exclude=["example-a"]))
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER + "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools npm\nmin-release-age=7\nmin-release-age-exclude[]=example-a\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools npm\n")
+        result = self.run_settings()
+        self.ok(result)
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER)
+        self.assertEqual(self.recap(result)["changed"], 1, result.stdout)
+        result = self.run_settings()
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_changed_value_is_rewritten_in_the_block(self) -> None:
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings={"min-release-age": 3}))
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings={"min-release-age": 7}))
+        self.assertEqual(self.npmrc().read_text().count("min-release-age"), 3)
+        self.assertIn("\nmin-release-age=7\n", self.npmrc().read_text())
+
+    def test_a_key_the_user_sets_outside_the_block_is_kept_and_reported_and_the_role_does_not_write_it(self) -> None:
+        self.npmrc().write_text(NPMRC_USER + "min-release-age=30\n# ignore-scripts=false\n")
+        variables = {"github_runner_host_tools_npm_settings": NPM_SETTINGS}
+        result = self.run_settings(**variables)
+        self.ok(result)
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER + "min-release-age=30\n# ignore-scripts=false\n# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools npm\nignore-scripts=true\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools npm\n")
+        self.assertIn("already sets min-release-age outside the block", self.squashed(result))
+        self.assertNotIn(NPMRC_TOKEN, self.squashed(result))
+        result = self.run_settings(**variables)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_key_the_user_adds_later_takes_it_out_of_the_block(self) -> None:
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS))
+        self.npmrc().write_text("min-release-age=30\n" + self.npmrc().read_text())
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS))
+        self.assertEqual(self.npmrc().read_text().count("min-release-age"), 1)
+        self.assertEqual(self.npmrc().read_text().splitlines()[0], "min-release-age=30")
+
+    def test_every_setting_the_user_already_has_leaves_no_block_and_no_change(self) -> None:
+        self.npmrc().write_text("min-release-age=30\nignore-scripts=false\n")
+        result = self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS)
+        self.ok(result)
+        self.assertEqual(self.npmrc().read_text(), "min-release-age=30\nignore-scripts=false\n")
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_an_exclusion_the_user_lists_already_is_not_added_again(self) -> None:
+        self.npmrc().write_text("min-release-age-exclude[]=example-a\n")
+        self.ok(self.run_settings(github_runner_host_tools_npm_min_release_age_exclude=["example-a", "example-b"]))
+        self.assertEqual(self.npmrc().read_text(), "min-release-age-exclude[]=example-a\n# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools npm\nmin-release-age-exclude[]=example-b\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools npm\n")
+
+    def test_a_file_with_no_final_newline_keeps_its_last_line(self) -> None:
+        self.npmrc().write_text("registry=https://registry.example.test/")
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings={"fund": False}))
+        self.assertEqual(self.npmrc().read_text().splitlines()[0], "registry=https://registry.example.test/")
+        self.assertEqual(self.npmrc().read_text().count("fund=false"), 1)
+
+    def test_a_symlinked_npmrc_stays_a_link_and_its_target_is_edited(self) -> None:
+        target = self.work / "dotfiles-npmrc"
+        target.write_text(NPMRC_USER)
+        target.chmod(0o640)
+        self.npmrc().symlink_to(target)
+        self.ok(self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS))
+        self.assertTrue(self.npmrc().is_symlink())
+        self.assertEqual(target.read_text(), NPMRC_USER + NPM_BLOCK_SETTINGS)
+        self.assertEqual(self.mode(target), 0o640)
+
+    def test_check_mode_reports_the_npm_block_and_writes_nothing(self) -> None:
+        result = self.run_settings("--check", github_runner_host_tools_npm_settings=NPM_SETTINGS)
+        self.ok(result)
+        self.assertFalse(self.npmrc().exists())
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+        self.npmrc().write_text(NPMRC_USER)
+        result = self.run_settings("--check", github_runner_host_tools_npm_settings=NPM_SETTINGS)
+        self.ok(result)
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER)
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+
+    def test_a_value_npm_would_misread_is_refused_and_leaves_no_file(self) -> None:
+        result = self.run_settings(github_runner_host_tools_npm_settings={"fund": "a;b"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("would not read it back", self.squashed(result))
+        self.assertFalse(self.npmrc().exists())
+
+    def test_a_value_npm_would_misread_is_refused_and_the_existing_file_is_unchanged(self) -> None:
+        self.npmrc().write_text(NPMRC_USER)
+        result = self.run_settings(github_runner_host_tools_npm_settings={"fund": "a;b"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.npmrc().read_text(), NPMRC_USER)
+        self.assertNotIn(NPMRC_TOKEN, self.squashed(result))
+
+    def test_a_host_the_role_does_not_support_gets_no_package_install_settings(self) -> None:
+        result = self.run_settings(system="FreeBSD", os_family="FreeBSD", github_runner_host_tools_npm_settings=NPM_SETTINGS, github_runner_host_tools_pnpm_settings={"saveExact": True})
+        self.ok(result)
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_pnpm_settings_make_a_new_config_file_at_the_macos_path(self) -> None:
+        self.ok(self.run_settings(github_runner_host_tools_pnpm_settings=PNPM_SETTINGS, github_runner_host_tools_pnpm_minimum_release_age_exclude=["example-a", "@example/*"]))
+        self.assertEqual(self.pnpm_config().read_text(), "minimumReleaseAge: 10080\nsaveExact: true\nminimumReleaseAgeExclude:\n  - example-a\n  - '@example/*'\n")
+        self.assertEqual(sorted(path.name for path in self.home.iterdir()), ["Library"])
+
+    def test_pnpm_settings_make_a_new_config_file_at_the_linux_path(self) -> None:
+        self.ok(self.run_settings(system="Linux", os_family="Debian", machine="x86_64", github_runner_host_tools_pnpm_settings=PNPM_SETTINGS))
+        self.assertEqual(self.pnpm_config("Linux").read_text(), "minimumReleaseAge: 10080\nsaveExact: true\n")
+        self.assertEqual(sorted(path.name for path in self.home.iterdir()), [".config"])
+
+    def test_pnpm_settings_are_merged_keeping_the_other_keys_and_comments_and_the_mode_and_a_second_run_changes_nothing(self) -> None:
+        self.pnpm_config().parent.mkdir(parents=True)
+        self.pnpm_config().write_text(PNPM_USER)
+        self.pnpm_config().chmod(0o640)
+        variables = {"github_runner_host_tools_pnpm_settings": PNPM_SETTINGS, "github_runner_host_tools_pnpm_minimum_release_age_exclude": ["example-a"]}
+        self.ok(self.run_settings(**variables))
+        self.assertEqual(self.pnpm_config().read_text(), PNPM_MERGED)
+        self.assertEqual(self.mode(self.pnpm_config()), 0o640)
+        result = self.run_settings(**variables)
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual(self.pnpm_config().read_text(), PNPM_MERGED)
+
+    def test_a_pnpm_config_that_holds_the_values_already_is_not_rewritten(self) -> None:
+        self.pnpm_config().parent.mkdir(parents=True)
+        self.pnpm_config().write_text("# mine\nminimumReleaseAge:    10080\nsaveExact: yes\n")
+        before = self.pnpm_config().stat().st_mtime_ns
+        result = self.run_settings(github_runner_host_tools_pnpm_settings={"minimumReleaseAge": 10080})
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual(self.pnpm_config().stat().st_mtime_ns, before)
+
+    def test_a_symlinked_pnpm_config_stays_a_link_and_its_target_is_edited(self) -> None:
+        target = self.work / "dotfiles-pnpm.yaml"
+        target.write_text(PNPM_USER)
+        self.pnpm_config().parent.mkdir(parents=True)
+        self.pnpm_config().symlink_to(target)
+        self.ok(self.run_settings(github_runner_host_tools_pnpm_settings=PNPM_SETTINGS))
+        self.assertTrue(self.pnpm_config().is_symlink())
+        self.assertIn("minimumReleaseAge: 10080\n", target.read_text())
+        self.assertIn("# Mine.\n", target.read_text())
+
+    def test_the_pnpm_exclusion_list_given_twice_is_refused_before_the_file_is_changed(self) -> None:
+        result = self.run_settings(github_runner_host_tools_pnpm_settings={"minimumReleaseAgeExclude": ["a"]}, github_runner_host_tools_pnpm_minimum_release_age_exclude=["b"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Use one of them", self.squashed(result))
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_a_pnpm_config_that_is_not_yaml_is_refused_and_left_as_it_is(self) -> None:
+        self.pnpm_config().parent.mkdir(parents=True)
+        self.pnpm_config().write_text("a: [1\n")
+        result = self.run_settings(github_runner_host_tools_pnpm_settings=PNPM_SETTINGS)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not valid YAML", self.squashed(result))
+        self.assertEqual(self.pnpm_config().read_text(), "a: [1\n")
+
+    def test_check_mode_reports_the_pnpm_settings_and_writes_nothing(self) -> None:
+        result = self.run_settings("--check", "--diff", github_runner_host_tools_pnpm_settings=PNPM_SETTINGS)
+        self.ok(result)
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertIn("config.yaml would be written", self.squashed(result))
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+        self.pnpm_config().parent.mkdir(parents=True)
+        self.pnpm_config().write_text(PNPM_USER)
+        result = self.run_settings("--check", github_runner_host_tools_pnpm_settings=PNPM_SETTINGS)
+        self.ok(result)
+        self.assertEqual(self.pnpm_config().read_text(), PNPM_USER)
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+
+    def test_the_npm_and_pnpm_settings_do_not_need_homebrew(self) -> None:
+        result = self.run_settings(github_runner_host_tools_npm_settings=NPM_SETTINGS, github_runner_host_tools_pnpm_settings=PNPM_SETTINGS)
+        self.ok(result)
+        self.assertEqual(self.logged(), [])
+        self.assertTrue(self.npmrc().exists())
+        self.assertTrue(self.pnpm_config().exists())
+
 
 
 if __name__ == "__main__":

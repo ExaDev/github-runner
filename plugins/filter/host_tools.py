@@ -1,4 +1,4 @@
-"""Filters the github_runner_host_tools role uses: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell, and mise's configuration rendered to TOML."""
+"""Filters the github_runner_host_tools role uses: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell, mise's configuration rendered to TOML, the managed lines of an npmrc file and a YAML file merged with settings."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 import shlex
 from typing import Any
 
+import yaml
 from ansible.errors import AnsibleFilterError
 
 # The prefixes Homebrew supports, which are where its bottles are built to be installed: a different prefix means compiling from source and is unsupported. macOS has one for each architecture; Linux has one whatever the architecture.
@@ -21,6 +22,17 @@ BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # TOML basic strings escape these by name; every other control character is written as a \u escape.
 STRING_ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}
+
+
+# The npmrc key whose values are a list, written as one key[]=value line for each. It has a variable of its own, so the scalar settings refuse it.
+NPM_LIST_KEY = "min-release-age-exclude"
+
+# An npmrc key, and a package name or pattern in an exclusion list.
+NPM_KEY = re.compile(r"^[A-Za-z0-9_@:./-]+$")
+NPM_PACKAGE = re.compile(r"^[A-Za-z0-9_@~./*-]+$")
+
+# An npmrc value written bare. The ini format npm reads treats ; and # as the start of a comment and a leading quote as quoting, and the value is trimmed, so a string with any of them would not read back as given.
+NPM_VALUE = re.compile(r"^[^\x00-\x1f#;\"'\\]*$")
 
 
 def host_tools_homebrew_prefix(system: Any, machine: Any) -> str:
@@ -127,6 +139,176 @@ def host_tools_mise_toml(config: Any) -> str:
     return "\n\n".join("\n".join(lines) for lines in blocks) + "\n"
 
 
+def _npm_value(key: str, value: Any) -> str:
+    """Return the text of an npmrc value: a string as it is, a boolean as true or false, a number as its digits.
+
+    :raises AnsibleFilterError: the value is none of those, or is a string that would not read back as given (a comment character, a quote, a backslash, a control character or surrounding space).
+    """
+    # bool is a subclass of int, so it has to be tested first.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AnsibleFilterError(f"{key} must be a finite number, not {value!r}.")
+        return repr(value)
+    if isinstance(value, str):
+        if not NPM_VALUE.match(value) or value != value.strip():
+            raise AnsibleFilterError(f"{key} must not contain a quote, a backslash, a control character, # or ;, or start or end with a space, since npm would not read it back as given.")
+        return str(value)
+    raise AnsibleFilterError(f"{key} must be a string, a number or a boolean, not {type(value).__name__}.")
+
+
+def _outside_block(existing: str, marker: str) -> list[str]:
+    """Return the lines of a text that are not between the BEGIN and END marker lines of the role's block, which are dropped with it. A BEGIN with no END after it drops nothing, since there is no block to speak of."""
+    lines = existing.splitlines()
+    begin, end = marker.replace("{mark}", "BEGIN"), marker.replace("{mark}", "END")
+    stripped = [line.rstrip() for line in lines]
+    if begin not in stripped or end not in stripped[stripped.index(begin) :]:
+        return lines
+    first = stripped.index(begin)
+    last = first + stripped[first:].index(end)
+    return lines[:first] + lines[last + 1 :]
+
+
+def host_tools_npmrc(settings: Any, excludes: Any, existing: Any, marker: Any) -> dict[str, list[str]]:
+    """Return the lines the role's block of an npmrc file holds, and the settings it leaves out because the file already sets them.
+
+    A key the file sets outside the block is the user's own: it is left out of the lines and reported in ``shadowed``, so the role never overrides it (appended after it, a line of the block would win, because npm reads the last of two assignments), and an exclusion the file lists outside the block is left out silently, since listing it twice changes nothing. The lines are only key names and the values the caller gave: nothing of the file's other lines is returned or put in an error.
+
+    :param settings: a mapping of npmrc keys to string, number or boolean values. :param excludes: a list of package names or patterns, each written as ``min-release-age-exclude[]=NAME``. :param existing: the text of the file, empty when it does not exist yet. :param marker: the block's marker line with ``{mark}`` where BEGIN and END go, which tells the role's block apart from the user's lines. :returns: ``{"lines": [...], "shadowed": [...]}``, the lines in the mapping's order and then the exclusions, without repeats. :raises AnsibleFilterError: ``settings`` is not a mapping or ``excludes`` not a list, a key or package name has a character an npmrc cannot hold, a key is the exclusion list's own, or a value is not a string, number or boolean that reads back as given.
+    """
+    if not isinstance(settings, dict):
+        raise AnsibleFilterError(f"The npm settings must be a mapping, not {type(settings).__name__}.")
+    if not isinstance(excludes, list):
+        raise AnsibleFilterError(f"The npm exclusions must be a list, not {type(excludes).__name__}.")
+    if not isinstance(existing, str) or not isinstance(marker, str):
+        raise AnsibleFilterError("The npmrc text and the block's marker must be strings.")
+    outside = [line for line in _outside_block(existing, marker) if not line.lstrip().startswith((";", "#"))]
+    lines: list[str] = []
+    shadowed: list[str] = []
+    for key, value in settings.items():
+        if not isinstance(key, str) or not NPM_KEY.match(key):
+            raise AnsibleFilterError(f"{key!r} is not a key an npmrc file can hold.")
+        if key == NPM_LIST_KEY:
+            raise AnsibleFilterError(f"{key} is a list, so it has a variable of its own and is not one of the npm settings.")
+        text = _npm_value(key, value)
+        if any(re.match(rf"^\s*{re.escape(key)}\s*(=|$)", line) for line in outside):
+            shadowed.append(key)
+        else:
+            lines.append(f"{key}={text}")
+    listed = {match.group(1).strip().strip("\"'") for line in outside if (match := re.match(rf"^\s*{re.escape(NPM_LIST_KEY)}\[\]\s*=\s*(.*)$", line))}
+    for name in excludes:
+        if not isinstance(name, str) or not NPM_PACKAGE.match(name):
+            raise AnsibleFilterError(f"{name!r} is not a package name or pattern an npmrc exclusion can hold.")
+        line = f"{NPM_LIST_KEY}[]={name}"
+        if name not in listed and line not in lines:
+            lines.append(line)
+    return {"lines": lines, "shadowed": shadowed}
+
+
+class _IndentedDumper(yaml.SafeDumper):
+    """A YAML dumper that indents a list under its key, as hand-written configuration files do."""
+
+    def increase_indent(self, flow: bool = False, indentless: bool = False) -> None:
+        super().increase_indent(flow, False)
+
+
+def _plain(value: Any, where: str) -> Any:
+    """Return a copy of a YAML value made of the plain types a dump writes: strings, booleans, numbers, lists and mappings with string keys.
+
+    :raises AnsibleFilterError: the value holds anything else, a null included, or a number that is not finite.
+    """
+    # bool is a subclass of int, so it has to be tested first.
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AnsibleFilterError(f"{where} must be a finite number, not {value!r}.")
+        return float(value)
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_plain(item, f"An item of {where}") for item in value]
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise AnsibleFilterError(f"{where} must have string keys.")
+        return {str(key): _plain(item, f"{where}.{key}") for key, item in value.items()}
+    raise AnsibleFilterError(f"{where} must be a string, a number, a boolean, a list or a mapping, not {type(value).__name__}.")
+
+
+def _same(left: Any, right: Any) -> bool:
+    """Return whether two YAML values are equal and of the same types all the way down, which ``==`` is not (``True == 1`` and ``1 == 1.0``)."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same(a, b) for a, b in zip(left, right))
+    return bool(left == right)
+
+
+def _block_end(lines: list[str], start: int) -> int:
+    """Return the index after the last line of the top-level entry that starts at ``start``: the lines indented under it and the list items written at its own indent, without the blank and comment lines after them, which belong to what follows."""
+    end = start + 1
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip() or line.startswith("#"):
+            continue
+        if line[0] in " \t" or line.startswith("- ") or line.rstrip() == "-":
+            end = index + 1
+            continue
+        break
+    return end
+
+
+def host_tools_yaml_merge(existing: Any, settings: Any) -> str:
+    """Return a YAML file's text with top-level keys set to the given values, and everything else in the file as it was.
+
+    Only the entries of the keys whose value differs are rewritten, in place, or appended when the file has no such key; every other line, comments and blank lines included, is kept byte for byte, and a key that already holds the value is not touched, so the result equals the input when there is nothing to change. The result is parsed and compared with what the merge should hold, and a file whose layout the merge cannot edit safely (a flow-style mapping at the top, several documents) is refused rather than written wrong. A comment on a rewritten key's own line goes with its old value.
+
+    :param existing: the file's text, empty when it does not exist yet. :param settings: a mapping of top-level keys to string, number, boolean, list or mapping values. :returns: the new text. :raises AnsibleFilterError: ``existing`` is not YAML or not a mapping at the top, ``settings`` holds a value that is none of the plain types, or the merge could not be made without changing something else.
+    """
+    if not isinstance(existing, str):
+        raise AnsibleFilterError(f"The existing YAML must be text, not {type(existing).__name__}.")
+    if not isinstance(settings, dict):
+        raise AnsibleFilterError(f"The YAML settings must be a mapping, not {type(settings).__name__}.")
+    wanted = _plain(settings, "The YAML settings")
+    try:
+        current = yaml.safe_load(existing)
+    except yaml.YAMLError as error:
+        raise AnsibleFilterError(f"The existing file is not valid YAML, so nothing was merged into it ({getattr(error, 'problem', type(error).__name__)}).") from error
+    if current is None:
+        current = {}
+    if not isinstance(current, dict):
+        raise AnsibleFilterError("The existing file is not a mapping at the top, so nothing was merged into it.")
+    lines = existing.splitlines(keepends=True)
+    expected = dict(current)
+    for key, value in wanted.items():
+        if key in current and _same(current[key], value):
+            continue
+        rendered = yaml.dump({key: value}, Dumper=_IndentedDumper, default_flow_style=False, sort_keys=False, allow_unicode=True, width=10**9).splitlines(keepends=True)
+        starts = [index for index, line in enumerate(lines) if re.match(rf"""^(?:{re.escape(key)}|"{re.escape(key)}"|'{re.escape(key)}')[ \t]*:(?=[ \t\r\n]|$)""", line)]
+        if starts:
+            lines[starts[-1] : _block_end(lines, starts[-1])] = rendered
+        else:
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] += "\n"
+            lines.extend(rendered)
+        expected[key] = value
+    merged = "".join(lines)
+    try:
+        reread = yaml.safe_load(merged)
+    except yaml.YAMLError:
+        reread = None
+    if not _same(reread if reread is not None else {}, expected):
+        raise AnsibleFilterError("The file's layout is one the merge cannot edit safely, so nothing was merged into it.")
+    return merged
+
+
 class FilterModule:
     """Registers the host tools filters with Ansible."""
 
@@ -136,4 +318,6 @@ class FilterModule:
             "host_tools_homebrew_prefix": host_tools_homebrew_prefix,
             "host_tools_shell_integrations": host_tools_shell_integrations,
             "host_tools_mise_toml": host_tools_mise_toml,
+            "host_tools_npmrc": host_tools_npmrc,
+            "host_tools_yaml_merge": host_tools_yaml_merge,
         }
