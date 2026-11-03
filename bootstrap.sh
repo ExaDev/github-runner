@@ -19,7 +19,8 @@ if [ ! -x "${venv}/bin/ansible-playbook" ]; then
   # --prefer-binary: cryptography (an ansible-core dependency) stopped publishing Intel macOS wheels after 48.0.1, so without it pip picks the newest version on an Intel Mac and compiles it from source, which needs a working Rust and C toolchain.
   "${venv}/bin/pip" install --quiet --prefer-binary ansible-core
 fi
-"${venv}/bin/ansible-galaxy" collection install -r ansible/requirements.yml -p "${venv}/collections" >/dev/null
+# --no-cache: ansible-core's Galaxy response cache keeps an empty entry when a request it retries (a 429, 502 or 520) fails, and the retry then reads that entry and fails the install with "Missing expected 'results'" (_call_galaxy in ansible/galaxy/api.py); without the cache the retry asks the server again.
+"${venv}/bin/ansible-galaxy" collection install --no-cache -r ansible/requirements.yml -p "${venv}/collections" >/dev/null
 
 if [ -n "${K3S_AGENT_SERVER_URL:-}" ]; then
   node_role=agent
