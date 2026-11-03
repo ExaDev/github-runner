@@ -146,14 +146,46 @@ def _home_relative_path(name: str, value: Any) -> str:
     return value
 
 
-def _reject_names_in_both(env: dict[Any, Any], home_relative: dict[Any, Any]) -> None:
-    """Raise unless every variable is given once, as a plain value or as a path below the home directory.
+def _reject_repeated_names(*mappings: dict[Any, Any]) -> None:
+    """Raise unless every variable is given once across the mappings: as a plain value, as a path below the home directory or as a share of the CPUs.
 
-    :raises AnsibleFilterError: a name is in both mappings.
+    :raises AnsibleFilterError: a name is in more than one mapping.
     """
-    both = [name for name in env if name in home_relative]
-    if both:
-        raise AnsibleFilterError(f"{', '.join(map(str, both))} is set both as a plain value and as a home-relative path; give each variable once.")
+    seen: set[Any] = set()
+    repeated: list[Any] = []
+    for mapping in mappings:
+        repeated += [name for name in mapping if name in seen]
+        seen.update(mapping)
+    if repeated:
+        raise AnsibleFilterError(f"{', '.join(map(str, repeated))} is given more than once, as a plain value, a home-relative path or a CPU share; give each variable once.")
+
+
+def _cpu_divisor(name: str, value: Any) -> int:
+    """Return the divisor of a variable that is a share of the host's logical CPUs.
+
+    :raises AnsibleFilterError: the value is not an integer of at least 1. A boolean is not one, though Python counts it as an integer, and neither is a float or a string.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AnsibleFilterError(f"The CPU divisor of {name} must be an integer, not {value!r}.")
+    if value < 1:
+        raise AnsibleFilterError(f"The CPU divisor of {name} must be at least 1, not {value}.")
+    return value
+
+
+def _cpu_share_shell(divisor: int) -> str:
+    """Return the shell word that is the number of logical CPUs the host has online divided by ``divisor``, rounded down and never below 1.
+
+    The count is ``getconf _NPROCESSORS_ONLN``, which POSIX hosts, macOS and Linux alike, have, and the arithmetic runs in a command substitution so that no variable is left behind in the user's shell. It is the same in sh, bash and zsh.
+    """
+    return f'"$(n=$(getconf _NPROCESSORS_ONLN); n=$((n / {divisor})); echo $((n > 0 ? n : 1)))"'
+
+
+def _cpu_share_tera(divisor: int) -> str:
+    """Return the mise template that is the number of logical CPUs divided by ``divisor``, rounded down and never below 1.
+
+    ``num_cpus()`` returns a string, so it needs ``int`` before any arithmetic. Tera's ``/`` gives a float and its ``int`` filter refuses a float that is not whole (mise reports "received an unexpected type" for 12 / 8), so the division is of a multiple of the divisor: the count less its remainder, which is a whole number whatever the count. Tera has no ``max`` filter, so the floor of 1 is an ``if``. The template is the role's own and holds no ``$``, so it needs none of the escaping of a user's value.
+    """
+    return f"{{% set c = num_cpus() | int %}}{{% set n = ((c - c % {divisor}) / {divisor}) | int %}}{{% if n < 1 %}}1{{% else %}}{{{{ n }}}}{{% endif %}}"
 
 
 def _double_quoted(text: str) -> str:
@@ -171,23 +203,27 @@ def _home_relative_value(name: str, value: Any) -> str:
     return '"$HOME/' + _double_quoted(_home_relative_path(name, value)) + '"'
 
 
-def host_tools_shell_env(env: Any, home_relative: Any) -> list[dict[str, Any]]:
+def host_tools_shell_env(env: Any, home_relative: Any, cpu_share: Any) -> list[dict[str, Any]]:
     """Return the startup lines that set environment variables in a shell, in the shape host_tools_shell_integrations returns, with ``non_interactive`` true: a variable is for every shell the user's commands run in, and a non-interactive bash returns from ``~/.bashrc`` at the file's interactive guard, so the caller writes these lines ahead of everything else in the file.
 
     A value in ``env`` is quoted for the shell with ``shlex.quote``, so it reaches the variable exactly as given whatever it holds (spaces, quotes, ``$``, backticks), in zsh and in bash alike. A value in ``home_relative`` is a path below the user's home directory and is written as ``"$HOME/<path>"``, so the shell works out the home directory when the file is read, which the role cannot know when it runs without gathering facts. ``pattern`` is an extended regular expression that matches a line of a startup file that already assigns the variable, outside a comment, whatever its value, so a value the user chose is never overridden, and ``name`` tells the lines apart.
 
-    :param env: a mapping of variable names to string, number or boolean values. :param home_relative: a mapping of variable names to paths relative to the user's home directory. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, the variables of ``env`` in its order and then those of ``home_relative`` in its. :raises AnsibleFilterError: an argument is not a mapping, a name is not one the shell accepts or is in both mappings (a name in both is refused by the same check as in ``host_tools_mise_toml``), a value of ``env`` is not a single-line string, a number or a boolean, or a path of ``home_relative`` is not a non-empty relative path without a ``..`` component.
+    :param env: a mapping of variable names to string, number or boolean values. :param home_relative: a mapping of variable names to paths relative to the user's home directory. :param cpu_share: a mapping of variable names to an integer divisor of at least 1, each variable being the host's logical CPU count divided by it, rounded down and never below 1, worked out by the shell each time it reads the line. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, the variables of ``env`` in its order, then those of ``home_relative`` and then those of ``cpu_share``, each in its own. :raises AnsibleFilterError: an argument is not a mapping, a name is not one the shell accepts or is in more than one mapping (refused by the same check as in ``host_tools_mise_toml``), a divisor is not an integer of at least 1, a value of ``env`` is not a single-line string, a number or a boolean, or a path of ``home_relative`` is not a non-empty relative path without a ``..`` component.
     """
     if not isinstance(env, dict):
         raise AnsibleFilterError(f"The shell environment must be a mapping, not {type(env).__name__}.")
     if not isinstance(home_relative, dict):
         raise AnsibleFilterError(f"The home-relative shell environment must be a mapping, not {type(home_relative).__name__}.")
-    _reject_names_in_both(env, home_relative)
+    if not isinstance(cpu_share, dict):
+        raise AnsibleFilterError(f"The CPU-share shell environment must be a mapping, not {type(cpu_share).__name__}.")
+    _reject_repeated_names(env, home_relative, cpu_share)
     lines: list[dict[str, Any]] = []
     for name, value in env.items():
         lines.append(_export_line(name, shlex.quote(_env_value(_env_name(name), value))))
     for name, value in home_relative.items():
         lines.append(_export_line(name, _home_relative_value(_env_name(name), value)))
+    for name, value in cpu_share.items():
+        lines.append(_export_line(name, _cpu_share_shell(_cpu_divisor(_env_name(name), value))))
     return lines
 
 
@@ -276,27 +312,30 @@ def _mise_literal(text: str) -> str:
     return re.sub(r"\{(?=[{%#])", "{{ '{' }}", text.replace("$", "$$"))
 
 
-def _env_table(env: Any, home_relative: Any) -> list[str]:
+def _env_table(env: Any, home_relative: Any, cpu_share: Any) -> list[str]:
     """Return the lines of mise's ``[env]`` table, empty when neither mapping has an entry.
 
-    A plain value is read back as given. A home-relative path is written as ``{{ env.HOME }}/<path>``, so mise works the home directory out when it reads the file, which the role cannot know when it runs without gathering facts.
+    A plain value is read back as given. A home-relative path is written as ``{{ env.HOME }}/<path>``, so mise works the home directory out when it reads the file, which the role cannot know when it runs without gathering facts. A CPU share is a template that works the host's logical CPU count out when mise reads the file, divided by the divisor, rounded down and never below 1.
 
-    :raises AnsibleFilterError: a name is not one a shell accepts (a mise variable is exported to commands run by shells), is in both mappings, a plain value is not a single-line string, a number or a boolean, or a path is not a non-empty relative path without a ``..`` component.
+    :raises AnsibleFilterError: a name is not one a shell accepts (a mise variable is exported to commands run by shells), is in more than one mapping, a divisor is not an integer of at least 1, a plain value is not a single-line string, a number or a boolean, or a path is not a non-empty relative path without a ``..`` component.
     """
     if not isinstance(env, dict):
         raise AnsibleFilterError(f"env must be a mapping, not {type(env).__name__}.")
     if not isinstance(home_relative, dict):
         raise AnsibleFilterError(f"The home-relative env must be a mapping, not {type(home_relative).__name__}.")
-    _reject_names_in_both(env, home_relative)
+    if not isinstance(cpu_share, dict):
+        raise AnsibleFilterError(f"The CPU-share env must be a mapping, not {type(cpu_share).__name__}.")
+    _reject_repeated_names(env, home_relative, cpu_share)
     lines = [f"{_env_name(name)} = {_string(_mise_literal(_env_value(name, value)))}" for name, value in env.items()]
     lines += [f"{_env_name(name)} = {_string('{{ env.HOME }}/' + _mise_literal(_home_relative_path(name, value)))}" for name, value in home_relative.items()]
+    lines += [f"{_env_name(name)} = {_string(_cpu_share_tera(_cpu_divisor(name, value)))}" for name, value in cpu_share.items()]
     return ["[env]", *lines] if lines else []
 
 
-def host_tools_mise_toml(config: Any, env_home_relative: Any) -> str:
+def host_tools_mise_toml(config: Any, env_home_relative: Any, env_cpu_share: Any) -> str:
     """Return a mise configuration file for a mapping of its tables.
 
-    :param config: a mapping with the tables ``tools`` (a tool name to a version string or a list of them), ``settings`` (a setting name to a string, number or boolean, or a list of those) and ``env`` (a variable name to a string, number or boolean, read back by mise as given). A table that is empty is left out. :param env_home_relative: a mapping of variable names to paths relative to the user's home directory, written into the ``env`` table as mise's ``{{ env.HOME }}`` template followed by the path. :returns: the TOML text, each table after a blank line and the whole ending in a newline, in the order tools, settings and env whatever the order of the mapping. :raises AnsibleFilterError: an argument is not a mapping, ``config`` has a table the role does not render or a value of a kind its table does not take, a variable is in both ``config['env']`` and ``env_home_relative``, a path is absolute, empty or has a ``..`` component, or there is nothing to render.
+    :param config: a mapping with the tables ``tools`` (a tool name to a version string or a list of them), ``settings`` (a setting name to a string, number or boolean, or a list of those) and ``env`` (a variable name to a string, number or boolean, read back by mise as given). A table that is empty is left out. :param env_home_relative: a mapping of variable names to paths relative to the user's home directory, written into the ``env`` table as mise's ``{{ env.HOME }}`` template followed by the path. :param env_cpu_share: a mapping of variable names to an integer divisor of at least 1, written into the ``env`` table as a template for the host's logical CPU count divided by it, rounded down and never below 1. :returns: the TOML text, each table after a blank line and the whole ending in a newline, in the order tools, settings and env whatever the order of the mapping. :raises AnsibleFilterError: an argument is not a mapping, ``config`` has a table the role does not render or a value of a kind its table does not take, a variable is in more than one of ``config['env']``, ``env_home_relative`` and ``env_cpu_share``, a path is absolute, empty or has a ``..`` component, a divisor is not an integer of at least 1, or there is nothing to render.
     """
     if not isinstance(config, dict):
         raise AnsibleFilterError(f"The mise configuration must be a mapping, not {type(config).__name__}.")
@@ -304,7 +343,7 @@ def host_tools_mise_toml(config: Any, env_home_relative: Any) -> str:
     if unknown:
         raise AnsibleFilterError(f"The mise configuration has the tables {', '.join(map(repr, unknown))}; the role renders only {', '.join(MISE_TABLES)}.")
     tables = {name: _table(name, config[name]) for name in MISE_TABLES if name in config and name != "env"}
-    tables["env"] = _env_table(config.get("env", {}), env_home_relative)
+    tables["env"] = _env_table(config.get("env", {}), env_home_relative, env_cpu_share)
     blocks = [tables[name] for name in MISE_TABLES if tables.get(name)]
     if not blocks:
         raise AnsibleFilterError("The mise configuration has no entry in any table, so there is nothing to render.")

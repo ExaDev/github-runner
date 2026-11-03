@@ -105,7 +105,25 @@ renders to
 TURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"
 ```
 
-so mise works the home directory out when it reads the file, whichever user and home the host has. The path reaches the variable exactly as given (the same escaping as for a plain value, applied to the path). The rules are those of `github_runner_host_tools_shell_env_home_relative`, whose validation the role shares: a path that is empty, absolute, has a `..` component, is not a string or holds a newline or a NUL fails the run before anything is written, and a variable that is both a plain `env` value and here fails it too. With `github_runner_host_tools_mise_config` empty, this mapping alone makes the role write the file. A fleet that wants one value in the shell's startup file and in mise gives it to both `github_runner_host_tools_shell_env_home_relative` and this mapping: the shell file serves commands run by a shell, and mise's table serves commands run by `mise exec`, `mise run` and shims.
+so mise works the home directory out when it reads the file, whichever user and home the host has. The path reaches the variable exactly as given (the same escaping as for a plain value, applied to the path). The rules are those of `github_runner_host_tools_shell_env_home_relative`, whose validation the role shares: a path that is empty, absolute, has a `..` component, is not a string or holds a newline or a NUL fails the run before anything is written, and a variable that is also a plain `env` value or a CPU share fails it too. With `github_runner_host_tools_mise_config` empty, this mapping alone makes the role write the file. A fleet that wants one value in the shell's startup file and in mise gives it to both `github_runner_host_tools_shell_env_home_relative` and this mapping: the shell file serves commands run by a shell, and mise's table serves commands run by `mise exec`, `mise run` and shims.
+
+### A share of the CPUs
+
+`github_runner_host_tools_mise_env_cpu_share` is a mapping of variable names to an integer divisor, for a value that depends on the size of the host, such as a worker count. Each variable is the host's logical CPU count divided by its divisor, rounded down and never below 1, worked out when mise reads the file:
+
+```yaml
+github_runner_host_tools_mise_env_cpu_share:
+  VITEST_MAX_WORKERS: 2
+```
+
+renders to
+
+```toml
+[env]
+VITEST_MAX_WORKERS = "{% set c = num_cpus() | int %}{% set n = ((c - c % 2) / 2) | int %}{% if n < 1 %}1{% else %}{{ n }}{% endif %}"
+```
+
+which is 5 on a 10-CPU host and 1 on a 1-CPU host. It is a number and not a percentage because tools read these variables as integers: vitest 5 reads `VITEST_MAX_WORKERS` with `Number.parseInt`, so `50%` would be 50 workers. mise's `num_cpus()` returns a string, so the template converts it with `int` before dividing (Tera refuses arithmetic on a string). Tera's `int` filter also refuses a float that is not whole, so the template divides the count less its remainder (a whole number) rather than the count itself, and Tera has no `max` filter, so the floor of 1 is an `if`. The divisor must be an integer of at least 1 (a boolean, a float, a string, zero and a negative number fail the run), and a variable may be in only one of the three mappings that write the `env` table. The template is the role's own text, so none of the escaping of a plain value applies to it. A fleet that wants the value in the shell's startup file and in mise gives it to both this mapping and `github_runner_host_tools_shell_env_cpu_share`.
 
 Any other table, or a value of a kind its table does not take, fails the run with a message rather than being written in a form mise might read differently.
 
@@ -188,9 +206,26 @@ writes
 export TURBO_CACHE_DIR="$HOME/.cache/turbo"
 ```
 
-so the shell works out the home directory when it reads the file, whichever user and home the host has. Inside double quotes the shell expands `$` and the backtick and gives the backslash and the double quote a meaning, in sh, bash and zsh alike, so the role puts a backslash before each of those four characters in the path and it reaches the variable as given (`!` matters only to an interactive shell reading a typed line, not one reading a startup file). The block, its place at the top of the file, the rule that a variable any startup file of the shell assigns already is never added and the `--check` behaviour are those of `github_runner_host_tools_shell_env`, and a variable that is in both mappings fails the run.
+so the shell works out the home directory when it reads the file, whichever user and home the host has. Inside double quotes the shell expands `$` and the backtick and gives the backslash and the double quote a meaning, in sh, bash and zsh alike, so the role puts a backslash before each of those four characters in the path and it reaches the variable as given (`!` matters only to an interactive shell reading a typed line, not one reading a startup file). The block, its place at the top of the file, the rule that a variable any startup file of the shell assigns already is never added and the `--check` behaviour are those of `github_runner_host_tools_shell_env`, and a variable that is in more than one of the shell mappings fails the run.
 
 A path that is empty, absolute (it starts with `/`; a fixed path belongs in `github_runner_host_tools_shell_env`), has a `..` component (so the variable cannot point outside the home directory; a name such as `a..b` is fine), is not a string, or holds a newline or a NUL fails the run with a message before any file is changed.
+
+### A share of the CPUs
+
+`github_runner_host_tools_shell_env_cpu_share` is a mapping of environment variable names to an integer divisor, for a value that depends on the size of the host. Each variable is the host's logical CPU count divided by its divisor, rounded down and never below 1, worked out by the shell each time it reads the file:
+
+```yaml
+github_runner_host_tools_shell_env_cpu_share:
+  VITEST_MAX_WORKERS: 2
+```
+
+writes
+
+```sh
+export VITEST_MAX_WORKERS="$(n=$(getconf _NPROCESSORS_ONLN); n=$((n / 2)); echo $((n > 0 ? n : 1)))"
+```
+
+`getconf _NPROCESSORS_ONLN` is the count of logical CPUs online, and macOS and Linux both have it (POSIX). The arithmetic runs in a command substitution, so no variable is left behind in the user's shell, and the line is the same in sh, bash and zsh. The value is a number and not a percentage because tools read these variables as integers (see the mise section above). The block is placed at the top of the file and skipped when a startup file assigns the variable already, as for the other two mappings. The line starts one `getconf` when a shell reads the file, which for bash on a Debian host is every SSH command. The divisor must be an integer of at least 1, and a variable may be in only one of the three shell mappings.
 
 The variables are written whether or not `github_runner_host_tools_shell_integration` is on, and without Homebrew: that variable covers only the Homebrew and mise lines, and a mapping the host gives is the host asking for the variables. A user whose login shell is neither zsh nor bash is left alone with a message. A variable dropped from the mapping keeps its line.
 
@@ -208,6 +243,8 @@ The variables are written whether or not `github_runner_host_tools_shell_integra
 - `github_runner_host_tools_pnpm_minimum_release_age_exclude` (default an empty list): package names or patterns written under `minimumReleaseAgeExclude` in that file.
 - `github_runner_host_tools_shell_env` (default an empty mapping): environment variables written as `export` lines at the top of the shell's startup file; see Shell environment above.
 - `github_runner_host_tools_shell_env_home_relative` (default an empty mapping): environment variables whose value is a path relative to the user's home directory, written as `export NAME="$HOME/<path>"`; see Paths below the home directory above.
+- `github_runner_host_tools_shell_env_cpu_share` (default an empty mapping): environment variables whose value is a share of the host's logical CPUs, written as an `export` line whose value the shell works out; see A share of the CPUs under Shell environment above.
+- `github_runner_host_tools_mise_env_cpu_share` (default an empty mapping): the same for mise's `env` table; see A share of the CPUs under Global mise defaults above.
 - `github_runner_host_tools_homebrew_prefix` (default empty): the Homebrew prefix. Empty takes the prefix described under Homebrew. Not a setting; a variable only so the tests can point it at a stand-in.
 - `github_runner_host_tools_homebrew_install_base_url`: where the installer is downloaded from, as `<this>/<commit>/install.sh`. Not a setting; a variable only so the tests can point it at a stand-in.
 
@@ -243,8 +280,12 @@ github_runner_host_tools_shell_env_home_relative:
   TURBO_CACHE_DIR: .cache/turbo
 github_runner_host_tools_mise_env_home_relative:
   TURBO_CACHE_DIR: .cache/turbo
+github_runner_host_tools_shell_env_cpu_share:
+  VITEST_MAX_WORKERS: 2
+github_runner_host_tools_mise_env_cpu_share:
+  VITEST_MAX_WORKERS: 2
 ```
 
 ## Testing
 
-`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. The mise `env` table is read back with a real `mise env`, which has to be on `PATH` (the CI job installs it), for values with `$`, template braces, quotes and a home directory whose name has a space, a quote and a dollar sign. They also check the package-install settings and the shell variables: that nothing is read or written when the variables are empty, that the `.npmrc` block holds only the role's lines, keeps the user's lines and credentials (made-up values) out of the output, is idempotent and shrinks as entries are dropped, that a key the user sets outside the block is kept and reported, that a new `.npmrc` is `0600` and no existing file or symlink changes mode, that the pnpm merge keeps unrelated keys and comments, and that a shell variable's value, quotes and dollar signs included, round-trips through `sh` and `bash` reading the written file. A non-interactive `bash` sourcing the Ubuntu `.bashrc` fixture finds `brew`, `mise` and a shim after a run and finds none before it, and the `PATH` line is read back by `sh` and `bash` under prefixes and home directories holding a space, quotes and dollar signs. The bash cases run against `tests/host_tools/ubuntu-26.04-skel.bashrc`, a byte-for-byte copy of Ubuntu's default `/etc/skel/.bashrc` (its checksum is asserted), and read the result with a real non-interactive `bash`, which sees a variable only when the block is above the interactive guard; they cover a block an earlier version appended below the guard being moved to the top without a duplicate, a second run and `--check` changing nothing, and a variable the file assigns already being kept. The home-relative variables are read back through real `sh`, `bash` and `zsh` with a home directory whose name has a space, a quote and a dollar sign, and a path with every character special in double quotes, to show that the home directory is expanded when the file is read and nothing else is. Nothing is downloaded and no real package manager, privilege or startup file is touched.
+`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. The mise `env` table is read back with a real `mise env`, which has to be on `PATH` (the CI job installs it), for values with `$`, template braces, quotes and a home directory whose name has a space, a quote and a dollar sign. They also check the package-install settings and the shell variables: that nothing is read or written when the variables are empty, that the `.npmrc` block holds only the role's lines, keeps the user's lines and credentials (made-up values) out of the output, is idempotent and shrinks as entries are dropped, that a key the user sets outside the block is kept and reported, that a new `.npmrc` is `0600` and no existing file or symlink changes mode, that the pnpm merge keeps unrelated keys and comments, and that a shell variable's value, quotes and dollar signs included, round-trips through `sh` and `bash` reading the written file. A non-interactive `bash` sourcing the Ubuntu `.bashrc` fixture finds `brew`, `mise` and a shim after a run and finds none before it, and the `PATH` line is read back by `sh` and `bash` under prefixes and home directories holding a space, quotes and dollar signs. The bash cases run against `tests/host_tools/ubuntu-26.04-skel.bashrc`, a byte-for-byte copy of Ubuntu's default `/etc/skel/.bashrc` (its checksum is asserted), and read the result with a real non-interactive `bash`, which sees a variable only when the block is above the interactive guard; they cover a block an earlier version appended below the guard being moved to the top without a duplicate, a second run and `--check` changing nothing, and a variable the file assigns already being kept. The home-relative variables are read back through real `sh`, `bash` and `zsh` with a home directory whose name has a space, a quote and a dollar sign, and a path with every character special in double quotes, to show that the home directory is expanded when the file is read and nothing else is. The CPU-share lines are read back through real `sh`, `bash` and `zsh` with a stand-in `getconf` on `PATH` that reports 1, 2, 3, 10 and 64 CPUs, and the mise template through a real `mise env` with `num_cpus()` replaced by the same counts as strings, so the floor of 1 and the rounding are checked at sizes the test host does not have; the real `num_cpus()` is checked against the host's own count. Nothing is downloaded and no real package manager, privilege or startup file is touched.

@@ -820,7 +820,7 @@ class RoleTest(unittest.TestCase):
         self.have_homebrew()
         result = self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_config={"env": {"TURBO_CACHE_DIR": "/x"}}, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("TURBO_CACHE_DIR is set both", self.squashed(result))
+        self.assertIn("TURBO_CACHE_DIR is given more than once", self.squashed(result))
         self.assertFalse(self.fleet_file().exists())
 
     def test_the_home_relative_paths_are_not_written_when_mise_is_left_out(self) -> None:
@@ -1396,7 +1396,7 @@ class RoleTest(unittest.TestCase):
     def test_a_variable_in_both_mappings_is_refused_before_any_file_is_changed(self) -> None:
         result = self.run_settings(github_runner_host_tools_shell_env={"TURBO_CACHE_DIR": "/x"}, github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("set both as a plain value", self.squashed(result))
+        self.assertIn("is given more than once", self.squashed(result))
         self.assertEqual(list(self.home.iterdir()), [])
 
     def test_a_home_relative_mapping_of_the_wrong_type_is_refused_by_the_argument_specs(self) -> None:
@@ -1546,6 +1546,111 @@ class RoleTest(unittest.TestCase):
         self.tools_on_disk()
         self.ok(self.run_role())
         self.assertNotIn("github_runner_host_tools path", (self.home / ".zshenv").read_text())
+
+    # Variables that are a share of the host's logical CPUs.
+
+    def stand_in_cpus(self, cpus: int) -> str:
+        """A PATH, with a getconf that reports ``cpus`` first, for a real shell to read a startup file with."""
+        directory = self.work / "cpu-stand-in"
+        directory.mkdir(exist_ok=True)
+        (directory / "getconf").write_text(f'#!/bin/sh\n[ "$1" = _NPROCESSORS_ONLN ] || exit 2\necho {cpus}\n')
+        (directory / "getconf").chmod(0o755)
+        return f"{directory}:/usr/bin:/bin"
+
+    def shell_sees_with_cpus(self, shell: str, startup: Path, name: str, cpus: int) -> str:
+        script = f'. "$1"\nprintf %s "${{{name}-unset}}"' if shell != "zsh" else f'source "$1"\nprintf %s "${{{name}-unset}}"'
+        return subprocess.run([shell, "-c", script, shell, str(startup)], capture_output=True, text=True, check=True, env={"PATH": self.stand_in_cpus(cpus), "HOME": str(self.home)}).stdout
+
+    def test_a_cpu_share_goes_into_zshenv_and_a_second_run_changes_nothing(self) -> None:
+        variables = {"github_runner_host_tools_shell_env_cpu_share": {"VITEST_MAX_WORKERS": 2}}
+        self.ok(self.run_settings(**variables))
+        written = (self.home / ".zshenv").read_text()
+        self.assertEqual(written, "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools env-VITEST_MAX_WORKERS\nexport VITEST_MAX_WORKERS=\"$(n=$(getconf _NPROCESSORS_ONLN); n=$((n / 2)); echo $((n > 0 ? n : 1)))\"\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools env-VITEST_MAX_WORKERS\n")
+        result = self.run_settings(**variables)
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual((self.home / ".zshenv").read_text(), written)
+
+    def test_the_written_startup_file_gives_half_the_cpus_in_a_real_shell_whatever_the_host_has(self) -> None:
+        self.ok(self.run_settings(github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": 2}))
+        for cpus, expected in ((1, "1"), (2, "1"), (3, "1"), (10, "5"), (11, "5"), (64, "32")):
+            for shell in ("sh", "bash", "zsh"):
+                with self.subTest(cpus=cpus, shell=shell):
+                    self.assertEqual(self.shell_sees_with_cpus(shell, self.home / ".zshenv", "VITEST_MAX_WORKERS", cpus), expected)
+
+    def test_a_non_interactive_bash_on_the_ubuntu_bashrc_sees_the_share_and_did_not_before(self) -> None:
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": 2}))
+        self.assertTrue((self.home / ".bashrc").read_text().endswith(skeleton))
+        self.assertEqual(self.shell_sees_with_cpus("bash", self.home / ".bashrc", "VITEST_MAX_WORKERS", 10), "5")
+        result = subprocess.run(["bash", "-c", '. "$1"\nprintf %s "${VITEST_MAX_WORKERS-unset}"', "bash", str(UBUNTU_BASHRC)], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)})
+        self.assertEqual(result.stdout, "unset")
+
+    def test_a_cpu_share_the_startup_files_assign_already_is_not_added_or_overridden(self) -> None:
+        (self.home / ".zshrc").write_text("export VITEST_MAX_WORKERS=3\n")
+        result = self.run_settings(github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": 2})
+        self.ok(result)
+        self.assertEqual((self.home / ".zshrc").read_text(), "export VITEST_MAX_WORKERS=3\n")
+        self.assertFalse((self.home / ".zshenv").exists())
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_changed_cpu_divisor_updates_the_roles_block_in_place(self) -> None:
+        self.ok(self.run_settings(github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": 4}))
+        self.ok(self.run_settings(github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": 2}))
+        text = (self.home / ".zshenv").read_text()
+        self.assertEqual(text.count("BEGIN ANSIBLE MANAGED BLOCK"), 1)
+        self.assertEqual(self.shell_sees_with_cpus("zsh", self.home / ".zshenv", "VITEST_MAX_WORKERS", 10), "5")
+
+    def test_a_cpu_divisor_that_is_not_an_integer_of_at_least_one_fails_the_run_before_any_file_is_changed(self) -> None:
+        for label, divisor, message in (("zero", 0, "at least 1"), ("percentage", "50%", "must be an integer"), ("float", 2.5, "must be an integer")):
+            with self.subTest(label):
+                result = self.run_settings(github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": divisor})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, self.squashed(result))
+                self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_a_variable_in_the_share_and_another_shell_mapping_fails_the_run_before_any_file_is_changed(self) -> None:
+        result = self.run_settings(github_runner_host_tools_shell_env={"VITEST_MAX_WORKERS": "4"}, github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": 2})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("VITEST_MAX_WORKERS is given more than once", self.squashed(result))
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_a_cpu_share_alone_is_enough_to_make_the_role_write_the_startup_file_and_check_mode_writes_nothing(self) -> None:
+        result = self.run_settings("--check", github_runner_host_tools_shell_env_cpu_share={"VITEST_MAX_WORKERS": 2})
+        self.ok(result)
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+
+    def test_a_mise_cpu_share_is_written_to_the_fleet_file_untouched_by_ansibles_templating_and_a_second_run_changes_nothing(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        variables = {"github_runner_host_tools_shell_integration": False, "github_runner_host_tools_mise_env_cpu_share": {"VITEST_MAX_WORKERS": 2}}
+        self.ok(self.run_role(**variables))
+        written = self.fleet_file().read_text()
+        self.assertEqual(written.splitlines()[1:], ["[env]", 'VITEST_MAX_WORKERS = "{% set c = num_cpus() | int %}{% set n = ((c - c % 2) / 2) | int %}{% if n < 1 %}1{% else %}{{ n }}{% endif %}"'])
+        result = self.run_role(**variables)
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual(self.fleet_file().read_text(), written)
+
+    def test_mise_reads_the_cpu_share_the_role_wrote_back_as_half_the_cpus_of_the_host(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        self.ok(self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_cpu_share={"VITEST_MAX_WORKERS": 2}))
+        elsewhere = self.work / "reading-home"
+        (elsewhere / ".config" / "mise").mkdir(parents=True)
+        shutil.copytree(self.fleet_file().parent, elsewhere / ".config" / "mise" / "conf.d")
+        exported, _ = mise_reads(elsewhere)
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+        self.assertEqual(exported["VITEST_MAX_WORKERS"], str(max(1, cpus // 2)))
+
+    def test_a_mise_cpu_divisor_that_is_not_an_integer_of_at_least_one_fails_the_run_and_writes_nothing(self) -> None:
+        self.have_homebrew()
+        for divisor in (0, "50%"):
+            with self.subTest(divisor=divisor):
+                result = self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_cpu_share={"VITEST_MAX_WORKERS": divisor})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.fleet_file().exists())
 
     def test_check_mode_reports_a_variable_and_writes_nothing(self) -> None:
         result = self.run_settings("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})

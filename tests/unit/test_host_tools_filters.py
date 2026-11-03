@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -135,27 +136,27 @@ class MiseTomlFilterTest(unittest.TestCase):
     def test_tools_and_settings_render_as_two_tables(self) -> None:
         config = {"tools": {"node": "22", "python": ["3.13", "3.12"]}, "settings": {"experimental": True, "jobs": 4, "ratio": 0.5, "http_timeout": "30s"}}
         self.assertEqual(
-            host_tools.host_tools_mise_toml(config, {}),
+            host_tools.host_tools_mise_toml(config, {}, {}),
             '[tools]\nnode = "22"\npython = ["3.13", "3.12"]\n\n[settings]\nexperimental = true\njobs = 4\nratio = 0.5\nhttp_timeout = "30s"\n',
         )
 
     def test_the_tables_come_out_in_one_order_whatever_the_mapping_has(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"experimental": False}, "tools": {"node": "lts"}}, {}), '[tools]\nnode = "lts"\n\n[settings]\nexperimental = false\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"experimental": False}, "tools": {"node": "lts"}}, {}, {}), '[tools]\nnode = "lts"\n\n[settings]\nexperimental = false\n')
 
     def test_a_key_that_is_not_bare_is_quoted(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {"npm:typescript": "latest", "cargo:ripgrep": ["14"]}}, {}), '[tools]\n"npm:typescript" = "latest"\n"cargo:ripgrep" = ["14"]\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {"npm:typescript": "latest", "cargo:ripgrep": ["14"]}}, {}, {}), '[tools]\n"npm:typescript" = "latest"\n"cargo:ripgrep" = ["14"]\n')
 
     def test_strings_are_escaped(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"note": 'say "hi"\\\n\t\x01'}}, {}), '[settings]\nnote = "say \\"hi\\"\\\\\\n\\t\\u0001"\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"note": 'say "hi"\\\n\t\x01'}}, {}, {}), '[settings]\nnote = "say \\"hi\\"\\\\\\n\\t\\u0001"\n')
 
     def test_a_setting_can_be_a_list_of_scalars(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"disable_tools": ["node", "python"], "levels": [1, 2]}}, {}), '[settings]\ndisable_tools = ["node", "python"]\nlevels = [1, 2]\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"disable_tools": ["node", "python"], "levels": [1, 2]}}, {}, {}), '[settings]\ndisable_tools = ["node", "python"]\nlevels = [1, 2]\n')
 
     def test_an_empty_table_is_left_out(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {}, "settings": {"experimental": True}}, {}), "[settings]\nexperimental = true\n")
+        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {}, "settings": {"experimental": True}}, {}, {}), "[settings]\nexperimental = true\n")
 
     def test_a_boolean_is_not_written_as_a_number(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"on": True, "one": 1}}, {}), "[settings]\non = true\none = 1\n")
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"on": True, "one": 1}}, {}, {}), "[settings]\non = true\none = 1\n")
 
     def test_what_it_cannot_render_is_refused(self) -> None:
         cases = {
@@ -171,29 +172,29 @@ class MiseTomlFilterTest(unittest.TestCase):
         }
         for label, (config, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
-                host_tools.host_tools_mise_toml(config, {})
+                host_tools.host_tools_mise_toml(config, {}, {})
 
 
 class MiseEnvFilterTest(unittest.TestCase):
     def read_back(self, env: dict[str, object], home_relative: dict[str, str], home: str = "home") -> tuple[dict[str, str], str]:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
-        return mise_env(host_tools.host_tools_mise_toml({"env": env}, home_relative), root / home)
+        return mise_env(host_tools.host_tools_mise_toml({"env": env}, home_relative, {}), root / home)
 
     def test_the_env_table_is_written_last_with_plain_values_then_home_relative_paths(self) -> None:
         self.assertEqual(
-            host_tools.host_tools_mise_toml({"env": {"B": "x", "A": True, "N": 3, "F": 0.5}, "tools": {"node": "22"}}, {"TURBO_CACHE_DIR": ".cache/turbo"}),
+            host_tools.host_tools_mise_toml({"env": {"B": "x", "A": True, "N": 3, "F": 0.5}, "tools": {"node": "22"}}, {"TURBO_CACHE_DIR": ".cache/turbo"}, {}),
             '[tools]\nnode = "22"\n\n[env]\nB = "x"\nA = "true"\nN = "3"\nF = "0.5"\nTURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"\n',
         )
 
     def test_home_relative_paths_alone_are_enough_to_render(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({}, {"TURBO_CACHE_DIR": ".cache/turbo"}), '[env]\nTURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({}, {"TURBO_CACHE_DIR": ".cache/turbo"}, {}), '[env]\nTURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"\n')
 
     def test_an_empty_env_table_is_left_out(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"env": {}, "tools": {"node": "22"}}, {}), '[tools]\nnode = "22"\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"env": {}, "tools": {"node": "22"}}, {}, {}), '[tools]\nnode = "22"\n')
 
     def test_a_dollar_sign_and_a_template_brace_are_escaped_for_mise_and_the_string_for_toml(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"env": {"A": 'a$b "c" {{d}} {%e%} {#f#} {g}'}}, {}), "[env]\nA = \"a$$b \\\"c\\\" {{ '{' }}{d}} {{ '{' }}%e%} {{ '{' }}#f#} {g}\"\n")
+        self.assertEqual(host_tools.host_tools_mise_toml({"env": {"A": 'a$b "c" {{d}} {%e%} {#f#} {g}'}}, {}, {}), "[env]\nA = \"a$$b \\\"c\\\" {{ '{' }}{d}} {{ '{' }}%e%} {{ '{' }}#f#} {g}\"\n")
 
     def test_a_home_relative_variable_is_expanded_by_mise_to_the_home_directory_it_reads_the_file_in(self) -> None:
         for home in ("home", "a home", "it's", 'say "hi"', "$d"):
@@ -240,15 +241,15 @@ class MiseEnvFilterTest(unittest.TestCase):
             "only a parent component": ({}, {"A": ".."}, "'..' component"),
             "a number as a path": ({}, {"A": 3}, "must be a string"),
             "a newline in a path": ({}, {"A": "a\nb"}, "one line"),
-            "a name in both": ({"env": {"A": "x"}}, {"A": ".cache"}, "A is set both"),
+            "a name in both": ({"env": {"A": "x"}}, {"A": ".cache"}, "A is given more than once"),
         }
         for label, (config, home_relative, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
-                host_tools.host_tools_mise_toml(config, home_relative)
+                host_tools.host_tools_mise_toml(config, home_relative, {})
 
     def test_nothing_in_either_mapping_is_nothing_to_render(self) -> None:
         with self.assertRaisesRegex(Exception, "nothing to render"):
-            host_tools.host_tools_mise_toml({"env": {}}, {})
+            host_tools.host_tools_mise_toml({"env": {}}, {}, {})
 
 
 def grep_finds(pattern: str, text: str) -> bool:
@@ -258,35 +259,35 @@ def grep_finds(pattern: str, text: str) -> bool:
 
 class ShellEnvFilterTest(unittest.TestCase):
     def test_a_variable_becomes_a_quoted_export_line_and_a_pattern_that_finds_an_assignment_of_it(self) -> None:
-        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"}, {})
+        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"}, {}, {})
         self.assertEqual(item, {"name": "env-UV_PYTHON_DOWNLOADS", "pattern": "^[[:space:]]*(export[[:space:]]+)?UV_PYTHON_DOWNLOADS=", "line": "export UV_PYTHON_DOWNLOADS=never", "non_interactive": True})
 
     def test_the_variables_come_out_in_the_order_of_the_mapping(self) -> None:
-        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_env({"B": "1", "A": "2"}, {})], ["env-B", "env-A"])
+        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_env({"B": "1", "A": "2"}, {}, {})], ["env-B", "env-A"])
 
     def test_an_empty_mapping_has_no_lines(self) -> None:
-        self.assertEqual(host_tools.host_tools_shell_env({}, {}), [])
+        self.assertEqual(host_tools.host_tools_shell_env({}, {}, {}), [])
 
     def test_a_value_reaches_the_variable_exactly_as_given_whatever_it_holds(self) -> None:
         values = ["it's", 'say "hi"', "$HOME", "${HOME}", "`id`", "$(id)", "a b  c", "back\\slash", "tab\there", "*", "; echo injected", "", "-n", "'", "''", "\"'\"", "é"]
         for value in values:
             with self.subTest(value=value):
-                [item] = host_tools.host_tools_shell_env({"EXAMPLE": value}, {})
+                [item] = host_tools.host_tools_shell_env({"EXAMPLE": value}, {}, {})
                 for shell in ("sh", "bash"):
                     result = subprocess.run([shell, "-c", item["line"] + '\nprintf %s "$EXAMPLE"'], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home"})
                     self.assertEqual(result.stdout, value)
                     self.assertEqual(result.stderr, "")
 
     def test_a_dollar_sign_and_a_single_quote_are_quoted_and_not_expanded(self) -> None:
-        self.assertEqual(host_tools.host_tools_shell_env({"A": "$HOME"}, {})[0]["line"], "export A='$HOME'")
-        self.assertEqual(host_tools.host_tools_shell_env({"A": "it's"}, {})[0]["line"], "export A='it'\"'\"'s'")
+        self.assertEqual(host_tools.host_tools_shell_env({"A": "$HOME"}, {}, {})[0]["line"], "export A='$HOME'")
+        self.assertEqual(host_tools.host_tools_shell_env({"A": "it's"}, {}, {})[0]["line"], "export A='it'\"'\"'s'")
 
     def test_a_boolean_is_true_or_false_and_a_number_is_its_digits(self) -> None:
-        lines = {item["name"]: item["line"] for item in host_tools.host_tools_shell_env({"A": True, "B": False, "C": 3, "D": 0.5}, {})}
+        lines = {item["name"]: item["line"] for item in host_tools.host_tools_shell_env({"A": True, "B": False, "C": 3, "D": 0.5}, {}, {})}
         self.assertEqual(lines, {"env-A": "export A=true", "env-B": "export B=false", "env-C": "export C=3", "env-D": "export D=0.5"})
 
     def test_the_pattern_finds_an_assignment_with_or_without_export_and_not_a_comment_or_another_variable(self) -> None:
-        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"}, {})
+        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"}, {}, {})
         for text in ("UV_PYTHON_DOWNLOADS=automatic", "export UV_PYTHON_DOWNLOADS=automatic", "  export   UV_PYTHON_DOWNLOADS='x'", "\texport UV_PYTHON_DOWNLOADS="):
             with self.subTest(text=text):
                 self.assertTrue(grep_finds(item["pattern"], text))
@@ -309,7 +310,7 @@ class ShellEnvFilterTest(unittest.TestCase):
         }
         for label, (env, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
-                host_tools.host_tools_shell_env(env, {})
+                host_tools.host_tools_shell_env(env, {}, {})
 
 
 def shell_reads(shell: str, line: str, home: str) -> str:
@@ -321,35 +322,35 @@ def shell_reads(shell: str, line: str, home: str) -> str:
 
 class HomeRelativeFilterTest(unittest.TestCase):
     def test_a_path_becomes_an_export_of_the_home_directory_and_the_path_in_double_quotes(self) -> None:
-        [item] = host_tools.host_tools_shell_env({}, {"TURBO_CACHE_DIR": ".cache/turbo"})
+        [item] = host_tools.host_tools_shell_env({}, {"TURBO_CACHE_DIR": ".cache/turbo"}, {})
         self.assertEqual(item, {"name": "env-TURBO_CACHE_DIR", "pattern": "^[[:space:]]*(export[[:space:]]+)?TURBO_CACHE_DIR=", "line": 'export TURBO_CACHE_DIR="$HOME/.cache/turbo"', "non_interactive": True})
 
     def test_the_variables_of_both_mappings_come_out_the_plain_ones_first_each_in_its_own_order(self) -> None:
-        items = host_tools.host_tools_shell_env({"B": "1", "A": "2"}, {"D": "d", "C": "c"})
+        items = host_tools.host_tools_shell_env({"B": "1", "A": "2"}, {"D": "d", "C": "c"}, {})
         self.assertEqual([item["name"] for item in items], ["env-B", "env-A", "env-D", "env-C"])
 
     def test_a_path_reaches_the_variable_as_given_in_every_shell_whatever_it_holds_and_the_home_is_expanded_once(self) -> None:
         paths = [".cache/turbo", "a b  c", "it's", 'say "hi"', "$HOME", "${HOME}", "`id`", "$(id)", "back\\slash", "\\$", "tab\there", "*", "?", "[a]", "; echo injected", "-n", "~", "~/x", "!x", "a..b", "..x", "x..", ".hidden/.also", "dir/", "./x", "é", "'", "\""]
         homes = ["/home/example", "/home/a b", "/home/it's", '/home/"q"', "/home/$d"]
         for path in paths:
-            [item] = host_tools.host_tools_shell_env({}, {"EXAMPLE": path})
+            [item] = host_tools.host_tools_shell_env({}, {"EXAMPLE": path}, {})
             for home in homes:
                 for shell in ("sh", "bash", "zsh"):
                     with self.subTest(path=path, home=home, shell=shell):
                         self.assertEqual(shell_reads(shell, item["line"], home), f"{home}/{path}")
 
     def test_the_special_characters_are_escaped_and_nothing_else_is(self) -> None:
-        [item] = host_tools.host_tools_shell_env({}, {"A": 'x\\y$z`w"v !*~'})
+        [item] = host_tools.host_tools_shell_env({}, {"A": 'x\\y$z`w"v !*~'}, {})
         self.assertEqual(item["line"], 'export A="$HOME/x\\\\y\\$z\\`w\\"v !*~"')
 
     def test_the_pattern_finds_an_assignment_of_the_variable_already_in_a_startup_file(self) -> None:
-        [item] = host_tools.host_tools_shell_env({}, {"TURBO_CACHE_DIR": ".cache/turbo"})
+        [item] = host_tools.host_tools_shell_env({}, {"TURBO_CACHE_DIR": ".cache/turbo"}, {})
         self.assertTrue(grep_finds(item["pattern"], 'export TURBO_CACHE_DIR="$HOME/.cache/turbo"'))
         self.assertTrue(grep_finds(item["pattern"], "TURBO_CACHE_DIR=/elsewhere"))
         self.assertFalse(grep_finds(item["pattern"], "# export TURBO_CACHE_DIR=/elsewhere"))
 
     def test_an_empty_mapping_has_no_lines(self) -> None:
-        self.assertEqual(host_tools.host_tools_shell_env({}, {}), [])
+        self.assertEqual(host_tools.host_tools_shell_env({}, {}, {}), [])
 
     def test_what_is_not_a_path_below_the_home_directory_is_refused(self) -> None:
         cases = {
@@ -372,15 +373,153 @@ class HomeRelativeFilterTest(unittest.TestCase):
         }
         for label, (home_relative, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
-                host_tools.host_tools_shell_env({}, home_relative)
+                host_tools.host_tools_shell_env({}, home_relative, {})
 
     def test_a_mapping_that_is_not_one_is_refused(self) -> None:
         with self.assertRaisesRegex(Exception, "home-relative shell environment must be a mapping"):
-            host_tools.host_tools_shell_env({}, [".cache"])
+            host_tools.host_tools_shell_env({}, [".cache"], {})
 
     def test_a_variable_in_both_mappings_is_refused_and_named(self) -> None:
-        with self.assertRaisesRegex(Exception, "A is set both"):
-            host_tools.host_tools_shell_env({"A": "x"}, {"A": "y"})
+        with self.assertRaisesRegex(Exception, "A is given more than once"):
+            host_tools.host_tools_shell_env({"A": "x"}, {"A": "y"}, {})
+
+
+# The CPU counts the share tests pretend a host has, and the divisors they divide by. The counts include 1, which a divisor above 1 would round down to 0, the exact multiples and the counts one below them.
+CPU_COUNTS = (1, 2, 3, 4, 5, 10, 11, 12, 63, 64)
+CPU_DIVISORS = (1, 2, 3, 4, 8, 100)
+
+
+def expected_share(cpus: int, divisor: int) -> int:
+    return max(1, cpus // divisor)
+
+
+def host_cpus() -> int:
+    """The count mise's num_cpus() and getconf report on this host: the CPUs the process may run on where the OS says, else all of them."""
+    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+
+
+class CpuShareFilterTest(unittest.TestCase):
+    def stand_in_getconf(self, cpus: int) -> Path:
+        """A directory holding a getconf that reports ``cpus`` for _NPROCESSORS_ONLN and refuses anything else, so the count is the test's and not the host's."""
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        stand_in = directory / "getconf"
+        stand_in.write_text(f'#!/bin/sh\n[ "$1" = _NPROCESSORS_ONLN ] || {{ echo "unexpected getconf $*" >&2; exit 2; }}\necho {cpus}\n')
+        stand_in.chmod(0o755)
+        return directory
+
+    def read(self, shell: str, line: str, path: str, extra: str = "") -> subprocess.CompletedProcess[str]:
+        return subprocess.run([shell, "-c", f'{extra}{line}\nprintf %s "$V"'], capture_output=True, text=True, check=True, env={"PATH": path, "HOME": "/nonexistent-home"})
+
+    def test_a_share_is_one_export_line_that_counts_the_cpus_and_divides_in_a_subshell(self) -> None:
+        [item] = host_tools.host_tools_shell_env({}, {}, {"V": 2})
+        self.assertEqual(item, {"name": "env-V", "pattern": "^[[:space:]]*(export[[:space:]]+)?V=", "line": 'export V="$(n=$(getconf _NPROCESSORS_ONLN); n=$((n / 2)); echo $((n > 0 ? n : 1)))"', "non_interactive": True})
+
+    def test_the_value_is_the_cpu_count_divided_rounded_down_and_never_below_one_in_every_shell(self) -> None:
+        for cpus in CPU_COUNTS:
+            path = f"{self.stand_in_getconf(cpus)}:/usr/bin:/bin"
+            for divisor in CPU_DIVISORS:
+                [item] = host_tools.host_tools_shell_env({}, {}, {"V": divisor})
+                for shell in ("sh", "bash", "zsh"):
+                    with self.subTest(cpus=cpus, divisor=divisor, shell=shell):
+                        result = self.read(shell, str(item["line"]), path)
+                        self.assertEqual(result.stdout, str(expected_share(cpus, divisor)))
+                        self.assertEqual(result.stderr, "")
+
+    def test_the_real_getconf_gives_the_hosts_own_count(self) -> None:
+        for divisor in CPU_DIVISORS:
+            [item] = host_tools.host_tools_shell_env({}, {}, {"V": divisor})
+            for shell in ("sh", "bash", "zsh"):
+                with self.subTest(divisor=divisor, shell=shell):
+                    self.assertEqual(self.read(shell, str(item["line"]), "/usr/bin:/bin").stdout, str(max(1, host_cpus() // divisor)))
+
+    def test_no_variable_of_the_arithmetic_is_left_in_the_users_shell_and_one_they_have_is_kept(self) -> None:
+        [item] = host_tools.host_tools_shell_env({}, {}, {"V": 2})
+        path = f"{self.stand_in_getconf(10)}:/usr/bin:/bin"
+        for shell in ("sh", "bash", "zsh"):
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, "-c", f'n=keep\n{item["line"]}\nprintf "%s|%s" "$V" "$n"; unset n\n{item["line"]}\nprintf "|%s" "${{n-unset}}"'], capture_output=True, text=True, check=True, env={"PATH": path, "HOME": "/nonexistent-home"})
+                self.assertEqual(result.stdout, "5|keep|unset")
+
+    def test_the_value_is_exported_to_the_commands_the_shell_runs(self) -> None:
+        [item] = host_tools.host_tools_shell_env({}, {}, {"VITEST_MAX_WORKERS": 2})
+        path = f"{self.stand_in_getconf(10)}:/usr/bin:/bin"
+        for shell in ("bash", "zsh"):
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, "-c", f'{item["line"]}\nenv'], capture_output=True, text=True, check=True, env={"PATH": path, "HOME": "/nonexistent-home"})
+                self.assertIn("VITEST_MAX_WORKERS=5\n", result.stdout)
+
+    def test_the_pattern_finds_an_assignment_of_the_variable_already_in_a_startup_file(self) -> None:
+        [item] = host_tools.host_tools_shell_env({}, {}, {"VITEST_MAX_WORKERS": 2})
+        self.assertTrue(grep_finds(str(item["pattern"]), "export VITEST_MAX_WORKERS=4"))
+        self.assertFalse(grep_finds(str(item["pattern"]), "# export VITEST_MAX_WORKERS=4"))
+
+    def test_the_variables_come_out_plain_then_home_relative_then_shares(self) -> None:
+        items = host_tools.host_tools_shell_env({"B": "x"}, {"D": "d"}, {"F": 2, "E": 3})
+        self.assertEqual([item["name"] for item in items], ["env-B", "env-D", "env-F", "env-E"])
+
+    def test_the_mise_share_is_a_template_in_the_env_table(self) -> None:
+        self.assertEqual(host_tools.host_tools_mise_toml({}, {}, {"V": 2}), '[env]\nV = "{% set c = num_cpus() | int %}{% set n = ((c - c % 2) / 2) | int %}{% if n < 1 %}1{% else %}{{ n }}{% endif %}"\n')
+
+    def test_the_mise_share_is_the_cpu_count_divided_rounded_down_and_never_below_one_for_counts_the_host_does_not_have(self) -> None:
+        names = {divisor: f"D{divisor}" for divisor in CPU_DIVISORS}
+        rendered = host_tools.host_tools_mise_toml({}, {}, {name: divisor for divisor, name in names.items()})
+        self.assertEqual(rendered.count("num_cpus()"), len(names))
+        for cpus in CPU_COUNTS:
+            root = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, root)
+            # num_cpus() returns a string, so a single-quoted Tera string (the template sits in a double-quoted TOML string) stands in for the host's count.
+            exported, stderr = mise_env(rendered.replace("num_cpus()", f"'{cpus}'"), root / "home")
+            with self.subTest(cpus=cpus):
+                self.assertEqual({divisor: exported[name] for divisor, name in names.items()}, {divisor: str(expected_share(cpus, divisor)) for divisor in names})
+                self.assertEqual(stderr, "")
+
+    def test_the_mise_share_with_the_real_num_cpus_gives_the_hosts_own_count(self) -> None:
+        names = {divisor: f"D{divisor}" for divisor in CPU_DIVISORS}
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        exported, _ = mise_env(host_tools.host_tools_mise_toml({}, {}, {name: divisor for divisor, name in names.items()}), root / "home")
+        self.assertEqual({divisor: exported[name] for divisor, name in names.items()}, {divisor: str(max(1, host_cpus() // divisor)) for divisor in names})
+
+    def test_the_shell_and_mise_agree_for_every_count_and_divisor(self) -> None:
+        for cpus in (1, 3, 10, 64):
+            path = f"{self.stand_in_getconf(cpus)}:/usr/bin:/bin"
+            root = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, root)
+            rendered = host_tools.host_tools_mise_toml({}, {}, {f"D{divisor}": divisor for divisor in CPU_DIVISORS})
+            exported, _ = mise_env(rendered.replace("num_cpus()", f"'{cpus}'"), root / "home")
+            for divisor in CPU_DIVISORS:
+                [item] = host_tools.host_tools_shell_env({}, {}, {"V": divisor})
+                with self.subTest(cpus=cpus, divisor=divisor):
+                    self.assertEqual(self.read("bash", str(item["line"]), path).stdout, exported[f"D{divisor}"])
+
+    def test_a_divisor_that_is_not_an_integer_of_at_least_one_is_refused(self) -> None:
+        cases = {"zero": (0, "at least 1"), "negative": (-2, "at least 1"), "a float": (2.0, "must be an integer"), "half": (0.5, "must be an integer"), "a string": ("2", "must be an integer"), "a percentage": ("50%", "must be an integer"), "true": (True, "must be an integer"), "false": (False, "must be an integer"), "null": (None, "must be an integer"), "a list": ([2], "must be an integer")}
+        for label, (divisor, message) in cases.items():
+            with self.subTest(label, target="shell"), self.assertRaisesRegex(Exception, message):
+                host_tools.host_tools_shell_env({}, {}, {"V": divisor})
+            with self.subTest(label, target="mise"), self.assertRaisesRegex(Exception, message):
+                host_tools.host_tools_mise_toml({}, {}, {"V": divisor})
+
+    def test_a_name_a_shell_would_not_accept_is_refused(self) -> None:
+        with self.assertRaisesRegex(Exception, "not a name a shell accepts"):
+            host_tools.host_tools_shell_env({}, {}, {"A-B": 2})
+        with self.assertRaisesRegex(Exception, "not a name a shell accepts"):
+            host_tools.host_tools_mise_toml({}, {}, {"A-B": 2})
+
+    def test_a_mapping_that_is_not_one_is_refused(self) -> None:
+        with self.assertRaisesRegex(Exception, "CPU-share shell environment must be a mapping"):
+            host_tools.host_tools_shell_env({}, {}, [2])
+        with self.assertRaisesRegex(Exception, "CPU-share env must be a mapping"):
+            host_tools.host_tools_mise_toml({}, {}, [2])
+
+    def test_a_variable_given_in_two_mappings_is_refused_and_named_in_every_pairing(self) -> None:
+        pairings = {"plain and share": (({"A": "x"}, {}, {"A": 2})), "path and share": (({}, {"A": "x"}, {"A": 2})), "plain and path": (({"A": "x"}, {"A": "y"}, {}))}
+        for label, (env, home_relative, cpu_share) in pairings.items():
+            with self.subTest(label, target="shell"), self.assertRaisesRegex(Exception, "A is given more than once"):
+                host_tools.host_tools_shell_env(env, home_relative, cpu_share)
+            with self.subTest(label, target="mise"), self.assertRaisesRegex(Exception, "A is given more than once"):
+                host_tools.host_tools_mise_toml({"env": env}, home_relative, cpu_share)
 
 
 STEM = "# {mark} ANSIBLE MANAGED BLOCK example "
