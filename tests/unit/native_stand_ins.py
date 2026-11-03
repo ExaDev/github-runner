@@ -106,6 +106,7 @@ class NativeRoleHarness(unittest.TestCase):
         # A kernel with memory pressure, as every kernel the role supports has unless it was built or booted without it.
         self.paths["github_runner_cluster_native_psi_file"].write_text("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
         self.make_stand_ins()
+        self.make_network()
         self.set_tailscale(None, None)
         self.facts = dict(FACTS)
         # What the host holds before the role runs, which written() leaves out.
@@ -117,6 +118,16 @@ class NativeRoleHarness(unittest.TestCase):
     def written(self) -> list[Path]:
         """The files on the stand-in host that were not there before the role ran, in path order."""
         return sorted(self.files_on_host() - self.host_files)
+
+    def make_network(self) -> None:
+        """A /sys/class/net and /proc/net/route for the role's link reader (files/node-link.sh) to read instead of the machine's own: a default route through a PCI Ethernet interface, which reads wired."""
+        net = self.stubs / "net"
+        device = net / "devices" / "pci0000:00" / "0000:00:1f.6" / "net" / "eno1"
+        device.mkdir(parents=True)
+        (net / "class" / "net").mkdir(parents=True)
+        (net / "class" / "net" / "eno1").symlink_to(device)
+        (net / "route").write_text("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\neno1\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n")
+        self.network = {"NODE_LINK_SYSTEM": "Linux", "SYS_CLASS_NET": str(net / "class" / "net"), "PROC_NET_ROUTE": str(net / "route")}
 
     def make_stand_ins(self) -> None:
         bin_dir = self.stubs / "bin"
@@ -262,6 +273,7 @@ esac
             "ANSIBLE_LOCALHOST_WARNING": "false",
             "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false",
             "ANSIBLE_RETRY_FILES_ENABLED": "false",
+            **self.network,
         }
         command = [ANSIBLE_PLAYBOOK, "-i", str(self.inventory(only_the_node, second_server, **(host_vars or {}))), str(RUN), "-e", json.dumps({"host_facts": self.facts, **extra}), *args]
         if check:

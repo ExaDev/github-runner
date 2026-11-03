@@ -64,6 +64,10 @@
 - name: Check the role controller's settings
   ansible.builtin.include_tasks: voters.yml
 
+- name: Read the medium of this host's link, for its Node label
+  ansible.builtin.include_tasks: link.yml
+  when: github_runner_cluster_publishes_node_labels | bool
+
 - name: Check the memory-pressure regrading settings
   ansible.builtin.include_tasks: regrade.yml
 

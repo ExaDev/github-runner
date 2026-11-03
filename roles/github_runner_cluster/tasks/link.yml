@@ -1,0 +1,40 @@
+---
+# Reads the medium of this host's link, wired, wifi or unknown, on the host itself, for the github_runner_cluster_link_label Node label (defaults/main.yml's github_runner_cluster_node_labels), with files/node-link.sh, the reader the role controller's probe runs inside the node too. Only while the host publishes node labels (github_runner_cluster_publishes_node_labels): a host that publishes none reads nothing. Read-only, so it runs under --check too.
+#
+# A Mac's node runs in a Colima VM bridged to one interface of the Mac (network.mode bridged with network.address in the profile's colima.yaml), so its link is that interface's, whichever interface the Mac's own default route leaves by. A VM that is not bridged reaches the network through the Mac's routes, as Docker Desktop's and any other runtime's do, so its link is the one the Mac's default route leaves by, and so is a Linux host's. Publishes github_runner_cluster_link and github_runner_cluster_link_interface.
+
+- name: Read the Colima profile's network settings
+  # <COLIMA_HOME>/<profile>/colima.yaml, the file colima start reads; the Colima home tasks/runtime.yml worked out is empty for Colima's own default, ~/.colima.
+  ansible.builtin.slurp:
+    src: >-
+      {{ github_runner_cluster_runtime_colima_home or (ansible_facts['env']['HOME'] ~ '/.colima') }}/{{ github_runner_cluster_effective_runtime.colima_profile }}/colima.yaml
+  register: github_runner_cluster_link_colima_config
+  check_mode: false
+  when:
+    - ansible_facts['system'] == 'Darwin'
+    - github_runner_cluster_effective_runtime.kind == 'colima'
+
+- name: Work out which interface the node's traffic leaves the host by
+  # The interface a bridged Colima VM is bridged to, or empty, which has the reader take the interface the host's default route leaves by. Colima writes every network key into the file when it starts a profile.
+  vars:
+    github_runner_cluster_link_colima_network: "{{ (github_runner_cluster_link_colima_config.content | b64decode | from_yaml).network }}"
+  ansible.builtin.set_fact:
+    github_runner_cluster_link_bridged_interface: >-
+      {{ github_runner_cluster_link_colima_network.interface
+         if (github_runner_cluster_link_colima_config is not skipped
+             and github_runner_cluster_link_colima_network.mode == 'bridged' and github_runner_cluster_link_colima_network.address | bool)
+         else '' }}
+
+- name: Read the medium of that interface
+  ansible.builtin.script:
+    cmd: "node-link.sh {{ github_runner_cluster_link_bridged_interface | quote if github_runner_cluster_link_bridged_interface | length > 0 else '' }}"
+  register: github_runner_cluster_link_reading
+  changed_when: false
+  check_mode: false
+
+- name: Note the medium and the interface it was read from
+  vars:
+    github_runner_cluster_link_read: "{{ github_runner_cluster_link_reading.stdout | from_json }}"
+  ansible.builtin.set_fact:
+    github_runner_cluster_link: "{{ github_runner_cluster_link_read.link }}"
+    github_runner_cluster_link_interface: "{{ github_runner_cluster_link_read.interface }}"

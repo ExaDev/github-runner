@@ -250,6 +250,7 @@ jobs:
           tarball=$(ls exadev-github_runner-*.tar.gz)
           tar -tzf "$tarball" | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
           tar -tzf "$tarball" | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
+          tar -tzf "$tarball" | grep -Fx roles/github_runner_cluster/files/node-link.sh
           for file in Dockerfile fleet-regrade.sh fleet-regrade-core.sh fleet-regrade-k3s.sh fleet-regrade-docker.sh fleet-regrade-systemd.sh; do
             tar -tzf "$tarball" | grep -Fx "roles/github_runner_cluster/files/regrade/${file}"
           done

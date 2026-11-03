@@ -26,6 +26,7 @@ ELIGIBLE = "github_runner_cluster_voter_eligible"
 PINNED = "github_runner_cluster_voter_pinned"
 ELIGIBLE_LABEL = "github-runner.exadev.com/voter-eligible"
 PINNED_LABEL = "github-runner.exadev.com/voter-pinned"
+LINK_LABEL = "github-runner.exadev.com/link"
 MAX_SERVERS = "github_runner_cluster_max_servers"
 
 
@@ -48,6 +49,7 @@ class DefaultsTest(unittest.TestCase):
     def test_the_label_names_are_the_ones_the_controller_reads(self) -> None:
         self.assertEqual(DEFAULTS["github_runner_cluster_voter_eligible_label"], ELIGIBLE_LABEL)
         self.assertEqual(DEFAULTS["github_runner_cluster_voter_pinned_label"], PINNED_LABEL)
+        self.assertEqual(DEFAULTS["github_runner_cluster_link_label"], LINK_LABEL)
 
     def test_the_default_target_is_a_valid_one_for_the_default_maximum(self) -> None:
         self.assertEqual(DEFAULTS[VOTERS] % 2, 1)
@@ -142,24 +144,31 @@ class RoleTest(unittest.TestCase):
 
     def test_an_eligible_host_publishes_eligible_true_and_pinned_false_in_its_env_and_its_compose_files(self) -> None:
         server, agent, files = self.render_env("-e", f"{ELIGIBLE}=true")
-        expected = f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=true {PINNED_LABEL}=false"
+        expected = f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=true {PINNED_LABEL}=false {LINK_LABEL}=wired"
         self.assertIn(expected, server)
         self.assertIn(expected, agent)
         self.assertEqual(files, ["docker-compose.yml", "docker-compose.node-labels.yml"])
 
     def test_a_pinned_host_publishes_pinned_true(self) -> None:
         server, _, _ = self.render_env("-e", f"{PINNED}=true")
-        self.assertIn(f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=false {PINNED_LABEL}=true", server)
+        self.assertIn(f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=false {PINNED_LABEL}=true {LINK_LABEL}=wired", server)
 
     def test_with_the_controller_on_every_host_publishes_both_as_false_so_that_a_setting_turned_off_is_written_over(self) -> None:
         server, agent, files = self.render_env("-e", f"{CONTROLLER}=true")
         for lines in (server, agent):
-            self.assertIn(f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=false {PINNED_LABEL}=false", lines)
+            self.assertIn(f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=false {PINNED_LABEL}=false {LINK_LABEL}=wired", lines)
         self.assertIn("docker-compose.node-labels.yml", files)
 
     def test_the_label_names_can_be_changed(self) -> None:
         server, _, _ = self.render_env("-e", f"{ELIGIBLE}=true", "-e", "github_runner_cluster_voter_eligible_label=example.com/candidate")
-        self.assertIn(f"K3S_NODE_LABELS=example.com/candidate=true {PINNED_LABEL}=false", server)
+        self.assertIn(f"K3S_NODE_LABELS=example.com/candidate=true {PINNED_LABEL}=false {LINK_LABEL}=wired", server)
+
+    def test_the_link_label_carries_the_medium_read_on_the_host(self) -> None:
+        for medium in ("wifi", "unknown"):
+            with self.subTest(medium):
+                server, agent, _ = self.render_env("-e", f"{CONTROLLER}=true", "-e", f"github_runner_cluster_link={medium}", "-e", "github_runner_cluster_link_label=example.com/link")
+                for lines in (server, agent):
+                    self.assertIn(f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=false {PINNED_LABEL}=false example.com/link={medium}", lines)
 
 
 class ComposeOverrideTest(unittest.TestCase):

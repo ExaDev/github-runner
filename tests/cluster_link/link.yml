@@ -1,0 +1,26 @@
+---
+# Runs the cluster role's tasks/link.yml through the role itself, with the facts and variables the earlier tasks of a real run would have set passed as extra variables (link_system, link_home and, for a Mac, github_runner_cluster_effective_runtime and github_runner_cluster_runtime_colima_home), and writes the medium and the interface it read to link_output, for tests/unit/test_node_link.py. The reader runs on this machine, so the test points it at stand-ins through the environment the run inherits (NODE_LINK_SYSTEM, SYS_CLASS_NET, PROC_NET_ROUTE, and networksetup and route on the PATH).
+- name: Read a host's link as the cluster role does
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Give the host the facts the role's earlier tasks gather
+      # Cacheable, so that they are host facts and the role reads them through ansible_facts as it reads gathered ones.
+      ansible.builtin.set_fact:
+        system: "{{ link_system }}"
+        env: {HOME: "{{ link_home }}"}
+        cacheable: true
+
+    - name: Include the role's link reading
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: link
+        # So that the role's defaults, github_runner_cluster_node_labels among them, are visible to the task below.
+        public: true
+
+    - name: Write what it read
+      ansible.builtin.copy:
+        content: "{{ {'link': github_runner_cluster_link, 'interface': github_runner_cluster_link_interface, 'labels': github_runner_cluster_node_labels} | to_json }}"
+        dest: "{{ link_output }}"
+        mode: "0600"
