@@ -1,0 +1,40 @@
+---
+# One wait for the nodes this run manages to report Ready, with the reasons it leaves a node out. Only the inventory hosts' nodes (github_runner_cluster_topology, by each host's effective node name) are waited for: a node the cluster holds that no inventory host owns, as one flashed from an image is, is not this run's to bring up, so it is never waited for and, when it is not Ready, is reported in one line and does not fail the run. A server that memory-pressure regrading has stepped down (see the README) carries the level label and does not run a kubelet at etcd-only, so it is not Ready by design and is left out too. A node of the inventory that has not registered is not waited for either, as before; the run fails when no node of the inventory has registered at all, since kubectl wait refuses an empty list.
+
+- name: Read the nodes' state
+  ansible.builtin.include_tasks: node_readiness.yml
+
+- name: Work out which nodes to wait for and which are outside the inventory
+  ansible.builtin.set_fact:
+    github_runner_cluster_node_ready_status: "{{ dict(github_runner_cluster_node_readiness.stdout_lines | select('search', '=') | map('split', '=') | map('list') | list) }}"
+    github_runner_cluster_inventory_node_names: "{{ github_runner_cluster_topology.hosts.values() | map(attribute='node_name') | list }}"
+
+- name: Settle the nodes to wait for and the nodes to report
+  ansible.builtin.set_fact:
+    github_runner_cluster_wait_nodes: >-
+      {{ github_runner_cluster_node_ready_status | dict2items | map(attribute='key')
+         | select('in', github_runner_cluster_inventory_node_names)
+         | reject('in', github_runner_cluster_nodes_stepped_down.stdout_lines) | list }}
+    github_runner_cluster_unmanaged_not_ready: >-
+      {{ github_runner_cluster_node_ready_status | dict2items
+         | rejectattr('key', 'in', github_runner_cluster_inventory_node_names)
+         | rejectattr('value', 'equalto', 'True') | list }}
+
+- name: Report each node outside the inventory that is not Ready
+  ansible.builtin.debug:
+    msg: "{{ item.key }} is not in the inventory and reports Ready={{ item.value | default('unknown', true) }}; it is not waited for"
+  loop: "{{ github_runner_cluster_unmanaged_not_ready }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Fail when no node of the inventory has registered
+  ansible.builtin.fail:
+    msg: No node of this cluster's inventory is registered, so there is nothing to wait for. The inventory's nodes are {{ github_runner_cluster_inventory_node_names | join(', ') }}.
+  when: github_runner_cluster_wait_nodes | length == 0
+
+- name: Wait for the nodes to report Ready
+  ansible.builtin.command:
+    argv: "{{ ['kubectl', 'wait', '--for=condition=Ready', '--timeout=120s'] + (github_runner_cluster_wait_nodes | map('regex_replace', '^', 'node/') | list) }}"
+  environment:
+    KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
+  changed_when: false
