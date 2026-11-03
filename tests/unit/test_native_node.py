@@ -239,7 +239,9 @@ class ScriptTest(unittest.TestCase):
         file = self.tmp / "fleet-role"
         if recorded is not None:
             file.write_text(recorded)
-        return subprocess.run(["sh", str(ROLE / "files" / "native" / "fleet-role-is.sh"), role, str(file)], env=self.env(), capture_output=True, text=True, timeout=60, check=False)
+        # The server unit also names k3s's server directory, for its tombstone (test_native_server.py tests that part).
+        server = [str(self.tmp / "server")] if role == "server" else []
+        return subprocess.run(["sh", str(ROLE / "files" / "native" / "fleet-role-is.sh"), role, str(file), *server], env=self.env(), capture_output=True, text=True, timeout=60, check=False)
 
     def test_the_role_condition_holds_only_for_the_role_the_file_names(self) -> None:
         self.assertEqual(self.role_is("server", "server").returncode, 0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import stat
+import subprocess
 import unittest
 
 import yaml
@@ -45,7 +46,8 @@ class NativeServerTest(NativeRoleHarness):
         text = self.file("github_runner_cluster_native_unit_dir", "k3s.service").read_text()
         service = [line for line in text.split("[Service]")[1].split("[Install]")[0].splitlines() if line and not line.startswith("#")]
         lib, config = self.paths["github_runner_cluster_native_lib_dir"], self.paths["github_runner_cluster_native_config_dir"]
-        self.assertIn(f"ExecCondition={lib}/fleet-role-is server {self.paths['github_runner_cluster_native_data_dir']}/fleet-role", service)
+        data = self.paths["github_runner_cluster_native_data_dir"]
+        self.assertIn(f"ExecCondition={lib}/fleet-role-is server {data}/fleet-role {data}/server", service)
         self.assertIn(f"ExecStartPre={lib}/write-node-ip {config}/server.yaml.d/00-node-ip.yaml {config}/vpn-auth", service)
         self.assertIn(f"ExecStart={self.paths['github_runner_cluster_native_bin_dir']}/k3s server --config {config}/server.yaml", service)
         # Each unit has a runtime directory of its own: systemd removes a unit's when a start of it is skipped by its condition, which would otherwise take the running unit's files.
@@ -265,6 +267,27 @@ class NativeServerTest(NativeRoleHarness):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.role_file(), "agent")
         self.assertEqual(self.unit_calls(before), [])
+
+    def server_condition(self) -> subprocess.CompletedProcess[str]:
+        """Runs the server unit's ExecCondition= as systemd would, from the unit the role wrote, against the role file and k3s data directory the role keeps."""
+        self.assertEqual(self.run_role(host_vars={"github_runner_cluster_bootstrap": True}, only_the_node=True).returncode, 0)
+        text = self.file("github_runner_cluster_native_unit_dir", "k3s.service").read_text()
+        line = next(line for line in text.splitlines() if line.startswith("ExecCondition="))
+        return subprocess.run(["sh", *line.removeprefix("ExecCondition=").split()], capture_output=True, text=True, timeout=60, check=False)
+
+    def test_the_server_unit_does_not_start_while_its_datastore_holds_a_tombstone(self) -> None:
+        self.assertEqual(self.server_condition().returncode, 0)
+        tombstone = self.paths["github_runner_cluster_native_data_dir"] / "server" / "db" / "etcd" / "tombstone"
+        tombstone.parent.mkdir(parents=True, exist_ok=True)
+        tombstone.touch()
+        refused = self.server_condition()
+        # 1 to 254 is a start systemd skips, which Restart=always does not repeat, rather than a failure.
+        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(self.role_file(), "server")
+        self.assertIn(f"{tombstone} says this server's etcd member was removed from the cluster", refused.stderr)
+        # Moving server/db aside, as finishing a demotion does, takes the tombstone with it.
+        tombstone.parent.parent.rename(tombstone.parent.parent.with_name("db.demoted"))
+        self.assertEqual(self.server_condition().returncode, 0)
 
     def test_a_native_bootstrap_host_is_refused_under_headscale_in_cluster(self) -> None:
         result = self.run_role(host_vars={"github_runner_cluster_bootstrap": True, "github_runner_cluster_mesh": "headscale_in_cluster"})
