@@ -1,3 +1,13 @@
+## [2.30.0](https://github.com/ExaDev/github-runner/compare/v2.29.0...v2.30.0) (2026-11-03)
+
+### Features
+
+* **role:** attribute each unfit verdict to the node at fault for it ([146ff4a](https://github.com/ExaDev/github-runner/commit/146ff4ad0873b22d1eecba536ac470ccd13103e5))
+
+### Tests
+
+* **role:** check the slow voter's peers' verdicts are attributed to it ([43b8296](https://github.com/ExaDev/github-runner/commit/43b829689c6bee567f840ab618588b012cdcdb62))
+
 ## [2.29.0](https://github.com/ExaDev/github-runner/compare/v2.28.3...v2.29.0) (2026-11-03)
 
 ### Features
