@@ -28,8 +28,8 @@ DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_
 SPECS: dict[str, Any] = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())["argument_specs"]["main"]["options"]
 PLIST_NAME = "com.tailscale.tailscaled.plist"
 AUTH_KEY = "tskey-auth-example-0123456789"
-# The standalone app's wrapper for its command line, which an Intel Mac that has the app holds /usr/local/bin/tailscale with: 68 bytes, where Homebrew then cannot link the formula's tailscale.
-APP_WRAPPER = '#!/bin/sh\n/Applications/Tailscale.app/Contents/MacOS/Tailscale "$@"\n'
+# The standalone app's wrapper for its command line (the bundle's path is the test's stand-in app), which an Intel Mac that has the app holds /usr/local/bin/tailscale with, where Homebrew then cannot link the formula's tailscale.
+APP_WRAPPER = '#!/bin/sh\n{bundle}/Contents/MacOS/Tailscale "$@"\n'
 
 _spec = importlib.util.spec_from_file_location("macos_host_filters", PLUGIN)
 assert _spec is not None and _spec.loader is not None
@@ -414,6 +414,10 @@ elif name == "defaults":
     if not os.path.exists(path("app.version")):
         sys.exit("The domain/default pair of (" + args[1] + ", CFBundleShortVersionString) does not exist")
     print(read("app.version"))
+elif name == "Tailscale":
+    # The standalone app's own binary, which its wrapper script calls: it answers for the app and not for the tailscaled daemon, so the role has no use for it.
+    log("app root=" + str(int(root)) + " " + " ".join(args))
+    sys.exit("the app answers for itself")
 elif name == "tailscaled":
     system = os.path.abspath(sys.argv[0]) == os.environ["MACOS_HOST_DAEMON"]
     log(("daemon" if system else "tailscaled") + " root=" + str(int(root)) + " " + " ".join(args))
@@ -508,13 +512,12 @@ class RoleTest(unittest.TestCase):
         """A host whose daemon the formula installed: the formula at `installed` while `latest` is out, the daemon binary at `binary` and the running daemon at `running` (each the formula's release unless given), and its login state Running. `link` makes the daemon path a link to the formula, as on a prefix of /usr/local. `wrapper` puts the standalone app's wrapper script where the formula's tailscale would be linked, so the formula is in its keg and not linked, as Homebrew leaves it there."""
         keg = self.prefix / "opt" / "tailscale" / "bin"
         keg.mkdir(parents=True)
+        if wrapper:
+            self.app_wrapper()
         for tool in ("tailscaled", "tailscale"):
             (keg / tool).write_text(STUB.format(python=sys.executable))
             (keg / tool).chmod(0o755)
-            if tool == "tailscale" and wrapper:
-                self.wrapper.write_text(APP_WRAPPER)
-                self.wrapper.chmod(0o755)
-            elif not wrapper:
+            if not wrapper:
                 (self.bin / tool).symlink_to(keg / tool)
         (self.stub / "formula.installed").write_text(installed)
         (self.stub / "formula.latest").write_text(latest)
@@ -533,6 +536,19 @@ class RoleTest(unittest.TestCase):
     @property
     def wrapper(self) -> Path:
         return self.bin / "tailscale"
+
+    def app_wrapper(self) -> None:
+        """The standalone app's wrapper script where the formula's tailscale would be linked, calling the stand-in app binary."""
+        app_binary = self.app_bundle / "Contents" / "MacOS" / "Tailscale"
+        app_binary.parent.mkdir(parents=True)
+        app_binary.write_text(STUB.format(python=sys.executable))
+        app_binary.chmod(0o755)
+        self.wrapper.write_text(APP_WRAPPER.format(bundle=self.app_bundle))
+        self.wrapper.chmod(0o755)
+
+    def assert_wrapper_untouched(self) -> None:
+        self.assertEqual(self.wrapper.read_text(), APP_WRAPPER.format(bundle=self.app_bundle))
+        self.assertEqual([call for call in self.calls() if call.startswith("app ")], [], "the app answers for itself and not for the daemon")
 
     def app(self, installed: str | None = "1.2.0", latest: str = "1.2.0", bundle: str | None = None) -> None:
         """The standalone app as the Homebrew cask: installed at `installed` (None for not installed) while `latest` is out, and the app bundle at `bundle` (the cask's installed release unless given). They differ when the app has updated itself, which Homebrew's record of the cask does not follow."""
@@ -1015,7 +1031,7 @@ class RoleTest(unittest.TestCase):
         # The daemon is installed from the keg, since nothing is linked into the prefix, and the wrapper is as it was.
         self.assertEqual(self.state("daemon.exe"), str(self.keg_tailscaled()))
         self.assertFalse((self.bin / "tailscaled").exists())
-        self.assertEqual(self.wrapper.read_text(), APP_WRAPPER)
+        self.assert_wrapper_untouched()
         self.assertEqual(self.recap(result)["changed"], 2, result.stdout)
         self.assertIn("is not linked into", result.stdout)
 
@@ -1045,9 +1061,10 @@ class RoleTest(unittest.TestCase):
         self.ok(result)
         self.assertEqual(self.writes(), ["tailscaled root=1 install-system-daemon"])
         self.assertEqual(self.state("daemon.running"), "1.2.0")
+        self.assert_wrapper_untouched()
 
     def test_a_first_install_beside_the_apps_wrapper_installs_the_daemon_from_the_keg(self) -> None:
-        self.wrapper.write_text(APP_WRAPPER)
+        self.app_wrapper()
         (self.stub / "formula.latest").write_text("1.2.0")
         self.set_power()
         result = self.run_role()
@@ -1055,8 +1072,18 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(self.writes(), ["brew root=0 install tailscale", "tailscaled root=1 install-system-daemon"])
         self.assertEqual(self.state("daemon.exe"), str(self.keg_tailscaled()))
         self.assertEqual(self.daemon_binary.read_text(), self.keg_tailscaled().read_text())
-        self.assertEqual(self.wrapper.read_text(), APP_WRAPPER)
+        self.assert_wrapper_untouched()
         self.assertEqual(self.recap(result)["failed"], 0, result.stdout)
+
+    def test_the_join_beside_the_apps_wrapper_goes_through_the_formulas_tailscale_to_the_daemon(self) -> None:
+        self.app_wrapper()
+        (self.stub / "formula.latest").write_text("1.2.0")
+        self.set_power()
+        result = self.run_role(github_runner_macos_host_tailscale_auth_key=AUTH_KEY)
+        self.ok(result)
+        self.assertEqual(self.state("login.state"), "Running")
+        self.assertIn(f"tailscale key={key_hash(AUTH_KEY)} --auth-key=file:/dev/stdin", self.calls())
+        self.assert_wrapper_untouched()
 
     def test_a_formula_that_did_not_install_fails_the_run_with_homebrews_output(self) -> None:
         self.formula_daemon(installed="1.1.0", latest="1.2.0", wrapper=True)
