@@ -1,0 +1,563 @@
+"""Tests for scripts/fleet-role.sh and scripts/fleet-role.jq, one pass of the role controller, run against a scripted stand-in for kubectl with the real bash and jq. The probes' entries are built the way scripts/fleet-role-probe.sh writes them (tests/unit/test_fleet_role_probe.py holds the probe to a real etcd's metrics); here every threshold and decision rule is held to its boundary."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import time
+import unittest
+from dataclasses import dataclass, field
+from typing import Any
+
+from fleet_role_support import (
+    AVAILABLE_FLOOR_PERCENT,
+    AVAILABLE_KB,
+    COMMIT_LIMIT_MS,
+    CONTROLLER_ENV,
+    COOLDOWN_SECONDS,
+    ELECTION_TIMEOUT_MS,
+    ETCD_QUOTA_BYTES,
+    FIT_RTT_MS,
+    MAX_SERVERS,
+    PRESSURE_THRESHOLD,
+    REGRADE_CORE,
+    SCRIPTS,
+    SAMPLE_SECONDS,
+    STALE_AFTER_SAMPLES,
+    TARGET,
+    TOTAL_KB,
+    UNFIT_RTT_MS,
+    WAL_LIMIT_MS,
+    WINDOW_SAMPLES,
+    WINDOW_SECONDS,
+    Cluster,
+    entry,
+    etcd_gain,
+    histogram,
+    node,
+    sample,
+    times,
+)
+
+Series = float | list[float]
+
+
+@dataclass
+class Host:
+    """What one host's probe has reported over the window, and the Node it is."""
+
+    name: str
+    voter: bool = False
+    eligible: bool = False
+    pinned: bool = False
+    ready: bool = True
+    ready_for: float = 24 * 3600
+    level: str | None = None
+    link: str = "wired"
+    # Milliseconds to every voter, or per peer; a list is one reading per sample.
+    tcp: Series | dict[str, Series] = 5.0
+    # What etcd's own round trip histogram holds per peer, in milliseconds, for a voter; none leaves the histograms out.
+    etcd_rtt: float | dict[str, float] | None = None
+    # Per-sample gains of a voter's histograms, in milliseconds, or the buckets themselves when given as dicts.
+    wal: Series | list[dict[str, int]] = 4.0
+    commit: Series | list[dict[str, int]] = 8.0
+    fsync_ms: float | None = 3.0
+    psi: float = 0.0
+    avail_kb: int = AVAILABLE_KB
+    total_kb: int = TOTAL_KB
+    samples: int = WINDOW_SAMPLES
+    restarted: bool = False
+    stale_by: float = 0
+    etcd: dict[str, Any] = field(default_factory=dict)
+
+
+def series_value(value: Series | dict[str, Series], peer: str, index: int) -> float:
+    if isinstance(value, dict):
+        value = value[peer]
+    return value[index] if isinstance(value, list) else value
+
+
+def gain(value: Series | list[dict[str, int]], index: int) -> dict[str, int]:
+    item = value[index] if isinstance(value, list) else value
+    return item if isinstance(item, dict) else histogram(item, 1)
+
+
+def etcd_id(name: str) -> str:
+    return f"{name}-etcd-id"
+
+
+def populate(cluster: Cluster, hosts: list[Host]) -> None:
+    """Gives the cluster these Nodes and, for each host, a probe entry of its last `samples` samples ending now (less stale_by)."""
+    voters = [h.name for h in hosts if h.voter]
+    cluster.nodes = [
+        node(h.name, voter=h.voter, eligible=h.eligible, pinned=h.pinned, ready=h.ready, ready_for=h.ready_for, level=h.level) for h in hosts
+    ]
+    entries = {}
+    for h in hosts:
+        peers = [v for v in voters if v != h.name]
+        stamps = times(h.samples, time.time() - h.stale_by)
+        built = []
+        for i, at in enumerate(stamps):
+            etcd = None
+            if h.voter:
+                rtt = {}
+                if h.etcd_rtt is not None:
+                    rtt = {etcd_id(p): histogram(h.etcd_rtt[p] if isinstance(h.etcd_rtt, dict) else h.etcd_rtt, 1) for p in peers}
+                etcd = {**etcd_gain(rtt=rtt, known_members=len(voters), active_peers=len(voters) - 1), "wal": gain(h.wal, i), "commit": gain(h.commit, i), **h.etcd}
+            built.append(
+                sample(
+                    at,
+                    tcp={p: series_value(h.tcp, p, i) for p in (voters if not h.voter else peers)},
+                    etcd=etcd,
+                    restarted=h.restarted and i == len(stamps) // 2,
+                    psi=h.psi,
+                    avail_kb=h.avail_kb,
+                    total_kb=h.total_kb,
+                    link=h.link,
+                    fsync_ms=None if h.voter else h.fsync_ms if i == 0 else None,
+                )
+            )
+        entries[h.name] = entry(built, etcd_id(h.name) if h.voter else None)
+    cluster.set_probes(entries)
+
+
+def healthy(**changes: Any) -> list[Host]:
+    """Three fit voters, a, b and c, and a fit eligible standby, d; every voter and the standby eligible."""
+    hosts = [Host("a", voter=True, eligible=True), Host("b", voter=True, eligible=True), Host("c", voter=True, eligible=True), Host("d", eligible=True)]
+    for host in hosts:
+        for key, value in changes.get(host.name, {}).items():
+            setattr(host, key, value)
+    return hosts
+
+
+class ControllerCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cluster = Cluster()
+        self.addCleanup(self.cluster.cleanup)
+
+    def pass_(self, hosts: list[Host], **env: str) -> dict[str, Any]:
+        """Runs one pass over these hosts and returns the status it published."""
+        populate(self.cluster, hosts)
+        completed = self.cluster.run("fleet-role.sh", **{**CONTROLLER_ENV, **env})
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.log = completed.stdout
+        return self.cluster.status()
+
+    def verdicts(self, status: dict[str, Any]) -> dict[str, str]:
+        return {name: host["verdict"] for name, host in status["hosts"].items()}
+
+
+class ThresholdTest(ControllerCase):
+    def test_the_limits_derive_from_the_election_timeout_and_the_window_from_the_tail(self) -> None:
+        status = self.pass_(healthy())
+        config = status["config"]
+        self.assertEqual(config["unfit_rtt_ms"], ELECTION_TIMEOUT_MS / 10)
+        self.assertEqual(config["fit_rtt_ms"], ELECTION_TIMEOUT_MS / 20)
+        self.assertEqual(config["window_samples"], 100)
+        self.assertEqual(config["window_seconds"], WINDOW_SECONDS)
+        self.assertEqual(config["cooldown_seconds"], COOLDOWN_SECONDS)
+        self.assertEqual((config["wal_fsync_limit_ms"], config["backend_commit_limit_ms"]), (WAL_LIMIT_MS, COMMIT_LIMIT_MS))
+
+    def test_healthy_voters_and_a_healthy_standby_are_all_fit_and_nothing_would_change(self) -> None:
+        status = self.pass_(healthy())
+        self.assertEqual(self.verdicts(status), {"a": "fit", "b": "fit", "c": "fit", "d": "fit"})
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertEqual(status["decision"]["because"], ["no unpinned eligible voter is unfit"])
+        self.assertEqual(status["blocks"], [])
+        self.assertTrue(status["dry_run"])
+
+    def test_a_voter_is_unfit_only_above_a_tenth_of_the_election_timeout(self) -> None:
+        for rtt, verdict in ((UNFIT_RTT_MS, "fit"), (UNFIT_RTT_MS + 0.001, "unfit")):
+            with self.subTest(rtt=rtt):
+                status = self.pass_(healthy(a={"tcp": rtt}))
+                self.assertEqual(status["hosts"]["a"]["verdict"], verdict)
+
+    def test_a_candidate_is_fit_only_at_or_below_a_twentieth_of_the_election_timeout(self) -> None:
+        for rtt, verdict in ((FIT_RTT_MS, "fit"), (FIT_RTT_MS + 0.001, "unfit")):
+            with self.subTest(rtt=rtt):
+                status = self.pass_(healthy(d={"tcp": rtt}))
+                self.assertEqual(status["hosts"]["d"]["verdict"], verdict)
+
+    def test_between_the_two_limits_a_voter_is_kept_and_a_candidate_is_not_promoted(self) -> None:
+        between = (UNFIT_RTT_MS + FIT_RTT_MS) / 2
+        status = self.pass_(healthy(a={"tcp": between}, d={"tcp": between}))
+        self.assertEqual(self.verdicts(status), {"a": "fit", "b": "fit", "c": "fit", "d": "unfit"})
+        self.assertEqual(status["decision"]["action"], "none")
+
+    def test_the_round_trip_figure_is_the_tail_of_the_window_so_one_outlier_never_decides(self) -> None:
+        one_outlier = [5.0] * (WINDOW_SAMPLES - 1) + [ELECTION_TIMEOUT_MS]
+        two_outliers = [5.0] * (WINDOW_SAMPLES - 2) + [ELECTION_TIMEOUT_MS] * 2
+        self.assertEqual(self.pass_(healthy(a={"tcp": one_outlier}))["hosts"]["a"]["verdict"], "fit")
+        status = self.pass_(healthy(a={"tcp": two_outliers}))
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unfit")
+        self.assertEqual(status["hosts"]["a"]["figures"]["rtt_p99_ms"], ELECTION_TIMEOUT_MS)
+
+    def test_a_window_one_sample_short_is_unknown_not_fit(self) -> None:
+        status = self.pass_(healthy(a={"samples": WINDOW_SAMPLES - 1}))
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unknown")
+        self.assertIn(f"{WINDOW_SAMPLES - 1} of {WINDOW_SAMPLES} samples since the last membership change", status["hosts"]["a"]["reasons"])
+
+    def test_a_probe_report_older_than_three_samples_is_no_report(self) -> None:
+        for stale_by, verdict in (((STALE_AFTER_SAMPLES * SAMPLE_SECONDS) - 5, "fit"), ((STALE_AFTER_SAMPLES * SAMPLE_SECONDS) + 5, "unknown")):
+            with self.subTest(stale_by=stale_by):
+                status = self.pass_(healthy(a={"stale_by": stale_by}))
+                self.assertEqual(status["hosts"]["a"]["verdict"], verdict)
+
+    def test_a_node_with_no_probe_entry_is_unknown(self) -> None:
+        hosts = healthy()
+        populate(self.cluster, hosts)
+        entries = self.cluster.probes()
+        del entries["d"]
+        self.cluster.set_probes(entries)
+        completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.cluster.status()["hosts"]["d"]["reasons"][0], "no probe report")
+
+    def test_etcds_own_round_trip_counts_beside_the_tcp_connect(self) -> None:
+        status = self.pass_(healthy(a={"tcp": 5.0, "etcd_rtt": {"b": 5.0, "c": 150.0}}))
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unfit")
+        self.assertEqual(status["hosts"]["a"]["figures"]["rtt_peer"], "c")
+        self.assertTrue(status["hosts"]["a"]["figures"]["rtt_p99_ms"] > UNFIT_RTT_MS)
+
+    def test_the_worst_peer_decides(self) -> None:
+        status = self.pass_(healthy(b={"tcp": {"a": 5.0, "c": UNFIT_RTT_MS + 20}}))
+        self.assertEqual(status["hosts"]["b"]["verdict"], "unfit")
+        self.assertEqual(status["hosts"]["b"]["figures"]["rtt_peer"], "c")
+
+
+class DiskTest(ControllerCase):
+    def gains(self, in_limit: int, past: int, limit_seconds: float, over_seconds: float) -> list[dict[str, int]]:
+        """One gain per sample: in_limit of them in a bucket whose upper bound is the limit, past in a bucket above it."""
+        return [{str(limit_seconds): 1} for _ in range(in_limit)] + [{str(over_seconds): 1} for _ in range(past)]
+
+    def test_a_voters_wal_fsync_tail_must_be_under_ten_milliseconds(self) -> None:
+        for in_limit, past, bound, expected in (
+            (99, 1, 0.01, "unfit"),  # the tail interpolates to the bucket's bound, ten milliseconds, which is not under ten
+            (99, 1, 0.009, "fit"),
+        ):
+            with self.subTest(bound=bound):
+                status = self.pass_(healthy(a={"wal": self.gains(in_limit, past, bound, 0.02)}))
+                self.assertEqual(status["hosts"]["a"]["verdict"], expected)
+
+    def test_a_voters_backend_commit_tail_must_be_under_twenty_five_milliseconds(self) -> None:
+        for bound, expected in ((0.025, "unfit"), (0.024, "fit")):
+            with self.subTest(bound=bound):
+                status = self.pass_(healthy(a={"commit": self.gains(99, 1, bound, 0.05)}))
+                self.assertEqual(status["hosts"]["a"]["verdict"], expected)
+
+    def test_a_standbys_fdatasync_tail_must_be_under_the_wal_limit(self) -> None:
+        for fsync, expected in ((WAL_LIMIT_MS - 0.01, "fit"), (WAL_LIMIT_MS, "unfit")):
+            with self.subTest(fsync=fsync):
+                status = self.pass_(healthy(d={"fsync_ms": fsync}))
+                self.assertEqual(status["hosts"]["d"]["verdict"], expected)
+
+    def test_a_standby_without_an_fdatasync_reading_is_unknown(self) -> None:
+        status = self.pass_(healthy(d={"fsync_ms": None}))
+        self.assertEqual(status["hosts"]["d"]["verdict"], "unknown")
+        self.assertIn("no fdatasync reading yet", status["hosts"]["d"]["reasons"])
+
+    def test_a_voter_with_no_etcd_disk_observations_is_unknown(self) -> None:
+        status = self.pass_(healthy(a={"wal": [{}] * WINDOW_SAMPLES}))
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unknown")
+
+
+class MemoryAndStabilityTest(ControllerCase):
+    def test_memory_over_the_regrade_limit_needs_both_pressure_and_low_available(self) -> None:
+        total = 1_000_000
+        floor = total * AVAILABLE_FLOOR_PERCENT // 100
+        self.assertEqual(floor * 100, total * AVAILABLE_FLOOR_PERCENT, "a total whose floor is a whole number of kilobytes")
+        cases = (
+            ("pressure at the threshold and available just under the floor", PRESSURE_THRESHOLD, floor - 1, "unfit"),
+            ("pressure under the threshold", PRESSURE_THRESHOLD - 0.01, floor - 1, "fit"),
+            ("available at the floor", PRESSURE_THRESHOLD, floor, "fit"),
+        )
+        for label, psi, avail, expected in cases:
+            with self.subTest(label):
+                # A quota of one byte on every voter, so that only the regrade limit can fail the host.
+                quota = {"etcd": {"quota_bytes": 1}}
+                status = self.pass_(healthy(a={"psi": psi, "avail_kb": avail, "total_kb": total, **quota}, b=quota, c=quota))
+                self.assertEqual(status["hosts"]["a"]["verdict"], expected)
+
+    def test_available_memory_must_be_at_least_etcds_storage_quota(self) -> None:
+        quota_kb = ETCD_QUOTA_BYTES // 1024
+        for avail, expected in ((quota_kb, "fit"), (quota_kb - 1, "unfit")):
+            with self.subTest(avail=avail):
+                status = self.pass_(healthy(a={"avail_kb": avail, "total_kb": avail * 1000}))
+                self.assertEqual(status["hosts"]["a"]["verdict"], expected)
+
+    def test_the_quota_is_the_largest_a_voter_reports(self) -> None:
+        quota = 4 * 1024**3
+        status = self.pass_(healthy(b={"etcd": {"quota_bytes": quota}}, a={"avail_kb": 3 * 1024**2, "total_kb": 3 * 1024**5}))
+        self.assertEqual(status["config"]["quota_bytes"], quota)
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unfit")
+
+    def test_one_sample_over_the_limit_anywhere_in_the_window_is_enough(self) -> None:
+        populate(self.cluster, healthy())
+        entries = self.cluster.probes()
+        # Under the floor share of the total but above etcd's quota, so only the regrade limit can fail it.
+        entries["a"]["samples"][10].update(psi=PRESSURE_THRESHOLD + 5, avail_kb=TOTAL_KB * AVAILABLE_FLOOR_PERCENT // 100 - 1)
+        self.cluster.set_probes(entries)
+        completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        host = self.cluster.status()["hosts"]["a"]
+        self.assertEqual(host["verdict"], "unfit")
+        self.assertIn("memory was over the regrade limit in 1 of 100 samples", host["reasons"])
+
+    def test_a_node_that_was_not_ready_within_the_window_is_unfit_and_one_that_was_not_is_fit(self) -> None:
+        for ready_for, expected in ((WINDOW_SECONDS - 60, "unfit"), (WINDOW_SECONDS + 60, "fit")):
+            with self.subTest(ready_for=ready_for):
+                status = self.pass_(healthy(d={"ready_for": ready_for}))
+                self.assertEqual(status["hosts"]["d"]["verdict"], expected)
+
+    def test_a_node_that_is_not_ready_is_unfit(self) -> None:
+        status = self.pass_(healthy(d={"ready": False}))
+        self.assertEqual(status["hosts"]["d"]["verdict"], "unfit")
+        self.assertIn("the node is not Ready", status["hosts"]["d"]["reasons"])
+
+    def test_a_k3s_restart_in_the_window_is_unfit(self) -> None:
+        status = self.pass_(healthy(a={"restarted": True}, d={"restarted": True}))
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unfit")
+        self.assertEqual(status["hosts"]["d"]["verdict"], "unfit")
+        self.assertEqual(status["hosts"]["a"]["figures"]["restarts"], 1)
+
+    def test_leader_changes_are_reported(self) -> None:
+        status = self.pass_(healthy(a={"etcd": {"leader_changes": 2}}))
+        self.assertEqual(status["hosts"]["a"]["figures"]["leader_changes"], 2 * WINDOW_SAMPLES)
+
+
+class RankingTest(ControllerCase):
+    def test_an_unfit_voter_is_swapped_for_the_fit_standby(self) -> None:
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}))
+        self.assertEqual(status["decision"]["action"], "swap")
+        self.assertEqual(status["decision"]["swap"], {"out": "a", "in": "d"})
+        self.assertIn("DRY RUN: would swap out a for d", self.log)
+
+    def test_wired_ranks_before_wifi_before_unknown_whatever_the_round_trip(self) -> None:
+        hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50, "link": "wifi"})
+        hosts = [h for h in hosts if h.name != "d"]
+        hosts += [Host("e", eligible=True, link="wifi", tcp=1.0), Host("f", eligible=True, link="wired", tcp=FIT_RTT_MS), Host("g", eligible=True, link="unknown", tcp=1.0)]
+        status = self.pass_(hosts)
+        self.assertEqual(status["ranking"], ["b", "c", "f", "e", "g"])
+        self.assertEqual(status["decision"]["swap"], {"out": "a", "in": "f"})
+
+    def test_within_a_link_type_the_lower_round_trip_ranks_first_then_the_lower_fsync_then_the_name(self) -> None:
+        cases = (
+            ("round trip", {"e": {"tcp": 10.0}, "f": {"tcp": 20.0}}, "e"),
+            ("fsync", {"e": {"fsync_ms": 4.0}, "f": {"fsync_ms": 2.0}}, "f"),
+            ("name", {"e": {}, "f": {}}, "e"),
+        )
+        for label, overrides, expected in cases:
+            with self.subTest(label):
+                base = {"tcp": 5.0, "fsync_ms": 3.0}
+                hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50, "link": "wifi"}, d={"tcp": FIT_RTT_MS + 20})
+                hosts += [Host("e", eligible=True, **{**base, **overrides["e"]}), Host("f", eligible=True, **{**base, **overrides["f"]})]
+                self.assertEqual(self.pass_(hosts)["decision"]["swap"], {"out": "a", "in": expected})
+
+    def test_a_candidate_must_rank_above_the_voter_it_replaces(self) -> None:
+        # The unfit voter is wired; the only fit standby is on a link the cluster cannot see, which ranks below wired.
+        hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50}, d={"link": "unknown"})
+        status = self.pass_(hosts)
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertEqual(status["decision"]["because"][0], "voter a is unfit and no eligible standby is fit and ranks above it")
+
+    def test_the_worst_ranked_unfit_voter_goes_out_first(self) -> None:
+        hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50}, b={"tcp": UNFIT_RTT_MS + 400})
+        status = self.pass_(hosts)
+        self.assertEqual(status["decision"]["swap"], {"out": "b", "in": "d"})
+
+    def test_a_pinned_voter_is_never_swapped_out(self) -> None:
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50, "pinned": True}))
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertIn("unfit but not replaceable: a", status["decision"]["because"][-1])
+
+    def test_a_voter_not_marked_eligible_is_never_swapped_out(self) -> None:
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50, "eligible": False}))
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertIn("unfit but not replaceable: a", status["decision"]["because"][-1])
+
+    def test_an_unfit_standby_is_not_a_candidate(self) -> None:
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}, d={"fsync_ms": 50.0}))
+        self.assertEqual(status["decision"]["action"], "none")
+
+
+class GateTest(ControllerCase):
+    """The swap is wanted in each of these (voter a is unfit and d is fit); something about the cluster as a whole says not now."""
+
+    def refused(self, **changes: dict[str, Any]) -> dict[str, Any]:
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50, **changes.get("a", {})}, **{k: v for k, v in changes.items() if k != "a"}))
+        self.assertEqual(status["decision"]["action"], "none", status["decision"])
+        self.assertEqual(status["decision"]["wanted"], {"out": "a", "in": "d"})
+        return status
+
+    def test_no_swap_while_a_voter_is_below_full(self) -> None:
+        status = self.refused(b={"level": "etcd-only"})
+        self.assertEqual(status["decision"]["because"], ["voter b is at regrade level etcd-only, below full"])
+
+    def test_no_swap_while_a_voter_is_not_ready(self) -> None:
+        status = self.refused(c={"ready": False})
+        self.assertIn("voter c is not Ready", status["decision"]["because"])
+
+    def test_no_swap_while_etcd_reports_no_leader(self) -> None:
+        status = self.refused(b={"etcd": {"has_leader": False}})
+        self.assertIn("voter b reports no leader", status["decision"]["because"])
+
+    def test_no_swap_while_a_voter_is_a_learner(self) -> None:
+        status = self.refused(b={"etcd": {"is_learner": True}})
+        self.assertIn("voter b is a learner", status["decision"]["because"])
+
+    def test_no_swap_while_a_voter_is_not_connected_to_every_other(self) -> None:
+        status = self.refused(b={"etcd": {"active_peers": TARGET - 2}})
+        self.assertIn(f"voter b is connected to {TARGET - 2} of its {TARGET - 1} peers", status["decision"]["because"])
+
+    def test_no_swap_while_a_voter_knows_a_member_that_is_not_a_voter(self) -> None:
+        # A learner joining, or a member added and not yet started, is a member etcd knows and no Node is labelled for.
+        status = self.refused(b={"etcd": {"known_members": TARGET + 1}})
+        self.assertIn(f"voter b knows {TARGET + 1} members, not the {TARGET} voters: a learner or a member that has not started", status["decision"]["because"])
+
+    def test_no_swap_while_the_voter_count_is_not_the_target(self) -> None:
+        hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50})
+        hosts.append(Host("e", voter=True, eligible=True))
+        status = self.pass_(hosts)
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertIn(f"there are 4 voters, not the target {TARGET}", status["decision"]["because"])
+
+    def test_no_swap_during_the_cooldown_after_a_membership_change_and_a_swap_after_it(self) -> None:
+        for since_change, expected in ((COOLDOWN_SECONDS - 60, "none"), (COOLDOWN_SECONDS + 60, "swap")):
+            with self.subTest(since_change=since_change):
+                hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50})
+                changed_at = int(time.time()) - since_change
+                self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": changed_at, "cooldown_until": changed_at + COOLDOWN_SECONDS}})
+                # Only samples since the change count, and a window's worth have arrived since in either case (the cooldown outlasts the window).
+                for host in hosts:
+                    host.samples = WINDOW_SAMPLES
+                status = self.pass_(hosts)
+                self.assertEqual(status["decision"]["action"], expected, status["decision"])
+                if expected == "none":
+                    self.assertTrue(any("the cooldown lasts until" in reason for reason in status["decision"]["because"]))
+
+    def test_the_cooldown_outlasts_the_window_by_the_learner_stall_time(self) -> None:
+        self.assertEqual(COOLDOWN_SECONDS - WINDOW_SECONDS, 300)
+        self.assertGreater(COOLDOWN_SECONDS, WINDOW_SECONDS)
+
+    def test_readings_from_before_a_membership_change_are_not_counted(self) -> None:
+        changed_at = int(time.time()) - (WINDOW_SECONDS // 2)
+        self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": changed_at, "cooldown_until": changed_at + COOLDOWN_SECONDS}})
+        status = self.pass_(healthy())
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unknown")
+        self.assertEqual(status["hosts"]["a"]["samples"], WINDOW_SAMPLES // 2 + 1)
+
+    def test_fewer_eligible_hosts_than_the_target_is_reported_and_refuses_a_swap(self) -> None:
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}, b={"eligible": False}, c={"eligible": False}))
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertIn(f"2 hosts are eligible, fewer than the target {TARGET}", status["decision"]["because"])
+
+
+class MembershipTest(ControllerCase):
+    def test_the_first_pass_records_the_voters_and_no_change(self) -> None:
+        status = self.pass_(healthy())
+        self.assertEqual(status["membership"], {"voters": ["a", "b", "c"], "changed_at": None, "cooldown_until": None})
+
+    def test_a_pass_that_sees_the_same_voters_keeps_the_time_of_the_last_change(self) -> None:
+        self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": 1700000000, "cooldown_until": 1700000000 + COOLDOWN_SECONDS}})
+        status = self.pass_(healthy())
+        self.assertEqual(status["membership"]["changed_at"], 1700000000)
+
+    def test_a_pass_that_sees_other_voters_records_the_change_now_and_the_cooldown(self) -> None:
+        self.cluster.set_status({"membership": {"voters": ["a", "b", "x"], "changed_at": None, "cooldown_until": None}})
+        before = int(time.time())
+        status = self.pass_(healthy())
+        self.assertGreaterEqual(status["membership"]["changed_at"], before)
+        self.assertEqual(status["membership"]["cooldown_until"], status["membership"]["changed_at"] + COOLDOWN_SECONDS)
+
+
+class ReportingTest(ControllerCase):
+    def test_with_no_host_eligible_it_only_reports_the_voters(self) -> None:
+        hosts = [Host("a", voter=True), Host("b", voter=True), Host("c", voter=True, tcp=UNFIT_RTT_MS + 50), Host("d")]
+        status = self.pass_(hosts)
+        self.assertEqual(sorted(status["hosts"]), ["a", "b", "c"])
+        self.assertEqual(status["hosts"]["c"]["verdict"], "unfit")
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertIn("no host is marked eligible", status["decision"]["because"])
+
+    def test_each_host_says_why_with_the_numbers(self) -> None:
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50, "psi": PRESSURE_THRESHOLD, "avail_kb": TOTAL_KB * AVAILABLE_FLOOR_PERCENT // 100 - 1}))
+        reasons = "; ".join(status["hosts"]["a"]["reasons"])
+        self.assertIn("round trip p99 to", reasons)
+        self.assertIn(f"over {UNFIT_RTT_MS:g} ms", reasons)
+        self.assertIn(f"{ELECTION_TIMEOUT_MS} ms election timeout", reasons)
+        self.assertIn("memory was over the regrade limit in 100 of 100 samples", reasons)
+        self.assertIn("a (voter): unfit", self.log)
+
+    def test_the_link_type_is_reported_for_every_host(self) -> None:
+        status = self.pass_(healthy(a={"link": "wifi"}, d={"link": "unknown"}))
+        self.assertEqual({name: host["link"] for name, host in status["hosts"].items()}, {"a": "wifi", "b": "wired", "c": "wired", "d": "unknown"})
+
+    def test_a_pass_writes_only_its_own_status_and_changes_nothing_in_the_cluster(self) -> None:
+        self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}))
+        calls = [json.loads(line) for line in self.cluster.calls.read_text().splitlines()]
+        writes = [call for call in calls if call[0] not in ("get",)]
+        self.assertEqual(len(writes), 1, writes)
+        self.assertEqual(writes[0][:3], ["patch", "configmap", "fleet-role-status"])
+
+
+class SettingsTest(ControllerCase):
+    def refuses(self, message: str, **env: str) -> None:
+        populate(self.cluster, healthy())
+        completed = self.cluster.run("fleet-role.sh", **{**CONTROLLER_ENV, **env})
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(message, completed.stderr)
+        self.assertEqual([c for c in self.cluster.calls.read_text().splitlines() if "patch" in c], [], "nothing is published from refused settings")
+
+    def test_an_even_target_is_refused(self) -> None:
+        self.refuses("must be odd", FLEET_ROLE_VOTERS="4")
+
+    def test_a_target_under_three_is_refused(self) -> None:
+        self.refuses("must be at least 3", FLEET_ROLE_VOTERS="1")
+
+    def test_a_target_without_a_place_of_headroom_below_the_maximum_is_refused(self) -> None:
+        self.refuses("one place of headroom", FLEET_ROLE_VOTERS=str(MAX_SERVERS))
+        self.refuses("one place of headroom", FLEET_ROLE_VOTERS="3", FLEET_ROLE_MAX_SERVERS="3")
+
+    def test_the_largest_target_that_leaves_headroom_is_accepted(self) -> None:
+        status = self.pass_(healthy(), FLEET_ROLE_VOTERS="5", FLEET_ROLE_MAX_SERVERS="6")
+        self.assertEqual(status["config"]["target"], 5)
+
+    def test_a_pass_that_is_not_a_dry_run_is_refused(self) -> None:
+        self.refuses("FLEET_ROLE_DRY_RUN must be true", FLEET_ROLE_DRY_RUN="false")
+
+    def test_the_election_timeout_defaults_to_k3ss_own(self) -> None:
+        populate(self.cluster, healthy())
+        env = {k: v for k, v in CONTROLLER_ENV.items() if k != "FLEET_ROLE_ELECTION_TIMEOUT_MS"}
+        completed = self.cluster.run("fleet-role.sh", **env)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.cluster.status()["config"]["election_timeout_ms"], 1000)
+
+
+class RegradeCoreAgreementTest(unittest.TestCase):
+    """The memory limit the controller applies is the regrade core's own is_over, checked over a grid of readings on both sides of each limit."""
+
+    def test_the_controllers_memory_limit_agrees_with_the_regrade_cores_is_over(self) -> None:
+        total = 1000
+        settings = {"pressure_threshold": PRESSURE_THRESHOLD, "available_floor_percent": AVAILABLE_FLOOR_PERCENT}
+        for psi in (0, PRESSURE_THRESHOLD - 0.5, PRESSURE_THRESHOLD, PRESSURE_THRESHOLD + 0.5, 100):
+            for available in (0, 149, 150, 151, 1000):
+                core = subprocess.run(
+                    ["bash", "-c", f'. "{REGRADE_CORE}"; PRESSURE_THRESHOLD={PRESSURE_THRESHOLD} AVAILABLE_FLOOR_PERCENT={AVAILABLE_FLOOR_PERCENT}; is_over {psi} {available} {total}'],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env={**os.environ, "FLEET_REGRADE_ENV": "/nonexistent"},
+                ).returncode == 0
+                ours = subprocess.run(
+                    ["jq", "-n", "-e", "-L", str(SCRIPTS), "--argjson", "c", json.dumps(settings), "--argjson", "reading", json.dumps({"psi": psi, "avail_kb": available, "total_kb": total}),
+                     'include "fleet-role-stats"; $reading | over_regrade_limit($c)'],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).returncode == 0
+                self.assertEqual(ours, core, (psi, available))
+
+
+if __name__ == "__main__":
+    unittest.main()
