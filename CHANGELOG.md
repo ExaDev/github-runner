@@ -1,3 +1,13 @@
+## [2.22.0](https://github.com/ExaDev/github-runner/compare/v2.21.1...v2.22.0) (2026-11-03)
+
+### Features
+
+* **linux-host:** install the AppArmor profile that allows signals under a stacked label ([598cef5](https://github.com/ExaDev/github-runner/commit/598cef597c2934c72fdaa5ad4f916651f9eefa0e))
+
+### Tests
+
+* **linux-host:** cover the AppArmor profile for containerd against a real-shaped host tree ([d1c3e99](https://github.com/ExaDev/github-runner/commit/d1c3e994c4caf4f5d2b0df002a6c07a77ffcb5dd))
+
 ## [2.21.1](https://github.com/ExaDev/github-runner/compare/v2.21.0...v2.21.1) (2026-11-03)
 
 ### Continuous Integration
