@@ -1,3 +1,9 @@
+## [2.26.1](https://github.com/ExaDev/github-runner/compare/v2.26.0...v2.26.1) (2026-11-03)
+
+### Bug Fixes
+
+* **host-tools:** put Homebrew and mise on PATH for a non-interactive bash ([7b7aa8e](https://github.com/ExaDev/github-runner/commit/7b7aa8ec370fa133124f2f69291b7d8ae897eef2))
+
 ## [2.26.0](https://github.com/ExaDev/github-runner/compare/v2.25.0...v2.26.0) (2026-11-03)
 
 ### Features
