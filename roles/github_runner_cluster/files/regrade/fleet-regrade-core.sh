@@ -249,6 +249,25 @@ release_lease() {
   jq '.spec.holderIdentity = ""' <<< "$current" | kubectl_ replace -f - > /dev/null
 }
 
+# Extends the Lease its holder $1 already has, or fails. The holder, acquire time, duration and annotations are kept and the renew time becomes now, and the replacement fails if anyone has changed the Lease since it was read, so a Lease that has passed to another holder, been released or never existed is refused and left as it was. A holder whose Lease has run out but that nobody has taken since may still renew it. Used by a holder that works for longer than one duration, such as the role controller; a step of the regrade core keeps its sized duration and never renews.
+renew_lease() {
+  local holder=${1:?renew_lease needs the holder} current now
+  now=$(now_epoch)
+  if ! current=$(kubectl_ get lease "$LEASE_NAME" --namespace "$LEASE_NAMESPACE" --output json 2>&1); then
+    log "cannot renew the lease: it cannot be read: $current"
+    return 1
+  fi
+  if [ "$(jq -r '.spec.holderIdentity // ""' <<< "$current")" != "$holder" ]; then
+    log "cannot renew the lease: it is not held by $holder"
+    return 1
+  fi
+  if jq --arg renewed "$(micro_time "$now")" '.spec.renewTime = $renewed' <<< "$current" | kubectl_ replace -f - > /dev/null; then
+    return 0
+  fi
+  log "cannot renew the lease: it changed while it was being renewed"
+  return 1
+}
+
 # Succeeds when every other etcd-voting node is Ready. A node whose state is unknown, that has no Ready condition, or that cannot be listed counts as not ready: a step never starts while a peer might be down.
 peers_ready() {
   local nodes not_ready
