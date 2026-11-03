@@ -174,7 +174,7 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(controller["FLEET_ROLE_ELECTION_TIMEOUT_MS"], probe["ELECTION_TIMEOUT_MS"])
         self.assertEqual((controller["FLEET_ROLE_SAMPLE_SECONDS"], probe["REPORT_SECONDS"]), ("30", "30"))
 
-    def test_the_probe_measures_from_the_nodes_own_network_on_every_linux_node_with_a_kubelet(self) -> None:
+    def test_the_probe_measures_from_the_nodes_own_network_and_tolerates_every_taint(self) -> None:
         daemonset = of_kind(self.manifests, "DaemonSet")[0]
         pod = daemonset["spec"]["template"]["spec"]
         self.assertTrue(pod["hostNetwork"])
@@ -184,6 +184,50 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(container(daemonset)["command"], ["/app/scripts/fleet-role-probe.sh"])
         self.assertEqual(env_of(daemonset)["NODE_NAME"], {"fieldRef": {"fieldPath": "spec.nodeName"}})
 
+    @staticmethod
+    def terms(manifests: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """The alternatives of the probe's node affinity, each the expressions a node must meet."""
+        pod = of_kind(manifests, "DaemonSet")[0]["spec"]["template"]["spec"]
+        return [term["matchExpressions"] for term in pod["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]]
+
+    @staticmethod
+    def scheduled(terms: list[list[dict[str, Any]]], labels: dict[str, str]) -> bool:
+        """Whether a node with these labels meets one of the terms, as the scheduler reads In expressions."""
+        return any(all(e["operator"] == "In" and labels.get(e["key"]) in e["values"] for e in term) for term in terms)
+
+    def test_the_probe_is_scheduled_only_on_a_voter_or_an_eligible_node(self) -> None:
+        terms = self.terms(self.manifests)
+        voter, eligible = "node-role.kubernetes.io/etcd", "github-runner.exadev.com/voter-eligible"
+        self.assertTrue(self.scheduled(terms, {voter: "true"}), "a voter that is not marked eligible")
+        self.assertTrue(self.scheduled(terms, {eligible: "true"}), "an eligible standby that is not a voter")
+        self.assertTrue(self.scheduled(terms, {voter: "true", eligible: "true"}))
+        self.assertFalse(self.scheduled(terms, {}), "a node that is neither: an agent, or a host that is neither voter nor eligible")
+        self.assertFalse(self.scheduled(terms, {eligible: "false"}), "the label with another value is not the owner's mark")
+        self.assertFalse(self.scheduled(terms, {"node-role.kubernetes.io/control-plane": "true", "node-role.kubernetes.io/master": "true"}), "a control-plane node that holds no etcd member")
+
+    def test_the_eligible_term_follows_the_controllers_label_name(self) -> None:
+        manifests = render(**{f"{ARC}eligible_label": "example.com/standby"})
+        terms = self.terms(manifests)
+        self.assertTrue(self.scheduled(terms, {"example.com/standby": "true"}))
+        self.assertFalse(self.scheduled(terms, {"github-runner.exadev.com/voter-eligible": "true"}))
+        controller = env_of(of_kind(manifests, "Deployment")[0])
+        self.assertEqual(controller["FLEET_ROLE_ELIGIBLE_LABEL"], "example.com/standby")
+
+    def test_the_probe_reads_the_nodes_pressure_from_its_own_procfs_so_a_kernel_without_it_cannot_fail_the_pod(self) -> None:
+        # A hostPath volume of /proc/pressure makes the container runtime create the directory when the kernel has none, and the pod then sits in CreateContainerError.
+        daemonset = of_kind(self.manifests, "DaemonSet")[0]
+        pod = daemonset["spec"]["template"]["spec"]
+        self.assertNotIn("/proc", json.dumps(pod["volumes"]))
+        self.assertNotIn("pressure", {v["name"] for v in pod["volumes"]} | {m["name"] for m in container(daemonset)["volumeMounts"]})
+        self.assertNotIn("PSI_FILE", env_of(daemonset))
+        self.assertIn('PSI_FILE="${PSI_FILE:-/proc/pressure/memory}"', (ROOT / "scripts" / "fleet-role-probe.sh").read_text())
+
+    def test_the_voter_label_the_template_schedules_on_is_the_one_the_controller_and_the_probe_read(self) -> None:
+        voter = "node-role.kubernetes.io/etcd"
+        self.assertIn(f'voter_label: "{voter}"', (ROOT / "scripts" / "fleet-role.sh").read_text())
+        self.assertIn(f'VOTER_LABEL="${{VOTER_LABEL:-{voter}=true}}"', (ROOT / "scripts" / "fleet-role-probe.sh").read_text())
+        self.assertEqual(env_of(of_kind(self.manifests, "DaemonSet")[0])["VOTER_LABEL"], f"{voter}=true")
+
     def test_the_probe_is_root_only_for_its_own_directory_and_holds_no_capability(self) -> None:
         daemonset = of_kind(self.manifests, "DaemonSet")[0]
         self.assertEqual(
@@ -192,16 +236,14 @@ class ManifestTest(unittest.TestCase):
         )
         self.assertNotIn("privileged", container(daemonset)["securityContext"])
 
-    def test_the_probe_sees_the_hosts_pressure_read_only_and_writes_only_in_its_own_directory(self) -> None:
+    def test_the_probe_writes_only_in_its_own_directory(self) -> None:
         daemonset = of_kind(self.manifests, "DaemonSet")[0]
         pod = daemonset["spec"]["template"]["spec"]
         mounts = {m["name"]: m for m in container(daemonset)["volumeMounts"]}
         volumes = {v["name"]: v for v in pod["volumes"]}
-        self.assertEqual(volumes["pressure"]["hostPath"], {"path": "/proc/pressure"})
-        self.assertTrue(mounts["pressure"]["readOnly"])
         self.assertEqual(volumes["fsync"]["hostPath"], {"path": "/var/lib/rancher/k3s/fleet-role-probe", "type": "DirectoryOrCreate"})
         self.assertEqual(mounts["fsync"]["mountPath"], env_of(daemonset)["FSYNC_DIR"])
-        self.assertEqual(sorted(volumes), ["fsync", "pressure", "tmp"])
+        self.assertEqual(sorted(volumes), ["fsync", "tmp"])
         self.assertEqual({name for name, mount in mounts.items() if not mount.get("readOnly")}, {"tmp", "fsync"})
 
     def test_the_controller_and_the_probe_run_one_image(self) -> None:

@@ -24,6 +24,12 @@ chmod 644 "$work/meminfo" "$work/pressure"
 docker run --rm -v "$work/meminfo:/meminfo:ro" -v "$work/pressure:/pressure:ro" -e MEMINFO_FILE=/meminfo -e PSI_FILE=/pressure \
   --entrypoint /app/scripts/fleet-role-probe.sh "$image" check memory | jq -e '.psi_avg300 == 1.5 and .mem_available_kb == 400' > /dev/null
 
+# With no file named, the probe reads the pod's own /proc/pressure/memory, which is the node's, so the DaemonSet mounts nothing for it: the container sees pressure exactly when this host's kernel has it (a mounted /proc/pressure would stop a pod on a kernel without it from starting) and the reading is then absent, never an error.
+host_has_psi=false
+[ -r /proc/pressure/memory ] && host_has_psi=true
+docker run --rm --entrypoint /app/scripts/fleet-role-probe.sh "$image" check memory \
+  | jq -e --argjson psi "$host_has_psi" '(.psi_avg300 != null) == $psi and .mem_total_kb > 0' > /dev/null
+
 # A kubectl that answers an empty cluster and keeps the patch it is given, in place of the image's own on the PATH.
 mkdir "$work/out"
 chmod 777 "$work/out"

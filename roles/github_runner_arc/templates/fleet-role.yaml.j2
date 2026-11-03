@@ -5,6 +5,8 @@
 {% set namespace = github_runner_arc_platform_namespace %}
 {% set probe_configmap = github_runner_arc_role_controller_probe_configmap %}
 {% set status_configmap = github_runner_arc_role_controller_status_configmap %}
+{# The label k3s puts, with the value true, on every node that is an etcd member: the controller (scripts/fleet-role.sh) and the probe (scripts/fleet-role-probe.sh) each name it, and tests/unit/test_fleet_role_arc.py holds the three together. #}
+{% set voter_label = 'node-role.kubernetes.io/etcd' %}
 {# A ClusterRole can only name nodes cluster-wide; the controller and the probe both list them to find the voters and the standbys, and neither can write one. #}
 {% set node_rules = [{'apiGroups': [''], 'resources': ['nodes'], 'verbs': ['get', 'list']}] %}
 {% for name in [controller, probe] %}
@@ -175,7 +177,15 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       nodeSelector: {{ {'kubernetes.io/os': 'linux'} | to_json }}
-      # Every node with a kubelet, whatever it is tainted for; a server regraded to etcd-only has no kubelet, so no pod, and its side is read from its peers.
+      # Only where the controller needs a reading: a node that is an etcd voter (the label k3s gives every member) or that the owner marked eligible (the label the controller reads to find its candidates). The terms of a node affinity are alternatives, so a node matching either gets a pod and any other gets none. A node that stops matching loses its pod, which removes the node's entry from the probe ConfigMap as it ends (scripts/fleet-role-probe.sh).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+{% for label in [voter_label, github_runner_arc_role_controller_eligible_label] %}
+              - matchExpressions: {{ [{'key': label, 'operator': 'In', 'values': ['true']}] | to_json }}
+{% endfor %}
+      # Whatever such a node is tainted for; a server regraded to etcd-only has no kubelet, so no pod, and its side is read from its peers.
       tolerations:
         - operator: Exists
       securityContext:
@@ -196,6 +206,8 @@ spec:
               value: {{ github_runner_arc_role_controller_election_timeout_ms | string | to_json }}
             - name: ELIGIBLE_LABEL
               value: {{ github_runner_arc_role_controller_eligible_label | to_json }}
+            - name: VOTER_LABEL
+              value: {{ (voter_label ~ '=true') | to_json }}
             - name: PROBE_CONFIGMAP
               value: {{ probe_configmap | to_json }}
             - name: REPORT_SECONDS
@@ -224,9 +236,6 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: pressure
-              mountPath: /host-pressure
-              readOnly: true
             - name: fsync
               mountPath: /fsync
       volumes:
@@ -234,9 +243,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 8Mi
-        - name: pressure
-          hostPath:
-            path: /proc/pressure
         - name: fsync
           hostPath:
             path: {{ github_runner_arc_role_controller_data_dir | to_json }}
