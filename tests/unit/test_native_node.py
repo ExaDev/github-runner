@@ -341,6 +341,7 @@ class DefaultsTest(unittest.TestCase):
             "github_runner_cluster_native_regrade_commands",
             "github_runner_cluster_native_agent_runtime_dir",
             "github_runner_cluster_native_server_runtime_dir",
+            "github_runner_cluster_native_drain_for",
         }
         self.assertEqual(set(SPECS), native - derived)
         for name, spec in SPECS.items():
