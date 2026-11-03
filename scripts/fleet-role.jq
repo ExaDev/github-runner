@@ -1,7 +1,7 @@
 # The role controller's decision (see scripts/fleet-role.sh, which gathers the inputs and publishes the result): which hosts are fit to hold an etcd vote, and the swap the controller would make. Pure: nothing here reads the cluster or the clock.
 #
 # Inputs, as jq named arguments:
-# - $config: the controller's settings (see scripts/fleet-role.sh for each), with `now` the time of the pass in epoch seconds.
+# - $config: the controller's settings (see scripts/fleet-role.sh for each), with `now` the time of the pass in epoch seconds and `expected_voters` the number of voters the cluster should hold at this moment: the target, or one more while a swap holds a new voter beside the old.
 # - $nodes_file: the output of `kubectl get nodes -o json`, as --slurpfile gives it (a one-element array).
 # - $probes_file: each node's probe entry (scripts/fleet-role-probe.sh), by node name, likewise.
 # - $previous_file: the status this program published on the last pass, or null on the first, likewise.
@@ -29,11 +29,16 @@ def stale_after_samples: 3;
 # Linux's byte count of one kibibyte, MemAvailable being reported in kB that are kibibytes.
 def kib: 1024;
 
+# The Node condition k3s sets True on a member of etcd that votes (setEtcdStatusCondition in pkg/etcd/etcd.go). k3s labels a server as an etcd node when it joins, as a learner that does not vote until the leader promotes it, and does not remove the label when a member is removed, so the label alone is no evidence of a vote.
+def voter_condition: "EtcdIsVoter";
+
 def link_rank: {"wired": 0, "wifi": 1, "unknown": 2};
 
 def round2: if . == null then null else (. * 100 | round) / 100 end;
 
 def ready_condition: ((.status.conditions // []) | map(select(.type == "Ready")) | .[0]);
+
+def condition_true($type): ((.status.conditions // []) | map(select(.type == $type)) | .[0].status) == "True";
 
 # The pair figure of one observer towards one peer over a window: the worse of the TCP connect tail and etcd's own round trip tail (only a voter has the latter, keyed by the peer's etcd id), in milliseconds, with how many TCP readings it rests on.
 def pair($window; $peer; $peer_id):
@@ -59,11 +64,13 @@ $config as $c
 # The nodes, with what the decision reads off each.
 | [$nodes.items[]
    | (.metadata.labels // {}) as $labels
+   | ($labels[$c.voter_label] == "true") as $labelled
    | ready_condition as $ready
    | {name: .metadata.name,
       ready: ($ready.status == "True"),
       ready_since: ($ready.lastTransitionTime | fromdateiso8601? // null),
-      voter: ($labels[$c.voter_label] == "true"),
+      labelled: $labelled,
+      voter: ($labelled and condition_true(voter_condition)),
       eligible: ($labels[$c.eligible_label] == "true"),
       pinned: ($labels[$c.pinned_label] == "true"),
       regrade_level: $labels[$c.level_label]}] as $all
@@ -232,7 +239,8 @@ $config as $c
 
 # Why no swap may start now whatever the hosts' fitness: the epic's conditions on the cluster as a whole.
 | ([
-    (if ($voters | length) != $c.target then "there are \($voters | length) voters, not the target \($c.target)" else empty end),
+    (if ($voters | length) != $c.expected_voters then "there are \($voters | length) voters, not the \(if $c.expected_voters == $c.target then "target \($c.target)" else "expected \($c.expected_voters) (the target \($c.target) and the new voter a swap holds)" end)" else empty end),
+    ($all[] | select(.labelled and (.voter | not)) | "node \(.name) is a member but not a voter: it carries the etcd label without \(voter_condition)=True"),
     ($voter_nodes[] | select(.regrade_level != null) | "voter \(.name) is at regrade level \(.regrade_level), below full"),
     ($voter_nodes[] | select(.ready | not) | "voter \(.name) is not Ready"),
     ($voter_names[] as $v | $probes[$v].samples[-1] as $last | $last.etcd as $e

@@ -60,13 +60,14 @@ kubectl get nodes -o json > "$work/nodes.json"
 kubectl get configmap "$probe_configmap" -n "$namespace" -o json | jq -c '(.data // {}) | map_values(fromjson)' > "$work/probes.json"
 kubectl get configmap "$status_configmap" -n "$namespace" -o json | jq -c '(.data["status.json"] // "") | if . == "" then null else fromjson end' > "$work/previous.json"
 
+# A pass holds the cluster at the target: this controller changes no membership, so no swap holds a new voter beside the old and the expected count is the target.
 config="$(jq -nc \
   --argjson now "$now" --argjson target "$target" --argjson max_servers "$max_servers" \
   --argjson election_timeout_ms "$election_timeout_ms" --argjson sample_seconds "$sample_seconds" \
   --argjson pressure_threshold "$pressure_threshold" --argjson available_floor_percent "$available_floor_percent" \
   --argjson default_quota_bytes "$default_quota_bytes" \
   --arg eligible_label "$eligible_label" --arg pinned_label "$pinned_label" --arg level_label "$level_label" \
-  '{now: $now, target: $target, max_servers: $max_servers, election_timeout_ms: $election_timeout_ms, sample_seconds: $sample_seconds,
+  '{now: $now, target: $target, expected_voters: $target, max_servers: $max_servers, election_timeout_ms: $election_timeout_ms, sample_seconds: $sample_seconds,
     pressure_threshold: $pressure_threshold, available_floor_percent: $available_floor_percent, default_quota_bytes: $default_quota_bytes,
     voter_label: "node-role.kubernetes.io/etcd", eligible_label: $eligible_label, pinned_label: $pinned_label, level_label: $level_label}')"
 

@@ -25,6 +25,8 @@ PINNED_LABEL = "github-runner.exadev.com/voter-pinned"
 LINK_LABEL = "github-runner.exadev.com/link"
 LEVEL_LABEL = "github-runner.exadev.com/regrade-level"
 VOTER_LABEL = "node-role.kubernetes.io/etcd"
+# The Node condition k3s sets True on a voting etcd member and not on a learner (setEtcdStatusCondition in pkg/etcd/etcd.go).
+VOTER_CONDITION = "EtcdIsVoter"
 
 # The settings the tests give the controller; the thresholds below derive from these the way the controller derives them, so a test names the rule it holds the program to and not a bare figure.
 ELECTION_TIMEOUT_MS = 1000
@@ -196,6 +198,25 @@ CONTROLLER_ENV = {
 }
 
 
+def controller_config(*, expected_voters: int = TARGET) -> dict[str, Any]:
+    """The settings object scripts/fleet-role.sh gives the decision program (scripts/fleet-role.jq), for a test that runs the program alone."""
+    return {
+        "now": int(time.time()),
+        "target": TARGET,
+        "expected_voters": expected_voters,
+        "max_servers": MAX_SERVERS,
+        "election_timeout_ms": ELECTION_TIMEOUT_MS,
+        "sample_seconds": SAMPLE_SECONDS,
+        "pressure_threshold": PRESSURE_THRESHOLD,
+        "available_floor_percent": AVAILABLE_FLOOR_PERCENT,
+        "default_quota_bytes": ETCD_QUOTA_BYTES,
+        "voter_label": VOTER_LABEL,
+        "eligible_label": ELIGIBLE_LABEL,
+        "pinned_label": PINNED_LABEL,
+        "level_label": LEVEL_LABEL,
+    }
+
+
 def transition_time(seconds_ago: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds_ago))
 
@@ -204,6 +225,7 @@ def node(
     name: str,
     *,
     voter: bool = False,
+    learner: bool = False,
     eligible: bool = False,
     pinned: bool = False,
     ready: bool = True,
@@ -212,9 +234,9 @@ def node(
     address: str | None = None,
     link: str | None = None,
 ) -> dict[str, Any]:
-    """A Node as `kubectl get nodes -o json` lists it; ready_for is how long ago its Ready condition last changed, and link the medium the cluster role labelled it with, none when it has no such label."""
+    """A Node as `kubectl get nodes -o json` lists it; a voter carries the etcd label and the EtcdIsVoter condition, a learner the label alone (k3s labels a member when it joins and sets the condition when it votes), ready_for is how long ago its Ready condition last changed, and link the medium the cluster role labelled it with, none when it has no such label."""
     labels: dict[str, str] = {}
-    if voter:
+    if voter or learner:
         labels[VOTER_LABEL] = "true"
     if eligible:
         labels[ELIGIBLE_LABEL] = "true"
@@ -224,10 +246,13 @@ def node(
         labels[LEVEL_LABEL] = level
     if link is not None:
         labels[LINK_LABEL] = link
+    conditions = [{"type": "Ready", "status": "True" if ready else "Unknown", "lastTransitionTime": transition_time(ready_for)}]
+    if voter:
+        conditions.append({"type": VOTER_CONDITION, "status": "True", "lastTransitionTime": transition_time(ready_for)})
     return {
         "metadata": {"name": name, "labels": labels},
         "status": {
-            "conditions": [{"type": "Ready", "status": "True" if ready else "Unknown", "lastTransitionTime": transition_time(ready_for)}],
+            "conditions": conditions,
             "addresses": [{"type": "InternalIP", "address": address or "127.0.0.1"}, {"type": "Hostname", "address": name}],
         },
     }
