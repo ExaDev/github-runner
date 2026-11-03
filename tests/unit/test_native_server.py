@@ -268,26 +268,27 @@ class NativeServerTest(NativeRoleHarness):
         self.assertEqual(self.role_file(), "agent")
         self.assertEqual(self.unit_calls(before), [])
 
-    def server_condition(self) -> subprocess.CompletedProcess[str]:
-        """Runs the server unit's ExecCondition= as systemd would, from the unit the role wrote, against the role file and k3s data directory the role keeps."""
+    def test_the_server_unit_does_not_start_while_its_datastore_holds_a_tombstone(self) -> None:
         self.assertEqual(self.run_role(host_vars={"github_runner_cluster_bootstrap": True}, only_the_node=True).returncode, 0)
         text = self.file("github_runner_cluster_native_unit_dir", "k3s.service").read_text()
-        line = next(line for line in text.splitlines() if line.startswith("ExecCondition="))
-        return subprocess.run(["sh", *line.removeprefix("ExecCondition=").split()], capture_output=True, text=True, timeout=60, check=False)
+        # The server unit's ExecCondition= as systemd runs it, from the unit the role wrote, against the role file and k3s data directory the role keeps.
+        condition = next(line for line in text.splitlines() if line.startswith("ExecCondition=")).removeprefix("ExecCondition=").split()
 
-    def test_the_server_unit_does_not_start_while_its_datastore_holds_a_tombstone(self) -> None:
-        self.assertEqual(self.server_condition().returncode, 0)
+        def start() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["sh", *condition], capture_output=True, text=True, timeout=60, check=False)
+
+        self.assertEqual(start().returncode, 0)
         tombstone = self.paths["github_runner_cluster_native_data_dir"] / "server" / "db" / "etcd" / "tombstone"
         tombstone.parent.mkdir(parents=True, exist_ok=True)
         tombstone.touch()
-        refused = self.server_condition()
+        refused = start()
         # 1 to 254 is a start systemd skips, which Restart=always does not repeat, rather than a failure.
         self.assertEqual(refused.returncode, 1)
         self.assertEqual(self.role_file(), "server")
         self.assertIn(f"{tombstone} says this server's etcd member was removed from the cluster", refused.stderr)
         # Moving server/db aside, as finishing a demotion does, takes the tombstone with it.
         tombstone.parent.parent.rename(tombstone.parent.parent.with_name("db.demoted"))
-        self.assertEqual(self.server_condition().returncode, 0)
+        self.assertEqual(start().returncode, 0)
 
     def test_a_native_bootstrap_host_is_refused_under_headscale_in_cluster(self) -> None:
         result = self.run_role(host_vars={"github_runner_cluster_bootstrap": True, "github_runner_cluster_mesh": "headscale_in_cluster"})
