@@ -3,7 +3,7 @@
 #
 # A node whose kubelet has stopped reporting (Ready condition Unknown) keeps its pods forever: the control plane marks them for deletion once their unreachable toleration runs out, but only the kubelet can confirm a deletion, so they stay Terminating. A replacement that has to wait for the old pod to go, such as an ARC listener or a StatefulSet pod, then never starts. Kubernetes' answer is non-graceful node shutdown: the node.kubernetes.io/out-of-service=nodeshutdown:NoExecute taint makes the control plane evict every pod on the node at once and force-delete the ones already terminating there.
 #
-# This pass applies that taint to each node whose Ready condition has been Unknown for at least NODE_RECOVERY_AFTER_SECONDS, and removes it again once the node reports Ready. It only removes a taint it applied itself, recognised by the NODE_RECOVERY_ANNOTATION annotation it writes with it, so an operator's own out-of-service taint is left alone. A node reporting Ready False is never tainted: its kubelet is alive and still finishes its pods' deletion itself. The node this pass runs on (NODE_RECOVERY_SELF_NODE) is never tainted either. Each change is one JSON patch that first tests the node's resourceVersion, so a node whose status changed after it was read (for example because it came back) is left for the next pass instead of being tainted on stale information. Without the prune pass below it never deletes a Node object, and needs only get, list and patch on nodes.
+# This pass applies that taint to each node whose Ready condition has been Unknown for at least NODE_RECOVERY_AFTER_SECONDS, and removes it again once the node reports Ready. It only removes a taint it applied itself, recognised by the NODE_RECOVERY_ANNOTATION annotation it writes with it, so an operator's own out-of-service taint is left alone. A node reporting Ready False is never tainted: its kubelet is alive and still finishes its pods' deletion itself. The node this pass runs on (NODE_RECOVERY_SELF_NODE) is never tainted either. Each change is one JSON patch that first tests the node's resourceVersion, so a node whose status changed after it was read (for example because it came back) is left for the next pass instead of being tainted on stale information. A node a voter swap or regrading is moving through is left alone, because it is meant to be silent for a while (its host stops one k3s unit and starts the other) and tainting it out of service would evict pods the controller is draining on purpose. While the Lease NODE_RECOVERY_LEASE_NAMESPACE/NODE_RECOVERY_LEASE_NAME (the cluster-wide Lease that serialises both) is unexpired, a node is skipped when the Lease's NODE_RECOVERY_SWAP_NODES_ANNOTATION annotation lists it (comma separated) or when its holderIdentity names it, and a node carrying the label NODE_RECOVERY_LEVEL_LABEL, which regrading puts on a server it has stepped down and which therefore has no kubelet, is never tainted whether or not any Lease is held. A node the Lease protects is neither tainted nor pruned (a level-labelled server is already refused by the prune pass), and a taint this pass applied earlier is still removed once the node reports Ready. The Lease is read with a Role that allows get on that one name; a Lease that cannot be read fails the pass before any change, since tainting on a guess could cut a swap short. Without the prune pass below it never deletes a Node object, and needs only get, list and patch on nodes.
 #
 # An opt-in second pass deletes a Node object that has stayed Unknown for at least NODE_RECOVERY_PRUNE_AFTER_SECONDS (empty turns it off) and carries the label NODE_RECOVERY_PRUNE_LABEL with the value true, which a node that rejoins by itself, such as a k3s agent, sets on itself when it registers. Deleting a Node removes it, and the pods bound to it, from the cluster; an agent that comes back registers a new Node object. A k3s server's Node is never deleted, because that removes its etcd member: a node that is a control-plane or etcd member is refused even when it carries the label, and the pass fails saying so. Nothing is deleted either unless at least min_etcd_voters Ready nodes carrying the etcd role label would remain (a non-voting agent does not count), so a cluster with fewer voters than quorum needs, or with none, is left alone and the pass fails saying so. An unlabelled node, a node without a Ready condition and the node this pass runs on (NODE_RECOVERY_SELF_NODE) are never deleted. The delete is one API request carrying the node's uid and resourceVersion as preconditions, which kubectl delete cannot send, so a node that changed after it was read (for example because it came back) is left for the next pass. This pass then needs delete on nodes as well as curl, which reaches the API with the pod's ServiceAccount credentials (NODE_RECOVERY_API_URL and NODE_RECOVERY_SERVICEACCOUNT_DIR override where it looks).
 set -euo pipefail
@@ -13,6 +13,10 @@ annotation="${NODE_RECOVERY_ANNOTATION:-github-runner.exadev/out-of-service-appl
 self_node="${NODE_RECOVERY_SELF_NODE:-}"
 prune_after="${NODE_RECOVERY_PRUNE_AFTER_SECONDS:-}"
 prune_label="${NODE_RECOVERY_PRUNE_LABEL:-github-runner.exadev.io/removable}"
+lease_namespace="${NODE_RECOVERY_LEASE_NAMESPACE:-kube-system}"
+lease_name="${NODE_RECOVERY_LEASE_NAME:-fleet-regrade}"
+swap_nodes_annotation="${NODE_RECOVERY_SWAP_NODES_ANNOTATION:-github-runner.exadev.com/swap-nodes}"
+level_label="${NODE_RECOVERY_LEVEL_LABEL:-github-runner.exadev.com/regrade-level}"
 # A cluster needs three voting etcd members to tolerate losing one: with two, losing either leaves one of two, which is not a majority. k3s removes a server's etcd member when its Node is deleted, so the prune pass deletes nothing unless at least this many Ready etcd members would remain.
 readonly min_etcd_voters=3
 taint_key="node.kubernetes.io/out-of-service"
@@ -38,6 +42,8 @@ fi
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
 nodes="$(kubectl get nodes -o json)"
+# Empty when there is no such Lease. Any other failure (the API unreachable, the Role missing) stops the pass here.
+lease="$(kubectl get lease "$lease_name" --namespace "$lease_namespace" --output json --ignore-not-found)"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # One JSON object per node that needs a change: its name, the action, how long it has been Unknown, and the patch to send (or, for a delete, the uid and resourceVersion to send as preconditions).
@@ -46,6 +52,9 @@ plan="$(jq -c \
   --argjson min_voters "$min_etcd_voters" \
   --arg prune_after "$prune_after" \
   --arg prune_label "$prune_label" \
+  --arg level_label "$level_label" \
+  --arg swap_annotation "$swap_nodes_annotation" \
+  --argjson lease "${lease:-null}" \
   --arg annotation "$annotation" \
   --arg self "$self_node" \
   --arg key "$taint_key" \
@@ -53,6 +62,16 @@ plan="$(jq -c \
   --arg now "$now" '
   ($now | fromdateiso8601) as $now_s
   | (if $prune_after == "" then null else ($prune_after | tonumber) end) as $prune_s
+  # The nodes the Lease protects: none once it has expired (its renew time plus its duration, the rule of lease_state in roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh) or when nobody holds it, otherwise the nodes its annotation lists and its holder, which is a node name when regrading holds it and a name no node has when the role controller does.
+  | (if $lease == null then []
+     else ($lease.spec.holderIdentity // "") as $holder
+       | ($lease.spec.renewTime // $lease.spec.acquireTime // null) as $renewed
+       | if $holder == "" or $renewed == null
+            or (($renewed | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) + ($lease.spec.leaseDurationSeconds // 0)) <= $now_s
+         then []
+         else [$holder] + (($lease.metadata.annotations // {})[$swap_annotation] // "" | split(",") | map(gsub("^\\s+|\\s+$"; "") | select(length > 0)))
+         end
+     end) as $swapping
   | [.items[]
      | select((.metadata.labels // {}) | has("node-role.kubernetes.io/etcd"))
      | select(((.status.conditions // []) | map(select(.type == "Ready")) | first).status == "True")
@@ -66,9 +85,11 @@ plan="$(jq -c \
   | ($annotations | has($annotation)) as $ours
   | (.metadata.labels // {}) as $labels
   | ($labels | has("node-role.kubernetes.io/control-plane") or has("node-role.kubernetes.io/etcd")) as $server
+  | ($swapping | index($name) != null) as $in_swap
+  | ($labels[$level_label] // null) as $level
   | {op: "test", path: "/metadata/resourceVersion", value: .metadata.resourceVersion} as $test
   | if $name == $self or $ready == null then empty
-    elif $prune_s != null and $ready.status == "Unknown" and $labels[$prune_label] == "true"
+    elif $prune_s != null and $ready.status == "Unknown" and $labels[$prune_label] == "true" and ($in_swap | not)
          and ($now_s - ($ready.lastTransitionTime | fromdateiso8601)) >= $prune_s then
       {
         name: $name,
@@ -80,7 +101,9 @@ plan="$(jq -c \
       }
     elif $ready.status == "Unknown" and ($tainted | not)
          and ($now_s - ($ready.lastTransitionTime | fromdateiso8601)) >= $after then
-      {
+      if $in_swap then {name: $name, action: "hold", reason: "the Lease \($lease.metadata.name) names it for a swap or a regrade step"}
+      elif $level != null then {name: $name, action: "hold", reason: "\($level_label) holds it at \($level)"}
+      else {
         name: $name,
         action: "taint",
         unknown_for: ($now_s - ($ready.lastTransitionTime | fromdateiso8601)),
@@ -90,6 +113,7 @@ plan="$(jq -c \
           {op: "add", path: "/spec/taints", value: ($taints + [{key: $key, value: $value, effect: "NoExecute", timeAdded: $now}])}
         ]
       }
+      end
     elif $ready.status == "True" and $ours then
       {
         name: $name,
@@ -152,6 +176,10 @@ while IFS= read -r change; do
   [ -n "$change" ] || continue
   name="$(jq -r '.name' <<< "$change")"
   action="$(jq -r '.action' <<< "$change")"
+  if [ "$action" = hold ]; then
+    log "Not tainting ${name}: $(jq -r '.reason' <<< "$change")"
+    continue
+  fi
   if [ "$action" = refuse ]; then
     log "Not deleting ${name}: it carries ${prune_label}=true but is a control-plane or etcd member, and deleting a server's Node removes its etcd member; remove the label" >&2
     exit_code=1
