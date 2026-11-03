@@ -104,6 +104,57 @@ write_lease other-node "$((NOW - 10))"
 release_lease
 check "release leaves a lease that has passed to another node alone" test "$(holder)" = other-node
 
+# Renewing: the holder keeps the Lease past its duration by writing a later renew time, and nobody else may.
+renews() { renew_lease "$1" > /dev/null 2>&1; }
+# Writes a Lease held by $1, acquired at epoch $2, last renewed at epoch $3, carrying an annotation.
+write_annotated_lease() {
+  build_lease "$1" "$2" "$3" 7 | jq '.metadata.annotations = {"example.test/nodes": "node-a node-b"}' > "$lease"
+}
+
+reset_cluster
+write_lease fleet-role "$((NOW - 500))"
+check "renew: the holder renews its own lease" renews fleet-role
+check "renew: the holder is unchanged" test "$(holder)" = fleet-role
+check "renew: the renew time is now" test "$(jq -r '.spec.renewTime' "$lease")" = "$(micro_time "$NOW")"
+check "renew: the lease is replaced, not created" test "$(jq -r '.metadata.resourceVersion' "$lease")" = 8
+
+reset_cluster
+write_annotated_lease fleet-role "$((NOW - 800))" "$((NOW - 500))"
+renews fleet-role || true
+check "renew: the acquire time is kept" test "$(jq -r '.spec.acquireTime' "$lease")" = "$(micro_time "$((NOW - 800))")"
+check "renew: the duration is kept" test "$(jq -r '.spec.leaseDurationSeconds' "$lease")" = 600
+check "renew: annotations survive" test "$(jq -r '.metadata.annotations["example.test/nodes"]' "$lease")" = "node-a node-b"
+
+reset_cluster
+write_lease fleet-role "$((NOW - 599))"
+renews fleet-role || true
+past_original_expiry() { [ "$(lease_state "$(cat "$lease")" fleet-role "$((NOW + 599))")" = mine ]; }
+check "renew: the lease then outlasts the expiry it had before" past_original_expiry
+
+reset_cluster
+write_annotated_lease other-node "$((NOW - 800))" "$((NOW - 100))"
+cp "$lease" "$work/before.json"
+check_not "renew: refused when another holds it" renews fleet-role
+check "renew: a refusal leaves the lease as it was" cmp -s "$lease" "$work/before.json"
+
+reset_cluster
+write_lease '' "$((NOW - 100))"
+check_not "renew: refused when the lease was released" renews fleet-role
+
+reset_cluster
+check_not "renew: refused when there is no lease" renews fleet-role
+
+reset_cluster
+write_lease fleet-role "$((NOW - 100))"
+export FAKE_REPLACE_CONFLICT=1
+check_not "renew: refused when the lease changed while it was being renewed" renews fleet-role
+
+reset_cluster
+write_lease fleet-role "$((NOW - 100))"
+export FAKE_LEASE_READ_ERROR=1
+check_not "renew: refused when the lease cannot be read" renews fleet-role
+unset FAKE_LEASE_READ_ERROR
+
 # The other etcd-voting nodes.
 reset_cluster
 check "peers: all Ready" peers_ready
