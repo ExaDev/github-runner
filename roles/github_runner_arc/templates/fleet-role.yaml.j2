@@ -206,6 +206,8 @@ spec:
               value: {{ github_runner_arc_role_controller_election_timeout_ms | string | to_json }}
             - name: ELIGIBLE_LABEL
               value: {{ github_runner_arc_role_controller_eligible_label | to_json }}
+            - name: LINK_LABEL
+              value: {{ github_runner_arc_role_controller_link_label | to_json }}
             - name: VOTER_LABEL
               value: {{ (voter_label ~ '=true') | to_json }}
             - name: PROBE_CONFIGMAP

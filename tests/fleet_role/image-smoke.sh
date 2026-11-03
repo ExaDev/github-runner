@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs what the role controller's pods run, from the image as built (fleet-role/Dockerfile), with nothing that reaches a cluster: the tools and files the pods need are present and executable, the jq modules compile under the image's own jq (not the host's), the probe's check mode reads the memory signals through the regrade core the image carries, and one pass of the controller runs end to end against a kubectl that answers an empty cluster and records the status it is asked to publish. Needs only Docker.
+# Runs what the role controller's pods run, from the image as built (fleet-role/Dockerfile), with nothing that reaches a cluster: the tools and files the pods need are present and executable, the jq modules compile under the image's own jq (not the host's), the probe's check mode reads the memory signals through the regrade core the image carries and the link through the cluster role's link reader, and one pass of the controller runs end to end against a kubectl that answers an empty cluster and records the status it is asked to publish. Needs only Docker.
 #
 # Usage: tests/fleet_role/image-smoke.sh <image>   (the image must already be built)
 set -euo pipefail
@@ -14,7 +14,7 @@ docker run --rm --entrypoint bash "$image" -c '
   set -euo pipefail
   for tool in jq kubectl curl fio; do command -v "$tool" > /dev/null; done
   test -x /app/loop.sh -a -x /app/scripts/fleet-role.sh -a -x /app/scripts/fleet-role-probe.sh
-  test -f /app/fleet-regrade-core.sh -a -f /app/scripts/fleet-role.jq -a -f /app/scripts/fleet-role-stats.jq'
+  test -f /app/fleet-regrade-core.sh -a -f /app/node-link.sh -a -f /app/scripts/fleet-role.jq -a -f /app/scripts/fleet-role-stats.jq'
 
 docker run --rm --entrypoint jq "$image" -en -L /app/scripts 'include "fleet-role-stats"; {window: window_samples, tail: tail_percentile} | select(.window == 100 and .tail == 99)' > /dev/null
 
@@ -29,6 +29,9 @@ host_has_psi=false
 [ -r /proc/pressure/memory ] && host_has_psi=true
 docker run --rm --entrypoint /app/scripts/fleet-role-probe.sh "$image" check memory \
   | jq -e --argjson psi "$host_has_psi" '(.psi_avg300 != null) == $psi and .mem_total_kb > 0' > /dev/null
+
+# The link reader the image carries reads the container's own interface: a veth, whose link it cannot see.
+docker run --rm --entrypoint /app/scripts/fleet-role-probe.sh "$image" check link | jq -e '.link == "unknown" and (.interface | length > 0)' > /dev/null
 
 # A kubectl that answers an empty cluster and keeps the patch it is given, in place of the image's own on the PATH.
 mkdir "$work/out"

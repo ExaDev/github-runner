@@ -411,6 +411,9 @@ argument_specs:
       github_runner_arc_role_controller_level_label:
         type: str
         description: The label regrading puts on a server below full, from github_runner_cluster_regrade_level_label when defined, else github-runner.exadev.com/regrade-level.
+      github_runner_arc_role_controller_link_label:
+        type: str
+        description: The Node label the cluster role publishes the medium of each host's link under, wired, wifi or unknown, which the probe reports for its node, from github_runner_cluster_link_label when defined, else github-runner.exadev.com/link.
       github_runner_arc_role_controller_probe_configmap:
         type: str
         default: fleet-role-probe

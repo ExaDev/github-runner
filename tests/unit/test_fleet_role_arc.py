@@ -123,7 +123,7 @@ class ManifestTest(unittest.TestCase):
     def test_the_probe_gets_every_setting_its_script_requires(self) -> None:
         daemonset = of_kind(self.manifests, "DaemonSet")[0]
         required = script_requirements("fleet-role-probe.sh")
-        self.assertEqual(required, {"NODE_NAME", "NAMESPACE", "ELECTION_TIMEOUT_MS", "ELIGIBLE_LABEL"})
+        self.assertEqual(required, {"NODE_NAME", "NAMESPACE", "ELECTION_TIMEOUT_MS", "ELIGIBLE_LABEL", "LINK_LABEL"})
         self.assertLessEqual(required, set(env_of(daemonset)))
 
     def test_the_default_settings_reach_the_controller_as_strings(self) -> None:
@@ -156,6 +156,7 @@ class ManifestTest(unittest.TestCase):
             github_runner_cluster_voters=5,
             github_runner_cluster_voter_eligible_label="example.com/candidate",
             github_runner_cluster_voter_pinned_label="example.com/pinned",
+            github_runner_cluster_link_label="example.com/link",
         )
         env = env_of(of_kind(manifests, "Deployment")[0])
         self.assertEqual(
@@ -167,6 +168,7 @@ class ManifestTest(unittest.TestCase):
             (env["FLEET_ROLE_VOTERS"], env["FLEET_ROLE_ELIGIBLE_LABEL"], env["FLEET_ROLE_PINNED_LABEL"], env_of(of_kind(manifests, "DaemonSet")[0])["ELIGIBLE_LABEL"]),
             ("5", "example.com/candidate", "example.com/pinned", "example.com/candidate"),
         )
+        self.assertEqual(env_of(of_kind(manifests, "DaemonSet")[0])["LINK_LABEL"], "example.com/link")
 
     def test_the_controller_and_the_probe_agree_on_the_election_timeout_and_the_period(self) -> None:
         manifests = render(**{ARC + "sample_seconds": 30})
@@ -278,6 +280,13 @@ class ManifestTest(unittest.TestCase):
         for program in ("fleet-role.jq", "fleet-role-stats.jq"):
             self.assertRegex(dockerfile, rf"COPY [^\n]*scripts/{re.escape(program)}[^\n]* /app/scripts/")
 
+    def test_the_probe_reads_the_link_reader_the_image_carries(self) -> None:
+        dockerfile = (ROOT / "fleet-role" / "Dockerfile").read_text()
+        script = (ROOT / "scripts" / "fleet-role-probe.sh").read_text()
+        default = re.search(r'NODE_LINK="\$\{NODE_LINK:-([^}]+)\}"', script)
+        assert default is not None
+        self.assertIn(f"COPY roles/github_runner_cluster/files/node-link.sh {default.group(1)}", dockerfile)
+
     def test_the_probe_reads_the_regrade_core_the_image_carries(self) -> None:
         dockerfile = (ROOT / "fleet-role" / "Dockerfile").read_text()
         script = (ROOT / "scripts" / "fleet-role-probe.sh").read_text()
@@ -349,6 +358,9 @@ class DefaultsAgreeWithTheClusterRoleTest(unittest.TestCase):
         self.assertEqual(self.fallback("eligible_label"), self.cluster["github_runner_cluster_voter_eligible_label"])
         self.assertEqual(self.fallback("pinned_label"), self.cluster["github_runner_cluster_voter_pinned_label"])
 
+    def test_the_link_label(self) -> None:
+        self.assertEqual(self.fallback("link_label"), self.cluster["github_runner_cluster_link_label"])
+
     def test_the_level_label(self) -> None:
         self.assertEqual(self.fallback("level_label"), self.cluster["github_runner_cluster_regrade_level_label"])
 
@@ -384,6 +396,8 @@ class ValidationTest(unittest.TestCase):
         "max servers text": {**ON, MAX: "many"},
         "same label": {**ON, ARC + "pinned_label": "example.com/x", ARC + "eligible_label": "example.com/x"},
         "bad label": {**ON, ARC + "eligible_label": "has space"},
+        "link label same as eligible": {**ON, ARC + "link_label": "github-runner.exadev.com/voter-eligible"},
+        "bad link label": {**ON, ARC + "link_label": "has space"},
         "good labels": {**ON, ARC + "eligible_label": "example.com/eligible", ARC + "pinned_label": "pinned"},
         "bad settings while off": {VOTERS: 4, ARC + "sample_seconds": 0, ARC + "eligible_label": "has space"},
     }
@@ -435,8 +449,8 @@ class ValidationTest(unittest.TestCase):
             with self.subTest(case):
                 self.assertTrue(self.refused(case))
 
-    def test_the_two_labels_must_be_label_keys_and_differ(self) -> None:
-        for case in ("same label", "bad label"):
+    def test_the_three_labels_must_be_label_keys_and_differ(self) -> None:
+        for case in ("same label", "bad label", "link label same as eligible", "bad link label"):
             with self.subTest(case):
                 self.assertTrue(self.refused(case))
         self.assertFalse(self.refused("good labels"))
