@@ -374,6 +374,8 @@ class EntrypointTest(unittest.TestCase):
                 'mesh_ip="100.64.0.1"',
                 'etcd_timing_flags=""',
                 'api_port_flags=""',
+                # The server's join URL as set_join_url chooses it when the role directory names none (test_node_entrypoint.py tests the choice).
+                'join_url="${K3S_JOIN_SERVER_URL:-}"',
                 assignments(["regrade_level_file", "regrade_started_file", "regrade_flags"]),
                 function_source("set_regrade_flags"),
                 function_source("mesh_server_args"),

@@ -185,6 +185,8 @@ class EntrypointTest(unittest.TestCase):
                 'vpn_auth="name=tailscale,joinKey=example"',
                 'mesh_ip="100.64.0.1"',
                 'regrade_flags=""',
+                # The server's join URL as set_join_url chooses it when the role directory names none (test_node_entrypoint.py tests the choice).
+                'join_url="${K3S_JOIN_SERVER_URL:-}"',
                 function_source("set_etcd_timing_flags"),
                 function_source("set_api_port_flags"),
                 function_source(builder),
