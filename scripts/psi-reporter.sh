@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes this node's own pressure stall information for the autoscaler. Runs in the `psi-reporter` DaemonSet, one pod per node a runner pod may use, with the host's /proc/pressure mounted read-only.
+# Publishes this node's own pressure stall information for the autoscaler. Runs in the `psi-reporter` DaemonSet, one pod per node a runner pod may use, reading /proc/pressure of its own procfs, which serves the whole node's pressure as /proc/meminfo serves its memory, so nothing is mounted: a hostPath volume of /proc/pressure makes the container runtime create the directory when the kernel has none (no pressure stall information), and the pod then never starts.
 #
 # The reading comes from the node's own /proc/pressure, not from the kubelet's summary API: on a cgroup v1 node that API reports every pressure field as 0 whatever the node is doing, so a reader built on it would find no pressure on exactly the nodes that have some.
 #
@@ -7,7 +7,7 @@
 # - NODE_NAME: the node this pod runs on (the downward API's spec.nodeName). Required.
 # - NAMESPACE: the namespace of the ConfigMap. Required.
 # - NODE_PRESSURE_CONFIGMAP: the shared ConfigMap, pre-created empty, that every reporter patches its own key of (default: autoscaler-node-pressure).
-# - PRESSURE_DIR: where the host's /proc/pressure is mounted (default: /host-pressure).
+# - PRESSURE_DIR: where the node's pressure files are (default: /proc/pressure, absent on a kernel without pressure stall information, which gives a report with no pressure figures).
 # - REPORT_SECONDS: seconds between reports (default: 15). The autoscaler treats a report older than a few polls as no report.
 # - REPORT_ONCE: when "true", report once and exit, for tests.
 #
@@ -17,7 +17,7 @@ set -euo pipefail
 : "${NODE_NAME:?NODE_NAME is required}"
 : "${NAMESPACE:?NAMESPACE is required}"
 NODE_PRESSURE_CONFIGMAP="${NODE_PRESSURE_CONFIGMAP:-autoscaler-node-pressure}"
-PRESSURE_DIR="${PRESSURE_DIR:-/host-pressure}"
+PRESSURE_DIR="${PRESSURE_DIR:-/proc/pressure}"
 REPORT_SECONDS="${REPORT_SECONDS:-15}"
 REPORT_ONCE="${REPORT_ONCE:-false}"
 
