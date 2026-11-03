@@ -78,7 +78,7 @@ There is no application test suite in this repo; the checks above are the projec
 
 ## Releases
 
-Every push to `main` runs `.github/workflows/release.yml`, driven by [semantic-release](https://semantic-release.gitbook.io/) (`.releaserc.json`) against [Conventional Commits](https://www.conventionalcommits.org/) (`commitlint.config.js`, enforced by the `commitlint`/`commitlint-pr-title` CI jobs above). Almost every conventional-commit type triggers at least a patch release (see `.releaserc.json`'s `commit-analyzer` `releaseRules`: `feat` is minor, a breaking change (`!` or a `BREAKING CHANGE:` footer) is major, everything else conventional is patch), so in practice nearly every push to `main` produces a release.
+Every push to `main` runs `.github/workflows/release.yml`, driven by [semantic-release](https://semantic-release.gitbook.io/) (`.releaserc.json`) against [Conventional Commits](https://www.conventionalcommits.org/) (`commitlint.config.js`, enforced by the `commitlint` CI job above, which checks every commit and the pull request title). Almost every conventional-commit type triggers at least a patch release (see `.releaserc.json`'s `commit-analyzer` `releaseRules`: `feat` is minor, a breaking change (`!` or a `BREAKING CHANGE:` footer) is major, everything else conventional is patch), so in practice nearly every push to `main` produces a release.
 
 A release:
 
