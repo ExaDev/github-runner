@@ -28,6 +28,8 @@ native_host=grtest-native
 native_image=grtest-native-host
 native_ip="${subnet_prefix}.20"
 native_role=""
+# Whether the inventory turns memory-pressure regrading on for the native host alone; native_server's last part sets it.
+native_regrade=false
 # The Docker hosts the inventory lists, by index; all of them unless a scenario leaves one out (native_server's second run, where node 3 keeps running as a voter outside the inventory).
 inventory_nodes=""
 # Where tc comes from for the role_controller scenario: a throwaway container in a node's network namespace, since the node's own image has none.
@@ -255,6 +257,7 @@ EOF
       echo "          ansible_python_interpreter: /usr/bin/python3"
       echo "          github_runner_cluster_node_mode: native"
       echo "          github_runner_cluster_node_role: ${native_role}"
+      echo "          github_runner_cluster_regrade: ${native_regrade}"
     fi
   } > "${work}/inventory.yml"
 }
@@ -1120,6 +1123,8 @@ scenario_native_server() {
   before=$(native_exec systemctl show k3s --property ActiveEnterTimestampMonotonic)
   run_role --limit "$native_host"
   [ "$before" = "$(native_exec systemctl show k3s --property ActiveEnterTimestampMonotonic)" ] || fail "rerunning the role restarted ${native_host}'s server"
+
+  regrade_native_server
 }
 
 # The slow link the role_controller scenario puts on a voter, in milliseconds each way on its mesh interface: above the unfit round trip limit, a tenth of the election timeout the inventory sets.
@@ -1265,6 +1270,147 @@ MANIFESTS
   [ "$(kubectl_on 1 get nodes -l node-role.kubernetes.io/etcd=true --no-headers | wc -l | tr -d ' ')" = 3 ] || fail "the set of etcd nodes changed"
   kubectl_on 1 get nodes -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{" "}{.spec.taints}{"\n"}{end}'
   if kubectl_on 1 get nodes -o json | jq -e '[.items[] | select(.metadata.annotations["etcd.k3s.cattle.io/remove"] != null)] | length > 0' >/dev/null; then fail "a node was annotated for removal"; fi
+}
+
+# --- Memory-pressure regrading of the native server (native_server's last part) ---
+
+# The level the native server's fleet-regrade reports, read with its own command, as an operator would.
+native_level() { native_exec fleet-regrade status </dev/null 2>/dev/null | sed -n 's/^level: \([^ ]*\) .*/\1/p'; }
+native_at_level() { [ "$(native_level)" = "$1" ]; }
+native_node_is() { [ "$(kubectl_on 1 get node "$native_host" --no-headers 2>/dev/null | awk '{print $2}')" = "$1" ]; }
+native_level_label() { kubectl_on 1 get node "$native_host" -o jsonpath='{.metadata.labels.github-runner\.exadev\.com/regrade-level}'; }
+# The keys the regrading drop-in sets, sorted, one space after each; a comment is not a key.
+native_dropin_keys() { native_exec sh -c "grep -v '^#' /etc/rancher/k3s/server.yaml.d/50-regrade.yaml | cut -d: -f1 | sort | tr '\n' ' '" </dev/null; }
+native_etcd_only_keys="disable-agent disable-apiserver disable-controller-manager disable-scheduler "
+# How many of the containerd shims k3s starts for pods run on the native host, found as the systemd actuator finds them.
+native_shims() { native_exec sh -c 'ps -e -o args= | grep -c "^/var/lib/rancher/k3s/data/[^/]*/bin/containerd-shim" || true' </dev/null; }
+# Whether k3s's own containerd runs on the native host.
+native_containerd_runs() { native_exec ps -e -o args= </dev/null | grep '^containerd ' >/dev/null; }
+native_member_ids() { etcd_members | awk -F', ' '{print $1}' | sort | tr '\n' ' '; }
+# Whether the member list names the native host's member as started and not a learner.
+native_voter_started() { etcd_members | grep -F ", ${native_host}-" | grep -E ', started, .*, false$' >/dev/null; }
+# The fleet-regrade unit's log, for its steps and for a failure.
+native_regrade_log() { native_exec journalctl -u fleet-regrade --no-pager --output cat </dev/null; }
+native_logged() { native_regrade_log | grep -Fx "now at $1" >/dev/null; }
+grtest_daemonset_ready() { [ "$(kubectl_on 1 get daemonset grtest-native-pod -o 'jsonpath={.status.numberReady}' 2>/dev/null)" = 1 ]; }
+# Whether the etcd of the native host's k3s is serving in the unit's current run, as the actuator reads it.
+native_etcd_serving() {
+  # shellcheck disable=SC2016 # The expansions are for the shell in the native host.
+  native_exec sh -c 'journalctl --no-pager --output cat "_SYSTEMD_INVOCATION_ID=$(systemctl show --property InvocationID --value k3s)" | grep -F "ETCD server is now running" >/dev/null' </dev/null
+}
+native_server_started() { native_exec systemctl show k3s --property ActiveEnterTimestampMonotonic </dev/null; }
+
+# The native server steps down to etcd-only and back up under simulated memory pressure, through the real fleet-regrade unit and the real k3s unit, whose ExecStartPre writes the drop-in: the membership unchanged, the vote kept, the level kept across `systemctl restart` and across the host stopping and starting, and no pod left running without a kubelet at etcd-only.
+regrade_native_server() {
+  local ids password before shims output
+  log "Turning regrading on for ${native_host}, which must not restart its server"
+  before=$(native_server_started)
+  native_regrade=true
+  write_inventory hosted
+  run_role --limit "$native_host"
+  [ "$before" = "$(native_server_started)" ] || fail "turning regrading on restarted ${native_host}'s server"
+  native_unit_is fleet-regrade active || { native_regrade_log || true; fail "${native_host} does not run fleet-regrade"; }
+  wait_for "${native_host}'s fleet-regrade to read full" 120 native_at_level full
+  native_exec grep -Fx 'FLEET_REGRADE_ACTUATOR=systemd' /usr/local/lib/github-runner-k3s/regrade/fleet-regrade.env </dev/null >/dev/null || fail "the native settings do not name the systemd actuator"
+  if native_exec grep -F "${native_host}." /usr/local/lib/github-runner-k3s/regrade/fleet-regrade.env </dev/null | grep '^KUBE_SERVERS=' >/dev/null; then fail "the native server's candidate API servers name its own"; fi
+
+  log "A pod that outlives a drain, a DaemonSet's, runs on ${native_host}"
+  kubectl_on 1 apply -f - <<EOF
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: grtest-native-pod, namespace: default}
+spec:
+  selector: {matchLabels: {app: grtest-native-pod}}
+  template:
+    metadata: {labels: {app: grtest-native-pod}}
+    spec:
+      nodeSelector: {kubernetes.io/hostname: ${native_host}}
+      tolerations: [{operator: Exists}]
+      containers: [{name: sleep, image: "${busybox_image}", command: [sleep, "86400"]}]
+EOF
+  wait_for "the DaemonSet's pod to run on ${native_host}" 300 grtest_daemonset_ready
+  shims=$(native_shims)
+  echo "  containerd shims of k3s's running on ${native_host} at full: ${shims}"
+  [ "$shims" -gt 0 ] || fail "no containerd shim of k3s's runs on ${native_host} at full, so the count at etcd-only could not tell"
+
+  ids=$(native_member_ids)
+  password=$(native_exec sha256sum /etc/rancher/node/password </dev/null | cut -d' ' -f1)
+  echo "etcd members: ${ids}"
+
+  log "Memory pressure on ${native_host} steps it down a level at a time, through its fleet-regrade unit"
+  # The unit's own watcher, reading its pressure from files in place of the kernel's and with its times in seconds through a drop-in, so the test controls it; everything else is the unit and the settings the role wrote.
+  native_exec sh -c 'cp /usr/local/lib/github-runner-k3s/regrade/fleet-regrade.env /etc/grtest-pressure.env && printf "SAMPLE_SECONDS=1\nSUSTAIN_SECONDS=3\nCOOLDOWN_SECONDS=5\n" >> /etc/grtest-pressure.env
+    printf "some avg10=0.00 avg60=0.00 avg300=50.00 total=1\n" > /etc/grtest-psi && printf "MemTotal: 1000000 kB\nMemAvailable: 1000 kB\n" > /etc/grtest-meminfo
+    mkdir -p /etc/systemd/system/fleet-regrade.service.d
+    printf "[Service]\nEnvironment=FLEET_REGRADE_ENV=/etc/grtest-pressure.env PSI_FILE=/etc/grtest-psi MEMINFO_FILE=/etc/grtest-meminfo\n" > /etc/systemd/system/fleet-regrade.service.d/grtest.conf
+    systemctl daemon-reload && systemctl restart fleet-regrade' </dev/null
+  wait_for "${native_host} to reach etcd-only" 900 native_logged etcd-only
+  native_regrade_log | grep -F 'step down full -> control-plane' >/dev/null || { native_regrade_log; fail "the watcher did not step down through control-plane first"; }
+  wait_for "the Lease to be released after ${native_host}'s step down" 120 lease_free
+  native_regrade_log
+
+  log "At etcd-only ${native_host} keeps its seat and its vote, runs all but etcd off, and runs no pod"
+  native_at_level etcd-only || fail "${native_host} does not read etcd-only"
+  [ "$(native_dropin_keys)" = "$native_etcd_only_keys" ] || fail "the drop-in does not turn all but etcd off: $(native_dropin_keys)"
+  [ "$(native_exec cat /run/github-runner-k3s/regrade-level </dev/null)" = etcd-only ] || fail "the unit's start did not record etcd-only"
+  wait_for "${native_host}'s Node to report NotReady" 240 native_node_is NotReady,SchedulingDisabled
+  [ "$(native_level_label)" = etcd-only ] || fail "the Node does not carry the level label"
+  [ "$(native_member_ids)" = "$ids" ] || fail "the etcd members changed: $(native_member_ids) (was ${ids})"
+  native_voter_started || { etcd_members; fail "${native_host}'s member is not a started voter at etcd-only"; }
+  shims=$(native_shims)
+  echo "  containerd shims of k3s's running on ${native_host} at etcd-only: ${shims}"
+  [ "$shims" = 0 ] || fail "${shims} containerd shims still run on ${native_host} at etcd-only"
+  if native_containerd_runs; then fail "${native_host} still runs containerd at etcd-only"; fi
+  native_regrade_log | grep -F 'stopping the pods left without a kubelet at etcd-only' >/dev/null || fail "the actuator did not say it stopped the pods"
+
+  log "The stepped-down native server still votes: the cluster takes writes with a Docker server stopped"
+  docker stop "$(container 3)" >/dev/null
+  wait_for "a write through $(node_name 1) with $(node_name 3) stopped" 180 write_marker
+  docker start "$(container 3)" >/dev/null
+  wait_for "$(node_name 3) to be Ready again" 600 node_is 3 3 Ready
+
+  log "The level stays across a restart of the server unit by hand"
+  native_exec systemctl restart k3s </dev/null
+  wait_for "${native_host}'s etcd to serve again after the restart" 300 native_etcd_serving
+  wait_for "${native_host} to read etcd-only after the restart" 120 native_at_level etcd-only
+  [ "$(native_dropin_keys)" = "$native_etcd_only_keys" ] || fail "the restart lost the drop-in"
+  [ "$(native_shims)" = 0 ] || fail "a pod came back on ${native_host} after the restart at etcd-only"
+
+  log "And across the host stopping and starting"
+  docker stop "$native_host" >/dev/null
+  docker start "$native_host" >/dev/null
+  wait_for "systemd to be running in ${native_host} again" 120 native_systemd_up
+  wait_for "${native_host}'s etcd to serve again after the host started" 300 native_etcd_serving
+  wait_for "${native_host} to read etcd-only after the host started" 120 native_at_level etcd-only
+  [ "$(native_dropin_keys)" = "$native_etcd_only_keys" ] || fail "the host's start lost the drop-in"
+  [ "$(native_shims)" = 0 ] || fail "a pod came back on ${native_host} after the host started at etcd-only"
+  wait_for "${native_host}'s member to be a started voter again" 300 native_voter_started
+  [ "$(native_member_ids)" = "$ids" ] || fail "the etcd members changed across the restarts: $(native_member_ids) (was ${ids})"
+  native_unit_is fleet-regrade active || fail "fleet-regrade did not start with the host"
+
+  log "The pressure passes: the watcher steps back up by itself, one level at a time, to the same node"
+  native_exec sh -c 'printf "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\n" > /etc/grtest-psi && printf "MemTotal: 1000000 kB\nMemAvailable: 900000 kB\n" > /etc/grtest-meminfo' </dev/null
+  wait_for "${native_host} to step back up to full" 900 native_logged full
+  wait_for "the Lease to be released after ${native_host}'s step up" 120 lease_free
+  native_regrade_log | grep -F 'step up etcd-only -> control-plane' >/dev/null || { native_regrade_log; fail "the watcher did not step up through control-plane first"; }
+  native_regrade_log
+  wait_for "${native_host} to be Ready and schedulable" 300 native_node_is Ready
+  [ -z "$(native_level_label)" ] || fail "the level label is still on the Node at full"
+  [ "$(native_dropin_keys)" = "" ] || fail "the drop-in still turns something off at full: $(native_dropin_keys)"
+  [ "$(native_member_ids)" = "$ids" ] || fail "the etcd members changed after stepping up"
+  [ "$(native_exec sha256sum /etc/rancher/node/password </dev/null | cut -d' ' -f1)" = "$password" ] || fail "${native_host}'s node password changed"
+  wait_for "the DaemonSet's pod to run on ${native_host} again" 300 grtest_daemonset_ready
+  kubectl_on 1 delete daemonset grtest-native-pod >/dev/null
+
+  log "With the server at full, turning regrading off removes the unit and leaves the server running"
+  native_exec sh -c 'rm -rf /etc/systemd/system/fleet-regrade.service.d /etc/grtest-pressure.env /etc/grtest-psi /etc/grtest-meminfo && systemctl daemon-reload' </dev/null
+  before=$(native_server_started)
+  native_regrade=false
+  write_inventory hosted
+  output=$(run_role --limit "$native_host" 2>&1) || { echo "$output"; fail "turning regrading off failed"; }
+  [ "$before" = "$(native_server_started)" ] || fail "turning regrading off restarted ${native_host}'s server"
+  if native_exec test -e /etc/systemd/system/fleet-regrade.service </dev/null; then fail "the fleet-regrade unit is still installed"; fi
+  native_unit_is fleet-regrade inactive || fail "fleet-regrade still runs"
 }
 
 scenarios=("$@")
