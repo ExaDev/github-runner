@@ -124,35 +124,35 @@ def grep_finds(pattern: str, text: str) -> bool:
 
 class ShellEnvFilterTest(unittest.TestCase):
     def test_a_variable_becomes_a_quoted_export_line_and_a_pattern_that_finds_an_assignment_of_it(self) -> None:
-        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"})
+        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"}, {})
         self.assertEqual(item, {"name": "env-UV_PYTHON_DOWNLOADS", "pattern": "^[[:space:]]*(export[[:space:]]+)?UV_PYTHON_DOWNLOADS=", "line": "export UV_PYTHON_DOWNLOADS=never", "non_interactive": True})
 
     def test_the_variables_come_out_in_the_order_of_the_mapping(self) -> None:
-        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_env({"B": "1", "A": "2"})], ["env-B", "env-A"])
+        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_env({"B": "1", "A": "2"}, {})], ["env-B", "env-A"])
 
     def test_an_empty_mapping_has_no_lines(self) -> None:
-        self.assertEqual(host_tools.host_tools_shell_env({}), [])
+        self.assertEqual(host_tools.host_tools_shell_env({}, {}), [])
 
     def test_a_value_reaches_the_variable_exactly_as_given_whatever_it_holds(self) -> None:
         values = ["it's", 'say "hi"', "$HOME", "${HOME}", "`id`", "$(id)", "a b  c", "back\\slash", "tab\there", "*", "; echo injected", "", "-n", "'", "''", "\"'\"", "é"]
         for value in values:
             with self.subTest(value=value):
-                [item] = host_tools.host_tools_shell_env({"EXAMPLE": value})
+                [item] = host_tools.host_tools_shell_env({"EXAMPLE": value}, {})
                 for shell in ("sh", "bash"):
                     result = subprocess.run([shell, "-c", item["line"] + '\nprintf %s "$EXAMPLE"'], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent-home"})
                     self.assertEqual(result.stdout, value)
                     self.assertEqual(result.stderr, "")
 
     def test_a_dollar_sign_and_a_single_quote_are_quoted_and_not_expanded(self) -> None:
-        self.assertEqual(host_tools.host_tools_shell_env({"A": "$HOME"})[0]["line"], "export A='$HOME'")
-        self.assertEqual(host_tools.host_tools_shell_env({"A": "it's"})[0]["line"], "export A='it'\"'\"'s'")
+        self.assertEqual(host_tools.host_tools_shell_env({"A": "$HOME"}, {})[0]["line"], "export A='$HOME'")
+        self.assertEqual(host_tools.host_tools_shell_env({"A": "it's"}, {})[0]["line"], "export A='it'\"'\"'s'")
 
     def test_a_boolean_is_true_or_false_and_a_number_is_its_digits(self) -> None:
-        lines = {item["name"]: item["line"] for item in host_tools.host_tools_shell_env({"A": True, "B": False, "C": 3, "D": 0.5})}
+        lines = {item["name"]: item["line"] for item in host_tools.host_tools_shell_env({"A": True, "B": False, "C": 3, "D": 0.5}, {})}
         self.assertEqual(lines, {"env-A": "export A=true", "env-B": "export B=false", "env-C": "export C=3", "env-D": "export D=0.5"})
 
     def test_the_pattern_finds_an_assignment_with_or_without_export_and_not_a_comment_or_another_variable(self) -> None:
-        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"})
+        [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"}, {})
         for text in ("UV_PYTHON_DOWNLOADS=automatic", "export UV_PYTHON_DOWNLOADS=automatic", "  export   UV_PYTHON_DOWNLOADS='x'", "\texport UV_PYTHON_DOWNLOADS="):
             with self.subTest(text=text):
                 self.assertTrue(grep_finds(item["pattern"], text))
@@ -175,7 +175,78 @@ class ShellEnvFilterTest(unittest.TestCase):
         }
         for label, (env, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
-                host_tools.host_tools_shell_env(env)
+                host_tools.host_tools_shell_env(env, {})
+
+
+def shell_reads(shell: str, line: str, home: str) -> str:
+    """The value of EXAMPLE after a real shell reads a startup line, with the given home directory."""
+    result = subprocess.run([shell, "-c", line + '\nprintf %s "$EXAMPLE"'], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin:/opt/homebrew/bin", "HOME": home})
+    assert result.stderr == "", result.stderr
+    return result.stdout
+
+
+class HomeRelativeFilterTest(unittest.TestCase):
+    def test_a_path_becomes_an_export_of_the_home_directory_and_the_path_in_double_quotes(self) -> None:
+        [item] = host_tools.host_tools_shell_env({}, {"TURBO_CACHE_DIR": ".cache/turbo"})
+        self.assertEqual(item, {"name": "env-TURBO_CACHE_DIR", "pattern": "^[[:space:]]*(export[[:space:]]+)?TURBO_CACHE_DIR=", "line": 'export TURBO_CACHE_DIR="$HOME/.cache/turbo"', "non_interactive": True})
+
+    def test_the_variables_of_both_mappings_come_out_the_plain_ones_first_each_in_its_own_order(self) -> None:
+        items = host_tools.host_tools_shell_env({"B": "1", "A": "2"}, {"D": "d", "C": "c"})
+        self.assertEqual([item["name"] for item in items], ["env-B", "env-A", "env-D", "env-C"])
+
+    def test_a_path_reaches_the_variable_as_given_in_every_shell_whatever_it_holds_and_the_home_is_expanded_once(self) -> None:
+        paths = [".cache/turbo", "a b  c", "it's", 'say "hi"', "$HOME", "${HOME}", "`id`", "$(id)", "back\\slash", "\\$", "tab\there", "*", "?", "[a]", "; echo injected", "-n", "~", "~/x", "!x", "a..b", "..x", "x..", ".hidden/.also", "dir/", "./x", "é", "'", "\""]
+        homes = ["/home/example", "/home/a b", "/home/it's", '/home/"q"', "/home/$d"]
+        for path in paths:
+            [item] = host_tools.host_tools_shell_env({}, {"EXAMPLE": path})
+            for home in homes:
+                for shell in ("sh", "bash", "zsh"):
+                    with self.subTest(path=path, home=home, shell=shell):
+                        self.assertEqual(shell_reads(shell, item["line"], home), f"{home}/{path}")
+
+    def test_the_special_characters_are_escaped_and_nothing_else_is(self) -> None:
+        [item] = host_tools.host_tools_shell_env({}, {"A": 'x\\y$z`w"v !*~'})
+        self.assertEqual(item["line"], 'export A="$HOME/x\\\\y\\$z\\`w\\"v !*~"')
+
+    def test_the_pattern_finds_an_assignment_of_the_variable_already_in_a_startup_file(self) -> None:
+        [item] = host_tools.host_tools_shell_env({}, {"TURBO_CACHE_DIR": ".cache/turbo"})
+        self.assertTrue(grep_finds(item["pattern"], 'export TURBO_CACHE_DIR="$HOME/.cache/turbo"'))
+        self.assertTrue(grep_finds(item["pattern"], "TURBO_CACHE_DIR=/elsewhere"))
+        self.assertFalse(grep_finds(item["pattern"], "# export TURBO_CACHE_DIR=/elsewhere"))
+
+    def test_an_empty_mapping_has_no_lines(self) -> None:
+        self.assertEqual(host_tools.host_tools_shell_env({}, {}), [])
+
+    def test_what_is_not_a_path_below_the_home_directory_is_refused(self) -> None:
+        cases = {
+            "absolute": ({"A": "/var/cache"}, "relative to the user's home"),
+            "the root": ({"A": "/"}, "relative to the user's home"),
+            "empty": ({"A": ""}, "must not be empty"),
+            "a parent component": ({"A": "../x"}, "'..' component"),
+            "a parent component in the middle": ({"A": "a/../b"}, "'..' component"),
+            "a parent component at the end": ({"A": "a/.."}, "'..' component"),
+            "only a parent component": ({"A": ".."}, "'..' component"),
+            "a newline": ({"A": "a\nb"}, "one line"),
+            "a carriage return": ({"A": "a\rb"}, "one line"),
+            "a NUL": ({"A": "a\x00b"}, "one line"),
+            "a number": ({"A": 3}, "must be a string"),
+            "a boolean": ({"A": True}, "must be a string"),
+            "a list": ({"A": ["a"]}, "must be a string"),
+            "a null": ({"A": None}, "must be a string"),
+            "a name with a hyphen": ({"A-B": "x"}, "not a name a shell accepts"),
+            "a name that is not a string": ({1: "x"}, "not a name a shell accepts"),
+        }
+        for label, (home_relative, message) in cases.items():
+            with self.subTest(label), self.assertRaisesRegex(Exception, message):
+                host_tools.host_tools_shell_env({}, home_relative)
+
+    def test_a_mapping_that_is_not_one_is_refused(self) -> None:
+        with self.assertRaisesRegex(Exception, "home-relative shell environment must be a mapping"):
+            host_tools.host_tools_shell_env({}, [".cache"])
+
+    def test_a_variable_in_both_mappings_is_refused_and_named(self) -> None:
+        with self.assertRaisesRegex(Exception, "A is set in both"):
+            host_tools.host_tools_shell_env({"A": "x"}, {"A": "y"})
 
 
 STEM = "# {mark} ANSIBLE MANAGED BLOCK example "

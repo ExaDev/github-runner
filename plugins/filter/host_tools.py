@@ -90,21 +90,60 @@ def _env_value(name: str, value: Any) -> str:
     raise AnsibleFilterError(f"The value of {name} must be a string, a number or a boolean, not {type(value).__name__}.")
 
 
-def host_tools_shell_env(env: Any) -> list[dict[str, Any]]:
+def _env_name(name: Any) -> str:
+    """Return the name of an environment variable.
+
+    :raises AnsibleFilterError: the name is not one the shell accepts in an assignment.
+    """
+    if not isinstance(name, str) or not ENV_NAME.match(name):
+        raise AnsibleFilterError(f"{name!r} is not a name a shell accepts for an environment variable.")
+    return name
+
+
+def _export_line(name: str, word: str) -> dict[str, Any]:
+    """Return the startup line that exports a variable set to a shell word, with the pattern that finds an assignment of it already in a startup file."""
+    return {"name": f"env-{name}", "pattern": f"^[[:space:]]*(export[[:space:]]+)?{name}=", "line": f"export {name}={word}", "non_interactive": True}
+
+
+def _home_relative_value(name: str, value: Any) -> str:
+    """Return the shell word that expands to the user's home directory followed by a relative path: ``"$HOME/<path>"`` with the path escaped for double quotes.
+
+    Inside double quotes the shell expands ``$`` and the backtick and gives the backslash and the double quote a meaning, and nothing else, in sh, bash and zsh alike, so a backslash before each of those four makes the path reach the variable exactly as given. (``!`` is special only to an interactive shell reading a typed line, never to one reading a startup file.)
+
+    :raises AnsibleFilterError: the value is not a string, is empty, is absolute, has a ``..`` component, or has a newline or a NUL, which a startup file line cannot hold.
+    """
+    if not isinstance(value, str):
+        raise AnsibleFilterError(f"The home-relative path of {name} must be a string, not {type(value).__name__}.")
+    if any(char in value for char in "\n\r\x00"):
+        raise AnsibleFilterError(f"The home-relative path of {name} must be one line without a NUL.")
+    if not value:
+        raise AnsibleFilterError(f"The home-relative path of {name} must not be empty.")
+    if value.startswith("/"):
+        raise AnsibleFilterError(f"The path of {name} must be relative to the user's home directory, not absolute ({value!r}); a fixed absolute path belongs in github_runner_host_tools_shell_env.")
+    if ".." in value.split("/"):
+        raise AnsibleFilterError(f"The path of {name} must stay inside the user's home directory, so it must not have a '..' component ({value!r}).")
+    return '"$HOME/' + re.sub(r'([\\$`"])', r"\\\1", value) + '"'
+
+
+def host_tools_shell_env(env: Any, home_relative: Any) -> list[dict[str, Any]]:
     """Return the startup lines that set environment variables in a shell, in the shape host_tools_shell_integrations returns, with ``non_interactive`` true: a variable is for every shell the user's commands run in, and a non-interactive bash returns from ``~/.bashrc`` at the file's interactive guard, so the caller writes these lines ahead of everything else in the file.
 
-    Each value is quoted for the shell with ``shlex.quote``, so it reaches the variable exactly as given whatever it holds (spaces, quotes, ``$``, backticks), in zsh and in bash alike. ``pattern`` is an extended regular expression that matches a line of a startup file that already assigns the variable, outside a comment, whatever its value, so a value the user chose is never overridden, and ``name`` tells the lines apart.
+    A value in ``env`` is quoted for the shell with ``shlex.quote``, so it reaches the variable exactly as given whatever it holds (spaces, quotes, ``$``, backticks), in zsh and in bash alike. A value in ``home_relative`` is a path below the user's home directory and is written as ``"$HOME/<path>"``, so the shell works out the home directory when the file is read, which the role cannot know when it runs without gathering facts. ``pattern`` is an extended regular expression that matches a line of a startup file that already assigns the variable, outside a comment, whatever its value, so a value the user chose is never overridden, and ``name`` tells the lines apart.
 
-    :param env: a mapping of variable names to string, number or boolean values. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]`` in the mapping's order, with a dictionary for each variable. :raises AnsibleFilterError: ``env`` is not a mapping, a name is not one the shell accepts, or a value is not a single-line string, a number or a boolean.
+    :param env: a mapping of variable names to string, number or boolean values. :param home_relative: a mapping of variable names to paths relative to the user's home directory. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, the variables of ``env`` in its order and then those of ``home_relative`` in its. :raises AnsibleFilterError: an argument is not a mapping, a name is not one the shell accepts or is in both mappings, a value of ``env`` is not a single-line string, a number or a boolean, or a path of ``home_relative`` is not a non-empty relative path without a ``..`` component.
     """
     if not isinstance(env, dict):
         raise AnsibleFilterError(f"The shell environment must be a mapping, not {type(env).__name__}.")
+    if not isinstance(home_relative, dict):
+        raise AnsibleFilterError(f"The home-relative shell environment must be a mapping, not {type(home_relative).__name__}.")
+    both = [name for name in env if name in home_relative]
+    if both:
+        raise AnsibleFilterError(f"{', '.join(map(str, both))} is set in both the shell environment and the home-relative one; give each variable once.")
     lines: list[dict[str, Any]] = []
     for name, value in env.items():
-        if not isinstance(name, str) or not ENV_NAME.match(name):
-            raise AnsibleFilterError(f"{name!r} is not a name a shell accepts for an environment variable.")
-        text = _env_value(name, value)
-        lines.append({"name": f"env-{name}", "pattern": f"^[[:space:]]*(export[[:space:]]+)?{name}=", "line": f"export {name}={shlex.quote(text)}", "non_interactive": True})
+        lines.append(_export_line(name, shlex.quote(_env_value(_env_name(name), value))))
+    for name, value in home_relative.items():
+        lines.append(_export_line(name, _home_relative_value(_env_name(name), value)))
     return lines
 
 
