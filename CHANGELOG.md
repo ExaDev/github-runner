@@ -1,3 +1,10 @@
+## [2.32.0](https://github.com/ExaDev/github-runner/compare/v2.31.0...v2.32.0) (2026-11-03)
+
+### Features
+
+* **arc:** leave a role swap's nodes and regraded servers alone in node-recovery ([d2ce821](https://github.com/ExaDev/github-runner/commit/d2ce8211689008ca1ca5054c638904717cd79e71)), closes [#183](https://github.com/ExaDev/github-runner/issues/183)
+* **arc:** let node-recovery read the regrade Lease and take the regrade level label ([5d692cf](https://github.com/ExaDev/github-runner/commit/5d692cfd3e7fbab5e7bbaa9b32c343a260236c36))
+
 ## [2.31.0](https://github.com/ExaDev/github-runner/compare/v2.30.2...v2.31.0) (2026-11-03)
 
 ### Features
