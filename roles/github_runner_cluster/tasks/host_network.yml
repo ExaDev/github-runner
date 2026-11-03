@@ -136,80 +136,9 @@
           recreating its node. Move one node at a time (--limit to one host). Nothing was changed.
       when: github_runner_cluster_network_movers | trim | split | length > 1
 
-    - name: Read the cluster's nodes and this node's pods through each server of the inventory
-      # Through the image's kubectl in each server's own container (as running_version.yml reads the cluster), this one first, each on its own host with its pinned Docker context, so the read needs no kubeconfig or published port on the host and no particular server to be up; each read is bounded by github_runner_cluster_cluster_read_timeout as a whole and as kubectl's --request-timeout. The first server that answers is the one the checks below use; plugins/filter/cluster_guard.py's cluster_guard_state says why for each when none does.
-      ansible.builtin.shell: |
-        set -eu
-        nodes=$(docker exec "$container" kubectl get nodes --request-timeout="${timeout}s" -o json)
-        pods=$(docker exec "$container" kubectl get pods --all-namespaces --request-timeout="${timeout}s" --field-selector "spec.nodeName=${node}" -o json)
-        printf '{"nodes": %s, "pods": %s}\n' "$nodes" "$pods"
-      environment: >-
-        {{ ({'DOCKER_CONTEXT': github_runner_cluster_guard_context} if github_runner_cluster_guard_context | length > 0 else {})
-           | combine({'container': github_runner_cluster_guard_container, 'node': github_runner_cluster_effective_node_name,
-                      'timeout': github_runner_cluster_cluster_read_timeout | string}) }}
-      delegate_to: "{{ item }}"
-      loop: >-
-        {{ ([inventory_hostname] if github_runner_cluster_effective_node_role == 'server' else [])
-           + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
-              | map(attribute='key') | reject('equalto', inventory_hostname) | list) }}
-      vars:
-        github_runner_cluster_guard_container: >-
-          {{ github_runner_cluster_container_name if item == inventory_hostname
-             else hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s') }}
-        github_runner_cluster_guard_context: >-
-          {{ (github_runner_cluster_docker_context | default('') if item == inventory_hostname
-              else hostvars[item].github_runner_cluster_docker_context | default('')) | trim }}
-      register: github_runner_cluster_guard_reads
-      changed_when: false
-      failed_when: false
-      ignore_unreachable: true
-      check_mode: false
-      timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
-
-    - name: Fail if no server of the inventory could be read
-      vars:
-        github_runner_cluster_guard_read: "{{ github_runner_cluster_guard_reads.results | exadev.github_runner.cluster_guard_state }}"
-      ansible.builtin.fail:
-        msg: >-
-          Not moving {{ github_runner_cluster_effective_node_name }} to the {{ github_runner_cluster_network_mode }} network,
-          which recreates its container: {{ github_runner_cluster_guard_read.problem }} Nothing was changed.
-      when: github_runner_cluster_guard_read.state is none
-
-    - name: Read etcd's health through every other server's own API server
-      # kubectl inside each server's container asks that server's API server, whose /readyz/etcd answers "ok" only while its etcd serves; on that host, with its pinned Docker context. Bounded like the reads above by github_runner_cluster_cluster_read_timeout, as a whole and as the API call's --request-timeout. A host that cannot be reached, or a read that fails or runs out of time, counts as unhealthy rather than failing here, so the refusal below names it.
-      ansible.builtin.command:
-        argv: [docker, exec, "{{ hostvars[item.key].github_runner_cluster_container_name | default('github-runner-k3s') }}", kubectl, get, "--request-timeout={{ github_runner_cluster_cluster_read_timeout | int }}s", --raw, /readyz/etcd]
-      environment: >-
-        {{ {'DOCKER_CONTEXT': hostvars[item.key].github_runner_cluster_docker_context}
-           if hostvars[item.key].github_runner_cluster_docker_context | default('') | length > 0 else {} }}
-      delegate_to: "{{ item.key }}"
-      loop: >-
-        {{ github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
-           | rejectattr('key', 'equalto', inventory_hostname) | list }}
-      loop_control:
-        label: "{{ item.value.node_name }}"
-      register: github_runner_cluster_guard_etcd
-      changed_when: false
-      failed_when: false
-      ignore_unreachable: true
-      check_mode: false
-      timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
-      when: github_runner_cluster_effective_node_role == 'server'
-
     - name: Refuse to recreate the node on the other network while the cluster needs it
+      ansible.builtin.include_tasks: restart_guard.yml
       vars:
-        github_runner_cluster_guard: "{{ (github_runner_cluster_guard_reads.results | exadev.github_runner.cluster_guard_state).state }}"
-        github_runner_cluster_guard_blockers: >-
-          {{ github_runner_cluster_guard.nodes
-             | exadev.github_runner.cluster_restart_blockers(github_runner_cluster_guard.pods,
-                                                             github_runner_cluster_effective_node_name,
-                                                             github_runner_cluster_topology.hosts | dict2items
-                                                             | selectattr('value.role', 'equalto', 'server')
-                                                             | map(attribute='value.node_name') | list,
-                                                             github_runner_cluster_guard_etcd.results | default([])) }}
-      ansible.builtin.fail:
-        msg: >-
-          Not moving {{ github_runner_cluster_effective_node_name }} to the {{ github_runner_cluster_network_mode }} network,
-          which recreates its container: {{ github_runner_cluster_guard_blockers | join(' ') }} Nothing was changed; run again
-          once that has cleared.
-      when: github_runner_cluster_guard_blockers | length > 0
+        github_runner_cluster_restart_guard_action: >-
+          moving {{ github_runner_cluster_effective_node_name }} to the {{ github_runner_cluster_network_mode }} network, which recreates its container
+        github_runner_cluster_restart_guard_runners: true
