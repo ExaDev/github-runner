@@ -613,6 +613,20 @@ class RingTest(ProbeCase):
         self.assertEqual(kept[0]["t"], 1001, "the oldest was dropped")
         self.assertGreater(kept[-1]["t"], 1000 + WINDOW_SAMPLES)
 
+    def test_an_entry_too_large_for_one_argument_is_read_and_extended_whole(self) -> None:
+        # One argument to a process is limited to 128 KiB on Linux; an entry of a voter in a large cluster, with a connect time to every other voter in each sample, passes that.
+        peers = {f"peer-with-a-long-node-name-{i:03d}": 1.234 for i in range(60)}
+        big = [sample(1000 + i, tcp=peers) for i in range(WINDOW_SAMPLES)]
+        self.cluster.set_probes({"me": {**entry(big), "fsync_at": int(time.time())}})
+        self.assertGreater(len(json.dumps(self.cluster.probes()["me"])), 128 * 1024)
+        completed = self.probe()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        kept = self.cluster.probes()["me"]["samples"]
+        self.assertEqual(len(kept), WINDOW_SAMPLES)
+        self.assertEqual(kept[0]["t"], 1001)
+        self.assertEqual(kept[0]["tcp"], peers)
+        self.assertGreater(kept[-1]["t"], 1000 + WINDOW_SAMPLES)
+
     def test_each_node_patches_only_its_own_key(self) -> None:
         other = entry([sample(5)], "other-id")
         self.cluster.set_probes({"other": other, "me": {**entry([]), "fsync_at": int(time.time())}})

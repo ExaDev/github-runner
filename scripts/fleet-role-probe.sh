@@ -156,14 +156,16 @@ report() {
   fi
 
   patch="$(mktemp)"
-  jq -n -L "$MODULES" --arg node "$NODE_NAME" --argjson entry "$entry" --argjson now "$now" --argjson tcp "$tcp" --argjson etcd "$etcd" \
+  # The entry goes in on standard input, never as an argument: it holds a window of samples, and one argument is limited to a fraction of the argument space (128 KiB on Linux).
+  jq -L "$MODULES" --arg node "$NODE_NAME" --argjson now "$now" --argjson tcp "$tcp" --argjson etcd "$etcd" \
     --argjson restarted "$restarted" --argjson cumulative "$cumulative" --argjson etcd_id "$etcd_id" --argjson fsync "$fsync" --argjson fsync_at "$fsync_at" \
     --arg psi "$psi" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" --arg iface "$iface" --arg link "$(link_type "$iface")" '
     include "fleet-role-stats";
     def number: if . == "" then null else tonumber end;
-    {t: $now, tcp: $tcp, etcd: $etcd, restarted: $restarted, psi: ($psi | number), avail_kb: ($avail | number), total_kb: ($total | number),
+    . as $entry
+    | {t: $now, tcp: $tcp, etcd: $etcd, restarted: $restarted, psi: ($psi | number), avail_kb: ($avail | number), total_kb: ($total | number),
      link: $link, iface: (if $iface == "" then null else $iface end), fsync_ms: $fsync} as $sample
-    | {data: {($node): ({etcd_id: $etcd_id, last: $cumulative, fsync_at: $fsync_at, samples: ((($entry.samples // []) + [$sample]) | .[-window_samples:])} | tojson)}}' > "$patch"
+    | {data: {($node): ({etcd_id: $etcd_id, last: $cumulative, fsync_at: $fsync_at, samples: ((($entry.samples // []) + [$sample]) | .[-window_samples:])} | tojson)}}' <<< "$entry" > "$patch"
   kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null
   rm -f "$patch"
 }
