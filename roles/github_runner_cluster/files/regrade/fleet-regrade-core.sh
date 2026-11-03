@@ -111,10 +111,45 @@ next_level_up() {
   echo "${LEVELS[$((position - 1))]}"
 }
 
-# kubectl against the cluster, as an administrator. KUBECTL may be more than one word (`k3s kubectl`). KUBE_SERVER, when set, names the API server to use instead of the one in the kubeconfig: a node that has switched its own API server off still has to reach the cluster's.
+# kubectl against the cluster, as an administrator. KUBECTL may be more than one word (`k3s kubectl`). KUBE_SERVER, when set, names the API server to use instead of the one in the kubeconfig: select_api_server sets it from KUBE_SERVERS, since a node that has switched its own API server off still has to reach the cluster's.
 kubectl_() {
   # shellcheck disable=SC2086 # KUBECTL is a command that may take a subcommand, so it is split on purpose.
   $KUBECTL --kubeconfig "$KUBECONFIG_PATH" ${KUBE_SERVER:+--server "$KUBE_SERVER"} "$@"
+}
+
+# How long one candidate API server is given to answer /readyz, in seconds. A serving API server answers it from memory, so one that takes longer is not one to drive a step through; the bound is what a candidate that drops packets (a host off the mesh) costs before the next is asked, instead of the connection's own retry time.
+READYZ_TIMEOUT_SECONDS=5
+
+# Succeeds when the API server $1 (a URL, or empty for the kubeconfig's own) answers /readyz.
+api_ready() {
+  local KUBE_SERVER=$1
+  kubectl_ get --raw=/readyz --request-timeout="${READYZ_TIMEOUT_SECONDS}s" > /dev/null 2>&1
+}
+
+# Sets KUBE_SERVER to the first of KUBE_SERVERS whose /readyz answers, and fails, leaving it as it was, when none does. KUBE_SERVERS is a list of API server URLs separated by spaces, every other server and every host that may become one, by the names their certificates carry and never this node's own: the servers change at run time, so the first of the inventory may be an agent by now, and the next that serves is used. Unset or empty, the kubeconfig's own server is the only candidate. Called before every coordinated step and again whenever a step waits for the API, so each step goes through a server that is serving at the time.
+select_api_server() {
+  local candidate
+  if [ -z "${KUBE_SERVERS:-}" ]; then
+    api_ready '' || return 1
+    KUBE_SERVER=''
+    return 0
+  fi
+  for candidate in $KUBE_SERVERS; do
+    if api_ready "$candidate"; then
+      KUBE_SERVER=$candidate
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The candidates select_api_server tries, as a refusal names them.
+api_candidates_text() {
+  if [ -n "${KUBE_SERVERS:-}" ]; then
+    echo "$KUBE_SERVERS"
+  else
+    echo "the kubeconfig's own server"
+  fi
 }
 
 # Taints, cordons and evicts everything but daemonsets, while the API server is still up. Both steps are idempotent, so each step down runs it again before anything is switched off. The taint is applied here and not left to the node's own configuration, which takes effect only when a node registers. --force evicts pods that no controller owns too: the node is shedding load, and a pod that blocks the drain would stop the step.
@@ -130,8 +165,8 @@ restore_workloads() {
 
 wait_for_api() {
   local deadline=$((SECONDS + OPERATION_TIMEOUT_SECONDS))
-  until kubectl_ get --raw=/readyz > /dev/null 2>&1; do
-    [ "$SECONDS" -lt "$deadline" ] || die "The API server did not become ready within ${OPERATION_TIMEOUT_SECONDS}s."
+  until select_api_server; do
+    [ "$SECONDS" -lt "$deadline" ] || die "No API server became ready within ${OPERATION_TIMEOUT_SECONDS}s (tried: $(api_candidates_text))."
     sleep 2
   done
 }
@@ -231,13 +266,17 @@ peers_ready() {
   fi
 }
 
-# Runs a command only while this node may transition: its peers are Ready and it holds the Lease. The Lease is released afterwards whether or not the command succeeded, and the command's status is the result.
+# Runs a command only while this node may transition: an API server answers, its peers are Ready and it holds the Lease. The Lease is released afterwards whether or not the command succeeded, through an API server that answers then (the one the step started with may have gone away meanwhile), and the command's status is the result.
 coordinated() {
   local status=0
+  if ! select_api_server; then
+    log "cannot step: no API server answers (tried: $(api_candidates_text))"
+    return 1
+  fi
   peers_ready || return 1
   acquire_lease || return 1
   "$@" || status=$?
-  release_lease || log "the lease could not be released; it expires on its own"
+  { select_api_server && release_lease; } || log "the lease could not be released; it expires on its own"
   return "$status"
 }
 

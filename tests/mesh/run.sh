@@ -811,9 +811,9 @@ assert_released() {
   if regrade_on "$1" cat "$2" | grep -F 'lease could not be released' >/dev/null; then regrade_on "$1" cat "$2"; fail "$(node_name "$1") could not release the Lease"; fi
 }
 node_is() { [ "$(node_status "$1" "$2")" = "$3" ]; }
-# Whether the regrade service of node $1 can read the cluster's nodes as a step does, with the kubectl and kubeconfig of its own server's container and the API of another server. A recreated container has no kubeconfig until its k3s has written one, some seconds after the container starts, and a step before then is refused for it.
+# Whether the regrade service of node $1 can read the cluster's nodes as a step does, with the kubectl and kubeconfig of its own server's container and the API of another server (the first of its candidates, which every other server is up to serve here). A recreated container has no kubeconfig until its k3s has written one, some seconds after the container starts, and a step before then is refused for it.
 # shellcheck disable=SC2016 # The expansions are for the shell in the service container, which sources the service's own settings and splits KUBECTL, a command of several words, on purpose.
-can_list_nodes() { regrade_on "$1" sh -c '. /usr/local/lib/fleet-regrade/fleet-regrade.env && $KUBECTL --kubeconfig "$KUBECONFIG_PATH" --server "$KUBE_SERVER" get nodes' >/dev/null 2>&1; }
+can_list_nodes() { regrade_on "$1" sh -c '. /usr/local/lib/fleet-regrade/fleet-regrade.env && $KUBECTL --kubeconfig "$KUBECONFIG_PATH" --server "${KUBE_SERVERS%% *}" get nodes' >/dev/null 2>&1; }
 
 # The numbers of the nodes whose regrade service reports a level below full. A read that gives no level, or unknown, is not a step: a test node's k3s container can restart by itself under the strain, and its status then reads unknown or fails for a moment, which says nothing about whether the server stepped.
 stepped_nodes() {

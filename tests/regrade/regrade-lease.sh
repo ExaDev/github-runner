@@ -26,8 +26,8 @@ NOW=1000000000
 now_epoch() { echo "$NOW"; }
 lease="$FAKE_DIR/lease.json"
 reset_cluster() {
-  rm -f "$lease" "$FAKE_DIR/calls"
-  unset FAKE_LEASE_READ_ERROR FAKE_NODES_ERROR FAKE_CREATE_RACE FAKE_REPLACE_CONFLICT
+  rm -f "$lease" "$FAKE_DIR/calls" "$FAKE_DIR/servers" "$FAKE_DIR/unready"
+  unset FAKE_LEASE_READ_ERROR FAKE_NODES_ERROR FAKE_CREATE_RACE FAKE_REPLACE_CONFLICT KUBE_SERVERS KUBE_SERVER
   nodes_json True True
 }
 # The voters: peer-a and peer-b with the given Ready condition statuses (True, False or Unknown), and this node, Ready.
@@ -123,7 +123,7 @@ reset_cluster
 peers_ready
 check "peers: only etcd-voting nodes are asked about" grep -qF -- "--selector node-role.kubernetes.io/etcd=true" "$FAKE_DIR/calls"
 
-# Coordinated: the peers first, then the lease, then the command, then the release.
+# Coordinated: an API server that answers first, then the peers, then the lease, then the command, then the release.
 ran=''
 step_recorder() { ran="$ran step"; }
 failing_step() { ran="$ran failing"; return 3; }
@@ -152,6 +152,72 @@ write_lease other-node "$((NOW - 10))"
 run_coordinated step_recorder || true
 check "lease held elsewhere: the command does not run" test "$ran" = ""
 check "lease held elsewhere: it is left as it was" test "$(holder)" = other-node
+
+# Which API server a step goes through: the first of the candidates whose /readyz answers, never the kubeconfig's own (this node's) while there are candidates, chosen again for the release and whenever a step waits for the API.
+first_api=https://first.example.test:6443
+second_api=https://second.example.test:6443
+unready() { printf '%s\n' "$@" > "$FAKE_DIR/unready"; }
+# The servers the calls other than the readiness probes went to, each once, in the order first used.
+used_servers() { grep -v ' get --raw=/readyz$' "$FAKE_DIR/servers" | cut -d' ' -f1 | awk '!seen[$0]++' | tr '\n' ' '; }
+to_own_server() { grep -q '^default ' "$FAKE_DIR/servers"; }
+
+reset_cluster
+KUBE_SERVERS="$first_api $second_api"
+run_coordinated step_recorder
+check "candidates: the step runs through the first that answers" test "$ran" = " step"
+check "candidates: every call goes to it" test "$(used_servers)" = "$first_api "
+check_not "candidates: nothing goes to this node's own server" to_own_server
+
+reset_cluster
+KUBE_SERVERS="$first_api $second_api"
+unready "$first_api"
+run_coordinated step_recorder
+check "a candidate that does not answer is passed over" test "$ran" = " step"
+check "and every call goes to the next" test "$(used_servers)" = "$second_api "
+check "the lease is given back through it" test "$(holder)" = ""
+
+reset_cluster
+KUBE_SERVERS="$first_api $second_api"
+unready "$first_api" "$second_api"
+ran=''
+refused_output=$(coordinated step_recorder 2>&1) && refused_status=0 || refused_status=$?
+check_not "no candidate answers: the step is refused" test "$refused_status" = 0
+check "and the command does not run" test "$ran" = ""
+check "and no lease is taken" test ! -e "$lease"
+check "and the refusal names the candidates" grep -Fq "no API server answers (tried: $first_api $second_api)" <<< "$refused_output"
+check_not "and this node's own server is never tried in their place" to_own_server
+
+reset_cluster
+KUBE_SERVERS="$first_api $second_api"
+first_goes_away() { ran="$ran step"; unready "$first_api"; }
+run_coordinated first_goes_away
+check "a server that goes away during a step: the release goes through the next" test "$(holder)" = ""
+check "and the calls after it went there" test "$(used_servers)" = "$first_api $second_api "
+
+reset_cluster
+run_coordinated step_recorder
+check "no candidates: the kubeconfig's own server is used" test "$(used_servers)" = "default "
+
+reset_cluster
+unready default
+run_coordinated step_recorder || true
+check "no candidates and the kubeconfig's own does not answer: the step is refused" test "$ran" = ""
+
+reset_cluster
+KUBE_SERVERS="$first_api $second_api"
+unready "$first_api"
+OPERATION_TIMEOUT_SECONDS=1 wait_for_api
+# shellcheck disable=SC2153 # KUBE_SERVER is the core's, set by select_api_server.
+check "waiting for the API settles on a candidate that answers" test "$KUBE_SERVER" = "$second_api"
+unready "$first_api" "$second_api"
+waits_out() { (OPERATION_TIMEOUT_SECONDS=1 wait_for_api) > /dev/null 2>&1; }
+check_not "waiting for the API gives up when none answers" waits_out
+gave_up_text() {
+  local output
+  output=$(OPERATION_TIMEOUT_SECONDS=1 wait_for_api 2>&1) && return 1
+  grep -Fq "No API server became ready within 1s (tried: $first_api $second_api)" <<< "$output"
+}
+check "and says which it tried" gave_up_text
 
 # Two nodes never step at once: while one holds the lease, a second asking as another node is refused.
 reset_cluster

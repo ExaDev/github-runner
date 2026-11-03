@@ -27,7 +27,7 @@ CONTROL_PLANE_TAINT=node-role.kubernetes.io/control-plane=true:NoSchedule
 NODE_CONTAINER=test-k3s
 KUBECTL="docker exec -i test-k3s kubectl"
 KUBECONFIG_PATH=/etc/rancher/k3s/k3s.yaml
-KUBE_SERVER=https://other.example.test:6443
+KUBE_SERVERS="https://other.example.test:6443 https://another.example.test:6443"
 LEVEL_LABEL=example.test/regrade-level
 ENV
 export FLEET_REGRADE_ENV=$work/env LEVEL_FILE=$work/node/level-file STARTED_FILE=$work/node/started-file
