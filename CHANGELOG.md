@@ -1,3 +1,17 @@
+## [2.28.1](https://github.com/ExaDev/github-runner/compare/v2.28.0...v2.28.1) (2026-11-03)
+
+### Bug Fixes
+
+* **cluster:** wait only for the nodes the inventory manages ([e0cdba7](https://github.com/ExaDev/github-runner/commit/e0cdba7df74cd3505921c7a59c985ccf2ae3a351))
+
+### Documentation
+
+* **cluster:** say which nodes the wait for Ready covers ([dbc4390](https://github.com/ExaDev/github-runner/commit/dbc4390fd696d7f1ae9b9439552fee07e6fecc13))
+
+### Tests
+
+* **cluster:** run the wait for nodes and its rescue against a kubectl stand-in ([52ae6b1](https://github.com/ExaDev/github-runner/commit/52ae6b1abb97fbe44f46f9b07457013008511342))
+
 ## [2.28.0](https://github.com/ExaDev/github-runner/compare/v2.27.2...v2.28.0) (2026-11-03)
 
 ### Features
