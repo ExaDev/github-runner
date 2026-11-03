@@ -108,7 +108,7 @@ def cluster_k3s_version_change_blockers(k3s_version: Any, node_name: Any, own_re
     :param node_name: this host's node name: its container, and its own entry in the node list, are this node.
     :param own_report: what ``k3s --version`` printed in this node's running container (for example "k3s version v1.34.1+k3s1 (24fc436e)"), or an empty string when it does not run.
     :param server_reads: the loop results of reading the cluster through each server of the inventory (tasks/running_version.yml), each with its host as ``item`` and ``stdout`` either "stopped" or "running" followed by "<node> <kubeletVersion> <control-plane label>" lines (the label "true" on a server, empty on an agent); an empty list when the inventory holds no server.
-    :param node_role: this host's role, "server" or "agent".
+    :param node_role: this host's role as the inventory gives it, "server" or "agent". Where the cluster lists this node, its live control-plane label decides instead, since a host's role can change at run time (a native host switched between its server and agent units).
     :param builds: whether this run builds the node's image (it is missing), which is when an agent's kubelet would take the pinned version.
     :returns: one sentence per rule broken. A version that cannot be read is a problem too, since the check would otherwise pass on what it never saw, and so is a cluster that some server runs but no server could be read through.
     """
@@ -126,9 +126,7 @@ def cluster_k3s_version_change_blockers(k3s_version: Any, node_name: Any, own_re
     if unread and not answered:
         problems.append(f"The cluster could not be read through any server of the inventory, so what it runs cannot be told: {'; '.join(unread)}.")
     # (source, version, is this node, is a server)
-    running: list[tuple[str, str, bool, bool]] = []
-    if own_report.strip():
-        running.append((f"This node's own container ({node_name})", own_report.strip(), True, node_role == "server"))
+    listed: list[tuple[str, str, bool, bool]] = []
     seen: set[str] = set()
     for lines in answered:
         for line in lines:
@@ -136,7 +134,14 @@ def cluster_k3s_version_change_blockers(k3s_version: Any, node_name: Any, own_re
             if not fields or fields[0] in seen:
                 continue
             seen.add(fields[0])
-            running.append((f"Node {fields[0]}", fields[1] if len(fields) > 1 else "", fields[0] == str(node_name), len(fields) > 2 and fields[2] == "true"))
+            listed.append((f"Node {fields[0]}", fields[1] if len(fields) > 1 else "", fields[0] == str(node_name), len(fields) > 2 and fields[2] == "true"))
+    live_self = [is_server for _, _, is_self, is_server in listed if is_self]
+    if live_self:
+        node_role = "server" if live_self[0] else "agent"
+    running: list[tuple[str, str, bool, bool]] = []
+    if own_report.strip():
+        running.append((f"This node's own container ({node_name})", own_report.strip(), True, node_role == "server"))
+    running.extend(listed)
     target = _release(pinned)
     for source, version, is_self, is_server in running:
         found = RUNNING_VERSION.search(version)
