@@ -980,6 +980,15 @@ start_native_host() {
 
 native_exec() { docker exec -i "$native_host" "$@"; }
 native_systemd_up() { case "$(native_exec systemctl is-system-running 2>/dev/null)" in running | degraded) return 0 ;; *) return 1 ;; esac; }
+# Whether every Docker server's own API server reports ready (/readyz through its own container) and every Docker node is Ready. The role's first start of a server returns once Compose has started its container, which is before its API server serves, so a play that reads the cluster straight after (the native host's version check reads through every server, and refuses when none answers) waits for this first.
+docker_servers_serving() {
+  local index
+  for index in $(seq 1 "$node_count"); do
+    [ "$(kubectl_on "$index" get --raw /readyz 2>/dev/null </dev/null)" = ok ] || return 1
+  done
+  [ "$(kubectl_on 1 get nodes --no-headers 2>/dev/null </dev/null | grep -c ' Ready ')" = "$node_count" ]
+}
+
 # node_status names a Docker node by its index; the native host's node is named for the host.
 native_node_ready() { [ "$(kubectl_on 1 get node "$native_host" --no-headers 2>/dev/null | awk '{print $2}')" = Ready ]; }
 native_unit_is() { [ "$(native_exec systemctl is-active "$1" </dev/null 2>/dev/null)" = "$2" ]; }
@@ -1031,6 +1040,9 @@ scenario_native_server() {
   # A play runs a native host's tasks before any Docker host's (the role's first task includes them, and Ansible's linear strategy runs an include for its hosts while the others wait), so the servers a native node joins are brought up first, as the role README says.
   log "Bringing up three Docker servers, then the native host as an agent"
   run_role --limit "$(node_name 1),$(node_name 2),$(node_name 3)"
+  # Said either way, so the log shows whether this run's role returned before its servers served, which is the race the wait closes.
+  if docker_servers_serving; then log "The Docker servers already serve as the role returns"; else log "The Docker servers do not serve yet as the role returns; waiting"; fi
+  wait_for "every Docker server's API to serve and every Docker node to be Ready" 600 docker_servers_serving
   run_role --limit "$native_host"
   wait_for "${native_host} to be Ready as an agent" 300 native_node_ready
   native_unit_is k3s-agent active || fail "${native_host} does not run k3s-agent"
