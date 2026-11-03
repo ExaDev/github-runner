@@ -1,3 +1,9 @@
+## [2.30.1](https://github.com/ExaDev/github-runner/compare/v2.30.0...v2.30.1) (2026-11-03)
+
+### Bug Fixes
+
+* **ci:** deal unit-test shards by the work each module does ([e779aa8](https://github.com/ExaDev/github-runner/commit/e779aa842f29cedb343c6f42a5448997e3fc449a))
+
 ## [2.30.0](https://github.com/ExaDev/github-runner/compare/v2.29.0...v2.30.0) (2026-11-03)
 
 ### Features
