@@ -1,0 +1,78 @@
+---
+# Puts the tailscale Homebrew formula where the caller wants it: installed, or installed and at its latest release (github_runner_macos_host_tailscale_formula_latest), and sets github_runner_macos_host_tailscale_formula_changed to whether Homebrew had to install or upgrade it. Homebrew's link step is not part of what the role needs, because the role runs the formula's binaries from its keg (github_runner_macos_host_tailscale_formula_bin, the stable opt path, which Homebrew points at the newest keg before it links anything), never from the prefix's bin directory. That directory can hold the standalone app's wrapper script as /usr/local/bin/tailscale, and Homebrew then installs the keg, removes every link it made and exits non-zero ("The `brew link` step did not complete successfully"). So the outcome is judged by the formula that Homebrew reports afterwards and not by its exit status: a keg that is installed (and current, when asked) is a success whatever the link step said, and anything else fails with Homebrew's own output.
+
+- name: Read the formula's releases
+  ansible.builtin.command:
+    argv: ["{{ github_runner_macos_host_effective_prefix }}/bin/brew", info, --json=v2, tailscale]
+  environment:
+    PATH: "{{ github_runner_macos_host_path }}"
+  register: github_runner_macos_host_tailscale_formula_before
+  changed_when: false
+  check_mode: false
+
+- name: Work out what the formula needs
+  ansible.builtin.set_fact:
+    # An installed keg that is behind is outdated whether or not it is linked, so a keg that an earlier upgrade left unlinked is not upgraded again.
+    github_runner_macos_host_tailscale_formula_action: >-
+      {{ 'install' if (github_runner_macos_host_tailscale_formula_before.stdout | from_json).formulae[0].installed | length == 0
+      else ('upgrade' if github_runner_macos_host_tailscale_formula_latest | bool
+      and (github_runner_macos_host_tailscale_formula_before.stdout | from_json).formulae[0].outdated | bool else '') }}
+
+- name: Install or upgrade the formula
+  # Only the tailscale formula is named, so no other formula is upgraded. The index was refreshed (or deliberately not) before this, so Homebrew is not to refresh it again.
+  ansible.builtin.command:
+    argv: ["{{ github_runner_macos_host_effective_prefix }}/bin/brew", "{{ github_runner_macos_host_tailscale_formula_action }}", tailscale]
+  environment:
+    PATH: "{{ github_runner_macos_host_path }}"
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+  register: github_runner_macos_host_tailscale_formula_run
+  # Judged by the formula afterwards, below.
+  failed_when: false
+  changed_when: true
+  when:
+    - github_runner_macos_host_tailscale_formula_action | length > 0
+    - not ansible_check_mode
+
+- name: Report the formula a real run would install or upgrade
+  ansible.builtin.debug:
+    msg: "brew {{ github_runner_macos_host_tailscale_formula_action }} tailscale"
+  changed_when: true
+  when:
+    - github_runner_macos_host_tailscale_formula_action | length > 0
+    - ansible_check_mode
+
+- name: Read the formula's releases again
+  ansible.builtin.command:
+    argv: ["{{ github_runner_macos_host_effective_prefix }}/bin/brew", info, --json=v2, tailscale]
+  environment:
+    PATH: "{{ github_runner_macos_host_path }}"
+  register: github_runner_macos_host_tailscale_formula_after
+  changed_when: false
+  when: github_runner_macos_host_tailscale_formula_run is not skipped
+
+- name: Check that the formula is where it was wanted
+  ansible.builtin.assert:
+    that:
+      - (github_runner_macos_host_tailscale_formula_after.stdout | from_json).formulae[0].installed | length > 0
+      - not (github_runner_macos_host_tailscale_formula_latest | bool and (github_runner_macos_host_tailscale_formula_after.stdout | from_json).formulae[0].outdated | bool)
+    fail_msg: >-
+      brew {{ github_runner_macos_host_tailscale_formula_action }} tailscale exited {{ github_runner_macos_host_tailscale_formula_run.rc }}
+      and left the formula {{ 'not installed' if (github_runner_macos_host_tailscale_formula_after.stdout | from_json).formulae[0].installed | length == 0 else 'outdated' }}:
+      {{ (github_runner_macos_host_tailscale_formula_run.stderr | trim) or (github_runner_macos_host_tailscale_formula_run.stdout | trim) }}
+    quiet: true
+  when: github_runner_macos_host_tailscale_formula_run is not skipped
+
+- name: Say that Homebrew did not link the formula
+  # The keg is what the role runs, so this is information and not a failure.
+  ansible.builtin.debug:
+    msg: >-
+      brew {{ github_runner_macos_host_tailscale_formula_action }} tailscale exited {{ github_runner_macos_host_tailscale_formula_run.rc }} after installing the formula, which is not linked into
+      {{ github_runner_macos_host_effective_prefix }}/bin (a file there is in the way, such as the standalone app's wrapper script); the role runs the formula from
+      {{ github_runner_macos_host_tailscale_formula_bin }}: {{ github_runner_macos_host_tailscale_formula_run.stderr | trim }}
+  when:
+    - github_runner_macos_host_tailscale_formula_run is not skipped
+    - github_runner_macos_host_tailscale_formula_run.rc != 0
+
+- name: Note whether the formula changed
+  ansible.builtin.set_fact:
+    github_runner_macos_host_tailscale_formula_changed: "{{ github_runner_macos_host_tailscale_formula_action | length > 0 }}"

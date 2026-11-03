@@ -73,7 +73,7 @@ argument_specs:
       github_runner_macos_host_tailscale_update:
         type: bool
         default: true
-        description: "Whether the role keeps the Tailscale software it finds current: the Homebrew formula tailscale at its latest release, the system daemon refreshed (tailscaled install-system-daemon) when it differs from the formula or the running daemon differs from the installed one, and the standalone app too when it is installed as the Homebrew cask. Nothing is installed that is not already, and no tailnet is joined. Skipped when github_runner_macos_host_tailscale is false."
+        description: "Whether the role keeps the Tailscale software it finds current: the Homebrew formula tailscale at its latest release (a keg that Homebrew installed but could not link into the prefix counts), the system daemon refreshed (tailscaled install-system-daemon) when it differs from the formula or the running daemon differs from the installed one, and the standalone app too when it is installed as the Homebrew cask and its bundle is behind the cask's release. Nothing is installed that is not already, and no tailnet is joined. Skipped when github_runner_macos_host_tailscale is false."
       github_runner_macos_host_tailscale_daemon_binary:
         type: path
         default: /usr/local/bin/tailscaled
@@ -82,6 +82,10 @@ argument_specs:
         type: str
         default: tailscale-app
         description: "The Homebrew cask of Tailscale's standalone app, kept current only when it is installed. Not a setting, and a variable only so the tests can point it at a stand-in."
+      github_runner_macos_host_tailscale_app_bundle:
+        type: path
+        default: /Applications/Tailscale.app
+        description: "Where the Homebrew cask puts Tailscale's standalone app, whose bundle says which release is installed, since the app updates itself and Homebrew's own record can be older. Not a setting, and a variable only so the tests can point it at a stand-in."
       github_runner_macos_host_tailscale_auth_key:
         type: str
         default: ""
