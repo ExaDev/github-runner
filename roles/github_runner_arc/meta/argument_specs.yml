@@ -376,8 +376,8 @@ argument_specs:
         description: Image the node recovery watcher runs, pulled without a pull Secret.
       github_runner_arc_role_controller_enabled:
         type: bool
-        default: false
         description:
+          - Whether to install the role controller. Defaults to the cluster role's github_runner_cluster_role_controller when that is defined, else false.
           - Install the role controller, a `fleet-role-probe` DaemonSet that measures on every node with a kubelet what decides whether a host is fit to hold an etcd vote, and a `fleet-role` Deployment that reports which eligible hosts are fit and which swap of an unfit voter for a fit standby it would make.
           - It only reports. Its writes are its own two ConfigMaps; its ClusterRoles can get and list nodes and nothing else. false removes both, their RBAC and their ConfigMaps.
       github_runner_arc_role_controller_image:

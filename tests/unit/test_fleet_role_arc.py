@@ -246,6 +246,35 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual((resources["requests"]["ephemeral-storage"], resources["limits"]["ephemeral-storage"]), ("64Mi", "128Mi"))
 
 
+class NamesTest(unittest.TestCase):
+    """Names that issue #184 fixes and the fleet's goal gate reads."""
+
+    def test_the_opt_in_is_the_cluster_roles_variable_and_off_by_default(self) -> None:
+        cluster = yaml.safe_load((CLUSTER_ROLE / "defaults" / "main.yml").read_text())
+        self.assertIs(cluster["github_runner_cluster_role_controller"], False)
+
+    def test_one_inventory_setting_turns_it_on_and_the_status_goes_to_fleet_role_status_in_the_platform_namespace(self) -> None:
+        manifests = render()
+        deployment = of_kind(manifests, "Deployment")[0]
+        self.assertEqual(env_of(deployment)["FLEET_ROLE_STATUS_CONFIGMAP"], "fleet-role-status")
+        self.assertEqual(deployment["metadata"]["namespace"], "github-runner-platform")
+        self.assertEqual(env_of(deployment)["FLEET_ROLE_DRY_RUN"], "true")
+
+    def test_the_arc_roles_switch_follows_the_cluster_roles(self) -> None:
+        template = ROOT / "tests" / "fleet_role" / "enabled.j2"
+        with tempfile.TemporaryDirectory() as work:
+            output = Path(work) / "enabled.txt"
+            for cluster_value, arc_value, expected in ((None, None, "False"), (True, None, "True"), (False, True, "True"), (True, False, "False")):
+                variables: dict[str, Any] = {"kept_template": str(template), "kept_output": str(output)}
+                if cluster_value is not None:
+                    variables["github_runner_cluster_role_controller"] = cluster_value
+                if arc_value is not None:
+                    variables[ARC + "enabled"] = arc_value
+                completed = ansible(EXPRESSION, **variables)
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                self.assertEqual(output.read_text().strip(), expected, (cluster_value, arc_value))
+
+
 class DefaultsAgreeWithTheClusterRoleTest(unittest.TestCase):
     """The fallbacks in the ARC role's defaults stand in for the cluster role's variables when they are not defined, so they must be their defaults."""
 
