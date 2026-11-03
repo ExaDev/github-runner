@@ -1,3 +1,13 @@
+## [2.26.2](https://github.com/ExaDev/github-runner/compare/v2.26.1...v2.26.2) (2026-11-03)
+
+### Tests
+
+* **mesh:** wait for the Docker servers to serve before the native host's run ([fbb2f38](https://github.com/ExaDev/github-runner/commit/fbb2f38b95ead502f532dcf9e7146ec8c9748d2b))
+
+### Continuous Integration
+
+* install Galaxy collections without the response cache ([2fe4121](https://github.com/ExaDev/github-runner/commit/2fe4121ae530ca9edb6d37d257c799aa4c76004c))
+
 ## [2.26.1](https://github.com/ExaDev/github-runner/compare/v2.26.0...v2.26.1) (2026-11-03)
 
 ### Bug Fixes
