@@ -1,6 +1,6 @@
 name: Mesh integration
 
-# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check, plus the role's refusal of a Docker Compose release that recreates the containers it has just built. headscale_in_cluster also runs with github_runner_cluster_docker_context pinned while the current Docker context points at nothing, which covers the cluster role's own docker calls and the recovery playbook's, and context_checks checks the role refuses a pin it cannot honour. regrade turns memory-pressure regrading on and steps a server down to etcd-only under (simulated) pressure and back up, checking that it keeps its etcd seat and vote and that no other server steps meanwhile. native_server joins a native host (a systemd container) as an agent beside three Docker servers, then promotes it to a server in place: it must join etcd as a learner, be promoted to a voter, and keep the cluster writable throughout. Only on changes that can affect how nodes join the mesh.
+# Brings up three k3s nodes in Docker and joins them through Headscale with the cluster role (tests/mesh/run.sh), once per scenario: headscale_hosted, headscale_in_cluster, and the headscale_existing policy check, plus the role's refusal of a Docker Compose release that recreates the containers it has just built. headscale_in_cluster also runs with github_runner_cluster_docker_context pinned while the current Docker context points at nothing, which covers the cluster role's own docker calls and the recovery playbook's, and context_checks checks the role refuses a pin it cannot honour. regrade turns memory-pressure regrading on and steps a server down to etcd-only under (simulated) pressure and back up, checking that it keeps its etcd seat and vote and that no other server steps meanwhile. native_server joins a native host (a systemd container) as an agent beside three Docker servers, then promotes it to a server in place: it must join etcd as a learner, be promoted to a voter, and keep the cluster writable throughout. role_controller adds a standby agent, runs the role controller's probe and controller from the image built from this checkout, makes a voter slow with tc netem and pauses another, and checks the controller reports the voter unfit with the swap named, reports that it would not act with a voter paused, and changes nothing. Only on changes that can affect how nodes join the mesh.
 #
 # Runs on GitHub-hosted ubuntu-latest, whose Docker daemon runs the privileged containers the test needs (k3s, and Tailscale inside it). The work directory sits under runner.temp, which the job always has write access to.
 
@@ -14,6 +14,10 @@ on:
       - playbooks/recover_in_cluster_mesh.yml
       - tests/mesh/**
       - tests/lib/**
+      - tests/fleet_role/**
+      - fleet-role/**
+      - scripts/fleet-role*
+      - roles/github_runner_arc/templates/fleet-role.yaml.j2
       - .github/workflows/mesh-integration.yml
   workflow_dispatch:
 
@@ -39,6 +43,7 @@ jobs:
           - {scenario: in_cluster, compose: v5.5.1}
           - {scenario: regrade, compose: v5.5.1}
           - {scenario: native_server, compose: v5.5.1}
+          - {scenario: role_controller, compose: v5.5.1}
           - {scenario: hosted, compose: v2.39.0}
           - {scenario: compose_faulty, compose: v2.38.2}
           - {scenario: in_cluster, compose: v5.5.1, pin: true}

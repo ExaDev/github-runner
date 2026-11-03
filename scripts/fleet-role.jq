@@ -226,7 +226,7 @@ $config as $c
    elif ($blocks | length) > 0 or ($shortfall | length) > 0 then
      {action: "none", swap: null, because: ($blocks + $shortfall), wanted: {out: $out.name, in: $in.name}}
    else
-     {action: "swap", swap: {out: $out.name, in: $in.name}, because: ["voter \($out.name) is unfit (\($out.reasons | join("; "))) and \($in.name) is fit and ranks above it"]}
+     {action: "swap", swap: {out: $out.name, in: $in.name}, because: ["voter \($out.name) is unfit (\($out.reasons | join("; "))) and \($in.name) is fit against the voters that would remain and ranks above it"]}
    end) as $decision
 
 | {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). native_server  three Docker servers and a native host (a privileged systemd container, tests/mesh/native/Dockerfile, managed over Ansible's docker connection) that joins as an agent, is then made a server by the inventory and promoted in place: it must join etcd as a learner, be promoted to a voter with its mesh address as its peer URL, and keep the cluster writable throughout, and a rerun must not restart it. compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
+# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). native_server  three Docker servers and a native host (a privileged systemd container, tests/mesh/native/Dockerfile, managed over Ansible's docker connection) that joins as an agent, is then made a server by the inventory and promoted in place: it must join etcd as a learner, be promoted to a voter with its mesh address as its peer URL, and keep the cluster writable throughout, and a rerun must not restart it. role_controller  four hosts (three servers and a standby agent, with etcd's data on memory so the machine's disk does not decide): the role controller's probe and controller run in the cluster from the image built from this checkout, with the manifests the ARC role renders; every host is reported fit from a full window of real samples, a voter made slow with tc netem on its mesh interface is reported unfit with the swap named, a paused voter makes the controller report that it would not act, and the controller changes nothing (not in the default set; needs jq, and takes a window of 100 samples before it can judge). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
 # With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
 #
@@ -30,6 +30,10 @@ native_ip="${subnet_prefix}.20"
 native_role=""
 # The Docker hosts the inventory lists, by index; all of them unless a scenario leaves one out (native_server's second run, where node 3 keeps running as a voter outside the inventory).
 inventory_nodes=""
+# Where tc comes from for the role_controller scenario: a throwaway container in a node's network namespace, since the node's own image has none.
+tc_image=alpine:3.20
+# The probe's period in the role_controller scenario: long enough that a sample's own work (a few kubectl calls) is a small part of it, since a probe that has not reported for three periods counts as silent.
+role_controller_sample_seconds=5
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
 # etcd's timing for every server, in milliseconds: a heartbeat interval and an election timeout of ten times it, above k3s's own defaults and so told apart from them, and above etcd's required five times.
@@ -85,7 +89,9 @@ fi
 
 node_name() { echo "grtest-node$1"; }
 node_ip() { echo "${subnet_prefix}.$((10 + $1))"; }
-container() { echo "grtest-node$1-k3s"; }
+# The container of node $1: its k3s server, or from agent_from on, the k3s agent the topology makes of a host beyond the servers (only the role_controller scenario has one).
+agent_from=99
+container() { if [ "$1" -ge "$agent_from" ]; then echo "grtest-node$1-agent"; else echo "grtest-node$1-k3s"; fi; }
 vm() { echo "grtest-vm$1"; }
 
 # The docker CLI for node $1's daemon: the machine's own, or with host_network that node's own daemon through its context.
@@ -98,7 +104,7 @@ docker_on() {
 teardown() {
   for index in $(seq 1 "$node_count"); do
     if [ -f "${work}/$(node_name "$index")/docker-compose.yml" ]; then
-      docker compose --project-directory "${work}/$(node_name "$index")" -f "${work}/$(node_name "$index")/docker-compose.yml" --profile server --profile regrade down -v --rmi local >/dev/null 2>&1 || true
+      docker compose --project-directory "${work}/$(node_name "$index")" -f "${work}/$(node_name "$index")/docker-compose.yml" --profile server --profile agent --profile regrade down -v --rmi local >/dev/null 2>&1 || true
     fi
   done
   if [ -f "${work}/headscale/docker-compose.yml" ]; then
@@ -154,6 +160,20 @@ prepare_nodes() {
         echo "    ports: !override [\"127.0.0.1:18080:8080\"]"
       else
         echo "    ports: !reset []"
+      fi
+      # etcd's data on memory when asked: the role_controller scenario judges the voters' and the standby's disk against etcd's own limits (a WAL fsync under 10 ms), which a laptop's or a runner's virtual disk does not reliably meet (a laptop's measured 15 to 30 ms), and what it tests is the controller's pipeline, not the disk of the machine it runs on.
+      if [ "${etcd_on_memory:-0}" = 1 ]; then
+        echo "    tmpfs:"
+        echo "      - /var/lib/rancher/k3s/server/db"
+      fi
+      echo "    networks:"
+      echo "      ${network}:"
+      echo "        ipv4_address: $(node_ip "$index")"
+      # A host the topology makes an agent runs the k3s-agent service, which needs the same fixed address. Its fdatasync probe directory is on memory for the reason etcd's data is.
+      echo "  k3s-agent:"
+      if [ "${etcd_on_memory:-0}" = 1 ]; then
+        echo "    tmpfs:"
+        echo "      - /var/lib/rancher/k3s/fleet-role-probe"
       fi
       echo "    networks:"
       echo "      ${network}:"
@@ -218,7 +238,9 @@ EOF
       echo "        $(node_name "$index"):"
       echo "          github_runner_cluster_dir: ${work}/$(node_name "$index")"
       echo "          github_runner_cluster_compose_project: $(node_name "$index")"
-      echo "          github_runner_cluster_container_name: $(container "$index")"
+      echo "          github_runner_cluster_container_name: grtest-node${index}-k3s"
+      # Used only by a host the topology makes an agent (the role_controller scenario has one); the role refuses one name for both services.
+      echo "          github_runner_cluster_agent_container_name: grtest-node${index}-agent"
     done
     if [ -n "$native_role" ]; then
       echo "        ${native_host}:"
@@ -1069,6 +1091,129 @@ scenario_native_server() {
   [ "$before" = "$(native_exec systemctl show k3s --property ActiveEnterTimestampMonotonic)" ] || fail "rerunning the role restarted ${native_host}'s server"
 }
 
+# The slow link the role_controller scenario puts on a voter, in milliseconds each way on its mesh interface: above the unfit round trip limit, a tenth of the election timeout the inventory sets.
+role_controller_delay_ms=$((etcd_election_ms / 10 + 100))
+role_controller_image=grtest/fleet-role:test
+platform_namespace=github-runner-platform
+
+role_status() { kubectl_on 1 --namespace "$platform_namespace" get configmap fleet-role-status -o 'jsonpath={.data.status\.json}' 2>/dev/null; }
+# Whether the controller's last status satisfies a jq test, as an exit status.
+role_status_is() { role_status | jq -e "$1" >/dev/null 2>&1; }
+# The node a pod of the app runs on.
+role_pod_node() { kubectl_on 1 --namespace "$platform_namespace" get pods -l "app.kubernetes.io/name=$1" -o 'jsonpath={.items[0].spec.nodeName}'; }
+# Puts a delay on a node's mesh interface, or takes it off, from a throwaway container in the node's network namespace (the node's own image has no tc).
+mesh_delay() {
+  local index="$1" action="$2" ms="${3:-0}" command
+  if [ "$action" = add ]; then command="apk add --quiet iproute2-tc && tc qdisc add dev tailscale0 root netem delay ${ms}ms"; else command="apk add --quiet iproute2-tc && tc qdisc del dev tailscale0 root"; fi
+  docker run --rm --network "container:$(container "$index")" --cap-add NET_ADMIN --entrypoint sh "$tc_image" -c "$command" </dev/null
+}
+
+# Brings up three servers and a standby agent, runs the role controller's probe and controller in the cluster (the pods from the image built from this checkout, the manifests the ARC role renders), and checks that the controller reports what it sees on real k3s and real etcd: all hosts fit, then one voter made slow with tc netem on its mesh interface reported unfit with the swap named, then a voter paused and the controller reporting that it would not act, and throughout that it has changed nothing.
+scenario_role_controller() {
+  local index ids image_file manifests slow paused paused_name controller_node deadline account verb
+  node_count=4
+  agent_from=4
+  etcd_on_memory=1
+  reset_environment
+  prepare_nodes hosted
+  write_inventory hosted
+  run_role
+
+  log "Waiting for the four nodes: three servers and a standby agent"
+  deadline=$((SECONDS + 600))
+  until [ "$(kubectl_on 1 get nodes --no-headers 2>/dev/null | grep -c ' Ready ')" = "$node_count" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || { kubectl_on 1 get nodes -o wide || true; fail "not every node became Ready"; }
+    sleep 5
+  done
+  [ "$(kubectl_on 1 get nodes -l node-role.kubernetes.io/etcd=true --no-headers | wc -l | tr -d ' ')" = 3 ] || fail "expected three etcd nodes"
+  if kubectl_on 1 get node "$(node_name 4)" -o 'jsonpath={.metadata.labels}' | grep -F 'node-role.kubernetes.io/etcd' >/dev/null; then fail "the fourth node is a server"; fi
+  ids=$(etcd_member_ids 1)
+
+  log "Building the role controller image from this checkout and loading it into every node"
+  docker build --quiet --file "${repo_root}/fleet-role/Dockerfile" --tag "$role_controller_image" "$repo_root" >/dev/null
+  image_file="${work}/fleet-role-image.tar"
+  docker save --output "$image_file" "$role_controller_image"
+  for index in $(seq 1 "$node_count"); do
+    docker exec -i "$(container "$index")" /bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images import - < "$image_file" >/dev/null
+  done
+  rm -f "$image_file"
+
+  log "Rendering the ARC role's manifests for the controller and the probe, and applying them"
+  manifests="${work}/fleet-role.yaml"
+  ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections" ANSIBLE_LOCALHOST_WARNING=false ANSIBLE_INVENTORY_UNPARSED_WARNING=false \
+    "$ansible_playbook" "${repo_root}/tests/fleet_role/render.yml" -e "fleet_role_output=${manifests}" \
+    -e "github_runner_arc_role_controller_image=${role_controller_image}" -e "github_runner_arc_role_controller_sample_seconds=${role_controller_sample_seconds}" \
+    -e "github_runner_arc_role_controller_election_timeout_ms=${etcd_election_ms}" >/dev/null
+  kubectl_on 1 create namespace "$platform_namespace" >/dev/null
+  kubectl_on 1 apply -f - >/dev/null <<MANIFESTS
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: github-runner-platform}
+value: 1000000
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: fleet-role-probe, namespace: ${platform_namespace}}
+data: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: fleet-role-status, namespace: ${platform_namespace}}
+data: {"status.json": ""}
+MANIFESTS
+  kubectl_on 1 apply -f - < "$manifests" >/dev/null
+  for index in $(seq 1 "$node_count"); do
+    kubectl_on 1 label node "$(node_name "$index")" github-runner.exadev.com/voter-eligible=true >/dev/null
+  done
+  kubectl_on 1 --namespace "$platform_namespace" rollout status daemonset/fleet-role-probe --timeout=300s
+  kubectl_on 1 --namespace "$platform_namespace" rollout status deployment/fleet-role --timeout=300s
+  kubectl_on 1 --namespace "$platform_namespace" get pods -o wide
+
+  log "The controller and the probe can read nodes and nothing more, and the controller cannot write the probes' ConfigMap"
+  for account in fleet-role fleet-role-probe; do
+    [ "$(kubectl_on 1 auth can-i list nodes --as "system:serviceaccount:${platform_namespace}:${account}")" = yes ] || fail "${account} cannot list nodes"
+    for verb in patch update delete create; do
+      [ "$(kubectl_on 1 auth can-i "$verb" nodes --as "system:serviceaccount:${platform_namespace}:${account}" || true)" = no ] || fail "${account} can ${verb} nodes"
+    done
+    [ "$(kubectl_on 1 auth can-i create configmaps --namespace "$platform_namespace" --as "system:serviceaccount:${platform_namespace}:${account}" || true)" = no ] || fail "${account} can create configmaps"
+  done
+  [ "$(kubectl_on 1 auth can-i patch configmaps/fleet-role-probe --namespace "$platform_namespace" --as "system:serviceaccount:${platform_namespace}:fleet-role" || true)" = no ] || fail "the controller can patch the probes' ConfigMap"
+
+  log "Every host is fit, from a window of real samples, and the controller would not act"
+  wait_for "every host to be reported fit and no swap wanted" 1800 role_status_is '(.hosts | length == 4) and ([.hosts[].verdict] | all(. == "fit")) and .decision.action == "none" and (.blocks | length == 0)'
+  role_status | jq .
+  role_status | jq -e '[.hosts[].link] | all(. == "unknown")' >/dev/null || fail "a node in a container should have a link it cannot see: $(role_status | jq -c '[.hosts[].link]')"
+
+  log "A voter is made slow with tc netem on its mesh interface (${role_controller_delay_ms} ms each way): the controller reports it unfit and names the swap"
+  slow=3
+  mesh_delay "$slow" add "$role_controller_delay_ms"
+  wait_for "$(node_name "$slow") to be reported unfit and the swap named" 900 role_status_is \
+    ".hosts[\"$(node_name "$slow")\"].verdict == \"unfit\" and .decision.action == \"swap\" and .decision.swap == {out: \"$(node_name "$slow")\", in: \"$(node_name 4)\"}"
+  role_status | jq .
+  role_status | jq -r '.decision.because[]'
+  role_status | jq -e ".hosts[\"$(node_name "$slow")\"].reasons | any(test(\"round trip p99\"))" >/dev/null || fail "the reason does not name the round trip"
+  kubectl_on 1 --namespace "$platform_namespace" logs deployment/fleet-role --tail 20 | grep -F "DRY RUN: would swap out $(node_name "$slow") for $(node_name 4)" >/dev/null || fail "the controller did not log the swap it would make"
+
+  log "A voter is paused: the controller reports that it would not act"
+  controller_node=$(role_pod_node fleet-role)
+  paused=2
+  [ "$(node_name "$paused")" != "$controller_node" ] || paused=$slow
+  paused_name=$(node_name "$paused")
+  docker pause "$(container "$paused")" >/dev/null
+  wait_for "the controller to say it would not act with ${paused_name} paused" 600 role_status_is \
+    ".decision.action == \"none\" and (.decision.because + .blocks | any(contains(\"${paused_name}\")))"
+  role_status | jq '{decision, blocks}'
+  kubectl_on 1 --namespace "$platform_namespace" logs deployment/fleet-role --tail 5 | grep -F 'DRY RUN: would not act' >/dev/null || fail "the controller did not log that it would not act"
+  docker unpause "$(container "$paused")" >/dev/null
+  mesh_delay "$slow" del
+
+  log "The controller changed nothing: the same etcd members, the same servers, no node touched"
+  [ "$(etcd_member_ids 1)" = "$ids" ] || fail "the etcd members changed: $(etcd_member_ids 1) (was ${ids})"
+  [ "$(kubectl_on 1 get nodes -l node-role.kubernetes.io/etcd=true --no-headers | wc -l | tr -d ' ')" = 3 ] || fail "the set of etcd nodes changed"
+  kubectl_on 1 get nodes -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{" "}{.spec.taints}{"\n"}{end}'
+  if kubectl_on 1 get nodes -o json | jq -e '[.items[] | select(.metadata.annotations["etcd.k3s.cattle.io/remove"] != null)] | length > 0' >/dev/null; then fail "a node was annotated for removal"; fi
+}
+
 scenarios=("$@")
 [ "${#scenarios[@]}" -gt 0 ] || scenarios=(existing hosted in_cluster)
 for scenario in "${scenarios[@]}"; do
@@ -1078,6 +1223,7 @@ for scenario in "${scenarios[@]}"; do
     existing) scenario_existing ;;
     regrade) scenario_regrade ;;
     native_server) scenario_native_server ;;
+    role_controller) scenario_role_controller ;;
     host_network) scenario_host_network ;;
     compose_faulty) scenario_compose_faulty ;;
     context_checks) scenario_context_checks ;;
