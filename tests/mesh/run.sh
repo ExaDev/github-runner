@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
+# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). native_server  three Docker servers and a native host (a privileged systemd container, tests/mesh/native/Dockerfile, managed over Ansible's docker connection) that joins as an agent, is then made a server by the inventory and promoted in place: it must join etcd as a learner, be promoted to a voter with its mesh address as its peer URL, and keep the cluster writable throughout, and a rerun must not restart it. compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
 # With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
 #
@@ -23,6 +23,13 @@ dind_image=docker:27.5.1-dind
 # Set by scenario_host_network: every node's containers are then on that node's own daemon, reached through a Docker context per node.
 host_network=0
 busybox_image=busybox:1.37
+# The native_server scenario's native host: its container, image, address and data volume. Unset (empty native_role) in every other scenario, which then has no native host.
+native_host=grtest-native
+native_image=grtest-native-host
+native_ip="${subnet_prefix}.20"
+native_role=""
+# The Docker hosts the inventory lists, by index; all of them unless a scenario leaves one out (native_server's second run, where node 3 keeps running as a voter outside the inventory).
+inventory_nodes=""
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
 # etcd's timing for every server, in milliseconds: a heartbeat interval and an election timeout of ten times it, above k3s's own defaults and so told apart from them, and above etcd's required five times.
@@ -92,7 +99,8 @@ teardown() {
   if [ -f "${work}/headscale/docker-compose.yml" ]; then
     docker compose --project-directory "${work}/headscale" -f "${work}/headscale/docker-compose.yml" down -v >/dev/null 2>&1 || true
   fi
-  docker rm -f grtest-headscale grtest-hs-existing grtest-etcdctl >/dev/null 2>&1 || true
+  docker rm -f grtest-headscale grtest-hs-existing grtest-etcdctl "$native_host" >/dev/null 2>&1 || true
+  docker volume rm "${native_host}-k3s" >/dev/null 2>&1 || true
   for index in $(seq 1 "$node_count"); do
     docker rm -f -v "$(vm "$index")" >/dev/null 2>&1 || true
     docker context rm -f "$(vm "$index")" >/dev/null 2>&1 || true
@@ -201,12 +209,20 @@ EOF
       echo "        github_runner_cluster_headscale_accept_node_local_state: true"
     fi
     echo "      hosts:"
-    for index in $(seq 1 "$node_count"); do
+    for index in ${inventory_nodes:-$(seq 1 "$node_count")}; do
       echo "        $(node_name "$index"):"
       echo "          github_runner_cluster_dir: ${work}/$(node_name "$index")"
       echo "          github_runner_cluster_compose_project: $(node_name "$index")"
       echo "          github_runner_cluster_container_name: $(container "$index")"
     done
+    if [ -n "$native_role" ]; then
+      echo "        ${native_host}:"
+      echo "          ansible_connection: community.docker.docker"
+      echo "          ansible_host: ${native_host}"
+      echo "          ansible_python_interpreter: /usr/bin/python3"
+      echo "          github_runner_cluster_node_mode: native"
+      echo "          github_runner_cluster_node_role: ${native_role}"
+    fi
   } > "${work}/inventory.yml"
 }
 
@@ -913,6 +929,132 @@ EOF
   done
 }
 
+# native_server: the native host is a container running systemd as PID 1 (tests/mesh/native/Dockerfile), on the test network at its own address, with k3s's data directory on a volume. The role reaches it over Ansible's docker connection and installs Tailscale and k3s on it, as on a real host.
+start_native_host() {
+  docker build --quiet --tag "$native_image" "${repo_root}/tests/mesh/native" >/dev/null
+  docker run -d --privileged --name "$native_host" --hostname "$native_host" --network "$network" --ip "$native_ip" \
+    --tmpfs /run --tmpfs /run/lock --volume "${native_host}-k3s:/var/lib/rancher/k3s" --volume /lib/modules:/lib/modules:ro \
+    "$native_image" >/dev/null
+  wait_for "systemd to be running in ${native_host}" 120 native_systemd_up
+  # Docker answers the container's DNS at 127.0.0.11, which a pod cannot reach and write-resolv-conf.sh therefore leaves out, and the container has no systemd-resolved, so the kubelet's resolver file is pointed at public servers through a drop-in for both units. A real host's systemd-resolved lists its upstream servers instead; nothing else of the role's is changed.
+  # shellcheck disable=SC2016 # Expanded by the container's shell.
+  native_exec sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/grtest-upstream-resolv.conf
+    for unit in k3s k3s-agent; do
+      mkdir -p "/etc/systemd/system/${unit}.service.d"
+      printf "[Service]\nEnvironment=GITHUB_RUNNER_RESOLV_SOURCES=/etc/grtest-upstream-resolv.conf\n" > "/etc/systemd/system/${unit}.service.d/grtest.conf"
+    done'
+}
+
+native_exec() { docker exec -i "$native_host" "$@"; }
+native_systemd_up() { case "$(native_exec systemctl is-system-running 2>/dev/null)" in running | degraded) return 0 ;; *) return 1 ;; esac; }
+native_unit_is() { [ "$(native_exec systemctl is-active "$1" </dev/null 2>/dev/null)" = "$2" ]; }
+
+# The etcd member list, as assert_cluster reads it, through node 1.
+etcd_members() {
+  docker rm -f grtest-etcdctl >/dev/null 2>&1 || true
+  docker run --rm --name grtest-etcdctl --network "container:$(container 1)" --volumes-from "$(container 1)" --entrypoint etcdctl "$etcd_image" \
+    --endpoints https://127.0.0.1:2379 --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
+    --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key \
+    member list -w simple </dev/null
+}
+
+native_is_voter() {
+  [ "$(kubectl_on 1 get node "$native_host" -o 'jsonpath={.status.conditions[?(@.type=="EtcdIsVoter")].status}' 2>/dev/null)" = True ]
+}
+
+# Writes to the cluster through node 1 once a second until the stop file appears, recording each write as ok or failed; a write is a ConfigMap under a name of its own (write_marker).
+write_throughout() {
+  local log="$1" stop="$2"
+  : > "$log"
+  until [ -e "$stop" ]; do
+    if write_marker 2>/dev/null; then echo ok >> "$log"; else echo "failed $(date -u +%H:%M:%S)" >> "$log"; fi
+    sleep 1
+  done
+}
+
+# Watches the member list until the stop file appears, recording every line that names the native host's member, so a learner seen at any point is on record.
+watch_native_member() {
+  local log="$1" stop="$2"
+  : > "$log"
+  until [ -e "$stop" ]; do
+    etcd_members 2>/dev/null | grep -F ", ${native_host}-" >> "$log" || true
+    sleep 1
+  done
+}
+
+scenario_native_server() {
+  reset_environment
+  prepare_nodes hosted
+  start_native_host
+  native_role=agent
+  write_inventory hosted
+  log "Bringing up three Docker servers and the native host as an agent"
+  run_role
+  wait_for "${native_host} to be Ready as an agent" 300 node_is 1 "$native_host" Ready
+  native_unit_is k3s-agent active || fail "${native_host} does not run k3s-agent"
+  native_unit_is k3s inactive || fail "${native_host} runs k3s as an agent"
+  [ "$(native_exec cat /var/lib/rancher/k3s/fleet-role)" = agent ] || fail "the role file does not name the agent"
+  [ "$(kubectl_on 1 get nodes -l node-role.kubernetes.io/etcd=true --no-headers | wc -l | tr -d ' ')" = 3 ] || fail "expected three etcd nodes before the promotion"
+  local password
+  password=$(native_exec sha256sum /etc/rancher/node/password | cut -d' ' -f1)
+
+  log "Promoting the native host to a server, with writes throughout; node 3 keeps running as a voter outside the inventory, so the inventory has three servers"
+  native_role=server
+  inventory_nodes="1 2"
+  write_inventory hosted
+  local writes="${work}/writes.log" members="${work}/native-member.log" stop="${work}/stop-writing"
+  rm -f "$stop"
+  write_throughout "$writes" "$stop" &
+  local writer=$!
+  watch_native_member "$members" "$stop" &
+  local watcher=$!
+  run_role --limit "$native_host" || { touch "$stop"; wait "$writer" "$watcher" || true; fail "the role did not promote ${native_host}"; }
+  wait_for "${native_host} to be a voting member of etcd" 300 native_is_voter
+  touch "$stop"
+  wait "$writer" "$watcher"
+
+  log "Checking it joined etcd as a learner and was promoted, with its mesh address as its peer URL"
+  local list
+  list=$(etcd_members)
+  echo "$list"
+  [ "$(echo "$list" | grep -c ', started, ')" = 4 ] || fail "expected four started etcd members after the promotion"
+  echo "$list" | grep -F ", ${native_host}-" | grep -Eq ', https://100\.[0-9.]+:2380, .*, false$' \
+    || fail "${native_host}'s member is not a voter with a mesh peer URL"
+  # k3s adds every joining server as a learner (MemberAddAsLearner) and the etcd leader logs each promotion; the member watch shows the learner unless it was promoted between two reads.
+  local promoted=0 index
+  for index in 1 2 3; do
+    if docker logs "$(container "$index")" 2>&1 | grep -F "Promoted learner ${native_host}-" >/dev/null; then promoted=1; fi
+  done
+  [ "$promoted" = 1 ] || fail "no server's k3s logged promoting ${native_host}'s learner"
+  if grep -Eq ', true$' "$members"; then log "The member watch saw ${native_host} as a learner"; else log "The member watch did not catch ${native_host} as a learner (promoted between reads); the promotion is in the servers' logs"; fi
+  native_exec journalctl -u k3s --no-pager | grep -F "Adding member ${native_host}-" >/dev/null || fail "${native_host}'s k3s did not add itself to etcd"
+
+  log "Checking every write succeeded throughout"
+  local ok failed
+  ok=$(grep -c '^ok$' "$writes" || true)
+  failed=$(grep -c '^failed' "$writes" || true)
+  echo "  ${ok} writes succeeded, ${failed} failed"
+  [ "$ok" -gt 0 ] || fail "no write was made during the promotion"
+  [ "$failed" = 0 ] || { grep '^failed' "$writes"; fail "writes failed during the promotion"; }
+
+  log "Checking the host now runs the server unit only, under the same identity"
+  native_unit_is k3s active || fail "${native_host} does not run k3s"
+  native_unit_is k3s-agent inactive || fail "${native_host} still runs k3s-agent"
+  [ "$(native_exec cat /var/lib/rancher/k3s/fleet-role)" = server ] || fail "the role file does not name the server"
+  [ "$(native_exec sha256sum /etc/rancher/node/password | cut -d' ' -f1)" = "$password" ] || fail "${native_host}'s node password changed"
+  [ "$(kubectl_on 1 get nodes --no-headers | grep -c "^${native_host} ")" = 1 ] || fail "${native_host} is not exactly one Node"
+  native_exec cat /etc/rancher/k3s/server.yaml.d/00-node-ip.yaml | grep -Eq '^node-ip: "100\.' || fail "the node-ip drop-in does not hold the mesh address"
+  # Restart=always must not start the agent unit again, whose condition now fails.
+  native_exec systemctl start k3s-agent || true
+  native_unit_is k3s-agent inactive || fail "k3s-agent started on a server"
+
+  log "Rerunning the role on the native server, which must not restart it"
+  local before
+  before=$(native_exec systemctl show k3s --property ActiveEnterTimestampMonotonic)
+  run_role --limit "$native_host"
+  [ "$before" = "$(native_exec systemctl show k3s --property ActiveEnterTimestampMonotonic)" ] || fail "rerunning the role restarted ${native_host}'s server"
+}
+
 scenarios=("$@")
 [ "${#scenarios[@]}" -gt 0 ] || scenarios=(existing hosted in_cluster)
 for scenario in "${scenarios[@]}"; do
@@ -921,6 +1063,7 @@ for scenario in "${scenarios[@]}"; do
     hosted | in_cluster) scenario_cluster "$scenario" ;;
     existing) scenario_existing ;;
     regrade) scenario_regrade ;;
+    native_server) scenario_native_server ;;
     host_network) scenario_host_network ;;
     compose_faulty) scenario_compose_faulty ;;
     context_checks) scenario_context_checks ;;
