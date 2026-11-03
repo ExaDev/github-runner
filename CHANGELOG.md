@@ -1,3 +1,27 @@
+## [2.28.0](https://github.com/ExaDev/github-runner/compare/v2.27.2...v2.28.0) (2026-11-03)
+
+### Features
+
+* **native:** regrade a native server under memory pressure with a systemd actuator ([0294862](https://github.com/ExaDev/github-runner/commit/0294862f361cc38d449acc6f79a914a063721fe7)), closes [#181](https://github.com/ExaDev/github-runner/issues/181)
+* **regrade:** reach the cluster through the first candidate server that answers ([264092c](https://github.com/ExaDev/github-runner/commit/264092cb25dd13d8ad346c5f0a457b0dc10032e2))
+
+### Bug Fixes
+
+* **native:** give each k3s unit a runtime directory of its own ([7156268](https://github.com/ExaDev/github-runner/commit/715626888177dcd63171a87d93db5eaf5c5205bc))
+
+### Code Refactoring
+
+* **regrade:** share the k3s actuator's levels, records and restart ([f7b018e](https://github.com/ExaDev/github-runner/commit/f7b018e744bf1796bfbb7c8ad3919740aa0cd91a))
+
+### Tests
+
+* **mesh:** step the native server down to etcd-only and back under pressure ([9800b6f](https://github.com/ExaDev/github-runner/commit/9800b6fbf8ec8f3b22bf2f967a46f1e71119ab28)), closes [#181](https://github.com/ExaDev/github-runner/issues/181)
+* **regrade:** read the settings file back with one shared helper ([3f7bf02](https://github.com/ExaDev/github-runner/commit/3f7bf02e1270ca1c184a0e8aea687c2c56625c21))
+
+### Continuous Integration
+
+* run every unit test module in a shard before failing it ([803e8b7](https://github.com/ExaDev/github-runner/commit/803e8b7de62d27082f8b24c7efdddc1b9f13e152))
+
 ## [2.27.2](https://github.com/ExaDev/github-runner/compare/v2.27.1...v2.27.2) (2026-11-03)
 
 ### Tests
