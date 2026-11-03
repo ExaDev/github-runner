@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The role controller's per-node probe (see roles/github_runner_arc/templates/fleet-role.yaml.j2): the `fleet-role-probe` DaemonSet runs this on every node that has a kubelet, with host networking, so it measures the path the node's own etcd and kubelet use. Every REPORT_SECONDS it takes one sample and appends it to this node's entry in the shared probe ConfigMap, which scripts/fleet-role.sh reads. An entry keeps the last window of samples, so it survives this pod being replaced.
+# The role controller's per-node probe (see roles/github_runner_arc/templates/fleet-role.yaml.j2): the `fleet-role-probe` DaemonSet runs this on every node that is an etcd voter or marked eligible and has a kubelet, with host networking, so it measures the path the node's own etcd and kubelet use. Every REPORT_SECONDS it takes one sample and appends it to this node's entry in the shared probe ConfigMap, which scripts/fleet-role.sh reads. An entry keeps the last window of samples, so it survives this pod being replaced.
 #
-# Only a node the controller judges is measured: a voter, or a host the owner marks eligible (ELIGIBLE_LABEL, with the value true). Any other node has nothing recorded, and an entry it has from when it was one is removed, so the ConfigMap, which holds at most a mebibyte, grows with the hosts that decide the cluster's control plane and not with the fleet.
+# Only a node the controller judges is measured: a voter, or a host the owner marks eligible (ELIGIBLE_LABEL, with the value true). The DaemonSet schedules a pod on no other node, and a pod that finds its node is neither (a label removed while it runs) records nothing and removes the entry it has from when it was one, as does a pod that is stopped on a node that is neither any more or is gone, so the ConfigMap, which holds at most a mebibyte, grows with the hosts that decide the cluster's control plane and not with the fleet.
 #
 # A sample holds, per node: the TCP connect time to every voter's etcd peer port (a connect that does not complete within the election timeout is recorded as the election timeout, so loss shows as tail latency); on a voter, what etcd's own metrics gained since the last sample (the WAL fsync and backend commit histograms, the round trip to each peer, leader changes) and whether it has a leader, is a learner and is connected to its peers; on a node that is not a voter, an fdatasync probe in the k3s data directory once per window, with the write size etcd's own fio check uses; the memory pressure and MemAvailable the regrade core reads; and the link the default route leaves by.
 #
@@ -20,7 +20,7 @@
 # - ETCD_PEER_PORT: etcd's peer port (default 2380).
 # - FSYNC_DIR: a directory on the filesystem k3s keeps its data on, which the fdatasync probe writes in (default /var/lib/rancher/k3s/fleet-role-probe).
 # - SYS_CLASS_NET, PROC_NET_ROUTE: where the host's /sys/class/net and /proc/net/route are (the defaults).
-# - FLEET_REGRADE_CORE: the regrade core (roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh), whose own psi_avg300 and meminfo_kb read the memory signals (default /app/fleet-regrade-core.sh). PSI_FILE and MEMINFO_FILE, which it reads, default here to the host's /proc/pressure mounted at /host-pressure and the node's /proc/meminfo.
+# - FLEET_REGRADE_CORE: the regrade core (roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh), whose own psi_avg300 and meminfo_kb read the memory signals (default /app/fleet-regrade-core.sh). PSI_FILE and MEMINFO_FILE, which it reads, default here to /proc/pressure/memory and /proc/meminfo, which a pod's own procfs serves for the whole node as it does /proc/meminfo, so nothing is mounted for them. A kernel without pressure stall information has no /proc/pressure, and the sample then has no pressure reading and the memory figures from /proc/meminfo alone, which the controller counts as not over the limit.
 set -euo pipefail
 
 PROBE_CONFIGMAP="${PROBE_CONFIGMAP:-fleet-role-probe}"
@@ -33,7 +33,7 @@ FSYNC_DIR="${FSYNC_DIR:-/var/lib/rancher/k3s/fleet-role-probe}"
 SYS_CLASS_NET="${SYS_CLASS_NET:-/sys/class/net}"
 PROC_NET_ROUTE="${PROC_NET_ROUTE:-/proc/net/route}"
 FLEET_REGRADE_CORE="${FLEET_REGRADE_CORE:-/app/fleet-regrade-core.sh}"
-PSI_FILE="${PSI_FILE:-/host-pressure/memory}"
+PSI_FILE="${PSI_FILE:-/proc/pressure/memory}"
 MEMINFO_FILE="${MEMINFO_FILE:-/proc/meminfo}"
 # The core reads its settings from an environment file when there is one; the probe has none, and must not pick up another by the core's default path.
 # shellcheck disable=SC2034 # read by the sourced core
@@ -101,6 +101,40 @@ fsync_ms() {
     | jq -r --arg percentile "${tail_percentile}.000000" '.jobs[0].sync.lat_ns.percentile[$percentile] / 1000000'
 }
 
+# The nodes JSON's voters, as a JSON array of name and InternalIP.
+voters_of() {
+  jq -c --arg label "${VOTER_LABEL%%=*}" --arg value "${VOTER_LABEL#*=}" '[.items[] | select((.metadata.labels // {})[$label] == $value) | {name: .metadata.name, ip: ([.status.addresses[]? | select(.type == "InternalIP") | .address] | .[0])}]' <<< "$1"
+}
+
+# Whether this node is among the voters (a JSON array from voters_of).
+is_voter_in() {
+  jq --arg node "$NODE_NAME" 'any(.[]; .name == $node)' <<< "$1"
+}
+
+# Whether this node is marked eligible in the nodes JSON. A node the JSON does not list is not.
+is_eligible_in() {
+  jq --arg node "$NODE_NAME" --arg label "$ELIGIBLE_LABEL" 'any(.items[]; .metadata.name == $node and (.metadata.labels // {})[$label] == "true")' <<< "$1"
+}
+
+# Removes this node's entry from the ConfigMap. A key set to null in a merge patch is removed.
+remove_entry() {
+  local patch
+  patch="$(mktemp)"
+  jq -n --arg node "$NODE_NAME" '{data: {($node): null}}' > "$patch"
+  kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null || { rm -f "$patch"; return 1; }
+  rm -f "$patch"
+}
+
+# What the pod does when it is stopped: if its node is neither a voter nor eligible any more (the DaemonSet stops the pod of a node that has lost both labels) or is gone, its entry is removed, so the ConfigMap holds only the hosts that decide the control plane; a pod stopped for any other reason (a new image, the node shutting down) leaves the entry for the pod that follows it to extend. The API can fail here, and a pod that is going away has nothing to retry it with.
+retire() {
+  local nodes_json
+  trap - TERM INT
+  if nodes_json="$(kubectl get nodes -o json)" && [ "$(is_voter_in "$(voters_of "$nodes_json")")" != true ] && [ "$(is_eligible_in "$nodes_json")" != true ]; then
+    remove_entry || log "could not remove this node's entry"
+  fi
+  exit 0
+}
+
 # Takes one sample and publishes it. $1 is "true" on the first pass of this process, which for a node that is not a voter is the only sign this probe has of k3s having restarted (a voter sees it in etcd's counters going backwards).
 report() {
   local first=$1 now entry voters is_voter eligible tcp='{}' peer_name peer_ip ms etcd='null' restarted=false cumulative='null' etcd_id='null'
@@ -114,16 +148,12 @@ report() {
     entry="$kept_entry"
   fi
   nodes_json="$(kubectl get nodes -o json)" || return 1
-  voters="$(jq -c --arg label "${VOTER_LABEL%%=*}" --arg value "${VOTER_LABEL#*=}" '[.items[] | select((.metadata.labels // {})[$label] == $value) | {name: .metadata.name, ip: ([.status.addresses[]? | select(.type == "InternalIP") | .address] | .[0])}]' <<< "$nodes_json")"
-  is_voter="$(jq --arg node "$NODE_NAME" 'any(.[]; .name == $node)' <<< "$voters")"
-  eligible="$(jq --arg node "$NODE_NAME" --arg label "$ELIGIBLE_LABEL" 'any(.items[]; .metadata.name == $node and (.metadata.labels // {})[$label] == "true")' <<< "$nodes_json")"
+  voters="$(voters_of "$nodes_json")"
+  is_voter="$(is_voter_in "$voters")"
+  eligible="$(is_eligible_in "$nodes_json")"
   if [ "$is_voter" != true ] && [ "$eligible" != true ]; then
-    # A key set to null in a merge patch is removed.
     if [ "$entry" != null ]; then
-      patch="$(mktemp)"
-      jq -n --arg node "$NODE_NAME" '{data: {($node): null}}' > "$patch"
-      kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null
-      rm -f "$patch"
+      remove_entry
       kept_entry=null
     fi
     return 0
@@ -189,7 +219,12 @@ if [ "${1:-}" = check ]; then
       jq -nc --arg interface "$iface" --arg link "$(link_type "$iface")" '{interface: $interface, link: $link}'
       ;;
     connect) connect_ms "${3:?usage: check connect <address>}" ;;
-    memory) jq -nc --arg psi "$(psi_avg300)" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" '{psi_avg300: ($psi | tonumber), mem_available_kb: ($avail | tonumber), mem_total_kb: ($total | tonumber)}' ;;
+    memory)
+      # No pressure reading on a kernel without pressure stall information, as in a sample.
+      psi=''
+      if [ -r "$PSI_FILE" ]; then psi="$(psi_avg300)"; fi
+      jq -nc --arg psi "$psi" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" '{psi_avg300: (if $psi == "" then null else $psi | tonumber end), mem_available_kb: ($avail | tonumber), mem_total_kb: ($total | tonumber)}'
+      ;;
     etcd) curl --silent --show-error --fail --max-time "$REPORT_SECONDS" "$ETCD_METRICS_URL" | jq -Rsc -L "$MODULES" 'include "fleet-role-stats"; etcd_reading | {id, has_leader, is_learner, known_members, active_peers, quota_bytes, leader_changes, wal_fsync_p99_ms: (.wal | per_bucket | histogram_quantile(tail_percentile) * 1000), backend_commit_p99_ms: (.commit | per_bucket | histogram_quantile(tail_percentile) * 1000)}' ;;
     fsync) fsync_ms ;;
     *) echo "usage: $0 check link|connect <address>|memory|etcd|fsync" >&2; exit 2 ;;
@@ -201,6 +236,8 @@ fi
 : "${NAMESPACE:?NAMESPACE is required}"
 : "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
 : "${ELIGIBLE_LABEL:?ELIGIBLE_LABEL is required}"
+
+trap retire TERM INT
 
 # This node's entry as the ConfigMap holds it, read once and then kept (see report).
 entry_loaded=false
@@ -215,5 +252,7 @@ while true; do
     log "could not record a sample; trying again in ${REPORT_SECONDS}s"
   fi
   [ "$REPORT_ONCE" = true ] && exit 0
-  sleep "$REPORT_SECONDS"
+  # In the background and waited for, so that a signal is handled at once and not when the sleep ends.
+  sleep "$REPORT_SECONDS" &
+  wait $! || true
 done

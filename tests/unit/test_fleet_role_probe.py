@@ -42,6 +42,7 @@ from fleet_role_support import (
     sample,
 )
 
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh"
 FIXTURES = Path(__file__).resolve().parents[1] / "fleet_role" / "etcd-metrics"
 # The members of the cluster the fixtures were captured from (etcd 3.6.15, three members on one host); the page is the first member's.
 FIXTURE_SERVER_ID = "d5811b26ae265d01"
@@ -607,6 +608,25 @@ class MemoryTest(ProbeCase):
         self.assertIsNone(latest["psi"])
         self.assertEqual(latest["avail_kb"], 8192000)
 
+    def test_without_a_psi_file_setting_the_pressure_is_read_from_this_hosts_own_procfs(self) -> None:
+        # The DaemonSet sets no PSI_FILE and mounts nothing, so the probe reads /proc/pressure/memory of its own procfs: with this host's kernel, a figure when it has pressure stall information and none when it has not (as on a Mac or a kernel booted with psi=0).
+        self.assertIn('PSI_FILE="${PSI_FILE:-/proc/pressure/memory}"', SCRIPT.read_text())
+        completed = self.probe(PSI_FILE="")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        if os.access("/proc/pressure/memory", os.R_OK):
+            self.assertIsNotNone(self.newest()["psi"], "the kernel has pressure stall information and the probe left it out")
+        else:
+            self.assertIsNone(self.newest()["psi"], "the kernel has none, and the sample has the memory figures alone")
+
+    def test_a_node_without_pressure_stall_information_still_records_memory_and_publishes_its_entry(self) -> None:
+        # The case the DaemonSet met on a host whose kernel has no /proc/pressure: the pod must run and sample, with no pressure figure and the figures /proc/meminfo gives.
+        self.psi.unlink()
+        completed = self.probe(PSI_FILE=str(self.cluster.dir / "no-such-dir" / "pressure" / "memory"))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "", "reading the pressure file that is not there must not even complain")
+        latest = self.newest()
+        self.assertEqual((latest["psi"], latest["avail_kb"], latest["total_kb"]), (None, 8192000, 16384000))
+
 
 class RingTest(ProbeCase):
     def setUp(self) -> None:
@@ -688,9 +708,83 @@ class RingTest(ProbeCase):
         reads = [c[:2] for c in calls if c[0] == "get"]
         patches = [c for c in calls if c[0] == "patch"]
         self.assertEqual(reads.count(["get", "configmap"]), 1, "this node's entry is read once, when the process starts")
-        # The process may have been stopped between a sample's read of the nodes and its patch, so the nodes were read once for each patch and at most once more.
-        self.assertIn(reads.count(["get", "nodes"]) - len(patches), (0, 1), reads)
+        # The process may have been stopped between a sample's read of the nodes and its patch, and it reads the nodes once more as it stops (to see whether its entry is to go), so the nodes were read once for each patch and at most twice more.
+        self.assertIn(reads.count(["get", "nodes"]) - len(patches), (0, 1, 2), reads)
         self.assertGreaterEqual(len(patches), len(samples))
+
+    def stop_loop(self, **env: str) -> subprocess.Popen[bytes]:
+        """Starts the probe as the DaemonSet does, waits for its first recorded sample and returns it still running."""
+        self.cluster.nodes = self.nodes
+        self.cluster.write_store()
+        process = subprocess.Popen(
+            [str(SCRIPT)],
+            env=self.cluster.env(
+                NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), ELIGIBLE_LABEL=ELIGIBLE_LABEL, REPORT_SECONDS="600", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
+                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
+            ),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(process.kill)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not self.recorded():
+            time.sleep(0.2)
+        self.assertTrue(self.recorded(), "the probe never recorded a sample")
+        return process
+
+    def stored_probes(self) -> dict[str, Any]:
+        """The probe ConfigMap as the stand-in cluster holds it now, which the running probe has patched."""
+        data = self.cluster.read_store()["configmaps"][f"{NAMESPACE}/fleet-role-probe"]["data"]
+        return {name: json.loads(value) for name, value in data.items()}
+
+    def change_nodes(self, nodes: list[dict[str, Any]]) -> None:
+        """Changes the Nodes the running probe will read, leaving what it has patched."""
+        store = self.cluster.read_store()
+        store["nodes"] = nodes
+        self.cluster.store_path.write_text(json.dumps(store))
+
+    def stop(self, process: subprocess.Popen[bytes]) -> None:
+        started = time.monotonic()
+        process.terminate()
+        self.assertEqual(process.wait(timeout=20), 0)
+        self.assertLess(time.monotonic() - started, 20, "the signal waited for the sleep between samples")
+
+    def test_a_pod_stopped_on_a_node_that_lost_both_labels_removes_its_entry_and_no_other(self) -> None:
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}, "other": entry([sample(5)], "other-id")})
+        process = self.stop_loop()
+        self.change_nodes([node("me")])
+        self.stop(process)
+        self.assertEqual(sorted(self.stored_probes()), ["other"])
+
+    def test_a_pod_stopped_on_a_node_that_is_gone_removes_its_entry(self) -> None:
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        process = self.stop_loop()
+        self.change_nodes([])
+        self.stop(process)
+        self.assertEqual(self.stored_probes(), {})
+
+    def test_a_pod_stopped_on_a_node_that_is_still_eligible_keeps_its_entry_for_the_pod_that_follows(self) -> None:
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        process = self.stop_loop()
+        self.stop(process)
+        self.assertEqual(len(self.stored_probes()["me"]["samples"]), 1)
+
+    def test_a_pod_stopped_on_a_node_that_is_a_voter_keeps_its_entry(self) -> None:
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.nodes = [node("me", voter=True)]
+        process = self.stop_loop(ETCD_METRICS_URL="http://127.0.0.1:1/metrics")
+        self.stop(process)
+        self.assertIn("me", self.stored_probes())
+
+    def test_a_pod_stopped_when_the_api_refuses_the_removal_exits_and_leaves_the_entry(self) -> None:
+        refusals = self.cluster.dir / "refusals"
+        refusals.write_text("0")
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        process = self.stop_loop(FAKE_FAIL_PATCHES=str(refusals))
+        self.change_nodes([node("me")])
+        refusals.write_text("1")
+        self.stop(process)
+        self.assertIn("me", self.stored_probes())
 
     def test_a_patch_the_api_refuses_is_retried_next_period_without_the_process_exiting_and_the_first_sample_still_marks_the_restart(self) -> None:
         refusals = self.cluster.dir / "refusals"
@@ -782,6 +876,12 @@ class CheckTest(ProbeCase):
         completed = self.check("link")
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout), {"interface": "wlan0", "link": "wifi"})
+
+    def test_memory_without_pressure_stall_information_prints_the_memory_figures_and_no_pressure(self) -> None:
+        self.meminfo.write_text("MemTotal:       32768000 kB\nMemAvailable:    4096000 kB\n")
+        completed = self.check("memory", PSI_FILE=str(self.cluster.dir / "no-such-dir" / "memory"))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"psi_avg300": None, "mem_available_kb": 4096000, "mem_total_kb": 32768000})
 
     def test_connect_prints_the_milliseconds_to_a_listener(self) -> None:
         with listener() as port:
