@@ -209,6 +209,8 @@ github_runner_arc_role_controller_available_floor_percent: "{{ github_runner_clu
 github_runner_arc_role_controller_eligible_label: "{{ github_runner_cluster_voter_eligible_label | default('github-runner.exadev.com/voter-eligible') }}"
 github_runner_arc_role_controller_pinned_label: "{{ github_runner_cluster_voter_pinned_label | default('github-runner.exadev.com/voter-pinned') }}"
 github_runner_arc_role_controller_level_label: "{{ github_runner_cluster_regrade_level_label | default('github-runner.exadev.com/regrade-level') }}"
+# The Node label the cluster role publishes the medium of each host's link under (wired, wifi or unknown), which the probe reports for its node in place of what it can see itself: the cluster role's github_runner_cluster_link_label when that is defined.
+github_runner_arc_role_controller_link_label: "{{ github_runner_cluster_link_label | default('github-runner.exadev.com/link') }}"
 # The ConfigMaps in the platform namespace that the probes publish to (a key per node) and that the controller publishes its status to, which the heartbeat republishes beside the autoscaler's.
 github_runner_arc_role_controller_probe_configmap: fleet-role-probe
 github_runner_arc_role_controller_status_configmap: fleet-role-status

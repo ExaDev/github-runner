@@ -15,12 +15,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 REGRADE_CORE = ROOT / "roles" / "github_runner_cluster" / "files" / "regrade" / "fleet-regrade-core.sh"
+NODE_LINK = ROOT / "roles" / "github_runner_cluster" / "files" / "node-link.sh"
 
 NAMESPACE = "github-runner-platform"
 PROBE_CONFIGMAP = "fleet-role-probe"
 STATUS_CONFIGMAP = "fleet-role-status"
 ELIGIBLE_LABEL = "github-runner.exadev.com/voter-eligible"
 PINNED_LABEL = "github-runner.exadev.com/voter-pinned"
+LINK_LABEL = "github-runner.exadev.com/link"
 LEVEL_LABEL = "github-runner.exadev.com/regrade-level"
 VOTER_LABEL = "node-role.kubernetes.io/etcd"
 
@@ -208,8 +210,9 @@ def node(
     ready_for: float = 24 * 3600,
     level: str | None = None,
     address: str | None = None,
+    link: str | None = None,
 ) -> dict[str, Any]:
-    """A Node as `kubectl get nodes -o json` lists it; ready_for is how long ago its Ready condition last changed."""
+    """A Node as `kubectl get nodes -o json` lists it; ready_for is how long ago its Ready condition last changed, and link the medium the cluster role labelled it with, none when it has no such label."""
     labels: dict[str, str] = {}
     if voter:
         labels[VOTER_LABEL] = "true"
@@ -219,6 +222,8 @@ def node(
         labels[PINNED_LABEL] = "true"
     if level is not None:
         labels[LEVEL_LABEL] = level
+    if link is not None:
+        labels[LINK_LABEL] = link
     return {
         "metadata": {"name": name, "labels": labels},
         "status": {
@@ -272,6 +277,7 @@ def sample(
     avail_kb: int | None = AVAILABLE_KB,
     total_kb: int | None = TOTAL_KB,
     link: str = "wired",
+    link_source: str = "interface",
     fsync_ms: float | None = None,
 ) -> dict[str, Any]:
     return {
@@ -283,6 +289,7 @@ def sample(
         "avail_kb": avail_kb,
         "total_kb": total_kb,
         "link": link,
+        "link_source": link_source,
         "iface": "eth0",
         "fsync_ms": fsync_ms,
     }

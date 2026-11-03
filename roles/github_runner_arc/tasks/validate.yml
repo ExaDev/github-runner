@@ -187,13 +187,13 @@
                or github_runner_arc_role_controller_voters | int < 3
                or github_runner_arc_role_controller_voters | int > (github_runner_arc_role_controller_max_servers | int) - 1)
         }}
-    - msg: github_runner_arc_role_controller_eligible_label and github_runner_arc_role_controller_pinned_label must be Kubernetes label keys, such as example.com/voter-eligible, and differ.
+    - msg: github_runner_arc_role_controller_eligible_label must be a Kubernetes label key, such as example.com/voter-eligible, as must github_runner_arc_role_controller_pinned_label and github_runner_arc_role_controller_link_label, and the three must differ.
       failed: >-
         {{
           github_runner_arc_role_controller_enabled | bool
-          and ([github_runner_arc_role_controller_eligible_label, github_runner_arc_role_controller_pinned_label]
+          and ([github_runner_arc_role_controller_eligible_label, github_runner_arc_role_controller_pinned_label, github_runner_arc_role_controller_link_label]
                | map('string') | reject('match', '^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$') | list | length > 0
-               or github_runner_arc_role_controller_eligible_label == github_runner_arc_role_controller_pinned_label)
+               or [github_runner_arc_role_controller_eligible_label, github_runner_arc_role_controller_pinned_label, github_runner_arc_role_controller_link_label] | unique | length < 3)
         }}
     - msg: github_runner_arc_runner_reaper_max_job_seconds must be a whole number of seconds, at least 1, and github_runner_arc_runner_reaper_completed_grace_seconds a whole number of seconds.
       failed: >-

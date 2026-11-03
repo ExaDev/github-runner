@@ -3,7 +3,7 @@
 #
 # Only a node the controller judges is measured: a voter, or a host the owner marks eligible (ELIGIBLE_LABEL, with the value true). The DaemonSet schedules a pod on no other node, and a pod that finds its node is neither (a label removed while it runs) records nothing and removes the entry it has from when it was one, as does a pod that is stopped on a node that is neither any more or is gone, so the ConfigMap, which holds at most a mebibyte, grows with the hosts that decide the cluster's control plane and not with the fleet.
 #
-# A sample holds, per node: the TCP connect time to every voter's etcd peer port (a connect that does not complete within the election timeout is recorded as the election timeout, so loss shows as tail latency); on a voter, what etcd's own metrics gained since the last sample (the WAL fsync and backend commit histograms, the round trip to each peer, leader changes) and whether it has a leader, is a learner and is connected to its peers; on a node that is not a voter, an fdatasync probe in the k3s data directory once per window, with the write size etcd's own fio check uses; the memory pressure and MemAvailable the regrade core reads; and the link the default route leaves by.
+# A sample holds, per node: the TCP connect time to every voter's etcd peer port (a connect that does not complete within the election timeout is recorded as the election timeout, so loss shows as tail latency); on a voter, what etcd's own metrics gained since the last sample (the WAL fsync and backend commit histograms, the round trip to each peer, leader changes) and whether it has a leader, is a learner and is connected to its peers; on a node that is not a voter, an fdatasync probe in the k3s data directory once per window, with the write size etcd's own fio check uses; the memory pressure and MemAvailable the regrade core reads; and the medium of the node's link: the value of its LINK_LABEL Node label when it has one, which the cluster role reads on the host itself (the medium of the interface a Mac's Colima VM is bridged to, or of the interface a Linux host's default route leaves by), and otherwise the medium of the interface this pod's default route leaves by. The label decides when the node has it because a node in a container or a VM sees only its own virtual interface: a k3s container's veth, which reads unknown, or a VM's virtio NIC, which reads wired whatever the Mac beneath it uses.
 #
 # `fleet-role-probe.sh check link|connect <address>|memory|etcd|fsync` takes one of those readings alone, prints it and exits, with no cluster access (connect needs ELECTION_TIMEOUT_MS; the others need nothing but the settings below), so that each can be compared with a reading taken by hand on the host it runs on.
 #
@@ -12,6 +12,7 @@
 # - NAMESPACE: the namespace of the ConfigMap. Required.
 # - ELECTION_TIMEOUT_MS: the cluster's etcd election timeout, which is how long a peer connect may take before it counts as lost. Required.
 # - ELIGIBLE_LABEL: the Node label, with the value true, that marks a host the controller may promote or demote. Required.
+# - LINK_LABEL: the Node label the cluster role publishes the host's link medium in, wired, wifi or unknown. Required.
 # - PROBE_CONFIGMAP: the shared ConfigMap, created by the role, that every probe patches its own key of (default fleet-role-probe).
 # - REPORT_SECONDS: seconds between samples (default 15, the node recovery watcher's poll).
 # - REPORT_ONCE: when "true", take one sample and exit, for tests.
@@ -19,7 +20,7 @@
 # - ETCD_METRICS_URL: where a voter's etcd serves its metrics (default http://127.0.0.1:2381/metrics, the listener k3s keeps).
 # - ETCD_PEER_PORT: etcd's peer port (default 2380).
 # - FSYNC_DIR: a directory on the filesystem k3s keeps its data on, which the fdatasync probe writes in (default /var/lib/rancher/k3s/fleet-role-probe).
-# - SYS_CLASS_NET, PROC_NET_ROUTE: where the host's /sys/class/net and /proc/net/route are (the defaults).
+# - NODE_LINK: the link reader the cluster role runs on the host too (roles/github_runner_cluster/files/node-link.sh), whose default_route_interface and link_type read this pod's own (default /app/node-link.sh). SYS_CLASS_NET and PROC_NET_ROUTE, which it reads, are where the host's /sys/class/net and /proc/net/route are (the defaults).
 # - FLEET_REGRADE_CORE: the regrade core (roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh), whose own psi_avg300 and meminfo_kb read the memory signals (default /app/fleet-regrade-core.sh). PSI_FILE and MEMINFO_FILE, which it reads, default here to /proc/pressure/memory and /proc/meminfo, which a pod's own procfs serves for the whole node as it does /proc/meminfo, so nothing is mounted for them. A kernel without pressure stall information has no /proc/pressure, and the sample then has no pressure reading and the memory figures from /proc/meminfo alone, which the controller counts as not over the limit.
 set -euo pipefail
 
@@ -30,8 +31,7 @@ VOTER_LABEL="${VOTER_LABEL:-node-role.kubernetes.io/etcd=true}"
 ETCD_METRICS_URL="${ETCD_METRICS_URL:-http://127.0.0.1:2381/metrics}"
 ETCD_PEER_PORT="${ETCD_PEER_PORT:-2380}"
 FSYNC_DIR="${FSYNC_DIR:-/var/lib/rancher/k3s/fleet-role-probe}"
-SYS_CLASS_NET="${SYS_CLASS_NET:-/sys/class/net}"
-PROC_NET_ROUTE="${PROC_NET_ROUTE:-/proc/net/route}"
+NODE_LINK="${NODE_LINK:-/app/node-link.sh}"
 FLEET_REGRADE_CORE="${FLEET_REGRADE_CORE:-/app/fleet-regrade-core.sh}"
 PSI_FILE="${PSI_FILE:-/proc/pressure/memory}"
 MEMINFO_FILE="${MEMINFO_FILE:-/proc/meminfo}"
@@ -45,44 +45,17 @@ readonly etcd_fio_write_bytes=2300
 
 # shellcheck source=/dev/null
 . "$FLEET_REGRADE_CORE"
+# A pod is a Linux process whatever the host beneath its node runs, so the reader reads Linux's files.
+# shellcheck disable=SC2034 # read by the sourced reader
+NODE_LINK_SYSTEM=Linux
+# shellcheck source=/dev/null
+. "$NODE_LINK"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
 # The tail percentile and the samples a window holds are defined once, in the module the controller reads them from too.
 read -r tail_percentile window_samples < <(jq -nr -L "$MODULES" 'include "fleet-role-stats"; "\(tail_percentile) \(window_samples)"')
 window_seconds=$((REPORT_SECONDS * window_samples))
-
-# The interface the default route leaves by, the one with the lowest metric among the routes that are up and have a gateway; empty when there is none. /proc/net/route is hexadecimal, tab separated, with a header line.
-default_route_interface() {
-  local iface destination _gateway flags _refcnt _use metric mask best='' best_metric=''
-  while read -r iface destination _gateway flags _refcnt _use metric mask _; do
-    [ "$destination" = 00000000 ] && [ "$mask" = 00000000 ] || continue
-    (( (0x$flags & 3) == 3 )) || continue
-    if [ -z "$best" ] || [ "$metric" -lt "$best_metric" ]; then
-      best=$iface
-      best_metric=$metric
-    fi
-  done < "$PROC_NET_ROUTE"
-  echo "$best"
-}
-
-# wired, wifi or unknown for an interface: wifi when the kernel gives it a wireless phy, wired when it is backed by a device, unknown when it is virtual (a veth in a container, a bridge, a tunnel) or absent, since then the link beneath it cannot be seen from here. Reads the interface's own directory and resolves it with cd -P, never a find over /sys, whose symlinks (device, subsystem, phy80211) loop back on themselves.
-link_type() {
-  local iface=$1 dir="${SYS_CLASS_NET}/$1" real
-  if [ -z "$iface" ] || [ ! -d "$dir" ]; then
-    echo unknown
-    return
-  fi
-  if [ -e "${dir}/phy80211" ] || [ -d "${dir}/wireless" ] || grep -qx 'DEVTYPE=wlan' "${dir}/uevent" 2> /dev/null; then
-    echo wifi
-    return
-  fi
-  real="$(cd -P "$dir" && pwd -P)"
-  case "$real" in
-    */devices/virtual/*) echo unknown ;;
-    *) echo wired ;;
-  esac
-}
 
 # The time curl took to connect to a peer's etcd peer port, in milliseconds. The request itself is not the point (the port speaks TLS, and curl's HTTP is refused), only the connection: curl reports a connect time of zero when it never completed, and then the reading is the election timeout.
 connect_ms() {
@@ -116,6 +89,11 @@ is_eligible_in() {
   jq --arg node "$NODE_NAME" --arg label "$ELIGIBLE_LABEL" 'any(.items[]; .metadata.name == $node and (.metadata.labels // {})[$label] == "true")' <<< "$1"
 }
 
+# The value of this node's LINK_LABEL in the nodes JSON, empty when the node has no such label.
+labelled_link_in() {
+  jq -r --arg node "$NODE_NAME" --arg label "$LINK_LABEL" '[.items[] | select(.metadata.name == $node) | (.metadata.labels // {})[$label] | strings] | first // ""' <<< "$1"
+}
+
 # Removes this node's entry from the ConfigMap. A key set to null in a merge patch is removed.
 remove_entry() {
   local patch
@@ -138,7 +116,7 @@ retire() {
 # Takes one sample and publishes it. $1 is "true" on the first pass of this process, which for a node that is not a voter is the only sign this probe has of k3s having restarted (a voter sees it in etcd's counters going backwards).
 report() {
   local first=$1 now entry voters is_voter eligible tcp='{}' peer_name peer_ip ms etcd='null' restarted=false cumulative='null' etcd_id='null'
-  local iface fsync='null' fsync_at patch metrics reading change psi=''
+  local iface link link_source fsync='null' fsync_at patch metrics reading change psi=''
   now="$(date +%s)"
   # This node's entry is read from the ConfigMap once, when the process starts, and kept from then on: the probe is the only writer of its key, and two API calls a sample (the nodes, then the patch) are all a probe on a poor path can be asked to make in a period.
   if [ "$entry_loaded" != true ]; then
@@ -182,6 +160,12 @@ report() {
   fi
 
   iface="$(default_route_interface)"
+  link="$(labelled_link_in "$nodes_json")"
+  link_source=label
+  if [ -z "$link" ]; then
+    link="$(link_type "$iface")"
+    link_source=interface
+  fi
   fsync_at="$(jq -c '.fsync_at' <<< "$entry")"
   if [ "$is_voter" != true ] && { [ "$fsync_at" = null ] || [ $((now - fsync_at)) -ge "$window_seconds" ]; }; then
     fsync="$(fsync_ms)"
@@ -196,12 +180,12 @@ report() {
   # The entry goes in on standard input, never as an argument: it holds a window of samples, and one argument is limited to a fraction of the argument space (128 KiB on Linux).
   new_entry="$(jq -c -L "$MODULES" --argjson now "$now" --argjson tcp "$tcp" --argjson etcd "$etcd" \
     --argjson restarted "$restarted" --argjson cumulative "$cumulative" --argjson etcd_id "$etcd_id" --argjson fsync "$fsync" --argjson fsync_at "$fsync_at" \
-    --arg psi "$psi" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" --arg iface "$iface" --arg link "$(link_type "$iface")" '
+    --arg psi "$psi" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" --arg iface "$iface" --arg link "$link" --arg link_source "$link_source" '
     include "fleet-role-stats";
     def number: if . == "" then null else tonumber end;
     . as $entry
     | {t: $now, tcp: $tcp, etcd: $etcd, restarted: $restarted, psi: ($psi | number), avail_kb: ($avail | number), total_kb: ($total | number),
-     link: $link, iface: (if $iface == "" then null else $iface end), fsync_ms: $fsync} as $sample
+     link: $link, link_source: $link_source, iface: (if $iface == "" then null else $iface end), fsync_ms: $fsync} as $sample
     | {etcd_id: $etcd_id, last: $cumulative, fsync_at: $fsync_at, samples: ((($entry.samples // []) + [$sample]) | .[-window_samples:])}' <<< "$entry")" || return 1
   patch="$(mktemp)"
   jq --arg node "$NODE_NAME" '{data: {($node): tojson}}' <<< "$new_entry" > "$patch"
@@ -236,6 +220,7 @@ fi
 : "${NAMESPACE:?NAMESPACE is required}"
 : "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
 : "${ELIGIBLE_LABEL:?ELIGIBLE_LABEL is required}"
+: "${LINK_LABEL:?LINK_LABEL is required}"
 
 trap retire TERM INT
 

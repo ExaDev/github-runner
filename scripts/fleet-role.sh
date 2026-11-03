@@ -80,7 +80,7 @@ kubectl patch configmap "$status_configmap" -n "$namespace" --type merge --patch
 # What each host's verdict rests on, then the decision, in the log.
 while IFS= read -r line; do log "$line"; done < <(jq -r '
   .hosts | to_entries[]
-  | "\(.key) (\(.value.role)\(if .value.pinned then ", pinned" else "" end)\(if .value.eligible then "" else ", not eligible" end)): \(.value.verdict), \(.value.reasons | if length == 0 then "all readings within their limits" else join("; ") end)"' <<< "$result")
+  | "\(.key) (\(.value.role)\(if .value.pinned then ", pinned" else "" end)\(if .value.eligible then "" else ", not eligible" end), link \(.value.link)): \(.value.verdict), \(.value.reasons | if length == 0 then "all readings within their limits" else join("; ") end)"' <<< "$result")
 while IFS= read -r line; do log "$line"; done < <(jq -r '
   if .decision.action == "swap" then "DRY RUN: would swap out \(.decision.swap.out) for \(.decision.swap.in): \(.decision.because | join("; "))"
   else "DRY RUN: would not act: \(.decision.because | join("; "))\(if .decision.wanted == null and (.blocks | length) > 0 then " (also: \(.blocks | join("; ")))" else "" end)" end' <<< "$result")

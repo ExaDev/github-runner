@@ -56,6 +56,7 @@ class Host:
     ready_for: float = 24 * 3600
     level: str | None = None
     link: str = "wired"
+    link_source: str = "interface"
     # Milliseconds to every voter, or per peer; a list is one reading per sample.
     tcp: Series | dict[str, Series] = 5.0
     # What etcd's own round trip histogram holds per peer, in milliseconds, for a voter; none leaves the histograms out.
@@ -116,6 +117,7 @@ def populate(cluster: Cluster, hosts: list[Host]) -> None:
                     avail_kb=h.avail_kb,
                     total_kb=h.total_kb,
                     link=h.link,
+                    link_source=h.link_source,
                     fsync_ms=None if h.voter else h.fsync_ms if i == 0 else None,
                 )
             )
@@ -556,11 +558,16 @@ class ReportingTest(ControllerCase):
         self.assertIn(f"over {UNFIT_RTT_MS:g} ms", reasons)
         self.assertIn(f"{ELECTION_TIMEOUT_MS} ms election timeout", reasons)
         self.assertIn("memory was over the regrade limit in 100 of 100 samples", reasons)
-        self.assertIn("a (voter): unfit", self.log)
+        self.assertIn("a (voter, link wired): unfit", self.log)
 
     def test_the_link_type_is_reported_for_every_host(self) -> None:
         status = self.pass_(healthy(a={"link": "wifi"}, d={"link": "unknown"}))
         self.assertEqual({name: host["link"] for name, host in status["hosts"].items()}, {"a": "wifi", "b": "wired", "c": "wired", "d": "unknown"})
+
+    def test_where_each_hosts_link_was_read_is_reported(self) -> None:
+        status = self.pass_(healthy(a={"link": "wifi", "link_source": "label"}))
+        self.assertEqual({name: host["link_source"] for name, host in status["hosts"].items()}, {"a": "label", "b": "interface", "c": "interface", "d": "interface"})
+        self.assertIn("a (voter, link wifi): fit", self.log)
 
     def test_a_pass_writes_only_its_own_status_and_changes_nothing_in_the_cluster(self) -> None:
         self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}))

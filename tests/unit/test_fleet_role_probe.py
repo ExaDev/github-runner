@@ -31,6 +31,8 @@ from fleet_role_support import (
     ELECTION_TIMEOUT_MS,
     ELIGIBLE_LABEL,
     NAMESPACE,
+    LINK_LABEL,
+    NODE_LINK,
     REGRADE_CORE,
     SAMPLE_SECONDS,
     TARGET,
@@ -171,6 +173,8 @@ class ProbeCase(unittest.TestCase):
             "SYS_CLASS_NET": str(self.sys / "class" / "net"),
             "PROC_NET_ROUTE": str(self.route),
             "FLEET_REGRADE_CORE": str(REGRADE_CORE),
+            "NODE_LINK": str(NODE_LINK),
+            "LINK_LABEL": LINK_LABEL,
             "PSI_FILE": str(self.psi),
             "MEMINFO_FILE": str(self.meminfo),
         }
@@ -307,6 +311,26 @@ class LinkTest(ProbeCase):
 
     def test_an_interface_the_tree_does_not_have_is_unknown(self) -> None:
         self.assertEqual(self.link_via(route_line("enp9s0")), "unknown")
+
+    def test_a_reading_of_the_pods_own_interface_says_so(self) -> None:
+        self.tree.pci_ethernet()
+        self.link_via(route_line("enp3s0"))
+        self.assertEqual(self.newest()["link_source"], "interface")
+
+    def test_the_label_the_cluster_role_published_decides_over_the_pods_own_interface(self) -> None:
+        # What a node in a Colima VM bridged to a Mac's Wi-Fi sees: its own virtio NIC, which is backed by a device and so reads wired, while the Mac beneath it is on Wi-Fi.
+        self.tree.pci_ethernet("eth0")
+        for medium in ("wifi", "wired", "unknown"):
+            with self.subTest(medium):
+                self.nodes = [node("me", eligible=True, link=medium)]
+                self.assertEqual(self.link_via(route_line("eth0")), medium)
+                self.assertEqual((self.newest()["link_source"], self.newest()["iface"]), ("label", "eth0"))
+
+    def test_another_nodes_label_is_not_this_ones(self) -> None:
+        self.tree.pci_ethernet()
+        self.nodes = [self.settled_node, node("other", eligible=True, link="wifi")]
+        self.assertEqual(self.link_via(route_line("enp3s0")), "wired")
+        self.assertEqual(self.newest()["link_source"], "interface")
 
     def test_the_kernels_looping_links_do_not_stop_the_reading(self) -> None:
         # The tree really loops: from the class directory, an interface's subsystem is the class directory again, and its device leads back to the interface. A find that follows links fails on a tree like this, which is how a real host failed.
@@ -680,7 +704,7 @@ class RingTest(ProbeCase):
             [str(Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh")],
             env=self.cluster.env(
                 NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), ELIGIBLE_LABEL=ELIGIBLE_LABEL, REPORT_SECONDS="1", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
-                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
+                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), NODE_LINK=str(NODE_LINK), LINK_LABEL=LINK_LABEL, PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
             ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -720,7 +744,7 @@ class RingTest(ProbeCase):
             [str(SCRIPT)],
             env=self.cluster.env(
                 NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), ELIGIBLE_LABEL=ELIGIBLE_LABEL, REPORT_SECONDS="600", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
-                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
+                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), NODE_LINK=str(NODE_LINK), LINK_LABEL=LINK_LABEL, PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
             ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -856,6 +880,7 @@ class CheckTest(ProbeCase):
             "SYS_CLASS_NET": str(self.sys / "class" / "net"),
             "PROC_NET_ROUTE": str(self.route),
             "FLEET_REGRADE_CORE": str(REGRADE_CORE),
+            "NODE_LINK": str(NODE_LINK),
             "PSI_FILE": str(self.psi),
             "MEMINFO_FILE": str(self.meminfo),
         }
