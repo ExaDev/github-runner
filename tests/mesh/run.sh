@@ -1148,6 +1148,22 @@ scenario_role_controller() {
   if kubectl_on 1 get node "$(node_name 4)" -o 'jsonpath={.metadata.labels}' | grep -F 'node-role.kubernetes.io/etcd' >/dev/null; then fail "the fourth node is a server"; fi
   ids=$(etcd_member_ids 1)
 
+  log "A check run on hosts that lack the node-labels Compose file, as a host that ran the role before the controller was turned on does, passes and writes nothing"
+  local before_started
+  before_started="$(started_at)"
+  for index in $(seq 1 "$node_count"); do rm -f "${work}/$(node_name "$index")/docker-compose.node-labels.yml"; done
+  run_role --check || fail "the role's check run failed on hosts without docker-compose.node-labels.yml"
+  for index in $(seq 1 "$node_count"); do
+    [ ! -e "${work}/$(node_name "$index")/docker-compose.node-labels.yml" ] || fail "the check run wrote docker-compose.node-labels.yml on $(node_name "$index")"
+  done
+  [ "$before_started" = "$(started_at)" ] || fail "the check run restarted a node"
+  log "The real run after it writes the file first, then names it, and recreates no container"
+  run_role
+  for index in $(seq 1 "$node_count"); do
+    [ -e "${work}/$(node_name "$index")/docker-compose.node-labels.yml" ] || fail "the real run did not write docker-compose.node-labels.yml on $(node_name "$index")"
+  done
+  [ "$before_started" = "$(started_at)" ] || fail "the real run restarted a node whose configuration it left as it was"
+
   log "Building the role controller image from this checkout and loading it into every node"
   docker build --quiet --file "${repo_root}/fleet-role/Dockerfile" --tag "$role_controller_image" "$repo_root" >/dev/null
   image_file="${work}/fleet-role-image.tar"
