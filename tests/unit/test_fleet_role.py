@@ -164,7 +164,7 @@ class ThresholdTest(ControllerCase):
         status = self.pass_(healthy())
         self.assertEqual(self.verdicts(status), {"a": "fit", "b": "fit", "c": "fit", "d": "fit"})
         self.assertEqual(status["decision"]["action"], "none")
-        self.assertEqual(status["decision"]["because"], ["no unpinned eligible voter is unfit"])
+        self.assertEqual(status["decision"]["because"], ["no voter is unfit"])
         self.assertEqual(status["blocks"], [])
         self.assertTrue(status["dry_run"])
 
@@ -370,12 +370,47 @@ class RankingTest(ControllerCase):
     def test_a_pinned_voter_is_never_swapped_out(self) -> None:
         status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50, "pinned": True}))
         self.assertEqual(status["decision"]["action"], "none")
-        self.assertIn("unfit but not replaceable: a", status["decision"]["because"][-1])
+        self.assertEqual(status["decision"]["because"], ["voter a is the most at fault and is pinned or not marked eligible, so it is not replaced"])
 
     def test_a_voter_not_marked_eligible_is_never_swapped_out(self) -> None:
         status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50, "eligible": False}))
         self.assertEqual(status["decision"]["action"], "none")
-        self.assertIn("unfit but not replaceable: a", status["decision"]["because"][-1])
+        self.assertEqual(status["decision"]["because"], ["voter a is the most at fault and is pinned or not marked eligible, so it is not replaced"])
+
+    SLOW = UNFIT_RTT_MS + 200
+
+    def slow_voter_c(self, **changes: dict[str, Any]) -> list[Host]:
+        """Voter c has a slow link to every other host, as a voter on a poor path does: both ends of each of its links measure it slow, so a and b are unfit too, by the rule that a voter is unfit when its round trip to any other voter is."""
+        hosts = healthy(
+            a={"tcp": {"b": 5.0, "c": self.SLOW + 300}},  # the worst single reading is a's, but c is on the most slow links
+            b={"tcp": {"a": 5.0, "c": self.SLOW}},
+            c={"tcp": {"a": self.SLOW, "b": self.SLOW}},
+            d={"tcp": {"a": 5.0, "b": 5.0, "c": self.SLOW}},
+        )
+        for host in hosts:
+            for key, value in changes.get(host.name, {}).items():
+                setattr(host, key, value)
+        return hosts
+
+    def test_a_slow_link_makes_both_its_ends_unfit_and_the_voter_on_the_most_slow_links_is_replaced(self) -> None:
+        status = self.pass_(self.slow_voter_c())
+        self.assertEqual(self.verdicts(status), {"a": "unfit", "b": "unfit", "c": "unfit", "d": "unfit"})
+        self.assertEqual(status["decision"]["swap"], {"out": "c", "in": "d"}, "c is on two slow links, a and b on one each")
+
+    def test_a_candidate_is_judged_against_the_voters_that_would_remain(self) -> None:
+        # d measures c slow, as everyone does, and is unfit against the full set; without c it is fit, which is what the swap needs.
+        status = self.pass_(self.slow_voter_c())
+        self.assertEqual(status["hosts"]["d"]["verdict"], "unfit")
+        self.assertEqual(status["decision"]["action"], "swap")
+        status = self.pass_(self.slow_voter_c(d={"tcp": {"a": self.SLOW, "b": 5.0, "c": self.SLOW}}))
+        self.assertEqual(status["decision"]["action"], "none", "d is slow to a voter that stays")
+        self.assertEqual(status["decision"]["because"], ["voter c is unfit and no eligible standby is fit and ranks above it"])
+
+    def test_nothing_is_swapped_when_the_voter_at_fault_is_pinned_even_though_its_peers_are_unfit_and_replaceable(self) -> None:
+        status = self.pass_(self.slow_voter_c(c={"pinned": True}))
+        self.assertEqual(self.verdicts(status)["a"], "unfit")
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertEqual(status["decision"]["because"], ["voter c is the most at fault and is pinned or not marked eligible, so it is not replaced"])
 
     def test_an_unfit_standby_is_not_a_candidate(self) -> None:
         status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}, d={"fsync_ms": 50.0}))
