@@ -7,7 +7,7 @@
 # - FLEET_ROLE_DRY_RUN: must be "true", the default. The controller has no way to change a role; the setting exists so that a Deployment that names it keeps working when it can.
 # - FLEET_ROLE_VOTERS: the number of voters the cluster is held at. Odd, at least 3, and at most FLEET_ROLE_MAX_SERVERS minus one, which leaves a swap one place of headroom (the new voter joins before the old one leaves). Required.
 # - FLEET_ROLE_MAX_SERVERS: the most servers the cluster may have (github_runner_cluster_max_servers). Required.
-# - FLEET_ROLE_ELECTION_TIMEOUT_MS: the cluster's configured etcd election timeout; k3s's own default when unset.
+# - FLEET_ROLE_ELECTION_TIMEOUT_MS: the cluster's etcd election timeout in milliseconds, k3s's own default of 1000 where the cluster configures none (the role works that out). Required.
 # - FLEET_ROLE_SAMPLE_SECONDS: the probe's sample period. Required; the window the figures are read over is this times the samples a window holds.
 # - FLEET_ROLE_PRESSURE_THRESHOLD, FLEET_ROLE_AVAILABLE_FLOOR_PERCENT: the regrade core's limit (github_runner_cluster_regrade_pressure_threshold and github_runner_cluster_regrade_available_floor_percent). Required.
 # - FLEET_ROLE_ETCD_QUOTA_BYTES: etcd's storage quota, used for a host's memory floor when no voter reports one; etcd's own default when unset.
@@ -16,8 +16,6 @@
 # - FLEET_ROLE_STATE_NAMESPACE, FLEET_ROLE_PROBE_CONFIGMAP, FLEET_ROLE_STATUS_CONFIGMAP: where the probes publish and this controller keeps its status; both ConfigMaps are created by the role.
 set -euo pipefail
 
-# k3s's own election timeout when none is configured (github_runner_cluster_etcd_election_timeout empty), in milliseconds.
-readonly k3s_default_election_timeout_ms=1000
 # etcd's default storage quota, 2 GiB, in bytes (--quota-backend-bytes).
 readonly etcd_default_quota_bytes=2147483648
 # etcd needs a majority, so fewer than three voters tolerate no failure.
@@ -26,7 +24,7 @@ readonly min_voters=3
 dry_run="${FLEET_ROLE_DRY_RUN:-true}"
 target="${FLEET_ROLE_VOTERS:?FLEET_ROLE_VOTERS must be set}"
 max_servers="${FLEET_ROLE_MAX_SERVERS:?FLEET_ROLE_MAX_SERVERS must be set}"
-election_timeout_ms="${FLEET_ROLE_ELECTION_TIMEOUT_MS:-$k3s_default_election_timeout_ms}"
+election_timeout_ms="${FLEET_ROLE_ELECTION_TIMEOUT_MS:?FLEET_ROLE_ELECTION_TIMEOUT_MS must be set}"
 sample_seconds="${FLEET_ROLE_SAMPLE_SECONDS:?FLEET_ROLE_SAMPLE_SECONDS must be set}"
 pressure_threshold="${FLEET_ROLE_PRESSURE_THRESHOLD:?FLEET_ROLE_PRESSURE_THRESHOLD must be set}"
 available_floor_percent="${FLEET_ROLE_AVAILABLE_FLOOR_PERCENT:?FLEET_ROLE_AVAILABLE_FLOOR_PERCENT must be set}"
