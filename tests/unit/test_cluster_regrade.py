@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from regrade_settings import sourced
+
 ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / "roles" / "github_runner_cluster"
 FILES = ROLE / "files"
@@ -192,19 +194,19 @@ class SettingsFileTest(unittest.TestCase):
 
     def sourced(self, text: str, *names: str) -> dict[str, str]:
         """What a shell that sources the file, as the core does, makes of these variables."""
-        script = "set -eu\n. /dev/stdin <<'ENV'\n" + text + "ENV\n" + "".join(f'printf "%s\\0" "${{{name}}}"\n' for name in names)
-        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return dict(zip(names, result.stdout.split("\0"), strict=False))
+        values = sourced(text)
+        return {name: values[name] for name in names}
+
+    def needed(self, actuator: str) -> set[str]:
+        """The settings the core, the part both k3s actuators share and the named actuator take from the environment: referenced, never assigned by the scripts themselves, and not a bash variable. The paths and names with a default (PSI_FILE and the like) are assigned with one, so they are not needed. A shell variable's name is letters, digits and underscores, not starting with a digit."""
+        scripts = "".join((FILES / "regrade" / name).read_text() for name in ("fleet-regrade-core.sh", "fleet-regrade-k3s.sh", f"fleet-regrade-{actuator}.sh"))
+        referenced = set(re.findall(r"\$\{?([A-Z_][A-Z0-9_]*)\b", scripts))
+        assigned = set(re.findall(r"\b([A-Z_][A-Z0-9_]*)=", scripts))
+        return referenced - assigned - {"SECONDS", "BASH_SOURCE"}
 
     def test_the_core_and_the_actuator_read_every_setting_they_need(self) -> None:
-        scripts = "".join((FILES / "regrade" / name).read_text() for name in ("fleet-regrade-core.sh", "fleet-regrade-k3s.sh", "fleet-regrade-docker.sh"))
-        referenced = set(re.findall(r"\$\{?([A-Z][A-Z_]+)\b", scripts))
-        assigned = set(re.findall(r"\b([A-Z][A-Z_]+)=", scripts))
-        # What the scripts take from the environment: referenced, never assigned by the scripts themselves, and not a bash variable. The paths and names with a default (PSI_FILE and the like) are assigned with one, so they are not needed here.
-        needed = referenced - assigned - {"SECONDS", "BASH_SOURCE"}
-        provided = {line.split("=", 1)[0] for line in self.render().splitlines() if re.match(r"[A-Z_]+=", line)}
-        self.assertEqual(sorted(needed - provided), [])
+        needed = self.needed("docker")
+        self.assertEqual(sorted(needed - set(sourced(self.render()))), [])
         self.assertIn("PRESSURE_THRESHOLD", needed, "the check finds the settings at all")
         self.assertIn("NODE_CONTAINER", needed, "the check reads the actuator too")
 
@@ -212,14 +214,9 @@ class SettingsFileTest(unittest.TestCase):
         self.assertEqual(self.sourced(self.render(), "FLEET_REGRADE_ACTUATOR"), {"FLEET_REGRADE_ACTUATOR": "docker"})
 
     def test_a_native_servers_core_and_actuator_read_every_setting_they_need(self) -> None:
-        scripts = "".join((FILES / "regrade" / name).read_text() for name in ("fleet-regrade-core.sh", "fleet-regrade-k3s.sh", "fleet-regrade-systemd.sh"))
-        referenced = set(re.findall(r"\$\{?([A-Z][A-Z_]+)\b", scripts))
-        assigned = set(re.findall(r"\b([A-Z][A-Z_]+)=", scripts))
-        needed = referenced - assigned - {"SECONDS", "BASH_SOURCE"}
-        text = self.render("-e", "github_runner_cluster_node_mode=native")
-        provided = {line.split("=", 1)[0] for line in text.splitlines() if re.match(r"[A-Z_]+=", line)}
-        self.assertEqual(sorted(needed - provided), [])
-        self.assertIn("K3S_SERVICE", needed, "the check reads the actuator too")
+        needed = self.needed("systemd")
+        self.assertEqual(sorted(needed - set(sourced(self.render("-e", "github_runner_cluster_node_mode=native")))), [])
+        self.assertIn("K3S_SERVICE", needed, "the check reads names with a digit in them, and the actuator too")
 
     def test_a_native_server_runs_the_systemd_actuator_with_k3s_and_its_admin_kubeconfig(self) -> None:
         values = self.sourced(self.render("-e", "github_runner_cluster_node_mode=native"), "FLEET_REGRADE_ACTUATOR", "KUBECTL", "KUBECONFIG_PATH", "K3S_SERVICE", "K3S_DATA_DIR", "LEVEL_FILE", "STARTED_FILE")

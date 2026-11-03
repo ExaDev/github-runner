@@ -301,9 +301,9 @@ class ScriptTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("reports no IPv4 address", result.stderr)
 
-    def test_both_scripts_are_executable_and_shellcheck_clean(self) -> None:
+    def test_every_script_is_executable_and_shellcheck_clean(self) -> None:
         scripts = sorted((ROLE / "files" / "native").glob("*.sh"))
-        self.assertEqual([script.name for script in scripts], ["fleet-role-is.sh", "tailscale-up-wait.sh", "write-node-ip.sh", "write-resolv-conf.sh"])
+        self.assertEqual([script.name for script in scripts], ["fleet-role-is.sh", "tailscale-up-wait.sh", "write-node-ip.sh", "write-regrade-level.sh", "write-resolv-conf.sh"])
         for script in scripts:
             self.assertTrue(os.access(script, os.X_OK), script)
         if shutil.which("shellcheck"):
@@ -362,7 +362,7 @@ class TemplateTest(unittest.TestCase):
 
     def test_the_units_and_configurations_are_templates_the_role_has(self) -> None:
         templates = sorted(path.name for path in (ROLE / "templates" / "native").iterdir())
-        self.assertEqual(templates, ["agent.yaml.j2", "join.yaml.j2", "k3s-agent.service.j2", "k3s.service.j2", "server.yaml.j2"])
+        self.assertEqual(templates, ["agent.yaml.j2", "fleet-regrade.service.j2", "join.yaml.j2", "k3s-agent.service.j2", "k3s.service.j2", "server.yaml.j2"])
         config = (ROLE / "tasks" / "native" / "config.yml").read_text()
         for name in ("agent.yaml.j2", "server.yaml.j2", "join.yaml.j2", "native/{{ item }}.service.j2"):
             self.assertIn(name, config)
@@ -528,7 +528,7 @@ class NativeRoleTest(NativeRoleHarness):
         result = self.run_role(check=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.mutations(), [])
-        self.assertEqual([path for path in self.root.rglob("*") if path.is_file()], [])
+        self.assertEqual(self.written(), [])
         self.assertIn("apt-get install tailscale=1.102.4 (installed: none)", result.stdout)
         self.assertIn("enable start k3s-agent", result.stdout)
         self.assertEqual(self.recap(result)["failed"], 0)
@@ -608,7 +608,7 @@ class NativeRoleTest(NativeRoleHarness):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not an architecture a native k3s node supports", result.stdout)
         self.assertEqual(self.calls(), [])
-        self.assertEqual([path for path in self.root.rglob("*") if path.is_file()], [])
+        self.assertEqual(self.written(), [])
 
     def test_a_host_that_is_not_linux_under_systemd_is_refused(self) -> None:
         for change in ({"system": "Darwin"}, {"service_mgr": "openrc"}):
