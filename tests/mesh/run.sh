@@ -952,6 +952,8 @@ start_native_host() {
 
 native_exec() { docker exec -i "$native_host" "$@"; }
 native_systemd_up() { case "$(native_exec systemctl is-system-running 2>/dev/null)" in running | degraded) return 0 ;; *) return 1 ;; esac; }
+# node_status names a Docker node by its index; the native host's node is named for the host.
+native_node_ready() { [ "$(kubectl_on 1 get node "$native_host" --no-headers 2>/dev/null | awk '{print $2}')" = Ready ]; }
 native_unit_is() { [ "$(native_exec systemctl is-active "$1" </dev/null 2>/dev/null)" = "$2" ]; }
 
 # The etcd member list, as assert_cluster reads it, through node 1.
@@ -997,7 +999,7 @@ scenario_native_server() {
   log "Bringing up three Docker servers, then the native host as an agent"
   run_role --limit "$(node_name 1),$(node_name 2),$(node_name 3)"
   run_role --limit "$native_host"
-  wait_for "${native_host} to be Ready as an agent" 300 node_is 1 "$native_host" Ready
+  wait_for "${native_host} to be Ready as an agent" 300 native_node_ready
   native_unit_is k3s-agent active || fail "${native_host} does not run k3s-agent"
   native_unit_is k3s inactive || fail "${native_host} runs k3s as an agent"
   [ "$(native_exec cat /var/lib/rancher/k3s/fleet-role)" = agent ] || fail "the role file does not name the agent"
