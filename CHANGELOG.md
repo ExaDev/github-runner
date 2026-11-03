@@ -1,3 +1,10 @@
+## [2.27.2](https://github.com/ExaDev/github-runner/compare/v2.27.1...v2.27.2) (2026-11-03)
+
+### Tests
+
+* **mesh:** assert host_network nodes advertise only addresses of their own VM ([43785c4](https://github.com/ExaDev/github-runner/commit/43785c407c5a9f02e97ad65233d78993fb80acf5))
+* **mesh:** drop STUN in the host_network VMs so nodes advertise only their own addresses ([543d4b8](https://github.com/ExaDev/github-runner/commit/543d4b8ad89d8ee5073057250eb3af4e17fc83c7))
+
 ## [2.27.1](https://github.com/ExaDev/github-runner/compare/v2.27.0...v2.27.1) (2026-11-03)
 
 ### Bug Fixes
