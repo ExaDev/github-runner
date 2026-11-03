@@ -1,3 +1,9 @@
+## [2.27.0](https://github.com/ExaDev/github-runner/compare/v2.26.2...v2.27.0) (2026-11-03)
+
+### Features
+
+* **host-tools:** add variables that are a share of the host's CPUs, for the shell and for mise ([359d4d3](https://github.com/ExaDev/github-runner/commit/359d4d368185da47b6e67499a65081fd93066aba))
+
 ## [2.26.2](https://github.com/ExaDev/github-runner/compare/v2.26.1...v2.26.2) (2026-11-03)
 
 ### Tests
