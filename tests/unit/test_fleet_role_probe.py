@@ -29,6 +29,7 @@ from typing import Any
 
 from fleet_role_support import (
     ELECTION_TIMEOUT_MS,
+    ELIGIBLE_LABEL,
     NAMESPACE,
     REGRADE_CORE,
     SAMPLE_SECONDS,
@@ -161,6 +162,7 @@ class ProbeCase(unittest.TestCase):
             "NODE_NAME": name,
             "NAMESPACE": NAMESPACE,
             "ELECTION_TIMEOUT_MS": str(ELECTION_TIMEOUT_MS),
+            "ELIGIBLE_LABEL": ELIGIBLE_LABEL,
             "REPORT_SECONDS": str(SAMPLE_SECONDS),
             "REPORT_ONCE": "true",
             "ETCD_PEER_PORT": "1",
@@ -238,7 +240,7 @@ class LinkTest(ProbeCase):
     def setUp(self) -> None:
         super().setUp()
         self.tree = SysfsTree(self.sys)
-        self.settled_node = node("me")
+        self.settled_node = node("me", eligible=True)
         self.nodes = [self.settled_node]
         self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
 
@@ -327,7 +329,7 @@ class ConnectTest(ProbeCase):
         self.settled()
 
     def peers(self, address: str = "127.0.0.1") -> list[dict[str, Any]]:
-        return [node("peer", voter=True, address=address), node("me")]
+        return [node("peer", voter=True, address=address), node("me", eligible=True)]
 
     def test_a_connect_to_a_listening_peer_port_is_its_real_time_in_milliseconds(self) -> None:
         with listener() as port:
@@ -440,7 +442,7 @@ class EtcdReadingTest(ProbeCase):
         self.assertEqual(self.cluster.probes()["me"]["etcd_id"], FIXTURE_SERVER_ID)
 
     def test_a_node_that_is_not_a_voter_reads_no_etcd_metrics(self) -> None:
-        self.nodes = [node("me"), node("p1", voter=True)]
+        self.nodes = [node("me", eligible=True), node("p1", voter=True)]
         self.settled()
         with metrics_server([page("before")]) as url:
             self.assertEqual(self.pass_with(url).returncode, 0)
@@ -544,10 +546,40 @@ def live_etcd(binary: str) -> Iterator[LiveEtcd]:
             cluster.stop()
 
 
+class MeasuredNodesTest(ProbeCase):
+    """Only a voter or a host marked eligible is measured; any other node has nothing recorded, so the ConfigMap grows with the hosts that decide the control plane and not with the fleet."""
+
+    def test_a_node_that_is_neither_records_nothing(self) -> None:
+        self.cluster.set_probes({"other": entry([sample(5)], "other-id")})
+        completed = self.probe(voters=[node("me"), node("peer", voter=True)])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(sorted(self.cluster.probes()), ["other"])
+        self.assertEqual([json.loads(line)[:2] for line in self.cluster.calls.read_text().splitlines() if '"patch"' in line], [])
+        self.assertEqual(list(self.fsync_dir.iterdir()), [], "and runs no disk probe")
+
+    def test_a_node_that_stopped_being_either_has_its_entry_removed_and_no_other(self) -> None:
+        self.cluster.set_probes({"other": entry([sample(5)], "other-id"), "me": entry([sample(6)])})
+        completed = self.probe(voters=[node("me"), node("peer", voter=True)])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(sorted(self.cluster.probes()), ["other"])
+
+    def test_an_eligible_node_is_measured(self) -> None:
+        self.settled()
+        completed = self.probe(voters=[node("me", eligible=True), node("peer", voter=True)])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(len(self.cluster.probes()["me"]["samples"]), 1)
+
+    def test_a_voter_is_measured_whether_or_not_it_is_eligible(self) -> None:
+        with metrics_server([page("before")]) as url:
+            completed = self.probe(voters=[node("me", voter=True), node("peer", voter=True)], ETCD_METRICS_URL=url)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(len(self.cluster.probes()["me"]["samples"]), 1)
+
+
 class MemoryTest(ProbeCase):
     def setUp(self) -> None:
         super().setUp()
-        self.nodes = [node("me")]
+        self.nodes = [node("me", eligible=True)]
         self.settled()
 
     def test_pressure_and_available_memory_are_read_from_the_kernels_files_by_the_regrade_cores_functions(self) -> None:
@@ -570,7 +602,7 @@ class MemoryTest(ProbeCase):
 class RingTest(ProbeCase):
     def setUp(self) -> None:
         super().setUp()
-        self.nodes = [node("me")]
+        self.nodes = [node("me", eligible=True)]
 
     def test_a_sample_is_appended_and_the_entry_keeps_the_last_window_of_them(self) -> None:
         old = [sample(1000 + i, fsync_ms=None) for i in range(WINDOW_SAMPLES)]
@@ -592,11 +624,12 @@ class RingTest(ProbeCase):
     def test_a_node_that_is_not_a_voter_marks_its_first_sample_as_a_restart_and_a_later_one_as_none(self) -> None:
         self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
         # The loop form: one process taking two samples.
+        self.cluster.nodes = self.nodes
         self.cluster.write_store()
         process = subprocess.Popen(
             [str(Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh")],
             env=self.cluster.env(
-                NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), REPORT_SECONDS="1", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
+                NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), ELIGIBLE_LABEL=ELIGIBLE_LABEL, REPORT_SECONDS="1", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
                 SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo),
             ),
             stdout=subprocess.DEVNULL,
@@ -623,7 +656,7 @@ class RingTest(ProbeCase):
 class FsyncTest(ProbeCase):
     def setUp(self) -> None:
         super().setUp()
-        self.nodes = [node("me"), node("peer", voter=True)]
+        self.nodes = [node("me", eligible=True), node("peer", voter=True)]
 
     def test_a_node_that_is_not_a_voter_takes_the_reading_from_the_real_fio_and_leaves_no_file_behind(self) -> None:
         completed = self.probe()
