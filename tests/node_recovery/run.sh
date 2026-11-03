@@ -155,8 +155,11 @@ doomed_uid="$(kubectl get node "$doomed_node" -o jsonpath='{.metadata.uid}')"
 
 log "Building and loading the watcher image and the stand-in's image"
 docker build -q -f "$repo_root/node-recovery/Dockerfile" -t "$image" "$repo_root" >/dev/null
-docker pull -q "$pod_image" >/dev/null
-kind load docker-image "$image" "$pod_image" --name "$cluster" >/dev/null
+kind load docker-image "$image" --name "$cluster" >/dev/null
+# The stand-in's image is pulled by each node's own runtime: a host Docker on the containerd image store pulls a multi-platform index holding only the host platform's blobs, and kind's import of it with all platforms fails on the missing ones.
+for node in $(kind get nodes --name "$cluster"); do
+  docker exec "$node" crictl pull "$pod_image" >/dev/null
+done
 
 # Renders the role's manifests into $work/recovery.yaml; extra arguments are further -e settings, such as the prune threshold.
 render_manifests() {
