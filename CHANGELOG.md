@@ -1,3 +1,10 @@
+## [2.33.0](https://github.com/ExaDev/github-runner/compare/v2.32.0...v2.33.0) (2026-11-03)
+
+### Features
+
+* **regrade:** let the holder of the Lease renew it ([4414161](https://github.com/ExaDev/github-runner/commit/4414161e8a62db7349c9a6da4ddd2e3a3300eeb6))
+* **role:** judge a voter by etcd's own vote, not by its label ([4d1d640](https://github.com/ExaDev/github-runner/commit/4d1d64070dae63a74614b0c3567998f14d177ec5))
+
 ## [2.32.0](https://github.com/ExaDev/github-runner/compare/v2.31.0...v2.32.0) (2026-11-03)
 
 ### Features
