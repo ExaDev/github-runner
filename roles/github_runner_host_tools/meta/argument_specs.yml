@@ -51,7 +51,7 @@ argument_specs:
       github_runner_host_tools_shell_env:
         type: dict
         default: {}
-        description: Environment variables for the connecting user's shell, as a mapping of names to string, number or boolean values, each written as a quoted export line in a managed block of the shell's startup file unless a startup file of the shell assigns it already.
+        description: Environment variables for the connecting user's shell, as a mapping of names to string, number or boolean values, each written as a quoted export line in a managed block at the top of the shell's startup file (above any interactive guard, so an SSH command sees it) unless a startup file of the shell assigns it already.
       github_runner_host_tools_homebrew_prefix:
         type: str
         default: ""

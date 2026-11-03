@@ -145,6 +145,9 @@ PNPM_CONFIG = {"Darwin": "Library/Preferences/pnpm/config.yaml", "Linux": ".conf
 PNPM_SETTINGS = {"minimumReleaseAge": 10080, "saveExact": True}
 PNPM_USER = "# Mine.\nstoreDir: /somewhere/store   # the store\n\n# The age, in minutes.\nminimumReleaseAge: 1440\n\n# Exclusions.\nminimumReleaseAgeExclude:\n- old-one\n\nregistry: https://registry.example.test/\n"
 PNPM_MERGED = "# Mine.\nstoreDir: /somewhere/store   # the store\n\n# The age, in minutes.\nminimumReleaseAge: 10080\n\n# Exclusions.\nminimumReleaseAgeExclude:\n  - example-a\n\nregistry: https://registry.example.test/\nsaveExact: true\n"
+# The ~/.bashrc every Ubuntu 26.04 user starts from, exactly as /etc/skel/.bashrc has it (package bash 5.3-2ubuntu1, read from two hosts, which agree), so the role is driven against the real structure: its comment header and the interactive guard near the top that returns for a non-interactive shell. SKEL_SHA256 is the checksum of that file, so a copy changed by an editor or a hook (which rejoins hard-wrapped comments) fails loudly.
+UBUNTU_BASHRC = ROOT / "tests" / "host_tools" / "ubuntu-26.04-skel.bashrc"
+SKEL_SHA256 = "342099da4dd28c394d3f8782d90d7465cb2eaa611193f8f378d6918261cb9bb8"
 ENV_BLOCK_UV = "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools env-UV_PYTHON_DOWNLOADS\nexport UV_PYTHON_DOWNLOADS=never\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools env-UV_PYTHON_DOWNLOADS\n"
 
 
@@ -165,7 +168,7 @@ def mise_block(prefix: Path, shell: str) -> str:
 
 class FilterRegistrationTest(unittest.TestCase):
     def test_the_filters_are_registered_under_the_names_the_role_uses(self) -> None:
-        self.assertEqual(set(host_tools.FilterModule().filters()), {"host_tools_homebrew_prefix", "host_tools_shell_integrations", "host_tools_shell_env", "host_tools_mise_toml", "host_tools_npmrc", "host_tools_yaml_merge"})
+        self.assertEqual(set(host_tools.FilterModule().filters()), {"host_tools_homebrew_prefix", "host_tools_shell_integrations", "host_tools_shell_env", "host_tools_block_leads", "host_tools_mise_toml", "host_tools_npmrc", "host_tools_yaml_merge"})
         used = set(re.findall(r"exadev\.github_runner\.(host_tools_\w+)", "".join(path.read_text() for path in (ROLE / "tasks").glob("*.yml"))))
         self.assertEqual(used, set(host_tools.FilterModule().filters()))
 
@@ -265,9 +268,17 @@ class TasksTest(unittest.TestCase):
                     self.assertNotIn("become", task)
 
     def test_the_shell_integration_never_sets_a_mode_on_a_startup_file(self) -> None:
-        [block] = [task["ansible.builtin.blockinfile"] for name, task in self.tasks() if "ansible.builtin.blockinfile" in task and name == "shell_integration_line.yml"]
-        self.assertNotIn("mode", block)
-        self.assertIs(block["create"], True)
+        blocks = [task["ansible.builtin.blockinfile"] for name, task in self.tasks() if "ansible.builtin.blockinfile" in task and name == "shell_integration_line.yml"]
+        self.assertEqual(len(blocks), 2)
+        for block in blocks:
+            self.assertNotIn("mode", block)
+        [write] = [block for block in blocks if block.get("state", "present") == "present"]
+        self.assertIs(write["create"], True)
+
+    def test_the_startup_file_is_read_only_to_find_the_block_and_never_shown_or_logged(self) -> None:
+        [read] = [task for name, task in self.tasks() if name == "shell_integration_line.yml" and "ansible.builtin.slurp" in task]
+        self.assertIs(read["no_log"], True)
+        self.assertIs(read["check_mode"], False)
 
     def test_the_npm_settings_block_never_sets_a_mode_and_a_missing_npmrc_is_created_private(self) -> None:
         [block] = [task["ansible.builtin.blockinfile"] for name, task in self.tasks() if "ansible.builtin.blockinfile" in task and name == "npm_settings.yml"]
@@ -1012,11 +1023,11 @@ class RoleTest(unittest.TestCase):
                 self.ok(self.run_settings(github_runner_host_tools_shell_integration=integration, github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
                 self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV)
 
-    def test_the_variables_come_with_homebrew_and_mise_lines_in_the_same_file_when_both_are_wanted(self) -> None:
+    def test_the_variables_come_ahead_of_the_homebrew_and_mise_lines_in_the_same_file_when_both_are_wanted(self) -> None:
         self.have_homebrew()
         (self.stub / "mise.state").write_text("current")
         self.ok(self.run_role(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
-        self.assertEqual((self.home / ".zshenv").read_text(), homebrew_block(self.prefix) + mise_block(self.prefix, "zsh") + ENV_BLOCK_UV)
+        self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV + homebrew_block(self.prefix) + mise_block(self.prefix, "zsh"))
 
     def test_a_login_shell_the_role_does_not_set_up_gets_no_variables(self) -> None:
         (self.stub / "shell").write_text("/usr/bin/fish")
@@ -1031,13 +1042,163 @@ class RoleTest(unittest.TestCase):
         startup.chmod(0o600)
         self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
         self.assertEqual(self.mode(startup), 0o600)
-        self.assertEqual(startup.read_text(), "export EXAMPLE=1\n" + ENV_BLOCK_UV)
+        self.assertEqual(startup.read_text(), ENV_BLOCK_UV + "export EXAMPLE=1\n")
 
     def test_a_name_a_shell_would_not_accept_is_refused_before_any_file_is_changed(self) -> None:
         result = self.run_settings(github_runner_host_tools_shell_env={"NOT-A-NAME": "x"})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not a name a shell accepts", self.squashed(result))
         self.assertEqual(list(self.home.iterdir()), [])
+
+    # Where the variables go in a bash startup file: a non-interactive bash, which is what sshd starts for a command, reads ~/.bashrc only as far as the interactive guard.
+
+    def bash_sees(self, name: str, *, interactive: bool = False) -> str:
+        """The value of a variable in a real bash that sources ~/.bashrc, as sshd's non-interactive bash does, or an interactive one."""
+        script = f'. "$1"\nprintf %s "${{{name}-unset}}"'
+        result = subprocess.run(["bash", *(["-i"] if interactive else []), "-c", script, "bash", str(self.home / ".bashrc")], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)})
+        return result.stdout
+
+    def ubuntu_home(self) -> str:
+        """Puts the Ubuntu skeleton ~/.bashrc in the home and returns its text."""
+        text = UBUNTU_BASHRC.read_text()
+        (self.home / ".bashrc").write_text(text)
+        return text
+
+    def run_ubuntu(self, *extra: str, **variables: Any) -> subprocess.CompletedProcess[str]:
+        return self.run_settings(*extra, system="Linux", os_family="Debian", machine="x86_64", **variables)
+
+    def test_the_ubuntu_skeleton_fixture_is_the_real_file(self) -> None:
+        self.assertEqual(hashlib.sha256(UBUNTU_BASHRC.read_bytes()).hexdigest(), SKEL_SHA256)
+        self.assertRegex(UBUNTU_BASHRC.read_text(), r"(?m)^case \$- in\n    \*i\*\) ;;\n      \*\) return;;\nesac$")
+
+    def test_the_variable_goes_above_the_interactive_guard_of_the_ubuntu_bashrc_and_the_rest_of_the_file_is_untouched(self) -> None:
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + skeleton)
+
+    def test_a_non_interactive_bash_sees_the_variable_and_an_interactive_one_does_too(self) -> None:
+        self.ubuntu_home()
+        self.assertEqual(self.bash_sees("UV_PYTHON_DOWNLOADS"), "unset")
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual(self.bash_sees("UV_PYTHON_DOWNLOADS"), "never")
+        self.assertEqual(self.bash_sees("UV_PYTHON_DOWNLOADS", interactive=True), "never")
+
+    def test_the_homebrew_and_mise_lines_stay_at_the_end_below_the_guard_and_the_variable_is_above_it(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_role(system="Linux", os_family="Debian", machine="x86_64", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + skeleton + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
+
+    def test_a_second_run_on_the_ubuntu_bashrc_changes_nothing(self) -> None:
+        self.ubuntu_home()
+        variables = {"github_runner_host_tools_shell_env": {"UV_PYTHON_DOWNLOADS": "never", "EXAMPLE_OTHER": "x"}}
+        self.ok(self.run_ubuntu(**variables))
+        after_first = (self.home / ".bashrc").read_text()
+        result = self.run_ubuntu(**variables)
+        self.ok(result)
+        self.assertEqual((self.home / ".bashrc").read_text(), after_first)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_block_an_earlier_version_appended_below_the_guard_is_moved_to_the_top_without_a_duplicate(self) -> None:
+        skeleton = self.ubuntu_home()
+        (self.home / ".bashrc").write_text(skeleton + ENV_BLOCK_UV)
+        self.assertEqual(self.bash_sees("UV_PYTHON_DOWNLOADS"), "unset")
+        variables = {"github_runner_host_tools_shell_env": {"UV_PYTHON_DOWNLOADS": "never"}}
+        result = self.run_ubuntu(**variables)
+        self.ok(result)
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + skeleton)
+        self.assertEqual(self.bash_sees("UV_PYTHON_DOWNLOADS"), "never")
+        result = self.run_ubuntu(**variables)
+        self.ok(result)
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + skeleton)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_moved_block_takes_the_new_value_and_the_other_blocks_below_the_guard_stay_where_they_are(self) -> None:
+        skeleton = self.ubuntu_home()
+        (self.home / ".bashrc").write_text(skeleton + homebrew_block(self.prefix) + ENV_BLOCK_UV.replace("never", "automatic") + mise_block(self.prefix, "bash"))
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + skeleton + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
+
+    def test_check_mode_reports_the_move_and_leaves_the_file_as_it_is(self) -> None:
+        skeleton = self.ubuntu_home()
+        (self.home / ".bashrc").write_text(skeleton + ENV_BLOCK_UV)
+        result = self.run_ubuntu("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+        self.ok(result)
+        self.assertEqual((self.home / ".bashrc").read_text(), skeleton + ENV_BLOCK_UV)
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+        result = self.run_ubuntu("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+        self.assertEqual((self.home / ".bashrc").read_text(), skeleton + ENV_BLOCK_UV)
+
+    def test_check_mode_on_a_file_with_the_block_at_the_top_changes_nothing(self) -> None:
+        skeleton = self.ubuntu_home()
+        (self.home / ".bashrc").write_text(ENV_BLOCK_UV + skeleton)
+        result = self.run_ubuntu("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_variable_the_ubuntu_bashrc_assigns_already_is_not_added_or_overridden(self) -> None:
+        skeleton = self.ubuntu_home()
+        for assignment in ("export UV_PYTHON_DOWNLOADS=automatic\n", "UV_PYTHON_DOWNLOADS=automatic\n"):
+            with self.subTest(assignment=assignment):
+                (self.home / ".bashrc").write_text(skeleton + assignment)
+                result = self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+                self.ok(result)
+                self.assertEqual((self.home / ".bashrc").read_text(), skeleton + assignment)
+                self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_guard_written_another_way_is_still_stepped_over(self) -> None:
+        for guard in ('[ -z "$PS1" ] && return\n', '[[ $- != *i* ]] && return\n', 'case "$-" in *i*) ;; *) return ;; esac\n'):
+            with self.subTest(guard=guard):
+                (self.home / ".bashrc").write_text("# mine\n" + guard + "export AFTER=1\n")
+                self.ok(self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+                self.assertEqual(self.bash_sees("UV_PYTHON_DOWNLOADS"), "never")
+                self.assertEqual(self.bash_sees("AFTER"), "unset")
+
+    def test_a_bashrc_is_not_printed_when_the_block_is_looked_for(self) -> None:
+        skeleton = self.ubuntu_home()
+        (self.home / ".bashrc").write_text(skeleton + ENV_BLOCK_UV + f"export EXAMPLE_TOKEN={NPMRC_TOKEN}\n")
+        result = self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+        self.ok(result)
+        self.assertNotIn(NPMRC_TOKEN, result.stdout + result.stderr)
+        self.assertIn(NPMRC_TOKEN, (self.home / ".bashrc").read_text())
+
+    def test_a_bashrc_that_is_a_symlink_stays_one_and_its_target_is_edited_and_keeps_its_mode(self) -> None:
+        target = self.work / "dotfiles-bashrc"
+        target.write_text(UBUNTU_BASHRC.read_text() + ENV_BLOCK_UV)
+        target.chmod(0o640)
+        (self.home / ".bashrc").symlink_to(target)
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertTrue((self.home / ".bashrc").is_symlink())
+        self.assertEqual(target.read_text(), ENV_BLOCK_UV + UBUNTU_BASHRC.read_text())
+        self.assertEqual(self.mode(target), 0o640)
+
+    def test_a_new_bashrc_gets_the_block_alone(self) -> None:
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV)
+        self.assertEqual(self.bash_sees("UV_PYTHON_DOWNLOADS"), "never")
+
+    def test_several_variables_are_all_above_the_guard(self) -> None:
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env={"EXAMPLE_ONE": "1", "EXAMPLE_TWO": "2", "EXAMPLE_THREE": "3"}))
+        text = (self.home / ".bashrc").read_text()
+        self.assertTrue(text.endswith(skeleton))
+        self.assertEqual([self.bash_sees(name) for name in ("EXAMPLE_ONE", "EXAMPLE_TWO", "EXAMPLE_THREE")], ["1", "2", "3"])
+
+    def test_a_zshenv_the_earlier_version_wrote_with_the_variable_after_the_roles_other_blocks_is_left_as_it_is(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        before = homebrew_block(self.prefix) + mise_block(self.prefix, "zsh") + ENV_BLOCK_UV
+        (self.home / ".zshenv").write_text(before)
+        result = self.run_role(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
+        self.ok(result)
+        self.assertEqual((self.home / ".zshenv").read_text(), before)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_zshenv_with_the_block_below_code_of_the_users_gets_it_moved_above_that_code(self) -> None:
+        (self.home / ".zshenv").write_text("export EXAMPLE=1\n" + ENV_BLOCK_UV)
+        self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV + "export EXAMPLE=1\n")
 
     def test_check_mode_reports_a_variable_and_writes_nothing(self) -> None:
         result = self.run_settings("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
