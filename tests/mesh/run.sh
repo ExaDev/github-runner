@@ -503,6 +503,10 @@ start_vms() {
       sleep 1
     done
   done
+  # Each node's Tailscale client advertises the endpoints it finds for itself: its interface addresses, and the address a STUN server on a public DERP region sees it come from, which on a hosted runner is the runner's public address. That address hairpins back through the runner's NAT, and magicsock picks between it and the test network address by measured latency, with a bonus for a private address that sub-millisecond jitter can outweigh (betterAddr in wgengine/magicsock/endpoint.go of the pinned Tailscale), so which one a node uses varied between runs. STUN is UDP to port 3478, so it is dropped in every VM, as on a LAN whose NAT does not hairpin: a node then advertises only addresses of its own VM's interfaces (see assert_direct_paths), and DERP, over TCP, still carries the disco messages that set a direct path up.
+  for index in $(seq 1 "$node_count"); do
+    docker exec "$(vm "$index")" iptables -I OUTPUT 1 -p udp --dport 3478 -j DROP
+  done
 }
 
 # A Headscale server on this machine's Docker, at a fixed address on the test network, with a policy that lets the nodes register, reach each other and route pods; prints the API key and a join key on two lines.
