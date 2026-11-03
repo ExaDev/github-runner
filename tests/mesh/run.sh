@@ -224,6 +224,7 @@ EOF
     echo "        github_runner_cluster_etcd_heartbeat_interval: ${etcd_heartbeat_ms}"
     echo "        github_runner_cluster_etcd_election_timeout: ${etcd_election_ms}"
     echo "        github_runner_cluster_regrade: ${regrade}"
+    if [ "${role_controller:-0}" = 1 ]; then echo "        github_runner_cluster_role_controller: true"; fi
     # The test cluster is throwaway: the role must not install a login item that starts the host's Colima profile.
     echo "        github_runner_cluster_runtime_autostart: false"
     if [ "$pin_context" = 1 ]; then
@@ -241,6 +242,11 @@ EOF
       echo "          github_runner_cluster_container_name: grtest-node${index}-k3s"
       # Used only by a host the topology makes an agent (the role_controller scenario has one); the role refuses one name for both services.
       echo "          github_runner_cluster_agent_container_name: grtest-node${index}-agent"
+      # The role_controller scenario marks every host a candidate for a vote, through the inventory, as an owner would, and pins the first.
+      if [ "${role_controller:-0}" = 1 ]; then
+        echo "          github_runner_cluster_voter_eligible: true"
+        if [ "$index" = 1 ]; then echo "          github_runner_cluster_voter_pinned: true"; fi
+      fi
     done
     if [ -n "$native_role" ]; then
       echo "        ${native_host}:"
@@ -1110,10 +1116,11 @@ mesh_delay() {
 
 # Brings up three servers and a standby agent, runs the role controller's probe and controller in the cluster (the pods from the image built from this checkout, the manifests the ARC role renders), and checks that the controller reports what it sees on real k3s and real etcd: all hosts fit, then one voter made slow with tc netem on its mesh interface reported unfit with the swap named, then a voter paused and the controller reporting that it would not act, and throughout that it has changed nothing.
 scenario_role_controller() {
-  local index ids image_file manifests slow paused paused_name controller_node deadline account verb
+  local index ids image_file manifests slow paused paused_name controller_node deadline account verb expected
   node_count=4
   agent_from=4
   etcd_on_memory=1
+  role_controller=1
   reset_environment
   prepare_nodes hosted
   write_inventory hosted
@@ -1162,8 +1169,12 @@ metadata: {name: fleet-role-status, namespace: ${platform_namespace}}
 data: {"status.json": ""}
 MANIFESTS
   kubectl_on 1 apply -f - < "$manifests" >/dev/null
+  log "The role published the labels from the inventory: eligible on every host, pinned on the first alone"
   for index in $(seq 1 "$node_count"); do
-    kubectl_on 1 label node "$(node_name "$index")" github-runner.exadev.com/voter-eligible=true >/dev/null
+    [ "$(kubectl_on 1 get node "$(node_name "$index")" -o 'jsonpath={.metadata.labels.github-runner\.exadev\.com/voter-eligible}')" = true ] || fail "$(node_name "$index") is not labelled eligible"
+    expected=false
+    if [ "$index" = 1 ]; then expected=true; fi
+    [ "$(kubectl_on 1 get node "$(node_name "$index")" -o 'jsonpath={.metadata.labels.github-runner\.exadev\.com/voter-pinned}')" = "$expected" ] || fail "$(node_name "$index") does not carry voter-pinned=${expected}"
   done
   kubectl_on 1 --namespace "$platform_namespace" rollout status daemonset/fleet-role-probe --timeout=300s
   kubectl_on 1 --namespace "$platform_namespace" rollout status deployment/fleet-role --timeout=300s
@@ -1182,6 +1193,7 @@ MANIFESTS
   log "Every host is fit, from a window of real samples, and the controller would not act"
   wait_for "every host to be reported fit and no swap wanted" 1800 role_status_is '(.hosts | length == 4) and ([.hosts[].verdict] | all(. == "fit")) and .decision.action == "none" and (.blocks | length == 0)'
   role_status | jq .
+  role_status | jq -e "(.hosts | to_entries | all(.value.eligible)) and ([.hosts[] | select(.pinned)] | length == 1) and .hosts[\"$(node_name 1)\"].pinned" >/dev/null || fail "the controller did not read the labels the role published: $(role_status | jq -c '[.hosts[] | {eligible, pinned}]')"
   role_status | jq -e '[.hosts[].link] | all(. == "unknown")' >/dev/null || fail "a node in a container should have a link it cannot see: $(role_status | jq -c '[.hosts[].link]')"
 
   log "A voter is made slow with tc netem on its mesh interface (${role_controller_delay_ms} ms each way): the controller reports it unfit and names the swap"
