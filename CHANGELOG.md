@@ -1,3 +1,13 @@
+## [2.31.0](https://github.com/ExaDev/github-runner/compare/v2.30.2...v2.31.0) (2026-11-03)
+
+### Features
+
+* **role:** say when a host's memory pressure is unknown ([3188c8d](https://github.com/ExaDev/github-runner/commit/3188c8db7f32a1290f9b230791c59a67a4a77429))
+
+### Bug Fixes
+
+* **role:** take no pressure reading from a pressure file the kernel refuses to read ([2e0dcdf](https://github.com/ExaDev/github-runner/commit/2e0dcdf745281162aff3b802c38138421eb4baed))
+
 ## [2.30.2](https://github.com/ExaDev/github-runner/compare/v2.30.1...v2.30.2) (2026-11-03)
 
 ### Bug Fixes
