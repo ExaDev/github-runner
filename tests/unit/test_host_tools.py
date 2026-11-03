@@ -149,6 +149,7 @@ PNPM_MERGED = "# Mine.\nstoreDir: /somewhere/store   # the store\n\n# The age, i
 UBUNTU_BASHRC = ROOT / "tests" / "host_tools" / "ubuntu-26.04-skel.bashrc"
 SKEL_SHA256 = "342099da4dd28c394d3f8782d90d7465cb2eaa611193f8f378d6918261cb9bb8"
 ENV_BLOCK_UV = "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools env-UV_PYTHON_DOWNLOADS\nexport UV_PYTHON_DOWNLOADS=never\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools env-UV_PYTHON_DOWNLOADS\n"
+TURBO_BLOCK = "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools env-TURBO_CACHE_DIR\nexport TURBO_CACHE_DIR=\"$HOME/.cache/turbo\"\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools env-TURBO_CACHE_DIR\n"
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -301,9 +302,9 @@ class TasksTest(unittest.TestCase):
         self.assertEqual(VARS["github_runner_host_tools_pnpm_config_files"], {"Darwin": "Library/Preferences/pnpm/config.yaml", "Linux": ".config/pnpm/config.yaml"})
 
     def test_the_package_install_settings_and_the_shell_environment_write_nothing_by_default(self) -> None:
-        for name in ("npm_settings", "npm_min_release_age_exclude", "pnpm_settings", "pnpm_minimum_release_age_exclude", "shell_env"):
+        for name in ("npm_settings", "npm_min_release_age_exclude", "pnpm_settings", "pnpm_minimum_release_age_exclude", "shell_env", "shell_env_home_relative"):
             with self.subTest(name=name):
-                self.assertEqual(DEFAULTS[f"github_runner_host_tools_{name}"], {} if name.endswith(("_settings", "_env")) else [])
+                self.assertEqual(DEFAULTS[f"github_runner_host_tools_{name}"], {} if name.endswith(("_settings", "_env", "_home_relative")) else [])
 
     def test_the_mise_configuration_goes_to_conf_d_and_never_to_config_toml(self) -> None:
         paths = [str(module.get("dest") or module.get("path")) for _, task in self.tasks() for key, module in task.items() if key.startswith("ansible.builtin.") and isinstance(module, dict) and (module.get("dest") or module.get("path"))]
@@ -1199,6 +1200,115 @@ class RoleTest(unittest.TestCase):
         (self.home / ".zshenv").write_text("export EXAMPLE=1\n" + ENV_BLOCK_UV)
         self.ok(self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
         self.assertEqual((self.home / ".zshenv").read_text(), ENV_BLOCK_UV + "export EXAMPLE=1\n")
+
+    # Variables whose value is a path below the user's home directory.
+
+    def shell_sees(self, shell: str, startup: Path, name: str, home: Path) -> str:
+        """The value of a variable in a real shell that reads a startup file with the given home directory."""
+        script = f'. "$1"\nprintf %s "${{{name}-unset}}"' if shell != "zsh" else f'source "$1"\nprintf %s "${{{name}-unset}}"'
+        result = subprocess.run([shell, "-c", script, shell, str(startup)], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin:/opt/homebrew/bin", "HOME": str(home)})
+        return result.stdout
+
+    def test_a_home_relative_variable_goes_into_zshenv_as_dollar_home_and_a_second_run_changes_nothing(self) -> None:
+        variables = {"github_runner_host_tools_shell_env_home_relative": {"TURBO_CACHE_DIR": ".cache/turbo"}}
+        self.ok(self.run_settings(**variables))
+        self.assertEqual((self.home / ".zshenv").read_text(), TURBO_BLOCK)
+        result = self.run_settings(**variables)
+        self.ok(result)
+        self.assertEqual((self.home / ".zshenv").read_text(), TURBO_BLOCK)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_the_home_directory_is_worked_out_by_the_shell_that_reads_the_file_not_by_the_role(self) -> None:
+        elsewhere = self.work / "another user's home"
+        elsewhere.mkdir()
+        self.ok(self.run_settings(github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        for shell in ("sh", "bash", "zsh"):
+            with self.subTest(shell=shell):
+                self.assertEqual(self.shell_sees(shell, self.home / ".zshenv", "TURBO_CACHE_DIR", elsewhere), f"{elsewhere}/.cache/turbo")
+        self.assertNotIn(str(self.home), (self.home / ".zshenv").read_text())
+
+    def test_a_path_with_characters_special_in_double_quotes_reaches_the_variable_as_given_through_the_role(self) -> None:
+        path = 'it\'s "$HOME" `id` $(id) ${HOME} \\n; echo injected'
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env_home_relative={"EXAMPLE_PATH": path}))
+        for shell in ("sh", "bash", "zsh"):
+            with self.subTest(shell=shell):
+                self.assertEqual(self.shell_sees(shell, self.home / ".bashrc", "EXAMPLE_PATH", self.work), f"{self.work}/{path}")
+
+    def test_a_non_interactive_bash_on_the_ubuntu_bashrc_sees_a_home_relative_variable_expanded(self) -> None:
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), TURBO_BLOCK + skeleton)
+        self.assertEqual(self.bash_sees("TURBO_CACHE_DIR"), f"{self.home}/.cache/turbo")
+        self.assertEqual(self.bash_sees("TURBO_CACHE_DIR", interactive=True), f"{self.home}/.cache/turbo")
+
+    def test_both_mappings_are_written_together_above_the_guard_and_a_second_run_changes_nothing(self) -> None:
+        skeleton = self.ubuntu_home()
+        variables = {"github_runner_host_tools_shell_env": {"UV_PYTHON_DOWNLOADS": "never"}, "github_runner_host_tools_shell_env_home_relative": {"TURBO_CACHE_DIR": ".cache/turbo"}}
+        self.ok(self.run_ubuntu(**variables))
+        text = (self.home / ".bashrc").read_text()
+        self.assertTrue(text.endswith(skeleton))
+        self.assertEqual(sorted([text[: -len(skeleton)].count(ENV_BLOCK_UV), text[: -len(skeleton)].count(TURBO_BLOCK)]), [1, 1])
+        self.assertEqual((self.bash_sees("UV_PYTHON_DOWNLOADS"), self.bash_sees("TURBO_CACHE_DIR")), ("never", f"{self.home}/.cache/turbo"))
+        result = self.run_ubuntu(**variables)
+        self.ok(result)
+        self.assertEqual((self.home / ".bashrc").read_text(), text)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_home_relative_variable_the_bashrc_assigns_already_is_kept_as_it_is(self) -> None:
+        skeleton = self.ubuntu_home()
+        own = "# One turbo cache for every repository on this machine.\nexport TURBO_CACHE_DIR=\"$HOME/.cache/turbo\"\n"
+        (self.home / ".bashrc").write_text(own + skeleton)
+        result = self.run_ubuntu(github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/elsewhere"})
+        self.ok(result)
+        self.assertEqual((self.home / ".bashrc").read_text(), own + skeleton)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+
+    def test_a_changed_home_relative_path_updates_the_roles_block_in_place(self) -> None:
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/old"}))
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), TURBO_BLOCK + skeleton)
+
+    def test_a_home_relative_block_below_the_guard_is_moved_to_the_top(self) -> None:
+        skeleton = self.ubuntu_home()
+        (self.home / ".bashrc").write_text(skeleton + TURBO_BLOCK)
+        self.ok(self.run_ubuntu(github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), TURBO_BLOCK + skeleton)
+
+    def test_the_home_relative_variables_alone_are_enough_to_write_the_startup_file(self) -> None:
+        result = self.run_settings("--check", github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
+        self.ok(result)
+        self.assertEqual(list(self.home.iterdir()), [])
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+
+    def test_a_host_the_role_does_not_support_gets_no_home_relative_variable(self) -> None:
+        self.ok(self.run_settings(system="FreeBSD", os_family="FreeBSD", github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_a_login_shell_the_role_does_not_set_up_gets_no_home_relative_variable(self) -> None:
+        (self.stub / "shell").write_text("/usr/bin/fish")
+        self.ok(self.run_settings(github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_a_path_that_is_not_below_the_home_directory_is_refused_before_any_file_is_changed(self) -> None:
+        cases = {"absolute": ("/var/cache/turbo", "relative to the user's home"), "parent": ("../turbo", "'..' component"), "empty": ("", "must not be empty"), "number": (3, "must be a string"), "newline": ("a\nb", "one line")}
+        for label, (path, message) in cases.items():
+            with self.subTest(label):
+                result = self.run_settings(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}, github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": path})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, self.squashed(result))
+                self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_a_variable_in_both_mappings_is_refused_before_any_file_is_changed(self) -> None:
+        result = self.run_settings(github_runner_host_tools_shell_env={"TURBO_CACHE_DIR": "/x"}, github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("set in both", self.squashed(result))
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_a_home_relative_mapping_of_the_wrong_type_is_refused_by_the_argument_specs(self) -> None:
+        result = self.run_settings(github_runner_host_tools_shell_env_home_relative=[".cache/turbo"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(list(self.home.iterdir()), [])
 
     def test_check_mode_reports_a_variable_and_writes_nothing(self) -> None:
         result = self.run_settings("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})
