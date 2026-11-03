@@ -27,7 +27,7 @@ recovery_bound=$((grace_seconds + after_seconds + poll_seconds + margin_seconds)
 stuck_watch_seconds=60
 # Voting etcd members the prune pass needs to remain, the quorum floor for tolerating one failure. kind runs no etcd member beyond its control plane's, so phase 4 gives three Ready nodes the etcd role label.
 min_voters=3
-etcd_role_label=node-role.kubernetes.io/etcd
+etcd_role_label="node-role.kubernetes.io/etcd"
 # Longer than after_seconds, as the watcher requires. Counted from when the worker went Unknown, which phase 3 reached long before phase 4 turns pruning on.
 prune_after_seconds=60
 removable_label=github-runner.exadev.io/removable
