@@ -25,7 +25,7 @@ CONTROL_PLANE = "node-role.kubernetes.io/control-plane"
 # What a cluster needs to tolerate losing one voter; the script's own constant is min_etcd_voters.
 QUORUM_VOTERS = 3
 
-# Answers `kubectl get nodes -o json` from a file and records every `kubectl patch`; FAKE_PATCH_EXIT sets the patch's exit status.
+# Answers `kubectl get nodes -o json` from a file, answers `kubectl get lease` with the Lease in FAKE_LEASE (nothing, as --ignore-not-found does, when there is no such file; FAKE_LEASE_EXIT makes it fail instead) and records every `kubectl patch`; FAKE_PATCH_EXIT sets the patch's exit status.
 FAKE_KUBECTL = textwrap.dedent(
     """\
     #!/usr/bin/env python3
@@ -33,6 +33,15 @@ FAKE_KUBECTL = textwrap.dedent(
     args = sys.argv[1:]
     if args[:2] == ["get", "nodes"]:
         sys.stdout.write(open(os.environ["FAKE_NODES"]).read())
+        sys.exit(0)
+    if args[:2] == ["get", "lease"]:
+        with open(os.environ["FAKE_LEASE_CALLS"], "a") as log:
+            log.write(json.dumps(args) + "\\n")
+        if int(os.environ.get("FAKE_LEASE_EXIT", "0")):
+            sys.stderr.write("lease unreadable\\n")
+            sys.exit(int(os.environ["FAKE_LEASE_EXIT"]))
+        if os.path.exists(os.environ["FAKE_LEASE"]):
+            sys.stdout.write(open(os.environ["FAKE_LEASE"]).read())
         sys.exit(0)
     if args[:2] == ["patch", "node"]:
         with open(os.environ["FAKE_PATCHES"], "a") as log:
@@ -91,6 +100,22 @@ def node(
     }
 
 
+LEASE_NAMESPACE = "kube-system"
+LEASE_NAME = "fleet-regrade"
+SWAP_NODES_ANNOTATION = "github-runner.exadev.com/swap-nodes"
+LEVEL_LABEL = "github-runner.exadev.com/regrade-level"
+LEASE_DURATION_SECONDS = 900
+
+
+def lease(holder: str, renewed_seconds_ago: int, swap_nodes: str | None = None, duration: int = LEASE_DURATION_SECONDS) -> dict[str, object]:
+    """The Lease as the API server stores it, renewed the given time ago."""
+    renewed = (datetime.now(timezone.utc) - timedelta(seconds=renewed_seconds_ago)).strftime("%Y-%m-%dT%H:%M:%S.123456Z")
+    metadata: dict[str, object] = {"name": LEASE_NAME, "namespace": LEASE_NAMESPACE}
+    if swap_nodes is not None:
+        metadata["annotations"] = {SWAP_NODES_ANNOTATION: swap_nodes}
+    return {"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": metadata, "spec": {"holderIdentity": holder, "leaseDurationSeconds": duration, "acquireTime": renewed, "renewTime": renewed}}
+
+
 UNREACHABLE = {"key": "node.kubernetes.io/unreachable", "effect": "NoExecute"}
 OURS = {"key": OUT_OF_SERVICE, "value": "nodeshutdown", "effect": "NoExecute"}
 
@@ -119,6 +144,8 @@ class PassCase(unittest.TestCase):
         self.patches_file = self.work / "patches.jsonl"
         self.current_file = self.work / "current.json"
         self.deletes_file = self.work / "deletes.jsonl"
+        self.lease_file = self.work / "lease.json"
+        self.lease_calls_file = self.work / "lease-calls.jsonl"
         self.sa_dir = self.work / "serviceaccount"
         self.sa_dir.mkdir()
         (self.sa_dir / "token").write_text(TOKEN)
@@ -130,6 +157,8 @@ class PassCase(unittest.TestCase):
             "FAKE_PATCHES": str(self.patches_file),
             "FAKE_CURRENT": str(self.current_file),
             "FAKE_DELETES": str(self.deletes_file),
+            "FAKE_LEASE": str(self.lease_file),
+            "FAKE_LEASE_CALLS": str(self.lease_calls_file),
             "NODE_RECOVERY_API_URL": "https://api.example.test:6443",
             "NODE_RECOVERY_SERVICEACCOUNT_DIR": str(self.sa_dir),
             "NODE_RECOVERY_AFTER_SECONDS": str(AFTER_SECONDS),
@@ -138,10 +167,16 @@ class PassCase(unittest.TestCase):
         }
 
     def run_pass(
-        self, nodes: list[dict[str, object]], current: list[dict[str, object]] | None = None, **env: str
+        self,
+        nodes: list[dict[str, object]],
+        current: list[dict[str, object]] | None = None,
+        held: dict[str, object] | None = None,
+        **env: str,
     ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
-        """Runs one pass over the nodes as listed. The API's own view when the delete arrives is `current`, the same nodes unless given."""
+        """Runs one pass over the nodes as listed. The API's own view when the delete arrives is `current`, the same nodes unless given; `held` is the regrade Lease in the cluster, none unless given."""
         self.nodes_file.write_text(json.dumps({"items": nodes}))
+        if held is not None:
+            self.lease_file.write_text(json.dumps(held))
         live = nodes if current is None else current
         self.current_file.write_text(json.dumps({n["metadata"]["name"]: n["metadata"] for n in live}))
         result = subprocess.run(["bash", str(SCRIPT)], env={**self.env, **env}, capture_output=True, text=True, check=False)
@@ -251,6 +286,80 @@ class NodeRecoveryTest(PassCase):
     def test_rejects_a_threshold_that_is_not_a_number(self) -> None:
         result, patches = self.run_pass([node("dead", "Unknown", AFTER_SECONDS * 10)], NODE_RECOVERY_AFTER_SECONDS="two minutes")
         self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(patches, [])
+
+
+class RoleSwapTest(PassCase):
+    """The nodes a voter swap or regrading is moving through, which the watcher leaves alone: the Lease kube-system/fleet-regrade names them while it is unexpired, and regrading marks a server it has stepped down with a level label."""
+
+    DEAD = AFTER_SECONDS * 10
+
+    def silent(self, name: str, **kwargs: object) -> dict[str, object]:
+        """A node whose kubelet has been silent far longer than the taint threshold."""
+        return node(name, "Unknown", self.DEAD, **kwargs)  # type: ignore[arg-type]
+
+    def tainted(self, patches: list[dict[str, object]]) -> list[str]:
+        return [p["name"] for p in patches]  # type: ignore[misc]
+
+    def test_leaves_alone_the_nodes_a_held_lease_lists(self) -> None:
+        result, patches = self.run_pass([self.silent("outgoing"), self.silent("incoming"), self.silent("other")], held=lease("fleet-role", 30, swap_nodes="outgoing,incoming"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tainted(patches), ["other"])
+        self.assertIn("Not tainting outgoing", result.stdout)
+        self.assertIn("Not tainting incoming", result.stdout)
+
+    def test_reads_only_the_named_lease_and_trims_the_names_it_lists(self) -> None:
+        _, patches = self.run_pass([self.silent("outgoing"), self.silent("incoming")], held=lease("fleet-role", 30, swap_nodes=" outgoing , ,incoming "))
+        self.assertEqual(patches, [])
+        [call] = [json.loads(line) for line in self.lease_calls_file.read_text().splitlines()]
+        self.assertEqual(call[:3], ["get", "lease", LEASE_NAME])
+        self.assertEqual(call[call.index("--namespace") + 1], LEASE_NAMESPACE)
+
+    def test_acts_on_a_listed_node_once_the_lease_has_expired(self) -> None:
+        expired = lease("fleet-role", LEASE_DURATION_SECONDS + 30, swap_nodes="outgoing")
+        result, patches = self.run_pass([self.silent("outgoing")], held=expired)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tainted(patches), ["outgoing"])
+
+    def test_acts_on_a_listed_node_when_the_lease_has_no_holder(self) -> None:
+        _, patches = self.run_pass([self.silent("outgoing")], held=lease("", 30, swap_nodes="outgoing"))
+        self.assertEqual(self.tainted(patches), ["outgoing"])
+
+    def test_leaves_alone_the_node_a_regrade_holder_names(self) -> None:
+        result, patches = self.run_pass([self.silent("stepping"), self.silent("other")], held=lease("stepping", 30))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tainted(patches), ["other"])
+
+    def test_leaves_alone_a_server_regrading_has_stepped_down(self) -> None:
+        result, patches = self.run_pass([self.silent("etcd-only", labels={LEVEL_LABEL: "etcd-only", ETCD: "true"}), self.silent("other")])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tainted(patches), ["other"])
+        self.assertIn(f"Not tainting etcd-only: {LEVEL_LABEL} holds it at etcd-only", result.stdout)
+
+    def test_the_level_label_is_configurable(self) -> None:
+        _, patches = self.run_pass([self.silent("stepped", labels={"example.com/level": "etcd-only"})], NODE_RECOVERY_LEVEL_LABEL="example.com/level")
+        self.assertEqual(patches, [])
+
+    def test_still_clears_its_taint_from_a_listed_node_that_is_ready(self) -> None:
+        back = node("outgoing", "True", 5, taints=[OURS], annotations={ANNOTATION: timestamp(600)})
+        result, patches = self.run_pass([back], held=lease("fleet-role", 30, swap_nodes="outgoing"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tainted(patches), ["outgoing"])
+        self.assertEqual(self.value_at(patches[0]["patch"], "/spec/taints"), [])  # type: ignore[arg-type]
+
+    def test_a_lease_that_cannot_be_read_fails_the_pass_before_any_change(self) -> None:
+        result, patches = self.run_pass([self.silent("outgoing")], FAKE_LEASE_EXIT="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(patches, [])
+
+    def test_does_not_delete_a_listed_node_that_would_be_pruned(self) -> None:
+        env = {"NODE_RECOVERY_PRUNE_AFTER_SECONDS": str(PRUNE_AFTER_SECONDS), "NODE_RECOVERY_PRUNE_LABEL": PRUNE_LABEL}
+        voters = [node(f"server-{i}", "True", 3600, labels={CONTROL_PLANE: "true", ETCD: "true"}) for i in range(QUORUM_VOTERS)]
+        outgoing = node("outgoing", "Unknown", PRUNE_AFTER_SECONDS * 10, labels=REMOVABLE)
+        other = node("other", "Unknown", PRUNE_AFTER_SECONDS * 10, labels=REMOVABLE)
+        result, patches = self.run_pass([outgoing, other, *voters], held=lease("fleet-role", 30, swap_nodes="outgoing"), **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.deleted(), ["other"])
         self.assertEqual(patches, [])
 
 
