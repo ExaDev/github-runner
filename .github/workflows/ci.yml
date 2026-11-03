@@ -163,6 +163,19 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq ansible pkg-config zsh
+      - name: Install mise
+        # The host tools tests read the mise configuration the role renders back with a real mise, to check that every value reaches the variable as given. A release more than a week old, pinned to its published checksum so the download is the file that was tested; the version is the one the tests were written against, raised by hand with its checksum from the release's SHASUMS256.txt.
+        env:
+          MISE_VERSION: v2026.10.20
+          MISE_SHA256: 5a9057180c3a9a795076f84be4f5f372e6e37179e1aeb49732928d6b395ce829
+        run: |
+          set -euo pipefail
+          directory="${RUNNER_TEMP}/mise"
+          mkdir -p "${directory}"
+          curl -fsSL -o "${directory}/mise.tar.gz" "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-x64.tar.gz"
+          echo "${MISE_SHA256}  ${directory}/mise.tar.gz" | sha256sum --check --strict
+          tar -xzf "${directory}/mise.tar.gz" -C "${directory}"
+          echo "${directory}/mise/bin" >> "$GITHUB_PATH"
       - name: Unit-test the collection
         # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record. A module is a shard's when its position in the list of modules, largest first, leaves this shard's index modulo the number of shards.
         env:
