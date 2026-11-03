@@ -1,10 +1,12 @@
-"""Filters the github_runner_cluster role uses before it moves a node container between networks: whether recreating it would be safe for the cluster, and whether the Docker host has an address on the LAN."""
+"""Filters the github_runner_cluster role uses before it restarts a node (moving its container between networks, resizing its Colima VM): whether the restart would be safe for the cluster, whether the fleet-regrade Lease that serialises such steps may be taken and how it is given back, and whether the Docker host has an address on the LAN."""
 
 from __future__ import annotations
 
 import ipaddress
 import json
+import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from ansible.errors import AnsibleFilterError
@@ -170,9 +172,88 @@ def addresses_in_network(lines: Any, network: Any) -> list[str]:
     return found
 
 
+def _micro_time(epoch: float) -> str:
+    """A Lease timestamp (RFC 3339 in UTC with microseconds, as the API server's MicroTime) for an epoch time, to the second as fleet-regrade's core writes it (micro_time in files/regrade/fleet-regrade-core.sh)."""
+    return datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+
+
+def _epoch(stamp: str) -> float:
+    return datetime.strptime(re.sub(r"\.[0-9]+Z$", "Z", stamp), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+
+
+def _lease_read(read: Any) -> dict[str, Any] | None | str:
+    """The Lease a `kubectl get lease --output json` result holds, None when the API server answered that there is none, or the reason the read failed."""
+    if not isinstance(read, Mapping):
+        raise AnsibleFilterError("The Lease read must be a command result.")
+    if read.get("rc") == 0:
+        try:
+            current = json.loads(str(read.get("stdout", "")))
+        except ValueError:
+            return "the API server's answer is not a Lease"
+        return current if isinstance(current, dict) else "the API server's answer is not a Lease"
+    detail = str(read.get("stderr", "") or read.get("msg", "")).strip()
+    if "(NotFound)" in detail:
+        return None
+    return detail or f"kubectl exited with status {read.get('rc')}"
+
+
+def cluster_lease_claim(read: Any, holder: Any, now: Any, duration: Any, name: Any, namespace: Any) -> dict[str, Any]:
+    """Decide whether a holder may take a Lease, and give the Lease it would write: the protocol fleet-regrade's core follows (lease_state and acquire_lease in files/regrade/fleet-regrade-core.sh), so the two never step a node at the same time.
+
+    A Lease nobody holds, whose holder's time has run out (renew time plus duration at or before now) or that the holder already holds is replaced, against the resourceVersion read so that the write fails if anyone changed it since; one that does not exist is created, which fails if anyone created it since; one another holds is refused.
+
+    :param read: the result of `kubectl get lease <name> --namespace <namespace> --output json`, not failed by its own task. :param holder: the identity to hold it as. :param now: the epoch time to take and judge it at. :param duration: how many seconds it is held for if it is never given back. :param name: the Lease's name. :param namespace: its namespace.
+    :returns: ``{"state": "absent" | "free" | "expired" | "mine" | "held" | "unreadable", "holder": <the current holder, empty for none>, "verb": "create" | "replace" | "" (refused), "manifest": <the Lease to write>, "problem": <why it could not be read, else empty>}``.
+    """
+    current = _lease_read(read)
+    if isinstance(current, str):
+        return {"state": "unreadable", "holder": "", "verb": "", "manifest": {}, "problem": current}
+    stamp = _micro_time(float(now))
+    manifest: dict[str, Any] = {
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {"name": str(name), "namespace": str(namespace)},
+        "spec": {"holderIdentity": str(holder), "leaseDurationSeconds": int(duration), "acquireTime": stamp, "renewTime": stamp},
+    }
+    if current is None:
+        return {"state": "absent", "holder": "", "verb": "create", "manifest": manifest, "problem": ""}
+    spec = current.get("spec") or {}
+    current_holder = str(spec.get("holderIdentity") or "")
+    renewed = spec.get("renewTime") or spec.get("acquireTime")
+    if not current_holder:
+        state = "free"
+    elif not renewed or _epoch(str(renewed)) + int(spec.get("leaseDurationSeconds") or 0) <= float(now):
+        state = "expired"
+    elif current_holder == holder:
+        state = "mine"
+    else:
+        return {"state": "held", "holder": current_holder, "verb": "", "manifest": {}, "problem": ""}
+    manifest["metadata"]["resourceVersion"] = str((current.get("metadata") or {}).get("resourceVersion", ""))
+    return {"state": state, "holder": current_holder, "verb": "replace", "manifest": manifest, "problem": ""}
+
+
+def cluster_lease_release(read: Any, holder: Any) -> dict[str, Any]:
+    """Give a Lease back if the holder still holds it, as fleet-regrade's core does (release_lease): the holder is cleared, so the next one does not wait for it to expire, and a Lease that has meanwhile passed to another, or gone, is left alone.
+
+    :param read: the result of `kubectl get lease ... --output json`, as cluster_lease_claim takes it. :param holder: the identity it was taken as.
+    :returns: ``{"verb": "replace" | "", "manifest": <the Lease with no holder, against the version read>}``; an empty verb writes nothing.
+    """
+    current = _lease_read(read)
+    if not isinstance(current, dict) or str((current.get("spec") or {}).get("holderIdentity") or "") != holder:
+        return {"verb": "", "manifest": {}}
+    released = {**current, "spec": {**current["spec"], "holderIdentity": ""}}
+    return {"verb": "replace", "manifest": released}
+
+
 class FilterModule:
     """Registers the cluster guard filters with Ansible."""
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"cluster_restart_blockers": cluster_restart_blockers, "cluster_guard_state": cluster_guard_state, "addresses_in_network": addresses_in_network}
+        return {
+            "cluster_restart_blockers": cluster_restart_blockers,
+            "cluster_guard_state": cluster_guard_state,
+            "addresses_in_network": addresses_in_network,
+            "cluster_lease_claim": cluster_lease_claim,
+            "cluster_lease_release": cluster_lease_release,
+        }

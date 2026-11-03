@@ -51,7 +51,7 @@
     - name: Fail, with the node as it was
       ansible.builtin.fail:
         msg: >-
-          Not switching {{ inventory_hostname }} from {{ github_runner_cluster_native_current_role }} to {{ github_runner_cluster_native_role }}:
+          Not {{ github_runner_cluster_native_drain_for }}:
           its node could not be emptied ({{ ansible_failed_result.msg | default('') | trim }}{{ ' ' ~ (ansible_failed_result.stdout | default('') | trim) if ansible_failed_result.stdout | default('') | trim | length > 0 else '' }}).
           Runner pods still running after about {{ github_runner_cluster_native_runner_wait_timeout }} seconds are left to finish. The node
-          is uncordoned and its units are as they were; run the role again once its jobs have finished.
+          is uncordoned and nothing else was changed; run the role again once its jobs have finished.
