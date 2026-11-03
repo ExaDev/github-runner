@@ -38,7 +38,7 @@
         profiles: ["regrade"]
         services: ["regrade"]
         cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
-        files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
+        files: "{{ github_runner_cluster_compose_files_in_use if github_runner_cluster_compose_files_in_use | length > 1 else omit }}"
         recreate: "{{ 'always' if github_runner_cluster_regrade_scripts.changed or github_runner_cluster_regrade_settings.changed else 'auto' }}"
         state: present
 

@@ -28,7 +28,7 @@
     project_name: "{{ github_runner_cluster_compose_project }}"
     profiles: ["server"]
     cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
-    files: "{{ github_runner_cluster_compose_file_list if github_runner_cluster_compose_file_list | length > 1 else omit }}"
+    files: "{{ github_runner_cluster_compose_files_in_use if github_runner_cluster_compose_files_in_use | length > 1 else omit }}"
     state: present
 
 - name: Wait for this server's node to report Ready again after its container was recreated

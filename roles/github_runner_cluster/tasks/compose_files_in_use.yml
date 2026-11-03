@@ -1,0 +1,18 @@
+---
+# Works out which of the Compose files a Compose command can name now (github_runner_cluster_compose_files_in_use) and, under --check, which the role would write and the host lacks (github_runner_cluster_compose_files_unwritten). Run right after the task that places the role's Compose files, and before any Compose command. In a real run that task has written every file the list names, so the defaults already hold the full list and nothing here changes it. Under --check nothing is written, so a file the role would add to a host that has run it before (a new override, as docker-compose.node-labels.yml is for a host that turns the role controller on) is not there, and Compose, asked for it, fails the read-only commands that run under --check and the Compose modules' own dry runs. Only files the role writes are left out: a user's own Compose file that is missing is an error in both kinds of run.
+
+- name: Read which of the Compose files this role writes are on the host
+  ansible.builtin.stat:
+    path: "{{ github_runner_cluster_dir }}/{{ item }}"
+  loop: "{{ github_runner_cluster_compose_file_list | select('in', github_runner_cluster_compose_files_written) | list }}"
+  register: github_runner_cluster_compose_files_stat
+  check_mode: false
+  when: ansible_check_mode
+
+- name: Leave out of the Compose commands the files this check run would write
+  ansible.builtin.set_fact:
+    github_runner_cluster_compose_files_unwritten: >-
+      {{ github_runner_cluster_compose_files_stat.results | rejectattr('stat.exists') | map(attribute='item') | list }}
+    github_runner_cluster_compose_files_in_use: >-
+      {{ github_runner_cluster_compose_file_list | reject('in', github_runner_cluster_compose_files_stat.results | rejectattr('stat.exists') | map(attribute='item') | list) | list }}
+  when: ansible_check_mode
