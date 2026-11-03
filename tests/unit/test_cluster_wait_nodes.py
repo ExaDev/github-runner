@@ -77,9 +77,9 @@ class WaitTestCase(RoleTestCase):
         modules.mkdir(parents=True)
         (modules / "k8s.py").write_text(K8S_MODULE)
 
-    def wait(self) -> subprocess.CompletedProcess[str]:
+    def wait(self, check: bool = False) -> subprocess.CompletedProcess[str]:
         hosts, group_vars = self.hosts(("node1", "node2", "node3"), ("agent1",))
-        return self.run_tasks("wait_for_nodes", hosts, group_vars, limit="node1")
+        return self.run_tasks("wait_for_nodes", hosts, group_vars, check=check, limit="node1")
 
     def kubectl_calls(self) -> list[str]:
         return self.read_log("kubectl.log")
@@ -171,6 +171,15 @@ class InsideTheInventoryTest(WaitTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("No node of this cluster's inventory is registered", result.stdout)
         self.assertEqual(self.waits(), [])
+
+
+class CheckModeTest(WaitTestCase):
+    def test_a_check_run_reads_the_nodes_and_leaves_the_wait_itself_unrun(self) -> None:
+        self.nodes(node1="True", node2="True", node3="True", agent1="True")
+        result = self.wait(check=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.waits(), [])
+        self.assertEqual(len([call for call in self.kubectl_calls() if call.startswith("get nodes")]), 2)
 
 
 class WiringTest(unittest.TestCase):
