@@ -1,3 +1,13 @@
+## [2.25.0](https://github.com/ExaDev/github-runner/compare/v2.24.0...v2.25.0) (2026-11-03)
+
+### Features
+
+* **host-tools:** write mise env variables, and ones below the home directory, to the fleet file ([429a6e7](https://github.com/ExaDev/github-runner/commit/429a6e70f3369e09e5062ee0a8126409516ab2f6))
+
+### Continuous Integration
+
+* **unit-tests:** install a pinned mise for the tests that read mise configuration back ([e33aa68](https://github.com/ExaDev/github-runner/commit/e33aa6878786e99a5f9c2dc39ca0c979f69cc8f1))
+
 ## [2.24.0](https://github.com/ExaDev/github-runner/compare/v2.23.0...v2.24.0) (2026-11-03)
 
 ### Features
