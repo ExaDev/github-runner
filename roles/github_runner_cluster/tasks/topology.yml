@@ -34,6 +34,19 @@
     msg: "{{ github_runner_cluster_topology.errors | join(' ') }}"
   when: github_runner_cluster_topology.errors | length > 0
 
+- name: Fail if a native host would bootstrap a cluster that runs its own Headscale server
+  # headscale_in_cluster's bootstrap server is supervised by k3s/node-entrypoint.sh, which starts k3s off the mesh, waits for the Headscale static pod, then restarts k3s on the mesh; a native server runs k3s straight from systemd with --vpn-auth and has no such supervisor, so it could never reach a control server that only it runs. Every host computes the same answer from the inventory.
+  ansible.builtin.fail:
+    msg: >-
+      {{ github_runner_cluster_topology.bootstrap }} sets github_runner_cluster_node_mode: native and would bootstrap the cluster, but
+      github_runner_cluster_mesh is headscale_in_cluster, whose bootstrap server runs the Headscale server as a static pod under a
+      supervisor that only the Docker node has. Bootstrap from a Docker host (github_runner_cluster_bootstrap: true on it), or use
+      another mesh provider. Nothing was changed.
+  when:
+    - github_runner_cluster_mesh == 'headscale_in_cluster'
+    - github_runner_cluster_topology.bootstrap | length > 0
+    - github_runner_cluster_topology.hosts[github_runner_cluster_topology.bootstrap].native | bool
+
 - name: Record this host's own part
   ansible.builtin.set_fact:
     github_runner_cluster_effective_node_role: "{{ github_runner_cluster_topology.hosts[inventory_hostname].role }}"

@@ -34,6 +34,7 @@ def _describe_host(name: str, host_vars: Mapping[str, Any], errors: list[str]) -
         "name": name,
         "role_override": role if role in NODE_ROLES else "",
         "native": mode == "native",
+        "eligible": boolean(host_vars.get("github_runner_cluster_voter_eligible", False), strict=False),
         "bootstrap_override": None if bootstrap_override is None else boolean(bootstrap_override, strict=False),
         "node_name": node_name,
         "address": address,
@@ -52,9 +53,9 @@ def _largest_odd_at_most(limit: int) -> int:
 def github_runner_cluster_topology(members: list[str], hostvars: Mapping[str, Mapping[str, Any]], max_servers: Any, api_port: Any) -> dict[str, Any]:
     """Decide every cluster member's part from inventory order and per-host overrides.
 
-    :param members: the cluster group's hosts, in inventory order. :param hostvars: Ansible's hostvars, read for each member's per-host overrides. :param max_servers: the most servers to choose automatically. :param api_port: the k3s API port a joining node connects to. :returns: ``errors`` (empty when the result is valid), ``servers`` and ``bootstrap`` (host names), and ``hosts``, mapping each member to its ``role``, ``bootstrap``, ``node_name``, ``address``, ``server_url`` and ``tls_sans``. :raises AnsibleFilterError: if max_servers or api_port is not an integer.
+    :param members: the cluster group's hosts, in inventory order. :param hostvars: Ansible's hostvars, read for each member's per-host overrides. :param max_servers: the most servers to choose automatically. :param api_port: the k3s API port a joining node connects to. :returns: ``errors`` (empty when the result is valid), ``servers`` and ``bootstrap`` (host names), and ``hosts``, mapping each member to its ``role``, ``bootstrap``, ``node_name``, ``address``, ``server_url``, ``tls_sans``, ``native``, ``eligible`` and ``peer_server_urls`` (the join URL of every other server, in inventory order). :raises AnsibleFilterError: if max_servers or api_port is not an integer.
 
-    The automatic server count is the largest odd number no greater than both the number of hosts that are not forced to be agents (a host with github_runner_cluster_node_mode: native is always an agent) and max_servers, because etcd needs a majority and an even member count tolerates no more failures than the odd count below it. The first hosts in inventory order become servers; the first server not told to join elsewhere bootstraps the cluster, and every other node joins it.
+    The automatic server count is the largest odd number no greater than both the number of hosts that are not forced to be agents and max_servers, because etcd needs a majority and an even member count tolerates no more failures than the odd count below it. A host with github_runner_cluster_node_mode: native is never given a server place automatically and does not count towards that number: it is a server only when it sets github_runner_cluster_node_role: server or github_runner_cluster_bootstrap: true, so an inventory whose native hosts set neither keeps every one of them an agent whatever max_servers allows. The first hosts in inventory order become servers; the first server not told to join elsewhere bootstraps the cluster, and every other node joins it. Every server's TLS SAN list names every server and every host marked github_runner_cluster_voter_eligible, so a standby that is later promoted is already covered by every certificate.
     """
     try:
         server_limit = int(max_servers)
@@ -66,11 +67,9 @@ def github_runner_cluster_topology(members: list[str], hostvars: Mapping[str, Ma
     if server_limit < 1:
         errors.append(f"github_runner_cluster_max_servers must be at least 1 (got {server_limit}).")
     hosts = [_describe_host(name, hostvars[name], errors) for name in members]
-    # A native node runs k3s as a systemd service on the host and only ever as an agent, so it is never offered a server place, and a host that asks for one is refused.
+    # A native node is a server only when its host asks to be one: with automatic placement it would otherwise take a server place silently once native hosts stopped being forced to agents, so a native host that sets neither the role nor the bootstrap is an agent.
     for host in hosts:
-        if host["native"]:
-            if host["role_override"] == "server" or host["bootstrap_override"] is True:
-                errors.append(f"{host['name']} sets github_runner_cluster_node_mode: native, which runs a k3s agent only; it cannot be a server or bootstrap the cluster.")
+        if host["native"] and not host["role_override"] and host["bootstrap_override"] is not True:
             host["role_override"] = "agent"
     # A host told to bootstrap has to be a server, so it takes one of the server places rather than competing for one in inventory order.
     for host in hosts:
@@ -121,13 +120,14 @@ def github_runner_cluster_topology(members: list[str], hostvars: Mapping[str, Ma
         else:
             host["server_url"] = ""
             errors.append(f"{host['name']} has nothing to join: no host in the cluster group bootstraps the cluster, and it sets no github_runner_cluster_server_url.")
-        host["tls_sans"] = host["tls_sans_override"] or [server["address"] for server in servers]
+        host["tls_sans"] = host["tls_sans_override"] or [candidate["address"] for candidate in hosts if candidate["role"] == "server" or candidate["eligible"]]
+        host["peer_server_urls"] = [f"https://{server['address']}:{port}" for server in servers if server is not host]
 
     return {
         "errors": errors,
         "servers": [host["name"] for host in servers],
         "bootstrap": bootstrap_host["name"] if bootstrap_host is not None else "",
-        "hosts": {host["name"]: {key: host[key] for key in ("role", "bootstrap", "node_name", "address", "server_url", "tls_sans")} for host in hosts},
+        "hosts": {host["name"]: {key: host[key] for key in ("role", "bootstrap", "node_name", "address", "server_url", "tls_sans", "native", "eligible", "peer_server_urls")} for host in hosts},
     }
 
 

@@ -166,9 +166,9 @@ class ValidationTest(unittest.TestCase):
 
 
 class NativeNodeTest(unittest.TestCase):
-    """A host that runs k3s natively under systemd is only ever an agent."""
+    """A host that runs k3s natively under systemd is a server only when it asks to be one, and never counts towards the automatic server number."""
 
-    def test_a_native_host_is_an_agent_and_takes_no_server_place(self) -> None:
+    def test_a_native_host_that_sets_nothing_is_an_agent_and_takes_no_server_place(self) -> None:
         hosts = plain(4)
         hosts["h1"]["github_runner_cluster_node_mode"] = "native"
         result = topology(hosts)
@@ -185,6 +185,16 @@ class NativeNodeTest(unittest.TestCase):
         self.assertEqual(result["servers"], ["h1"])
         self.assertEqual(result["hosts"]["h4"]["server_url"], "https://h1:6443")
 
+    def test_native_agents_stay_agents_however_many_servers_max_servers_allows(self) -> None:
+        # The fleet case the guard was for: three Docker servers, max_servers 5 and two native agents that set nothing. Letting native hosts be servers must not turn these two into servers silently.
+        hosts = plain(5)
+        for name in ("h4", "h5"):
+            hosts[name]["github_runner_cluster_node_mode"] = "native"
+        result = topology(hosts, max_servers=5)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["servers"], ["h1", "h2", "h3"])
+        self.assertEqual([result["hosts"][name]["role"] for name in ("h4", "h5")], ["agent", "agent"])
+
     def test_a_native_host_joins_the_bootstrap_server_like_any_agent(self) -> None:
         hosts = plain(4)
         hosts["h4"]["github_runner_cluster_node_mode"] = "native"
@@ -200,14 +210,58 @@ class NativeNodeTest(unittest.TestCase):
             host["github_runner_cluster_node_mode"] = "compose"
         self.assertEqual(topology(explicit), topology(plain(5)))
 
-    def test_a_native_host_cannot_be_a_server_or_bootstrap(self) -> None:
-        for override in ({"github_runner_cluster_node_role": "server"}, {"github_runner_cluster_bootstrap": True}):
-            with self.subTest(override=override):
-                hosts = plain(3)
-                hosts["h1"]["github_runner_cluster_node_mode"] = "native"
-                hosts["h1"].update(override)
-                errors = topology(hosts)["errors"]
-                self.assertTrue(any("h1 sets github_runner_cluster_node_mode: native" in error for error in errors), errors)
+    def test_a_native_host_that_sets_the_server_role_is_a_server_and_joins_as_one(self) -> None:
+        hosts = plain(3)
+        hosts["h3"].update({"github_runner_cluster_node_mode": "native", "github_runner_cluster_node_role": "server"})
+        result = topology(hosts)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["servers"], ["h1", "h2", "h3"])
+        self.assertEqual(result["bootstrap"], "h1")
+        self.assertEqual(result["hosts"]["h3"]["server_url"], "https://h1:6443")
+        self.assertTrue(result["hosts"]["h3"]["native"])
+
+    def test_a_native_host_that_sets_the_bootstrap_bootstraps_the_cluster(self) -> None:
+        hosts = plain(3)
+        hosts["h3"].update({"github_runner_cluster_node_mode": "native", "github_runner_cluster_bootstrap": True})
+        result = topology(hosts)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["bootstrap"], "h3")
+        self.assertEqual(result["hosts"]["h3"]["role"], "server")
+        self.assertEqual(result["hosts"]["h3"]["server_url"], "")
+        self.assertEqual(result["hosts"]["h1"]["server_url"], "https://h3:6443")
+
+    def test_an_explicit_native_server_takes_a_server_place_like_any_server_override(self) -> None:
+        hosts = plain(4)
+        hosts["h4"].update({"github_runner_cluster_node_mode": "native", "github_runner_cluster_node_role": "server"})
+        result = topology(hosts)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["servers"], ["h1", "h2", "h4"])
+        self.assertEqual(result["hosts"]["h3"]["role"], "agent")
+
+    def test_an_eligible_host_is_named_in_every_servers_certificate_and_keeps_its_own_role(self) -> None:
+        hosts = plain(4)
+        hosts["h4"].update({"github_runner_cluster_node_mode": "native", "github_runner_cluster_voter_eligible": True})
+        result = topology(hosts)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["hosts"]["h4"]["role"], "agent")
+        self.assertTrue(result["hosts"]["h4"]["eligible"])
+        self.assertFalse(result["hosts"]["h1"]["eligible"])
+        for name in ("h1", "h2", "h3", "h4"):
+            self.assertEqual(result["hosts"][name]["tls_sans"], ["h1", "h2", "h3", "h4"], name)
+
+    def test_each_host_knows_every_other_servers_join_url_in_inventory_order(self) -> None:
+        result = topology(plain(4))
+        self.assertEqual(result["hosts"]["h1"]["peer_server_urls"], ["https://h2:6443", "https://h3:6443"])
+        self.assertEqual(result["hosts"]["h2"]["peer_server_urls"], ["https://h1:6443", "https://h3:6443"])
+        self.assertEqual(result["hosts"]["h4"]["peer_server_urls"], ["https://h1:6443", "https://h2:6443", "https://h3:6443"])
+
+    def test_an_explicit_native_server_still_has_to_leave_an_odd_count(self) -> None:
+        hosts = plain(3)
+        hosts["h3"].update({"github_runner_cluster_node_mode": "native", "github_runner_cluster_node_role": "server"})
+        hosts["h1"]["github_runner_cluster_node_role"] = "server"
+        hosts["h2"]["github_runner_cluster_node_role"] = "agent"
+        errors = topology(hosts)["errors"]
+        self.assertTrue(any("etcd needs an odd number" in error for error in errors), errors)
 
     def test_a_mode_that_is_neither_compose_nor_native_is_refused(self) -> None:
         hosts = plain(1)
