@@ -1,5 +1,5 @@
 ---
-# Renders the cluster role's regrade.env.j2 for one server of a three-server group (the one the inventory names, which the test gives as the only host), with the role's defaults and placeholder values for what the template does not look at, writing it to env_output, for tests/unit/test_cluster_regrade.py. Role variables are passed as extra variables, which outrank the defaults loaded here.
+# Renders the cluster role's regrade.env.j2 for one server of a three-server group with a standby (an agent marked eligible) and an agent (the one the inventory names, which the test gives as the only host), with the role's defaults and placeholder values for what the template does not look at, writing it to env_output, for tests/unit/test_cluster_regrade.py. Role variables are passed as extra variables, which outrank the defaults loaded here.
 - name: Render the regrade service's settings
   hosts: all
   connection: local
@@ -12,9 +12,11 @@
     github_runner_cluster_topology:
       servers: [node1, node2, node3]
       hosts:
-        node1: {address: node1.example.internal}
-        node2: {address: node2.example.internal}
-        node3: {address: node3.example.internal}
+        node1: {address: node1.example.internal, role: server, eligible: false}
+        node2: {address: node2.example.internal, role: server, eligible: false}
+        node3: {address: node3.example.internal, role: server, eligible: false}
+        standby: {address: standby.example.internal, role: agent, eligible: true}
+        agent: {address: agent.example.internal, role: agent, eligible: false}
   tasks:
     - name: Render regrade.env.j2
       ansible.builtin.copy:

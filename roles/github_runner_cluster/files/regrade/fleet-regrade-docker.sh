@@ -8,7 +8,7 @@
 #
 # The Node carries a label, LEVEL_LABEL, with the level as its value, from the first step down until the node is back at the first level. Whatever judges nodes by their readiness can leave a stepped-down server out: at etcd-only it has no kubelet, so it is not Ready by design.
 #
-# It needs docker and the variables the core reads from the environment file, plus NODE_CONTAINER, the name of this server's k3s container, and LEVEL_LABEL. kubectl is the one in that container (KUBECTL in the environment file is `docker exec` of it), and KUBE_SERVER must name another server's API: the container's own, at etcd-only, answers `apiserver disabled` on some servers.
+# It needs docker and the variables the core reads from the environment file, plus NODE_CONTAINER, the name of this server's k3s container, and LEVEL_LABEL. kubectl is the one in that container (KUBECTL in the environment file is `docker exec` of it), and KUBE_SERVERS must name only other servers' APIs: the container's own, at etcd-only, answers `apiserver disabled` on some servers.
 
 LEVEL_FILE=${LEVEL_FILE:-/var/lib/rancher/k3s/regrade-level}
 STARTED_FILE=${STARTED_FILE:-/run/regrade-level}

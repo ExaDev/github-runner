@@ -227,15 +227,19 @@ class SettingsFileTest(unittest.TestCase):
         self.assertEqual(values["KUBECONFIG_PATH"], "/etc/rancher/k3s/k3s.yaml")
         self.assertEqual(values["CONTROL_PLANE_TAINT"], "node-role.kubernetes.io/control-plane=true:NoSchedule")
 
-    def test_the_api_it_uses_is_another_servers_never_its_own(self) -> None:
-        for host, other in (("node1", "node2"), ("node2", "node1"), ("node3", "node1")):
+    def test_the_apis_it_may_use_are_every_other_server_then_every_standby_never_its_own(self) -> None:
+        for host, others in (("node1", ("node2", "node3")), ("node2", ("node1", "node3")), ("node3", ("node1", "node2")), ("standby", ("node1", "node2", "node3"))):
             with self.subTest(host=host):
-                values = self.sourced(self.render(host=host), "KUBE_SERVER")
-                self.assertEqual(values["KUBE_SERVER"], f"https://{other}.example.internal:6443")
+                values = self.sourced(self.render(host=host), "KUBE_SERVERS")
+                expected = [f"https://{other}.example.internal:6443" for other in others] + ([] if host == "standby" else ["https://standby.example.internal:6443"])
+                self.assertEqual(values["KUBE_SERVERS"].split(" "), expected)
+
+    def test_an_agent_that_may_not_become_a_server_is_never_a_candidate(self) -> None:
+        self.assertNotIn("agent.example.internal", self.sourced(self.render(), "KUBE_SERVERS")["KUBE_SERVERS"])
 
     def test_it_follows_the_api_port(self) -> None:
-        values = self.sourced(self.render("-e", "github_runner_cluster_api_port=7443"), "KUBE_SERVER")
-        self.assertTrue(values["KUBE_SERVER"].endswith(":7443"))
+        values = self.sourced(self.render("-e", "github_runner_cluster_api_port=7443"), "KUBE_SERVERS")
+        self.assertTrue(all(url.endswith(":7443") for url in values["KUBE_SERVERS"].split(" ")))
 
 
 class ComposeServiceTest(unittest.TestCase):
