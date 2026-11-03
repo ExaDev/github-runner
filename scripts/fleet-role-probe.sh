@@ -21,7 +21,7 @@
 # - ETCD_PEER_PORT: etcd's peer port (default 2380).
 # - FSYNC_DIR: a directory on the filesystem k3s keeps its data on, which the fdatasync probe writes in (default /var/lib/rancher/k3s/fleet-role-probe).
 # - NODE_LINK: the link reader the cluster role runs on the host too (roles/github_runner_cluster/files/node-link.sh), whose default_route_interface and link_type read this pod's own (default /app/node-link.sh). SYS_CLASS_NET and PROC_NET_ROUTE, which it reads, are where the host's /sys/class/net and /proc/net/route are (the defaults).
-# - FLEET_REGRADE_CORE: the regrade core (roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh), whose own psi_avg300 and meminfo_kb read the memory signals (default /app/fleet-regrade-core.sh). PSI_FILE and MEMINFO_FILE, which it reads, default here to /proc/pressure/memory and /proc/meminfo, which a pod's own procfs serves for the whole node as it does /proc/meminfo, so nothing is mounted for them. A kernel without pressure stall information has no /proc/pressure, and the sample then has no pressure reading and the memory figures from /proc/meminfo alone, which the controller counts as not over the limit.
+# - FLEET_REGRADE_CORE: the regrade core (roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh), whose own psi_avg300 and meminfo_kb read the memory signals (default /app/fleet-regrade-core.sh). PSI_FILE and MEMINFO_FILE, which it reads, default here to /proc/pressure/memory and /proc/meminfo, which a pod's own procfs serves for the whole node as it does /proc/meminfo, so nothing is mounted for them. A kernel without pressure stall information (built or booted without it) has no /proc/pressure or, on older kernels, has the files and refuses to read them (EOPNOTSUPP); the sample then has no pressure reading and the memory figures from /proc/meminfo alone, which the controller judges by MemAvailable alone and reports with the pressure unknown.
 set -euo pipefail
 
 PROBE_CONFIGMAP="${PROBE_CONFIGMAP:-fleet-role-probe}"
@@ -52,6 +52,12 @@ NODE_LINK_SYSTEM=Linux
 . "$NODE_LINK"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
+
+# The memory pressure the regrade core reads, or nothing on a kernel without pressure stall information: one built or booted without it has no PSI_FILE or, on older kernels, has it and refuses to read it (EOPNOTSUPP), so a read that fails gives the same answer as a file that is not there.
+pressure_reading() {
+  [ -e "$PSI_FILE" ] || return 0
+  psi_avg300 2> /dev/null || true
+}
 
 # The tail percentile and the samples a window holds are defined once, in the module the controller reads them from too.
 read -r tail_percentile window_samples < <(jq -nr -L "$MODULES" 'include "fleet-role-stats"; "\(tail_percentile) \(window_samples)"')
@@ -172,10 +178,7 @@ report() {
     fsync_at="$now"
   fi
 
-  # A kernel without pressure stall information has no such file, and then the sample has no pressure reading.
-  if [ -r "$PSI_FILE" ]; then
-    psi="$(psi_avg300)"
-  fi
+  psi="$(pressure_reading)"
 
   # The entry goes in on standard input, never as an argument: it holds a window of samples, and one argument is limited to a fraction of the argument space (128 KiB on Linux).
   new_entry="$(jq -c -L "$MODULES" --argjson now "$now" --argjson tcp "$tcp" --argjson etcd "$etcd" \
@@ -205,8 +208,7 @@ if [ "${1:-}" = check ]; then
     connect) connect_ms "${3:?usage: check connect <address>}" ;;
     memory)
       # No pressure reading on a kernel without pressure stall information, as in a sample.
-      psi=''
-      if [ -r "$PSI_FILE" ]; then psi="$(psi_avg300)"; fi
+      psi="$(pressure_reading)"
       jq -nc --arg psi "$psi" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" '{psi_avg300: (if $psi == "" then null else $psi | tonumber end), mem_available_kb: ($avail | tonumber), mem_total_kb: ($total | tonumber)}'
       ;;
     etcd) curl --silent --show-error --fail --max-time "$REPORT_SECONDS" "$ETCD_METRICS_URL" | jq -Rsc -L "$MODULES" 'include "fleet-role-stats"; etcd_reading | {id, has_leader, is_learner, known_members, active_peers, quota_bytes, leader_changes, wal_fsync_p99_ms: (.wal | per_bucket | histogram_quantile(tail_percentile) * 1000), backend_commit_p99_ms: (.commit | per_bucket | histogram_quantile(tail_percentile) * 1000)}' ;;
