@@ -10,6 +10,8 @@
 # - HEALTH_GIST_FILE: the gist file the health reason (healthy, why not, nodes under pressure) is written to every tick (default fleet-health.json)
 # - HEARTBEAT_STATE_NAMESPACE: namespace holding the autoscaler's own status ConfigMap (see scripts/autoscaler.sh)
 # - AUTOSCALER_STATUS_CONFIGMAP: name of that ConfigMap
+# - FLEET_ROLE_STATUS_CONFIGMAP: name of the ConfigMap, in the state namespace, the role controller (scripts/fleet-role.sh) publishes its status to; empty (the default) when there is no role controller, and nothing is republished
+# - FLEET_ROLE_STATUS_GIST_FILE: the gist file that status is republished to (default fleet-role-status.json)
 # - HEARTBEAT_REGRADE_LEVEL_LABEL: the label memory-pressure regrading puts on a server it has stepped down, with the level as its value (default github-runner.exadev.com/regrade-level, the cluster role's github_runner_cluster_regrade_level_label)
 # - HEARTBEAT_DEPLOYED_STATE_CONFIGMAP: name of the ConfigMap, in the state namespace, holding the collection version the ARC role last applied (default deployed-state)
 # - HEARTBEAT_DEPLOYED_VERSION_ANNOTATION: the node annotation holding the collection version the cluster role last applied on that node's host
@@ -26,6 +28,8 @@ HEARTBEAT_EXPECTED_SCALE_SETS="${HEARTBEAT_EXPECTED_SCALE_SETS:-}"
 HEARTBEAT_STATE_NAMESPACE="${HEARTBEAT_STATE_NAMESPACE:-github-runner-platform}"
 AUTOSCALER_STATUS_CONFIGMAP="${AUTOSCALER_STATUS_CONFIGMAP:-autoscaler-status}"
 AUTOSCALER_STATUS_GIST_FILE="${AUTOSCALER_STATUS_GIST_FILE:-autoscaler-status.json}"
+FLEET_ROLE_STATUS_CONFIGMAP="${FLEET_ROLE_STATUS_CONFIGMAP:-}"
+FLEET_ROLE_STATUS_GIST_FILE="${FLEET_ROLE_STATUS_GIST_FILE:-fleet-role-status.json}"
 DEPLOYED_STATE_CONFIGMAP="${HEARTBEAT_DEPLOYED_STATE_CONFIGMAP:-deployed-state}"
 DEPLOYED_VERSION_ANNOTATION="${HEARTBEAT_DEPLOYED_VERSION_ANNOTATION:-github-runner.exadev.com/deployed-version}"
 REGRADE_LEVEL_LABEL="${HEARTBEAT_REGRADE_LEVEL_LABEL:-github-runner.exadev.com/regrade-level}"
@@ -123,6 +127,15 @@ if [ "$healthy" = "true" ]; then
   if [ -n "$status_json" ]; then
     files_json="$(jq --arg file "$AUTOSCALER_STATUS_GIST_FILE" --arg status "$status_json" \
       '. + {($file): {content: $status}}' <<< "$files_json")"
+  fi
+  # The role controller's status beside the autoscaler's, on the same terms: while the fleet is vouched for, when there is a status to publish.
+  if [ -n "$FLEET_ROLE_STATUS_CONFIGMAP" ]; then
+    role_status_json="$(kubectl get configmap "$FLEET_ROLE_STATUS_CONFIGMAP" -n "$HEARTBEAT_STATE_NAMESPACE" \
+      -o jsonpath='{.data.status\.json}' 2>/dev/null || true)"
+    if [ -n "$role_status_json" ]; then
+      files_json="$(jq --arg file "$FLEET_ROLE_STATUS_GIST_FILE" --arg status "$role_status_json" \
+        '. + {($file): {content: $status}}' <<< "$files_json")"
+    fi
   fi
 fi
 

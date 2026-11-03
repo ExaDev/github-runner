@@ -139,7 +139,7 @@
         name: github-runner-heartbeat-controller-reader
         apiGroup: rbac.authorization.k8s.io
 
-# heartbeat: read the autoscaler's own shared status ConfigMap and the deployed-state ConfigMap, scoped by resourceNames to the two objects it actually touches.
+# heartbeat: read the autoscaler's own shared status ConfigMap, the deployed-state ConfigMap and, with the role controller installed, its status ConfigMap, scoped by resourceNames to the objects it actually touches.
 - name: "Platform: heartbeat RBAC - read the autoscaler status ConfigMap"
   kubernetes.core.k8s:
     definition:
@@ -151,7 +151,7 @@
       rules:
         - apiGroups: [""]
           resources: ["configmaps"]
-          resourceNames: ["autoscaler-status", "{{ github_runner_arc_deployed_state_configmap }}"]
+          resourceNames: "{{ ['autoscaler-status', github_runner_arc_deployed_state_configmap] + ([github_runner_arc_role_controller_status_configmap] if github_runner_arc_role_controller_enabled | bool else []) }}"
           verbs: ["get"]
 
 - name: "Platform: heartbeat RBAC - bind status-reader"
@@ -406,7 +406,7 @@
             containers:
               - name: heartbeat
                 image: "{{ github_runner_arc_heartbeat_image }}"
-                env: "{{ github_runner_arc_heartbeat_env + github_runner_arc_heartbeat_controller_env }}"
+                env: "{{ github_runner_arc_heartbeat_env + github_runner_arc_heartbeat_controller_env + github_runner_arc_heartbeat_role_env }}"
                 resources:
                   requests:
                     cpu: "50m"
@@ -434,6 +434,12 @@
             name: heartbeat-gh-token
             key: token
     # Where the heartbeat looks for the controller's Deployment. Passed only when it differs from scripts/heartbeat.sh's own default, so that a heartbeat Deployment installed before this setting existed is not rolled by an unchanged configuration.
+    # Passed only with the role controller installed, for the same reason: the status the controller publishes is then republished in the gist beside the autoscaler's.
+    github_runner_arc_heartbeat_role_env: >-
+      {{
+        [{'name': 'FLEET_ROLE_STATUS_CONFIGMAP', 'value': github_runner_arc_role_controller_status_configmap}]
+        if github_runner_arc_role_controller_enabled | bool else []
+      }}
     github_runner_arc_heartbeat_controller_env: >-
       {{
         [{'name': 'HEARTBEAT_CONTROLLER_NAMESPACE', 'value': github_runner_arc_controller_namespace}]

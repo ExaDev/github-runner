@@ -41,7 +41,7 @@ FAKE_KUBECTL = textwrap.dedent(
         sys.exit(0)
     if args[:2] == ["get", "configmap"]:
         key = args[-1].split("data.")[-1].rstrip("}").replace("\\.", ".")
-        value = state["configmap"].get(key)
+        value = state.get("configmaps", {}).get(args[2], state["configmap"]).get(key)
         if value is None:
             sys.exit(1)
         sys.stdout.write(value)
@@ -95,6 +95,7 @@ class HeartbeatTest(unittest.TestCase):
         nodes: list[dict[str, object]] | None = None,
         previous: dict[str, object] | None = None,
         env: dict[str, str] | None = None,
+        state_extra: dict[str, object] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
         state = self.dir / "state.json"
         state.write_text(
@@ -106,6 +107,7 @@ class HeartbeatTest(unittest.TestCase):
                     "listeners": {"runners-a": 1, "runners-b": 1} if listeners is None else listeners,
                     "configmap": configmap or {},
                     "nodes": [self.node("node1", None)] if nodes is None else nodes,
+                    **(state_extra or {}),
                 }
             )
         )
@@ -185,6 +187,42 @@ class HeartbeatTest(unittest.TestCase):
         result, files = self.tick(controller_replicas=0)
         self.assertEqual(result.returncode, 1)
         self.assertWithheld(files)
+
+    ROLE_STATUS = {"decision": {"action": "none"}, "hosts": {"a": {"verdict": "fit"}}}
+
+    def role_tick(self, *, role_status: str | None, env: dict[str, str] | None = None, **kwargs: object) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+        configmaps: dict[str, dict[str, str]] = {"autoscaler-status": {"status.json": json.dumps({"mode": "autoscaler"})}}
+        if role_status is not None:
+            configmaps["fleet-role-status"] = {"status.json": role_status}
+        return self.tick(env={"FLEET_ROLE_STATUS_CONFIGMAP": "fleet-role-status", **(env or {})}, state_extra={"configmaps": configmaps}, **kwargs)  # type: ignore[arg-type]
+
+    def test_the_role_controllers_status_is_republished_beside_the_autoscalers(self) -> None:
+        result, files = self.role_tick(role_status=json.dumps(self.ROLE_STATUS))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(files["fleet-role-status.json"]), self.ROLE_STATUS)
+        self.assertEqual(json.loads(files["autoscaler-status.json"]), {"mode": "autoscaler"})
+
+    def test_the_role_controllers_status_goes_to_the_gist_file_it_is_given(self) -> None:
+        result, files = self.role_tick(role_status=json.dumps(self.ROLE_STATUS), env={"FLEET_ROLE_STATUS_GIST_FILE": "roles.json"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(files["roles.json"]), self.ROLE_STATUS)
+        self.assertNotIn("fleet-role-status.json", files)
+
+    def test_without_a_role_controller_nothing_is_republished_for_it(self) -> None:
+        result, files = self.tick(configmap={"status.json": json.dumps({"mode": "autoscaler"})})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("fleet-role-status.json", files)
+
+    def test_an_empty_role_status_is_not_republished(self) -> None:
+        result, files = self.role_tick(role_status="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("fleet-role-status.json", files)
+
+    def test_the_role_controllers_status_is_withheld_with_the_autoscalers_while_the_fleet_is_not_vouched_for(self) -> None:
+        result, files = self.role_tick(role_status=json.dumps(self.ROLE_STATUS), controller_replicas=0)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("fleet-role-status.json", files)
+        self.assertNotIn("autoscaler-status.json", files)
 
     @staticmethod
     def job_peaks(*peaks: int) -> str:
