@@ -1,0 +1,30 @@
+---
+# Waits, through the API api.yml chose, until this host's node reports Ready on a heartbeat later than github_runner_cluster_native_started and, on a server, k3s reports it a voting member of etcd, for about github_runner_cluster_native_ready_timeout seconds. Ready alone is not enough: the API keeps a stopped kubelet's Ready condition until the node controller's grace period runs out, so the node's lease (kube-node-lease/<node>), which the running kubelet renews, must have been renewed after the start. A voter, because k3s adds a new server as a learner, which does not count towards quorum until the etcd leader promotes it: k3s sets the EtcdIsVoter condition True on a voting member's Node (setEtcdStatusCondition in pkg/etcd/etcd.go at v1.34.1+k3s1), and an agent has no such condition. The run fails when the node does not come back, before the next server's turn.
+
+- name: Wait for this node to be Ready on a heartbeat from the k3s just started{{ ' and a voting member of etcd' if github_runner_cluster_native_role == 'server' else '' }}
+  vars:
+    github_runner_cluster_native_poll: 5
+    github_runner_cluster_native_ready_read: "{{ github_runner_cluster_native_ready.stdout | default('') | trim | split(',') }}"
+  become: "{{ github_runner_cluster_native_api_become }}"
+  # The kubectl command api.yml chose is written into the script word by word, each word quoted, so a command of several words (docker exec <container> kubectl) runs as it is.
+  ansible.builtin.shell: |
+    set -eu
+    node=$({{ github_runner_cluster_native_api_argv | map('quote') | join(' ') }} get node "$GITHUB_RUNNER_NODE" --request-timeout="${GITHUB_RUNNER_TIMEOUT}s" \
+      -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status},{.status.conditions[?(@.type=="EtcdIsVoter")].status}')
+    renewed=$({{ github_runner_cluster_native_api_argv | map('quote') | join(' ') }} get lease --namespace kube-node-lease "$GITHUB_RUNNER_NODE" --request-timeout="${GITHUB_RUNNER_TIMEOUT}s" -o 'jsonpath={.spec.renewTime}')
+    echo "${node},${renewed}"
+  environment: >-
+    {{ github_runner_cluster_native_api_environment
+       | combine({'GITHUB_RUNNER_NODE': github_runner_cluster_effective_node_name, 'GITHUB_RUNNER_TIMEOUT': github_runner_cluster_cluster_read_timeout | string}) }}
+  delegate_to: "{{ github_runner_cluster_native_api_host }}"
+  register: github_runner_cluster_native_ready
+  until:
+    - github_runner_cluster_native_ready.rc == 0
+    - github_runner_cluster_native_ready_read | length == 3
+    - github_runner_cluster_native_ready_read[0] == 'True'
+    - github_runner_cluster_native_role != 'server' or github_runner_cluster_native_ready_read[1] == 'True'
+    - github_runner_cluster_native_ready_read[2] is match('[0-9]{4}-[0-9]{2}-[0-9]{2}T')
+    - github_runner_cluster_native_ready_read[2][:19] > (github_runner_cluster_native_started.stdout | trim)[:19]
+  retries: "{{ ((github_runner_cluster_native_ready_timeout | int) / (2 * github_runner_cluster_native_poll)) | round(0, 'ceil') | int }}"
+  delay: "{{ github_runner_cluster_native_poll }}"
+  changed_when: false

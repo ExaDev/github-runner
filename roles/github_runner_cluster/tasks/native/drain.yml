@@ -1,0 +1,57 @@
+---
+# Empties this host's node before its role switches: cordons it, waits for the ARC runner pods on it to finish (a planned switch never cuts a job), then drains the rest. Past github_runner_cluster_native_runner_wait_timeout, or when the drain fails, it uncordons the node and fails the run with the host's units as they were. Needs api.yml to have chosen another server's API, since this host's own k3s is about to stop. A node the cluster does not list (a first install) has nothing to empty.
+
+- name: Empty the node before its role switches
+  vars:
+    github_runner_cluster_native_poll: 5
+    # The label ARC puts on every ephemeral runner pod, as plugins/filter/cluster_guard.py's RUNNER_POD_LABEL names it.
+    github_runner_cluster_native_runner_selector: actions-ephemeral-runner=True
+  block:
+    - name: Cordon the node
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_native_api_argv + ['cordon', github_runner_cluster_effective_node_name] }}"
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+
+    - name: Wait for the runner pods on the node to finish
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ github_runner_cluster_native_api_argv + ['get', 'pods', '--all-namespaces', '--selector', github_runner_cluster_native_runner_selector,
+             '--field-selector', 'spec.nodeName=' ~ github_runner_cluster_effective_node_name ~ ',status.phase!=Succeeded,status.phase!=Failed',
+             '--output', 'name', '--request-timeout=' ~ github_runner_cluster_cluster_read_timeout ~ 's'] }}
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      register: github_runner_cluster_native_runner_pods
+      until: github_runner_cluster_native_runner_pods.rc == 0 and github_runner_cluster_native_runner_pods.stdout | trim | length == 0
+      retries: "{{ ((github_runner_cluster_native_runner_wait_timeout | int) / github_runner_cluster_native_poll) | round(0, 'ceil') | int }}"
+      delay: "{{ github_runner_cluster_native_poll }}"
+      changed_when: false
+
+    - name: Drain the node
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ github_runner_cluster_native_api_argv + ['drain', github_runner_cluster_effective_node_name, '--ignore-daemonsets', '--delete-emptydir-data',
+             '--timeout=' ~ github_runner_cluster_native_runner_wait_timeout ~ 's'] }}
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+  rescue:
+    - name: Uncordon the node again, since the switch is abandoned
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_native_api_argv + ['uncordon', github_runner_cluster_effective_node_name] }}"
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+
+    - name: Fail, with the node as it was
+      ansible.builtin.fail:
+        msg: >-
+          Not switching {{ inventory_hostname }} from {{ github_runner_cluster_native_current_role }} to {{ github_runner_cluster_native_role }}:
+          its node could not be emptied ({{ ansible_failed_result.msg | default('') | trim }}{{ ' ' ~ (ansible_failed_result.stdout | default('') | trim) if ansible_failed_result.stdout | default('') | trim | length > 0 else '' }}).
+          Runner pods still running after about {{ github_runner_cluster_native_runner_wait_timeout }} seconds are left to finish. The node
+          is uncordoned and its units are as they were; run the role again once its jobs have finished.

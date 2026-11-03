@@ -1,0 +1,31 @@
+# Managed by the exadev.github_runner collection's github_runner_cluster role (node mode native). Do not edit by hand: change this host's variables and run the role again.
+# k3s reads this file as the flags of `k3s server` (the k3s unit passes it as --config), then every *.yaml in server.yaml.d beside it in name order (dotDFiles in pkg/configfilearg/parser.go of k3s), a later file's key replacing an earlier one's: 00-node-ip.yaml, which the unit writes before every start (write-node-ip), and 10-join.yaml, which says whether this server bootstraps a new cluster or joins one, and which a role change rewrites without touching this file. The token and the --vpn-auth value are secrets and are in files of their own, mode 0600. Values are written as JSON strings, which YAML reads as written.
+#
+# These match what every Docker server passes (k3s/node-entrypoint.sh's mesh_server_args): k3s refuses a server whose critical configuration differs from the cluster's ("critical configuration value mismatch between servers", pkg/cluster/bootstrap.go; the fields are CriticalControlArgs in pkg/daemons/config/types.go, disable-network-policy and the cluster and service networks, which every server leaves at k3s's own, among them), and a server that did not disable traefik would deploy it again.
+token-file: {{ (github_runner_cluster_native_config_dir ~ '/token') | to_json }}
+vpn-auth-file: {{ (github_runner_cluster_native_config_dir ~ '/vpn-auth') | to_json }}
+node-name: {{ github_runner_cluster_effective_node_name | to_json }}
+disable:
+  - "traefik"
+disable-network-policy: true
+# Only root reads the admin kubeconfig k3s writes to /etc/rancher/k3s/k3s.yaml: the role reads it through `k3s kubectl` with become, and nothing on the host needs it as another user.
+write-kubeconfig-mode: "0600"
+{% if github_runner_cluster_api_port | int != github_runner_cluster_k3s_default_api_port | int %}
+https-listen-port: {{ github_runner_cluster_api_port | int }}
+{% endif %}
+tls-san:
+{% for san in github_runner_cluster_effective_tls_sans %}
+  - {{ san | to_json }}
+{% endfor %}
+{% if github_runner_cluster_etcd_heartbeat_interval | string | length > 0 %}
+etcd-arg:
+  - {{ ('heartbeat-interval=' ~ github_runner_cluster_etcd_heartbeat_interval) | to_json }}
+  - {{ ('election-timeout=' ~ github_runner_cluster_etcd_election_timeout) | to_json }}
+{% endif %}
+resolv-conf: "/run/github-runner-k3s/resolv.conf"
+{% if github_runner_cluster_node_taints | length > 0 %}
+node-taint:
+{% for taint in github_runner_cluster_node_taints %}
+  - {{ taint | to_json }}
+{% endfor %}
+{% endif %}

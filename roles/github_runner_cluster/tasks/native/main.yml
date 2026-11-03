@@ -1,5 +1,5 @@
 ---
-# Brings this host up as a native k3s node: the agent runs directly on the host as the systemd service k3s-agent, with no Docker or Compose layer, and the host's own Tailscale client is the node's device on the cluster's tailnet (k3s's --vpn-auth runs `tailscale up` against it). Selected by github_runner_cluster_node_mode: native, from tasks/main.yml, which ends the role after this. The topology, the versions, the API port, the token and the mesh are worked out by the same task files as the Docker path, so a native agent joins the same cluster with the same secrets, node name rules and API port. Safe to rerun: each step converges, and the service is restarted only when its binary, configuration or secrets changed. Every task that changes the host uses become (sudo) on its own; under --check nothing is changed and each change a real run would make is reported.
+# Brings this host up as a native k3s node: k3s runs directly on the host as the systemd service k3s-agent (an agent) or k3s (a server), with no Docker or Compose layer, and the host's own Tailscale client is the node's device on the cluster's tailnet (k3s's --vpn-auth runs `tailscale up` against it). Selected by github_runner_cluster_node_mode: native, from tasks/main.yml, which ends the role after this. The topology, the versions, the API port, the token and the mesh are worked out by the same task files as the Docker path, so a native node joins the same cluster with the same secrets, node name rules and API port, and a native server is configured as every Docker server is. Safe to rerun: each step converges, a unit is restarted only when its binary, configuration or secrets changed, and the host switches between its server and agent units only when its role changed (role.yml). Every task that changes the host uses become (sudo) on its own; under --check nothing is changed and each change a real run would make is reported.
 
 - name: Read the platform the native node needs
   # Only the subsets that hold the kernel, architecture, distribution and init system, and only when the caller did not gather them: a play with gather_facts: false leaves ansible_facts without them. Read-only, so it runs under --check too.
@@ -54,12 +54,20 @@
         host's own network with the host's own Tailscale client, and has no Docker network to choose. Remove
         github_runner_cluster_network_mode (or set it to bridge) for this host.
       bad: "{{ github_runner_cluster_network_mode == 'host' }}"
+    - msg: >-
+        github_runner_cluster_regrade is true for {{ inventory_hostname }}, which sets github_runner_cluster_node_mode: native. Memory-pressure
+        regrading steps a server down through its actuator, and the only one there is drives a Docker server's container; a native server has
+        none yet. Remove github_runner_cluster_regrade for this host.
+      bad: "{{ github_runner_cluster_regrade | bool }}"
   loop_control:
     label: "{{ item.msg | split(' ') | first }}"
   when: item.bad | bool
 
 - name: Decide this host's part in the cluster
   ansible.builtin.include_tasks: topology.yml
+
+- name: Check etcd's heartbeat interval and election timeout, which a native server passes to its etcd as every server does
+  ansible.builtin.include_tasks: etcd_timing.yml
 
 - name: Check the versions the node is pinned to
   ansible.builtin.include_tasks: versions.yml
@@ -77,14 +85,17 @@
 - name: Check the k3s version against what this node and the cluster run now
   ansible.builtin.include_tasks: native/version_check.yml
 
+- name: Decide which role the host runs, and whether a server bootstraps a new cluster
+  ansible.builtin.include_tasks: native/role.yml
+
 - name: Install the pinned Tailscale client and check the tailnet it is logged in to
   ansible.builtin.include_tasks: native/tailscale.yml
 
 - name: Install the pinned k3s binary
   ansible.builtin.include_tasks: native/k3s_binary.yml
 
-- name: Write the node's helpers, configuration, secrets and unit
+- name: Write the node's helpers, configurations, secrets and units
   ansible.builtin.include_tasks: native/config.yml
 
-- name: Start the node and check it joined
+- name: Run the unit of the host's role and check the node joined
   ansible.builtin.include_tasks: native/service.yml

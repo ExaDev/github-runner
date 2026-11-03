@@ -1,0 +1,10 @@
+# Managed by the exadev.github_runner collection's github_runner_cluster role (node mode native). Whether this server bootstraps a new cluster or joins an existing one, read by k3s after server.yaml.
+#
+# cluster-init only when the role found no cluster to join: this host is the bootstrap host of the inventory, has no datastore of its own (server/db) and none moved aside by a demotion (server/db.demoted), and no other server of the inventory answers. A host that was ever a member therefore joins the cluster that exists rather than starting a second one. k3s reuses a datastore it finds on disk and then ignores both keys (https://docs.k3s.io/datastore/ha-embedded).
+{% if github_runner_cluster_native_cluster_init | bool %}
+cluster-init: true
+{% elif github_runner_cluster_native_join_url | length > 0 %}
+server: {{ github_runner_cluster_native_join_url | to_json }}
+{% else %}
+{}
+{% endif %}

@@ -1,5 +1,5 @@
 ---
-# Writes everything the k3s-agent service reads: the two helper scripts, the configuration, the two secrets and the unit. Registers github_runner_cluster_native_changed, whether any of them (or the binary k3s_binary.yml installed) changed, which is what restarts a running service. The token and the --vpn-auth value are secrets: each is in a file of its own, mode 0600, written by a task that logs nothing, and the configuration only names the files.
+# Writes everything the native units read: the helper scripts, the agent's configuration, the server's (on a server, or on a host marked eligible, which is staged as a standby), the two secrets, both units, and the role file when the host has none. Registers github_runner_cluster_native_agent_changed and github_runner_cluster_native_server_changed, whether anything the agent or the server unit reads changed (the binary k3s_binary.yml installed and the shared helpers and secrets count for both), which is what restarts a running unit. The token and the --vpn-auth value are secrets: each is in a file of its own, mode 0600, written by a task that logs nothing, and the configurations only name the files. Needs role.yml.
 
 - name: Create the directories the node's files go in
   become: true
@@ -11,11 +11,12 @@
     - {path: "{{ github_runner_cluster_native_lib_dir }}", mode: "0755"}
     - {path: "{{ github_runner_cluster_native_lib_dir }}/bin", mode: "0755"}
     - {path: "{{ github_runner_cluster_native_config_dir }}", mode: "0755"}
+    - {path: "{{ github_runner_cluster_native_data_dir }}", mode: "0755"}
   loop_control:
     label: "{{ item.path }}"
 
-- name: Place the Tailscale wrapper and the resolver helper
-  # See the two files for what each does. Copied on every run, so a collection upgrade reaches the host.
+- name: Place the Tailscale wrapper and the helpers the units run
+  # See each file for what it does. Copied on every run, so a collection upgrade reaches the host.
   become: true
   ansible.builtin.copy:
     src: "native/{{ item.src }}"
@@ -24,17 +25,37 @@
   loop:
     - {src: tailscale-up-wait.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/bin/tailscale"}
     - {src: write-resolv-conf.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/write-resolv-conf"}
+    - {src: write-node-ip.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/write-node-ip"}
+    - {src: fleet-role-is.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/fleet-role-is"}
   loop_control:
     label: "{{ item.dest }}"
   register: github_runner_cluster_native_helpers
 
+- name: Record the role a host set up before the role file existed runs
+  # Before either unit is written: the new units start only while this file names their role, so a host that runs the agent unit from an earlier release keeps running it across the restart below. A host that has the file keeps it; changing it is a role switch (service.yml), never a run's side effect. A first install records the role it is to run, which nothing runs yet.
+  become: true
+  ansible.builtin.copy:
+    content: >-
+      {{ github_runner_cluster_native_current_role if github_runner_cluster_native_current_role | length > 0 else github_runner_cluster_native_role }}
+    dest: "{{ github_runner_cluster_native_role_file }}"
+    mode: "0644"
+    force: false
+
 - name: Write the k3s agent configuration
   become: true
   ansible.builtin.template:
-    src: native/config.yaml.j2
-    dest: "{{ github_runner_cluster_native_config_dir }}/config.yaml"
+    src: native/agent.yaml.j2
+    dest: "{{ github_runner_cluster_native_config_dir }}/agent.yaml"
     mode: "0600"
-  register: github_runner_cluster_native_config
+  register: github_runner_cluster_native_agent_config
+
+- name: Remove the agent configuration of an earlier release
+  # Earlier releases wrote the agent's flags to k3s's default config.yaml, which a k3s started without --config would still read; both units now pass their own file.
+  become: true
+  ansible.builtin.file:
+    path: "{{ github_runner_cluster_native_config_dir }}/config.yaml"
+    state: absent
+  register: github_runner_cluster_native_old_config
 
 - name: Write the node's token
   # No trailing newline: k3s trims the file, and the bytes then are exactly the token.
@@ -55,20 +76,86 @@
   no_log: true
   register: github_runner_cluster_native_vpn_auth
 
-- name: Write the k3s-agent unit
+- name: Write the native units
+  # Both, on every native host: each starts only while the role file names its role, so the unit of the role the host does not run stays inert.
   become: true
   ansible.builtin.template:
-    src: native/k3s-agent.service.j2
-    dest: "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_native_service }}.service"
+    src: "native/{{ item }}.service.j2"
+    dest: "{{ github_runner_cluster_native_unit_dir }}/{{ item }}.service"
     mode: "0644"
-  register: github_runner_cluster_native_unit
+  loop:
+    - "{{ github_runner_cluster_native_agent_service }}"
+    - "{{ github_runner_cluster_native_server_service }}"
+  register: github_runner_cluster_native_units
 
-- name: Record whether anything the running service reads changed
-  ansible.builtin.set_fact:
-    github_runner_cluster_native_changed: >-
+- name: Write or remove the server's configuration
+  when: github_runner_cluster_native_stage_server | bool
+  block:
+    - name: Create the server configuration's drop-in directory
+      become: true
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_native_config_dir }}/server.yaml.d"
+        state: directory
+        mode: "0755"
+
+    - name: Write the k3s server configuration and whether it bootstraps or joins
+      become: true
+      ansible.builtin.template:
+        src: "native/{{ item.src }}"
+        dest: "{{ github_runner_cluster_native_config_dir }}/{{ item.dest }}"
+        mode: "0600"
+      loop:
+        - {src: server.yaml.j2, dest: server.yaml}
+        - {src: join.yaml.j2, dest: server.yaml.d/10-join.yaml}
+      loop_control:
+        label: "{{ item.dest }}"
+      register: github_runner_cluster_native_server_config
+
+- name: Remove the server's configuration from a host that neither is nor may become a server
+  # Its unit stays, inert while the role file names the agent.
+  become: true
+  ansible.builtin.file:
+    path: "{{ github_runner_cluster_native_config_dir }}/{{ item }}"
+    state: absent
+  loop: [server.yaml, server.yaml.d]
+  when: not github_runner_cluster_native_stage_server | bool
+
+- name: Read which units a run before this one changed and did not restart
+  # A restart this run makes can be refused (a server's, while another voter is not Ready) or fail after the files are written, and the next run would then find nothing changed and never restart the unit onto them. The marker is written whenever a unit's files change and removed once the unit has started on them.
+  ansible.builtin.stat:
+    path: "{{ github_runner_cluster_native_restart_marker }}-{{ item }}"
+  loop:
+    - "{{ github_runner_cluster_native_agent_service }}"
+    - "{{ github_runner_cluster_native_server_service }}"
+  register: github_runner_cluster_native_pending
+
+- name: Record whether anything a running unit reads changed
+  vars:
+    github_runner_cluster_native_shared_changed: >-
       {{ github_runner_cluster_native_binary is changed
          or github_runner_cluster_native_helpers is changed
-         or github_runner_cluster_native_config is changed
          or github_runner_cluster_native_token is changed
-         or github_runner_cluster_native_vpn_auth is changed
-         or github_runner_cluster_native_unit is changed }}
+         or github_runner_cluster_native_vpn_auth is changed }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_agent_changed: >-
+      {{ github_runner_cluster_native_shared_changed | bool
+         or github_runner_cluster_native_agent_config is changed
+         or github_runner_cluster_native_old_config is changed
+         or github_runner_cluster_native_units.results[0] is changed
+         or github_runner_cluster_native_pending.results[0].stat.exists }}
+    github_runner_cluster_native_server_changed: >-
+      {{ github_runner_cluster_native_shared_changed | bool
+         or github_runner_cluster_native_server_config is changed
+         or github_runner_cluster_native_units.results[1] is changed
+         or github_runner_cluster_native_pending.results[1].stat.exists }}
+
+- name: Mark the unit of the host's role as waiting for a restart when its files changed
+  # Only that unit: the other one, when the host switches to it, starts afresh on whatever its files hold.
+  become: true
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ github_runner_cluster_native_restart_marker }}-{{ github_runner_cluster_native_service }}"
+    mode: "0644"
+  when: >-
+    github_runner_cluster_native_server_changed | bool if github_runner_cluster_native_role == 'server'
+    else github_runner_cluster_native_agent_changed | bool

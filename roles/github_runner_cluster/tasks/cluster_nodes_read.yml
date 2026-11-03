@@ -1,8 +1,17 @@
 ---
-# Reads every node's k3s version through each server of the inventory and says what the read could not compare. Shared by running_version.yml (the Docker path) and native/version_check.yml (the native node). Registers github_runner_cluster_running_reads, the loop results that the cluster_k3s_version_change_blockers filter (plugins/filter/cluster_versions.py) takes as the server reads. Needs topology.yml to have run. Every task only reads, and runs under --check too.
+# Reads every node's k3s version and live role through each server of the inventory and says what the read could not compare. Shared by running_version.yml (the Docker path), native/version_check.yml (the native node) and native/role.yml (whether a cluster exists for a native bootstrap host to join). Registers github_runner_cluster_running_reads, whose results the cluster_k3s_version_change_blockers filter (plugins/filter/cluster_versions.py) takes as the server reads: one per server, a Docker server's read through its container and a native server's through `k3s kubectl` on its host. Needs topology.yml to have run. Every task only reads, and runs under --check too; github_runner_cluster_running_read_always makes it read even when github_runner_cluster_allow_k3s_version_jump skips the version comparison.
 
-- name: Read every node's k3s version through each server of the inventory
-  # Through every server of the group, this one first, each on its own host with its own pinned Docker context, since any one of them may be stopped or being rebuilt while the others run. The image's kubectl inside a server's container reads that server's kubeconfig, so the host needs none; it is run as kubectl, since `k3s kubectl` in the rancher/k3s image answers "unknown command". Each read prints "stopped" when the server's container does not run, or "running" and one "<node> <kubeletVersion>" line per node. Each read is bounded by github_runner_cluster_cluster_read_timeout as a whole (the task's own timeout, so a hung Docker daemon or docker exec cannot hold up the run) and as the API call's --request-timeout. A read that fails (a daemon or host that cannot be reached, a read that runs out of time) is recorded rather than failing here, so the filter can say which servers could not be read. Each node line also carries its control-plane label, so the filter can tell servers from agents.
+- name: Work out which servers of the inventory to read through, Docker and native
+  # Every server of the group, this one first, and every host marked eligible, which may run as a server whatever the inventory says (the role controller changes it at run time), since any one of them may be stopped or being rebuilt while the others run. A host that is not running a server reads as stopped.
+  ansible.builtin.set_fact:
+    github_runner_cluster_running_servers: >-
+      {{ (([inventory_hostname] if github_runner_cluster_effective_node_role == 'server' or github_runner_cluster_topology.hosts[inventory_hostname].eligible else [])
+          + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server') | map(attribute='key') | list)
+          + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.eligible') | map(attribute='key') | list)) | unique }}
+  when: not github_runner_cluster_allow_k3s_version_jump | bool or github_runner_cluster_running_read_always | bool
+
+- name: Read every node's k3s version through each Docker server of the inventory
+  # Each on its own host with its own pinned Docker context. The image's kubectl inside a server's container reads that server's kubeconfig, so the host needs none; it is run as kubectl, since `k3s kubectl` in the rancher/k3s image answers "unknown command". Each read prints "stopped" when the server's container does not run, or "running" and one "<node> <kubeletVersion> <control-plane label>" line per node, the label telling servers from agents as the cluster sees them now. Each read is bounded by github_runner_cluster_cluster_read_timeout as a whole (the task's own timeout, so a hung Docker daemon or docker exec cannot hold up the run) and as the API call's --request-timeout. A read that fails (a daemon or host that cannot be reached, a read that runs out of time) is recorded rather than failing here, so the filter can say which servers could not be read.
   ansible.builtin.shell: |
     set -eu
     state=$(docker ps --all --filter "name=^/${container}\$" --format '{{ '{{' }}.State{{ '}}' }}')
@@ -17,25 +26,53 @@
     {{ ({'DOCKER_CONTEXT': github_runner_cluster_running_read_context} if github_runner_cluster_running_read_context | length > 0 else {})
        | combine({'container': github_runner_cluster_running_read_container, 'timeout': github_runner_cluster_cluster_read_timeout | string}) }}
   delegate_to: "{{ item }}"
-  loop: "{{ github_runner_cluster_running_servers }}"
+  loop: "{{ github_runner_cluster_running_servers | reject('in', github_runner_cluster_topology.hosts | dict2items | selectattr('value.native') | map(attribute='key') | list) | list }}"
   vars:
-    github_runner_cluster_running_servers: >-
-      {{ ([inventory_hostname] if github_runner_cluster_effective_node_role == 'server' else [])
-         + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
-            | map(attribute='key') | reject('equalto', inventory_hostname) | list) }}
     github_runner_cluster_running_read_container: >-
       {{ github_runner_cluster_container_name if item == inventory_hostname
          else hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s') }}
     github_runner_cluster_running_read_context: >-
       {{ (github_runner_cluster_docker_context if item == inventory_hostname
           else hostvars[item].github_runner_cluster_docker_context | default('')) | trim }}
-  register: github_runner_cluster_running_reads
+  register: github_runner_cluster_running_reads_docker
   changed_when: false
   failed_when: false
   ignore_unreachable: true
   check_mode: false
   timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
-  when: not github_runner_cluster_allow_k3s_version_jump | bool
+  when: not github_runner_cluster_allow_k3s_version_jump | bool or github_runner_cluster_running_read_always | bool
+
+- name: Read every node's k3s version through each native server of the inventory
+  # The same read, through `k3s kubectl` on a native server's host, which reads the admin kubeconfig k3s writes there for root only (hence become), and "stopped" when the server unit is not active. The unit's name and the binary's place are the role's constants, read from the inventory where a host sets them (the tests do).
+  become: true
+  ansible.builtin.shell: |
+    set -eu
+    if ! systemctl is-active --quiet "$service"; then
+      echo stopped
+      exit 0
+    fi
+    echo running
+    "$k3s" kubectl get nodes --request-timeout="${timeout}s" \
+      -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.nodeInfo.kubeletVersion}{" "}{.metadata.labels.node-role\.kubernetes\.io/control-plane}{"\n"}{end}'
+  environment:
+    service: "{{ github_runner_cluster_native_server_service }}"
+    k3s: "{{ hostvars[item].github_runner_cluster_native_bin_dir | default(github_runner_cluster_native_bin_dir) }}/k3s"
+    timeout: "{{ github_runner_cluster_cluster_read_timeout | string }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ github_runner_cluster_running_servers | select('in', github_runner_cluster_topology.hosts | dict2items | selectattr('value.native') | map(attribute='key') | list) | list }}"
+  register: github_runner_cluster_running_reads_native
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+  when: not github_runner_cluster_allow_k3s_version_jump | bool or github_runner_cluster_running_read_always | bool
+
+- name: Gather the reads through every server
+  ansible.builtin.set_fact:
+    github_runner_cluster_running_reads:
+      results: "{{ github_runner_cluster_running_reads_docker.results + github_runner_cluster_running_reads_native.results }}"
+  when: not github_runner_cluster_allow_k3s_version_jump | bool or github_runner_cluster_running_read_always | bool
 
 - name: Say what the version check could not compare
   # Only when no server answered and none failed: every server of the inventory was read as stopped, or there is none. Which of those it is, and whether the cluster lives outside the inventory, comes from the topology: a group with no bootstrap host joins a cluster that one of its hosts did not bootstrap.
@@ -48,6 +85,6 @@
     msg: >-
       {% if github_runner_cluster_running_reads.results | default([]) | length == 0 %}No server of {{ github_runner_cluster_group }} is in the inventory, so the cluster this node joins cannot be read; only {{ github_runner_cluster_own_subject }} was compared.{% elif github_runner_cluster_running_joins_outside | bool %}{{ github_runner_cluster_group }} joins a cluster whose other servers are outside the inventory, and none of its own servers runs its container, so the cluster could not be read; only {{ github_runner_cluster_own_subject }} was compared.{% else %}No server of {{ github_runner_cluster_group }} runs its container, so there is no cluster to compare with yet (a first bootstrap, or a cluster whose servers are all stopped); only {{ github_runner_cluster_own_subject }} was compared.{% endif %}
   when:
-    - not github_runner_cluster_allow_k3s_version_jump | bool
+    - not github_runner_cluster_allow_k3s_version_jump | bool or github_runner_cluster_running_read_always | bool
     - github_runner_cluster_running_reads.results | default([]) | rejectattr('stdout', 'defined') | list | length == 0
     - github_runner_cluster_running_reads.results | default([]) | map(attribute='stdout') | map('trim') | reject('equalto', 'stopped') | list | length == 0

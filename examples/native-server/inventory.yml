@@ -1,0 +1,31 @@
+---
+# A cluster with a native server: node1 and node2 are Docker servers, and linux1 runs k3s directly under systemd as the third server and etcd voter, with its own Tailscale client as the node's device and its etcd peer URL on its Tailscale address. linux2 is a native agent staged as a standby (github_runner_cluster_voter_eligible): its server configuration is written and its name is on every server's certificate, but it stays an agent until its role is switched. See the cluster role's README, Native servers. Run with: ansible-playbook -i examples/native-server/inventory.yml exadev.github_runner.site --limit linux1,linux2 --check   # then without --check
+all:
+  children:
+    github_runner_cluster:
+      vars:
+        github_runner_cluster_tailnet_domain: example-tailnet.ts.net
+        github_runner_secrets_source: onepassword
+        github_runner_secrets_onepassword_vault: Example
+        github_runner_secrets_onepassword_item: github-runner
+      hosts:
+        node1:
+          ansible_host: node1.example.com
+        node2:
+          ansible_host: node2.example.com
+        linux1:
+          # Reached by its LAN name, not over the tailnet, as for a native agent.
+          ansible_host: linux1.local
+          github_runner_cluster_node_mode: native
+          # A native host is a server only when it says so; it never takes an automatic server place.
+          github_runner_cluster_node_role: server
+          github_runner_cluster_native_tailscale_leave_other_tailnet: true
+          github_runner_linux_host_k3s_prerequisites: true
+          github_runner_linux_host_keep_awake: true
+        linux2:
+          ansible_host: linux2.local
+          github_runner_cluster_node_mode: native
+          github_runner_cluster_voter_eligible: true
+          github_runner_cluster_native_tailscale_leave_other_tailnet: true
+          github_runner_linux_host_k3s_prerequisites: true
+          github_runner_linux_host_keep_awake: true

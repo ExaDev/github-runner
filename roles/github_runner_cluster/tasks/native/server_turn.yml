@@ -1,0 +1,131 @@
+---
+# One native server's turn (see service.yml, which gives each native server of the play its turn, one at a time, as tasks/start_servers.yml does for the Docker servers): works out what the server unit needs, refuses when that would take quorum away or add a member beside an unhealthy one, does it, and waits for the node to be Ready on a heartbeat from the k3s just started and a voting member of etcd. What a turn does:
+#
+# - promote: the host runs the agent unit and is to be a server. Its node is emptied (drain.yml), the role file is switched to server, the agent unit is stopped and disabled and the server unit enabled and started. k3s joins it as an etcd learner (MemberAddAsLearner in join, pkg/etcd/etcd.go), which the etcd leader promotes once it has caught up; a learner does not count towards quorum, so the add costs none. Same node name, node password (/etc/rancher/node/password, which neither unit's k3s is told to change) and Tailscale device, so the cluster's node-password Secret stays valid.
+# - first start: nothing runs on the host yet; the server unit is enabled and started, bootstrapping a new cluster or joining one as 10-join.yaml says.
+# - restart: the server runs and something it reads changed. Its etcd member is away while k3s restarts.
+# - start: the server unit is installed and stopped; it is started, and rejoins with its own datastore.
+#
+# Every one but a start, and a first start that bootstraps, goes ahead only while every other etcd voter the cluster lists is Ready, read from each node's etcd role label (plugins/filter/cluster_native.py's cluster_native_voter_blockers), never from the inventory, since a host's role can change at run time. Under --check the guard still reads and refuses, and the change is reported, not made.
+
+- name: Work out what this server's unit needs
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_turn: >-
+      {{ 'promote' if github_runner_cluster_native_current_role == 'agent'
+         else ('first start' if github_runner_cluster_native_current_role | length == 0
+         else ('restart' if github_runner_cluster_native_server_active | bool and github_runner_cluster_native_server_changed | bool
+         else ('start' if not github_runner_cluster_native_server_active | bool else ''))) }}
+
+- name: Reach the cluster through this server when it runs, and through another server otherwise
+  ansible.builtin.include_tasks: native/api.yml
+  vars:
+    github_runner_cluster_native_api_self: "{{ github_runner_cluster_native_server_active | bool }}"
+
+- name: Read which nodes are etcd voters and whether each is Ready
+  # A voter is a node with k3s's etcd role label, which k3s puts on every server whose etcd is a member. Comma-separated, since either of the last two fields can be empty.
+  become: "{{ github_runner_cluster_native_api_become }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ github_runner_cluster_native_api_argv + ['get', 'nodes', '--request-timeout=' ~ github_runner_cluster_cluster_read_timeout ~ 's', '-o',
+         'jsonpath={range .items[*]}{.metadata.name}{","}{.status.conditions[?(@.type=="Ready")].status}{","}{.metadata.labels.node-role\.kubernetes\.io/etcd}{"\n"}{end}'] }}
+  environment: "{{ github_runner_cluster_native_api_environment }}"
+  # Ansible resolves delegate_to before it evaluates when, so a task that is skipped because there is no other server still needs a host here.
+  delegate_to: "{{ github_runner_cluster_native_api_host if github_runner_cluster_native_api_host | length > 0 else inventory_hostname }}"
+  register: github_runner_cluster_native_voters
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+  when:
+    - github_runner_cluster_native_turn in ['promote', 'restart'] or (github_runner_cluster_native_turn == 'first start' and not github_runner_cluster_native_cluster_init | bool)
+    - github_runner_cluster_native_api_host | length > 0
+
+- name: Refuse while another etcd voter is not Ready
+  vars:
+    github_runner_cluster_native_voter_problems: >-
+      {{ github_runner_cluster_native_voters | exadev.github_runner.cluster_native_voter_blockers(github_runner_cluster_effective_node_name) }}
+  ansible.builtin.fail:
+    msg: >-
+      Not going ahead with the {{ github_runner_cluster_native_turn }} of {{ github_runner_cluster_native_server_service }} on {{ inventory_hostname }}:
+      {{ github_runner_cluster_native_voter_problems | join('; ') }}. A native server is restarted, started for the first time beside a
+      cluster, or promoted from an agent only while every other voter is Ready, so that the cluster keeps its quorum and a learner is only
+      added beside a healthy membership. Bring the other voters back and run again. Nothing was changed.
+  when:
+    - github_runner_cluster_native_voters is not skipped
+    - github_runner_cluster_native_voter_problems | length > 0
+
+- name: Report what a real run would do to this server
+  ansible.builtin.debug:
+    msg: "{{ github_runner_cluster_native_turn }} {{ github_runner_cluster_native_server_service }} on {{ inventory_hostname }}"
+  changed_when: true
+  when:
+    - ansible_check_mode
+    - github_runner_cluster_native_turn | length > 0
+
+- name: Switch, start or restart this server
+  when:
+    - not ansible_check_mode
+    - github_runner_cluster_native_turn | length > 0
+  block:
+    - name: Empty the node before it stops running the agent
+      ansible.builtin.include_tasks: native/drain.yml
+      when: github_runner_cluster_native_turn == 'promote'
+
+    - name: Record that the host is now a server
+      # Before the agent unit stops, so that Restart=always cannot start it again: from here on only the server unit's condition holds.
+      become: true
+      ansible.builtin.copy:
+        content: server
+        dest: "{{ github_runner_cluster_native_role_file }}"
+        mode: "0644"
+      when: github_runner_cluster_native_turn == 'promote'
+
+    - name: Stop and disable the agent unit
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, disable, --now, "{{ github_runner_cluster_native_agent_service }}"]
+      changed_when: true
+      when: github_runner_cluster_native_turn == 'promote'
+
+    - name: Read the time on the host, before the server is started or restarted
+      # The node's Ready condition outlives a stopped k3s for a while, so the wait below is for a heartbeat later than this. The host's own clock, which the kubelet's heartbeat is stamped with.
+      ansible.builtin.command:
+        argv: [date, -u, "+%Y-%m-%dT%H:%M:%SZ"]
+      register: github_runner_cluster_native_started
+      changed_when: false
+
+    - name: Enable the server unit
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, enable, "{{ github_runner_cluster_native_server_service }}"]
+      changed_when: true
+      when: not github_runner_cluster_native_server_enabled | bool
+
+    - name: Start or restart the server unit
+      # A restart leaves the pods running: the unit's KillMode=process leaves their containerd shims alone.
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, "{{ 'restart' if github_runner_cluster_native_turn == 'restart' else 'start' }}", "{{ github_runner_cluster_native_server_service }}"]
+      changed_when: true
+
+    - name: Clear the server's waiting restart, since it has started on its files
+      become: true
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_native_restart_marker }}-{{ github_runner_cluster_native_server_service }}"
+        state: absent
+
+    - name: Reach the cluster through this server from now on
+      ansible.builtin.include_tasks: native/api.yml
+      vars:
+        github_runner_cluster_native_api_self: true
+
+    - name: Wait for this server's node to be Ready on a new heartbeat and an etcd voter
+      # Ready alone is not enough, as for a recreated Docker server (tasks/server_ready.yml): the node's lease must have been renewed after the start. A voter, because k3s adds a new server as a learner and the turn is over only once etcd counts it: k3s's EtcdIsVoter condition is True on a voting member's Node (setEtcdStatusCondition in pkg/etcd/etcd.go).
+      ansible.builtin.include_tasks: native/server_ready.yml
+
+    - name: Let the node run workloads again
+      become: true
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_native_api_argv + ['uncordon', github_runner_cluster_effective_node_name] }}"
+      changed_when: true
+      when: github_runner_cluster_native_turn == 'promote'
