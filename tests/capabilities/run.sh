@@ -12,6 +12,7 @@ cluster=grtest-capabilities
 registry_container=grtest-capabilities-registry
 namespace=arc-runners-example
 tool_image=grtest/toolcache-node:test
+other_tool_image=grtest/toolcache-node:other-test
 library_image=grtest/sysroot-libpq:test
 # The node cache pruner's own image, built from the autoscaler image's Dockerfile with only the files it copies, and the registry the store test's images are pushed to (Docker Hub's, a version tag: the registry's own releases are not pinned by digest anywhere else here either).
 pruner_image=grtest/autoscaler:test
@@ -24,6 +25,8 @@ charts=oci://ghcr.io/actions/actions-runner-controller-charts
 chart_version="${GRTEST_SCALESET_CHART_VERSION:-}"
 tool_cache_package="@actions/tool-cache@4.0.0"
 node_version="$(sed -n 's/^ARG NODE_VERSION=//p' "$repo_root/tool-images/node/Dockerfile")"
+# The first further Node.js version the publish workflow's matrix names: the same Dockerfile built for it, so the test covers a second version of the tool image beside the Dockerfile's default.
+other_node_version="$(python3 -c 'import sys, yaml; print(next(entry["version"] for entry in yaml.safe_load(open(sys.argv[1]))["jobs"]["build"]["strategy"]["matrix"]["image"] if entry["name"] == "node" and "version" in entry))' "$repo_root/.github/workflows/publish-tool-images.yml")"
 work="$(mktemp -d "${TMPDIR:-/tmp}/grtest-capabilities.XXXXXX")"
 export KUBECONFIG="$work/kubeconfig"
 
@@ -47,11 +50,14 @@ cleanup() {
 trap cleanup EXIT
 
 [ -n "$node_version" ] || fail "could not read NODE_VERSION from tool-images/node/Dockerfile"
+[ -n "$other_node_version" ] || fail "could not read a further Node.js version from the publish workflow's matrix"
 version_flag=()
 [ -z "$chart_version" ] || version_flag=(--version "$chart_version")
 
 log "Building the reference Node.js ${node_version} tool image"
 docker build -q -t "$tool_image" "$repo_root/tool-images/node" >/dev/null
+log "Building the same image for Node.js ${other_node_version}"
+docker build -q --build-arg "NODE_VERSION=${other_node_version}" -t "$other_tool_image" "$repo_root/tool-images/node" >/dev/null
 log "Building the reference libpq system-library image"
 docker build -q -t "$library_image" "$repo_root/tool-images/libpq" >/dev/null
 
@@ -73,7 +79,7 @@ for node in $(kind get nodes --name "$cluster"); do
   docker exec "$node" mkdir -p "/etc/containerd/certs.d/localhost:${registry_port}"
   printf '[host."http://%s:5000"]\n' "$registry_container" | docker exec -i "$node" tee "/etc/containerd/certs.d/localhost:${registry_port}/hosts.toml" >/dev/null
 done
-kind load docker-image "$tool_image" "$library_image" "$pruner_image" --name "$cluster" >/dev/null
+kind load docker-image "$tool_image" "$other_tool_image" "$library_image" "$pruner_image" --name "$cluster" >/dev/null
 
 # What the store names its entries for: each image's digest in the registry, which the push returns.
 push_image() {
@@ -93,9 +99,9 @@ render_release() {
   local name=$1 store=$2 capabilities=$3 tool=$4 library=$5
   log "Rendering the ${name} profile's values through the role"
   # The profile as arc_profiles expands it, and a catalogue with the tool image (put on PATH through its bin directory), the library image (with PGSYSCONFDIR, where libpq looks for its service file, as its extra variable) and a hook capability that records it ran.
-  python3 - "$repo_root/plugins/filter/arc.py" "$work/$name.extra.json" "$tool" "$node_version" "$work/$name.rendered.json" "$library" "$sysroot" "$busybox_image" "$capabilities" "$store" <<'EOF'
+  python3 - "$repo_root/plugins/filter/arc.py" "$work/$name.extra.json" "$tool" "$node_version" "$work/$name.rendered.json" "$library" "$sysroot" "$busybox_image" "$capabilities" "$store" "$other_tool_image" <<'EOF'
 import importlib.util, json, sys
-plugin, extra, image, version, output, library_image, sysroot, busybox_image, capabilities, store = sys.argv[1:]
+plugin, extra, image, version, output, library_image, sysroot, busybox_image, capabilities, store, other_image = sys.argv[1:]
 spec = importlib.util.spec_from_file_location("arc", plugin)
 arc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(arc)
@@ -103,6 +109,7 @@ result = arc.arc_profiles([{"name": "Example", "image": "unused:1", "scale_set_p
 assert result["errors"] == [], result["errors"]
 catalogue = {
     "node": {"image": image, "path": f"node/{version}/bin"},
+    "node-other": {"image": other_image},
     "libpq": {"sysroot_image": library_image, "env": {"PGSYSCONFDIR": f"{sysroot}/etc"}},
     "pnpm-store": {"node_cache": {"init_image": busybox_image, "dirs": {"pnpm_config_store_dir": "pnpm"}}},
     "marker": {"job_started_hook": 'echo "CAPABILITY_HOOK_RAN=yes" >> "$GITHUB_ENV"\n'},
@@ -132,7 +139,7 @@ yaml.safe_dump(sets[0], open(sys.argv[2], "w"))
 EOF
 }
 
-render_release plain false node,libpq,marker,pnpm-store "$tool_image" "$library_image"
+render_release plain false node,node-other,libpq,marker,pnpm-store "$tool_image" "$library_image"
 render_release store true node,libpq,marker "$tool_reference" "$library_reference"
 
 log "Checking the AutoscalingRunnerSets against the ARC CRDs"
@@ -171,6 +178,12 @@ grep -qx CAPABILITY_HOOK_RAN=yes "\$GITHUB_ENV"
 echo "hook capability ran"
 echo "node on PATH: \$(command -v node) \$(node --version)"
 [ "\$(node --version)" = "v${node_version}" ]
+# The further version's node is not run: Node.js 26 links libatomic, which the stock runner image lacks (a fleet's own runner image carries it), so it would fail here for a reason that has nothing to do with the capability.
+other_arch_dirs="\$(find "\$RUNNER_TOOL_CACHE/node/${other_node_version}" -mindepth 1 -maxdepth 1 -type d)"
+[ "\$(printf '%s\\n' "\$other_arch_dirs" | wc -l)" = 1 ]
+[ -e "\$other_arch_dirs.complete" ]
+[ -x "\$other_arch_dirs/bin/node" ]
+echo "node ${other_node_version} sits in the tool cache beside it: \$other_arch_dirs"
 echo "psql on PATH: \$(command -v psql) \$(psql --version)"
 [ "\$(command -v psql)" = "${sysroot}/bin/psql" ]
 [ "\$(pg_config --includedir)" = "${sysroot}/include" ]
@@ -180,7 +193,7 @@ echo "system library ran from ${sysroot}"
 $(cat "$work/cache-step.sh")
 cd "\$(mktemp -d)"
 npm install --silent --no-audit --no-fund "${tool_cache_package}" >/dev/null
-node --input-type=module -e "import * as tc from '@actions/tool-cache'; const found = tc.find('node', '${node_version%%.*}', process.arch); if (!found) { console.error('not found in ' + process.env.RUNNER_TOOL_CACHE); process.exit(1); } console.log('tool-cache find: ' + found);"
+node --input-type=module -e "import * as tc from '@actions/tool-cache'; const found = tc.find('node', '${node_version%%.*}', process.arch); if (!found) { console.error('not found in ' + process.env.RUNNER_TOOL_CACHE); process.exit(1); } console.log('tool-cache find: ' + found); const other = tc.find('node', '${other_node_version%%.*}', process.arch); if (!other || !other.includes('/${other_node_version}/')) { console.error('node ${other_node_version} not found in ' + process.env.RUNNER_TOOL_CACHE + ': ' + other); process.exit(1); } console.log('tool-cache find: ' + other);"
 echo CAPABILITIES-OK
 EOF
 cat >"$work/make-pod.py" <<'EOF'
@@ -246,6 +259,8 @@ wait_for_pod runner
 kubectl -n "$namespace" logs runner -c runner | grep -qx CAPABILITIES-OK || fail "the step did not reach its end"
 init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-node")].state.terminated.exitCode}')"
 [ "$init_state" = 0 ] || fail "the capability-node init container did not succeed (exit code '${init_state}')"
+init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-node-other")].state.terminated.exitCode}')"
+[ "$init_state" = 0 ] || fail "the capability-node-other init container did not succeed (exit code '${init_state}')"
 init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-libpq")].state.terminated.exitCode}')"
 [ "$init_state" = 0 ] || fail "the capability-libpq init container did not succeed (exit code '${init_state}')"
 init_state="$(kubectl -n "$namespace" get pod runner -o jsonpath='{.status.initContainerStatuses[?(@.name=="capability-pnpm-store")].state.terminated.exitCode}')"
