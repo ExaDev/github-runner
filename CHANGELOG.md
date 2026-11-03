@@ -1,3 +1,9 @@
+## [2.20.1](https://github.com/ExaDev/github-runner/compare/v2.20.0...v2.20.1) (2026-11-03)
+
+### Bug Fixes
+
+* **linux-host:** read Wi-Fi devices from sysfs without find ([65dc685](https://github.com/ExaDev/github-runner/commit/65dc685a34336cec33a41384bad3e28162e0461b))
+
 ## [2.20.0](https://github.com/ExaDev/github-runner/compare/v2.19.0...v2.20.0) (2026-11-02)
 
 ### Features
