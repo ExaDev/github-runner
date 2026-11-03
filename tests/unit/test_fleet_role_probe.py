@@ -658,5 +658,71 @@ class FsyncTest(ProbeCase):
         self.assertIsNone(self.newest()["fsync_ms"])
 
 
+class CheckTest(ProbeCase):
+    """`check` takes one reading alone, with no cluster access, for comparing with a reading taken by hand on a real host."""
+
+    def check(self, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+        base = {
+            "ELECTION_TIMEOUT_MS": str(ELECTION_TIMEOUT_MS),
+            "REPORT_SECONDS": str(SAMPLE_SECONDS),
+            "FSYNC_DIR": str(self.fsync_dir),
+            "SYS_CLASS_NET": str(self.sys / "class" / "net"),
+            "PROC_NET_ROUTE": str(self.route),
+            "FLEET_REGRADE_CORE": str(REGRADE_CORE),
+            "PSI_FILE": str(self.psi),
+            "MEMINFO_FILE": str(self.meminfo),
+        }
+        completed = subprocess.run(
+            [str(Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh"), "check", *args],
+            env={"PATH": self.cluster.env()["PATH"], **base, **env},
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+        self.assertEqual(self.cluster.calls.read_text(), "", "a check must not reach the cluster")
+        return completed
+
+    def test_link_prints_the_interface_and_its_link_type(self) -> None:
+        SysfsTree(self.sys).pci_wifi()
+        self.route.write_text(ROUTE_HEADER + route_line("wlan0"))
+        completed = self.check("link")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"interface": "wlan0", "link": "wifi"})
+
+    def test_connect_prints_the_milliseconds_to_a_listener(self) -> None:
+        with listener() as port:
+            completed = self.check("connect", "127.0.0.1", ETCD_PEER_PORT=str(port))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(float(completed.stdout), ELECTION_TIMEOUT_MS)
+        self.assertGreater(float(completed.stdout), 0)
+
+    def test_memory_prints_what_the_kernels_files_say(self) -> None:
+        self.psi.write_text("some avg10=0.00 avg60=0.00 avg300=7.50 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+        completed = self.check("memory")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"psi_avg300": 7.5, "mem_available_kb": 8192000, "mem_total_kb": 16384000})
+
+    def test_etcd_prints_the_gauges_and_the_tails_of_the_cumulative_histograms(self) -> None:
+        with metrics_server([page("before")]) as url:
+            completed = self.check("etcd", ETCD_METRICS_URL=url)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        reading = json.loads(completed.stdout)
+        self.assertEqual((reading["id"], reading["known_members"], reading["has_leader"]), (FIXTURE_SERVER_ID, TARGET, True))
+        self.assertGreater(reading["wal_fsync_p99_ms"], 0)
+        self.assertGreater(reading["backend_commit_p99_ms"], 0)
+
+    @unittest.skipUnless(FIO, "needs fio")
+    def test_fsync_prints_the_milliseconds_fio_measured(self) -> None:
+        completed = self.check("fsync")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertGreater(float(completed.stdout), 0)
+
+    def test_an_unknown_reading_is_a_usage_error(self) -> None:
+        completed = self.check("nonsense")
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("usage:", completed.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
