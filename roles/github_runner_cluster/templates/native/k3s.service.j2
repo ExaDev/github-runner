@@ -29,8 +29,8 @@ RestartSec=5s
 # Kept across restarts, so the file the kubelet reads is there while k3s starts again; removed when the service stops, and when a start is skipped by the condition below, so it is this unit's alone and never shared with the other k3s unit.
 RuntimeDirectory={{ github_runner_cluster_native_server_runtime_dir }}
 RuntimeDirectoryPreserve=restart
-# Starts only while the role file names this host a server (files/native/fleet-role-is.sh), so this unit and the k3s agent unit never run together and Restart=always never starts a server that has been demoted, which would join the cluster again as a learner.
-ExecCondition={{ github_runner_cluster_native_lib_dir }}/fleet-role-is server {{ github_runner_cluster_native_role_file }}
+# Starts only while the role file names this host a server and k3s has not marked its datastore with a tombstone (files/native/fleet-role-is.sh), so this unit and the k3s agent unit never run together and Restart=always never starts a server that has been demoted or whose etcd member was removed, either of which would join the cluster again as a learner.
+ExecCondition={{ github_runner_cluster_native_lib_dir }}/fleet-role-is server {{ github_runner_cluster_native_role_file }} {{ github_runner_cluster_native_data_dir }}/server
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
 ExecStartPre={{ github_runner_cluster_native_lib_dir }}/write-resolv-conf {{ github_runner_cluster_native_run_dir }}/{{ github_runner_cluster_native_server_runtime_dir }}/resolv.conf
