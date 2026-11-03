@@ -1,0 +1,173 @@
+---
+# Runs the fleet-regrade unit on a native server when github_runner_cluster_regrade is true, and removes it when it is not: the native counterpart of tasks/regrade_service.yml. The unit runs fleet-regrade's core with the systemd actuator, from scripts and settings placed under github_runner_cluster_native_regrade_dir, and `fleet-regrade` on the PATH runs them by hand (status, down, up). Run after service.yml has run the host's unit; tasks/regrade.yml has already checked the settings, so regrading is on only for a server. While github_runner_cluster_native_start is false the unit is left as it is found, running or not, as the k3s units are, and only its files are written. Under --check nothing is changed and each change a real run would make is reported.
+
+- name: Run the fleet-regrade unit
+  when: github_runner_cluster_regrade | bool
+  block:
+    - name: Install the packages regrading needs that the host lacks
+      # tasks/regrade.yml read which they are, and refused a host that is not Debian or Ubuntu that lacks any. The index is refreshed first, since a host's lists can be missing or stale.
+      when: github_runner_cluster_native_regrade_packages | length > 0
+      block:
+        - name: Refresh the package index
+          become: true
+          ansible.builtin.command:
+            argv: [apt-get, update]
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          changed_when: true
+
+        - name: Install the packages
+          become: true
+          ansible.builtin.command:
+            argv: "{{ ['apt-get', 'install', '--yes', '--no-install-recommends'] + github_runner_cluster_native_regrade_packages }}"
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          changed_when: true
+
+    - name: Create the directory the regrade scripts and settings go in
+      become: true
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_native_regrade_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Place the regrade scripts
+      # Copied on every run, so a collection upgrade reaches the host; the unit reads them at its start, so a changed one restarts it, below.
+      become: true
+      ansible.builtin.copy:
+        src: "regrade/{{ item.name }}"
+        dest: "{{ github_runner_cluster_native_regrade_dir }}/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {name: fleet-regrade.sh, mode: "0755"}
+        - {name: fleet-regrade-core.sh, mode: "0644"}
+        - {name: fleet-regrade-k3s.sh, mode: "0644"}
+        - {name: fleet-regrade-systemd.sh, mode: "0644"}
+      register: github_runner_cluster_native_regrade_scripts
+
+    - name: Template the regrade settings
+      become: true
+      ansible.builtin.template:
+        src: regrade.env.j2
+        dest: "{{ github_runner_cluster_native_regrade_dir }}/fleet-regrade.env"
+        mode: "0644"
+      register: github_runner_cluster_native_regrade_settings
+
+    - name: Put fleet-regrade on the PATH, for stepping by hand
+      become: true
+      ansible.builtin.file:
+        src: "{{ github_runner_cluster_native_regrade_dir }}/fleet-regrade.sh"
+        dest: "{{ github_runner_cluster_native_bin_dir }}/fleet-regrade"
+        state: link
+        # Under --check the scripts above have not been placed, so the link's target may not exist yet.
+        force: true
+
+    - name: Write the fleet-regrade unit
+      become: true
+      ansible.builtin.template:
+        src: native/fleet-regrade.service.j2
+        dest: "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_native_regrade_service }}.service"
+        mode: "0644"
+      register: github_runner_cluster_native_regrade_unit
+
+    - name: Reload systemd when the unit changed
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, daemon-reload]
+      changed_when: true
+      when:
+        - github_runner_cluster_native_regrade_unit is changed
+        - not ansible_check_mode
+
+    - name: Read whether the unit is enabled and running
+      ansible.builtin.command:
+        argv: [systemctl, "{{ item }}", "{{ github_runner_cluster_native_regrade_service }}"]
+      loop: [is-enabled, is-active]
+      register: github_runner_cluster_native_regrade_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Enable the unit
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, enable, "{{ github_runner_cluster_native_regrade_service }}"]
+      changed_when: true
+      when:
+        - github_runner_cluster_native_start | bool
+        - github_runner_cluster_native_regrade_state.results[0].rc != 0
+
+    - name: Start the unit, or restart it since something it reads changed
+      # The watcher reads its scripts and settings once, at its start. A unit nothing changed for is left running, with its streaks.
+      become: true
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - "{{ 'restart' if github_runner_cluster_native_regrade_state.results[1].rc == 0 else 'start' }}"
+          - "{{ github_runner_cluster_native_regrade_service }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_native_start | bool
+        - >-
+          github_runner_cluster_native_regrade_state.results[1].rc != 0
+          or github_runner_cluster_native_regrade_scripts is changed
+          or github_runner_cluster_native_regrade_settings is changed
+          or github_runner_cluster_native_regrade_unit is changed
+
+- name: Stop regrading
+  when:
+    - not (github_runner_cluster_regrade | bool)
+    - github_runner_cluster_native_start | bool
+  block:
+    - name: Read the level this server's k3s started at
+      # Read-only, so it runs under --check too. Absent while the server unit is not running, on an agent, and on a server that has never started with the level's ExecStartPre.
+      become: true
+      ansible.builtin.slurp:
+        src: "{{ github_runner_cluster_native_regrade_started_file }}"
+      register: github_runner_cluster_native_regrade_level
+      failed_when: false
+      check_mode: false
+
+    - name: Fail if the server is stepped down
+      # Without the unit nothing steps it back up, and the server unit's ExecStartPre would keep starting it at the level it was left at. Fatal for the whole play, as tasks/regrade_service.yml's refusal is, so that no other host removes its service while one server is still stepped down.
+      any_errors_fatal: true
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_cluster_regrade is false, but {{ inventory_hostname }} is running at the level
+
+          {{ github_runner_cluster_native_regrade_level.content | b64decode | trim }}, below full, and the fleet-regrade unit is what steps it
+          back up. Run `fleet-regrade up` on {{ inventory_hostname }} until it reports full (`fleet-regrade status` shows the level), then run
+          again. Nothing was changed.
+      when:
+        - github_runner_cluster_native_regrade_level.content is defined
+        - github_runner_cluster_native_regrade_level.content | b64decode | trim != 'full'
+
+    - name: Read whether the unit is installed
+      ansible.builtin.stat:
+        path: "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_native_regrade_service }}.service"
+      register: github_runner_cluster_native_regrade_installed
+
+    - name: Remove the unit, its scripts and settings, and the command on the PATH
+      when: github_runner_cluster_native_regrade_installed.stat.exists
+      block:
+        - name: Stop and disable the unit
+          become: true
+          ansible.builtin.command:
+            argv: [systemctl, disable, --now, "{{ github_runner_cluster_native_regrade_service }}"]
+          changed_when: true
+
+        - name: Remove the unit's files
+          become: true
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_native_regrade_service }}.service"
+            - "{{ github_runner_cluster_native_regrade_dir }}"
+            - "{{ github_runner_cluster_native_bin_dir }}/fleet-regrade"
+
+        - name: Reload systemd, which still knows the removed unit
+          become: true
+          ansible.builtin.command:
+            argv: [systemctl, daemon-reload]
+          changed_when: true

@@ -1,0 +1,21 @@
+# Managed by the exadev.github_runner collection's github_runner_cluster role (node mode native, github_runner_cluster_regrade: true). Do not edit by hand: change this host's variables and run the role again.
+# Steps this native server down through levels of reduced function when memory runs short, and back up, while it keeps its etcd vote; see the role README's Memory-pressure regrading. It runs fleet-regrade's core with the systemd actuator (files/regrade/fleet-regrade-systemd.sh), which reads the host's own memory pressure and applies a level by recording it for the {{ github_runner_cluster_native_server_service }} unit's ExecStartPre and restarting that unit, so it runs as root, as that unit does.
+[Unit]
+Description=fleet-regrade memory-pressure regrading of this native k3s server
+Documentation=https://github.com/ExaDev/github-runner/tree/main/roles/github_runner_cluster#memory-pressure-regrading
+# Ordered after the server unit and bound to nothing: it restarts that unit itself, and must keep running while it does.
+After={{ github_runner_cluster_native_server_service }}.service
+
+[Service]
+Type=exec
+User=root
+Environment="FLEET_REGRADE_ENV={{ github_runner_cluster_native_regrade_dir }}/fleet-regrade.env"
+# k3s, for `k3s kubectl`, is in the role's binary directory.
+Environment="PATH={{ github_runner_cluster_native_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart={{ github_runner_cluster_native_regrade_dir }}/fleet-regrade.sh watch
+# The watcher keeps its streaks in memory, so a restart only starts them again; a kernel without memory pressure stops it at once, with the reason in the journal, and the role refuses to turn regrading on there in the first place. It is restarted after one sample period, the pace it reads at in any case.
+Restart=always
+RestartSec={{ github_runner_cluster_regrade_sample_seconds }}
+
+[Install]
+WantedBy=multi-user.target

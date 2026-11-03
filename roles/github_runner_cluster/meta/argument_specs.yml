@@ -80,3 +80,11 @@ argument_specs:
         type: path
         default: /etc/apt/sources.list.d/tailscale.list
         description: Where Tailscale's apt repository list file goes. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_run_dir:
+        type: path
+        default: /run/github-runner-k3s
+        description: The server and agent units' runtime directory (RuntimeDirectory=github-runner-k3s), which systemd keeps across a restart of the unit and removes when it stops; it holds the regrading level a native server's k3s started at. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_psi_file:
+        type: path
+        default: /proc/pressure/memory
+        description: The kernel's memory pressure, which the role reads to refuse memory-pressure regrading on a native host whose kernel has none. Not a setting, and a variable only so the tests can point it at a stand-in.

@@ -98,6 +98,13 @@
         argv: [systemctl, disable, --now, "{{ github_runner_cluster_native_server_service }}"]
       changed_when: true
 
+    - name: Forget the regrading level the server was left at
+      # The level is a server's, and the agent unit never reads it; a later promotion must start the server whole, not at a level it was stepped to in an earlier term as a server.
+      become: true
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_native_regrade_level_file }}"
+        state: absent
+
     - name: Move the server's datastore aside, keeping only the newest copy
       # A copy, not a deletion: it holds the snapshots this server took (server/db/snapshots). One copy only, the one from this demotion, so repeated switches do not fill the disk.
       become: true

@@ -27,6 +27,7 @@
     - {src: write-resolv-conf.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/write-resolv-conf"}
     - {src: write-node-ip.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/write-node-ip"}
     - {src: fleet-role-is.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/fleet-role-is"}
+    - {src: write-regrade-level.sh, dest: "{{ github_runner_cluster_native_lib_dir }}/write-regrade-level"}
   loop_control:
     label: "{{ item.dest }}"
   register: github_runner_cluster_native_helpers

@@ -1,5 +1,5 @@
 ---
-# Checks the memory-pressure regrading settings (github_runner_cluster_regrade and the settings beside it) before the role changes anything on the host. Run after the topology is known: whether a step down can work depends on the other servers. Off is the default and passes.
+# Checks the memory-pressure regrading settings (github_runner_cluster_regrade and the settings beside it) before the role changes anything on the host. Run after the topology is known: whether a step down can work depends on the other servers. On a native host (tasks/native/main.yml) it runs once the role the host is to run is decided too (tasks/native/role.yml), and also checks what the host's kernel and tools give the systemd actuator. Off is the default and passes.
 
 - name: Fail if regrading is not true or false
   ansible.builtin.assert:
@@ -11,9 +11,9 @@
   when: github_runner_cluster_regrade | bool
   block:
     - name: Fail if this host is not a server
-      # An agent has no control plane to shed and no etcd vote to keep.
+      # An agent has no control plane to shed and no etcd vote to keep. A native host is judged by the role it is to run after this run, which for a host marked github_runner_cluster_voter_eligible is the one recorded on the host, not the inventory's.
       ansible.builtin.assert:
-        that: github_runner_cluster_effective_node_role == 'server'
+        that: (github_runner_cluster_native_role if github_runner_cluster_node_mode == 'native' else github_runner_cluster_effective_node_role) == 'server'
         quiet: true
         fail_msg: >-
           github_runner_cluster_regrade is true, but {{ inventory_hostname }} is an agent. Regrading steps a server down while it
@@ -99,3 +99,46 @@
           github_runner_cluster_regrade_lease_duration_seconds ({{ github_runner_cluster_regrade_lease_duration_seconds }}) must be at least
           three times github_runner_cluster_regrade_operation_timeout_seconds ({{ github_runner_cluster_regrade_operation_timeout_seconds }}),
           or another server could take the Lease while this one is still stepping. Nothing was changed.
+
+    - name: Check what a native server's kernel and tools give regrading
+      when: github_runner_cluster_node_mode == 'native'
+      block:
+        - name: Read whether the kernel exposes memory pressure, and which of the commands regrading needs are installed
+          # Read-only, so it runs under --check too. The core decides on the kernel's memory pressure and parses the cluster's answers with jq, and the systemd actuator lists the node's processes with ps.
+          ansible.builtin.shell: |
+            set -u
+            if [ -r "$psi" ]; then echo psi; fi
+            for command in $commands; do
+              if command -v "$command" >/dev/null; then echo "$command"; fi
+            done
+          environment:
+            psi: "{{ github_runner_cluster_native_psi_file }}"
+            commands: "{{ github_runner_cluster_native_regrade_commands.keys() | join(' ') }}"
+          register: github_runner_cluster_native_regrade_host
+          changed_when: false
+          check_mode: false
+
+        - name: Record the packages regrading needs that are not installed
+          ansible.builtin.set_fact:
+            github_runner_cluster_native_regrade_packages: >-
+              {{ github_runner_cluster_native_regrade_commands | dict2items
+                 | rejectattr('key', 'in', github_runner_cluster_native_regrade_host.stdout_lines) | map(attribute='value') | list }}
+
+        - name: Fail if the kernel exposes no memory pressure
+          # The service would stop at its first sample (files/regrade/fleet-regrade.sh), so it is refused here, before anything changes.
+          ansible.builtin.fail:
+            msg: >-
+              github_runner_cluster_regrade is true, but the kernel of {{ inventory_hostname }} exposes no memory pressure
+              ({{ github_runner_cluster_native_psi_file }} is not readable): it needs CONFIG_PSI and no psi=0 on its command line, and
+              regrading cannot decide without it. Nothing was changed.
+          when: "'psi' not in github_runner_cluster_native_regrade_host.stdout_lines"
+
+        - name: Fail if a command regrading needs is missing on a host the role cannot install it on
+          ansible.builtin.fail:
+            msg: >-
+              github_runner_cluster_regrade is true, but {{ inventory_hostname }} lacks the packages
+              {{ github_runner_cluster_native_regrade_packages | join(', ') }}, which regrading needs, and the role installs them from the
+              distribution's packages on Debian and Ubuntu only. Install them and run again. Nothing was changed.
+          when:
+            - github_runner_cluster_native_regrade_packages | length > 0
+            - ansible_facts['os_family'] != 'Debian'

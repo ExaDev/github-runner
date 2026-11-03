@@ -119,9 +119,40 @@
       vars:
         github_runner_cluster_native_api_self: true
 
+    - name: Read the regrading level the server started at
+      # Written by the unit's ExecStartPre before k3s starts (files/native/write-regrade-level.sh), so it is there once the start has returned.
+      become: true
+      ansible.builtin.slurp:
+        src: "{{ github_runner_cluster_native_regrade_started_file }}"
+      register: github_runner_cluster_native_started_level
+
     - name: Wait for this server's node to be Ready on a new heartbeat and an etcd voter
       # Ready alone is not enough, as for a recreated Docker server (tasks/server_ready.yml): the node's lease must have been renewed after the start. A voter, because k3s adds a new server as a learner and the turn is over only once etcd counts it: k3s's EtcdIsVoter condition is True on a voting member's Node (setEtcdStatusCondition in pkg/etcd/etcd.go).
       ansible.builtin.include_tasks: native/server_ready.yml
+      when: github_runner_cluster_native_started_level.content | b64decode | trim != 'etcd-only'
+
+    - name: Wait for the etcd of a server that regrading has stepped down to etcd-only to serve again
+      # At etcd-only the server runs no kubelet, so its node is never Ready; what the restart has to give back is its etcd member, which k3s reports by logging that line once its etcd is serving, as the systemd actuator waits for it (files/regrade/fleet-regrade-systemd.sh). Only the unit's current run counts, read by its invocation id.
+      become: true
+      ansible.builtin.shell: |
+        set -eu
+        invocation=$(systemctl show --property InvocationID --value "$service")
+        [ -n "$invocation" ]
+        case "$(journalctl --no-pager --output cat "_SYSTEMD_INVOCATION_ID=${invocation}")" in
+          *'ETCD server is now running'*) ;;
+          *) exit 1 ;;
+        esac
+      environment:
+        service: "{{ github_runner_cluster_native_server_service }}"
+      register: github_runner_cluster_native_etcd_back
+      until: github_runner_cluster_native_etcd_back.rc == 0
+      retries: "{{ ((github_runner_cluster_native_ready_timeout | int) / github_runner_cluster_native_poll) | round(0, 'ceil') | int }}"
+      delay: "{{ github_runner_cluster_native_poll }}"
+      vars:
+        # Seconds between reads, as tasks/native/server_ready.yml polls.
+        github_runner_cluster_native_poll: 5
+      changed_when: false
+      when: github_runner_cluster_native_started_level.content | b64decode | trim == 'etcd-only'
 
     - name: Let the node run workloads again
       become: true
