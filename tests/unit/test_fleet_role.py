@@ -65,7 +65,7 @@ class Host:
     wal: Series | list[dict[str, int]] = 4.0
     commit: Series | list[dict[str, int]] = 8.0
     fsync_ms: float | None = 3.0
-    psi: float = 0.0
+    psi: float | None = 0.0
     avail_kb: int = AVAILABLE_KB
     total_kb: int = TOTAL_KB
     samples: int = WINDOW_SAMPLES
@@ -281,6 +281,21 @@ class MemoryAndStabilityTest(ControllerCase):
                 quota = {"etcd": {"quota_bytes": 1}}
                 status = self.pass_(healthy(a={"psi": psi, "avail_kb": avail, "total_kb": total, **quota}, b=quota, c=quota))
                 self.assertEqual(status["hosts"]["a"]["verdict"], expected)
+
+    def test_a_host_without_pressure_readings_is_judged_by_available_memory_and_says_its_pressure_is_unknown(self) -> None:
+        # A kernel without pressure stall information: every sample has MemAvailable and no pressure.
+        status = self.pass_(healthy(a={"psi": None, "avail_kb": TOTAL_KB * AVAILABLE_FLOOR_PERCENT // 100 - 1}))
+        host = status["hosts"]["a"]
+        self.assertEqual((host["verdict"], host["unknown_signals"], host["figures"]["psi_avg300_max"]), ("fit", ["memory pressure"], None))
+        self.assertIn("a (voter, link wired): fit, all readings within their limits; memory pressure unknown", self.log)
+        self.assertEqual(status["decision"]["action"], "none")
+        status = self.pass_(healthy(a={"psi": None, "avail_kb": ETCD_QUOTA_BYTES // 1024 - 1, "total_kb": TOTAL_KB}))
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unfit", "MemAvailable under etcd's quota still fails a host without pressure readings")
+
+    def test_a_host_with_pressure_readings_has_no_unknown_signal_and_reports_its_worst(self) -> None:
+        status = self.pass_(healthy(a={"psi": 2.5}))
+        self.assertEqual((status["hosts"]["a"]["unknown_signals"], status["hosts"]["a"]["figures"]["psi_avg300_max"]), ([], 2.5))
+        self.assertNotIn("unknown", self.log.split("a (voter, link wired)")[1].splitlines()[0])
 
     def test_available_memory_must_be_at_least_etcds_storage_quota(self) -> None:
         quota_kb = ETCD_QUOTA_BYTES // 1024
