@@ -284,6 +284,14 @@ esac
     def unit_calls(self, since: int = 0) -> list[str]:
         return [call for call in self.calls()[since:] if call.startswith("systemctl") and " is-" not in call and "daemon-reload" not in call]
 
+    def running_as(self, role: str) -> None:
+        """Leave the host as a run of the role leaves one that runs ``role``: the role file names it, and its unit is enabled and active. For a test whose subject is the next run, so that it need not spend a run of the role getting there; the role writes every file it reads afresh."""
+        self.file("github_runner_cluster_native_data_dir", "fleet-role").parent.mkdir(parents=True, exist_ok=True)
+        self.file("github_runner_cluster_native_data_dir", "fleet-role").write_text(role)
+        unit = "k3s" if role == "server" else "k3s-agent"
+        for state in ("enabled", "active"):
+            (self.state / f"{state}-{unit}").touch()
+
     def role_file(self) -> str:
         return self.file("github_runner_cluster_native_data_dir", "fleet-role").read_text()
 
@@ -293,8 +301,7 @@ esac
 
     def demote(self, voters: str = "server1,True,true\nserver2,True,true\nserver3,True,true\nlaptop,True,true\n") -> subprocess.CompletedProcess[str]:
         """Run laptop as a server, lay out its datastore as k3s leaves it, then run it as an agent with the cluster's voters read as ``voters``."""
-        (self.state / "voters").write_text("server1,True,true\nserver2,True,true\n")
-        self.assertEqual(self.run_three().returncode, 0)
+        self.running_as("server")
         self.wal = self.server_tree()
         older = self.paths["github_runner_cluster_native_data_dir"] / "server" / "db.demoted" / "etcd" / "name"
         older.parent.mkdir(parents=True)
@@ -312,11 +319,11 @@ esac
         self.assertTrue((self.state / "active-k3s").exists())
         self.assertTrue(self.wal.exists())
         # The Tailscale package is installed on every run of this test's host, whose dpkg-query stand-in reports none.
-        self.assertEqual([call for call in self.mutations(before) if not call.startswith(("apt-get", "systemctl enable --now tailscaled"))], [])
+        # The role writes its units before it decides what to do with them (here, for the first time), which reloads systemd; that touches no running unit.
+        self.assertEqual([call for call in self.mutations(before) if not call.startswith(("apt-get", "systemctl enable --now tailscaled", "systemctl daemon-reload"))], [])
 
     def demote_quickly(self) -> subprocess.CompletedProcess[str]:
-        (self.state / "voters").write_text("server1,True,true\nserver2,True,true\n")
-        self.assertEqual(self.run_three().returncode, 0)
+        self.running_as("server")
         self.wal = self.server_tree()
         (self.state / "voters").write_text("server1,True,true\nserver2,True,true\nserver3,True,true\nlaptop,True,true\n")
         return self.run_three(laptop={"github_runner_cluster_node_role": "agent", "github_runner_cluster_native_ready_timeout": 1})
