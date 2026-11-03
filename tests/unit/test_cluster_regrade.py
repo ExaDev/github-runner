@@ -21,6 +21,7 @@ FILES = ROLE / "files"
 ENTRYPOINT = FILES / "k3s" / "node-entrypoint.sh"
 COMPOSE = FILES / "docker-compose.yml"
 ACTUATOR = FILES / "regrade" / "fleet-regrade-docker.sh"
+K3S_ACTUATOR = FILES / "regrade" / "fleet-regrade-k3s.sh"
 ANSIBLE_PLAYBOOK = os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook")
 DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
 
@@ -196,15 +197,19 @@ class SettingsFileTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return dict(zip(names, result.stdout.split("\0"), strict=False))
 
-    def test_the_core_reads_every_setting_it_needs(self) -> None:
-        core = (FILES / "regrade" / "fleet-regrade-core.sh").read_text()
-        referenced = set(re.findall(r"\$\{?([A-Z][A-Z_]+)\b", core))
-        assigned = set(re.findall(r"\b([A-Z][A-Z_]+)=", core))
-        # What the core takes from the environment: referenced, never assigned by the core itself, and not a bash variable. The paths and names with a default (PSI_FILE and the like) are assigned with one, so they are not needed here.
+    def test_the_core_and_the_actuator_read_every_setting_they_need(self) -> None:
+        scripts = "".join((FILES / "regrade" / name).read_text() for name in ("fleet-regrade-core.sh", "fleet-regrade-k3s.sh", "fleet-regrade-docker.sh"))
+        referenced = set(re.findall(r"\$\{?([A-Z][A-Z_]+)\b", scripts))
+        assigned = set(re.findall(r"\b([A-Z][A-Z_]+)=", scripts))
+        # What the scripts take from the environment: referenced, never assigned by the scripts themselves, and not a bash variable. The paths and names with a default (PSI_FILE and the like) are assigned with one, so they are not needed here.
         needed = referenced - assigned - {"SECONDS", "BASH_SOURCE"}
         provided = {line.split("=", 1)[0] for line in self.render().splitlines() if re.match(r"[A-Z_]+=", line)}
         self.assertEqual(sorted(needed - provided), [])
         self.assertIn("PRESSURE_THRESHOLD", needed, "the check finds the settings at all")
+        self.assertIn("NODE_CONTAINER", needed, "the check reads the actuator too")
+
+    def test_the_wrapper_runs_the_docker_actuator(self) -> None:
+        self.assertEqual(self.sourced(self.render(), "FLEET_REGRADE_ACTUATOR"), {"FLEET_REGRADE_ACTUATOR": "docker"})
 
     def test_the_values_are_the_role_variables(self) -> None:
         values = self.sourced(self.render(), "PRESSURE_THRESHOLD", "AVAILABLE_FLOOR_PERCENT", "SAMPLE_SECONDS", "SUSTAIN_SECONDS", "COOLDOWN_SECONDS", "OPERATION_TIMEOUT_SECONDS", "LEASE_DURATION_SECONDS", "NODE_NAME", "STEP_UP")
@@ -275,11 +280,11 @@ class ComposeServiceTest(unittest.TestCase):
         directory = FILES / "regrade"
         dockerfile = (directory / "Dockerfile").read_text()
         self.assertIn("/usr/local/lib/fleet-regrade/fleet-regrade.sh", dockerfile)
-        for name in ("fleet-regrade.sh", "fleet-regrade-core.sh", "fleet-regrade-docker.sh"):
+        for name in ("fleet-regrade.sh", "fleet-regrade-core.sh", "fleet-regrade-k3s.sh", "fleet-regrade-docker.sh"):
             self.assertTrue((directory / name).is_file(), name)
         self.assertTrue(os.access(directory / "fleet-regrade.sh", os.X_OK))
         tasks = (ROLE / "tasks" / "regrade_service.yml").read_text()
-        for name in ("Dockerfile", "fleet-regrade.sh", "fleet-regrade-core.sh", "fleet-regrade-docker.sh"):
+        for name in ("Dockerfile", "fleet-regrade.sh", "fleet-regrade-core.sh", "fleet-regrade-k3s.sh", "fleet-regrade-docker.sh"):
             self.assertIn(f"name: {name}", tasks)
 
 
@@ -472,7 +477,7 @@ class RoleTasksTest(unittest.TestCase):
 
     def test_the_actuator_labels_the_node_with_the_key_the_role_selects_on(self) -> None:
         self.assertIn("LEVEL_LABEL={{ github_runner_cluster_regrade_level_label }}", (ROLE / "templates" / "regrade.env.j2").read_text())
-        self.assertIn('"${LEVEL_LABEL}=$1"', ACTUATOR.read_text())
+        self.assertIn('"${LEVEL_LABEL}=$1"', K3S_ACTUATOR.read_text())
         self.assertTrue(DEFAULTS["github_runner_cluster_regrade_level_label"].startswith(DEFAULTS["github_runner_cluster_deployed_version_annotation"].split("/")[0] + "/"))
 
 

@@ -20,6 +20,7 @@
         - {name: Dockerfile, mode: "0644"}
         - {name: fleet-regrade.sh, mode: "0755"}
         - {name: fleet-regrade-core.sh, mode: "0644"}
+        - {name: fleet-regrade-k3s.sh, mode: "0644"}
         - {name: fleet-regrade-docker.sh, mode: "0644"}
       register: github_runner_cluster_regrade_scripts
 

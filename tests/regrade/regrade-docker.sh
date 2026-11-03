@@ -1,10 +1,11 @@
-# Tests for the Docker actuator of fleet-regrade (files/regrade/fleet-regrade-docker.sh): which level the node is at, and how a level is entered. Run as `bash tests/regrade/regrade-docker.sh <path to fleet-regrade-core.sh> <path to fleet-regrade-docker.sh>`. docker is a stand-in that keeps one container in a directory (tests/regrade/fake-docker.sh) and kubectl is the lease test's (tests/regrade/fake-kubectl.sh), so nothing here touches a container or a cluster. The core calls the functions defined here by name, and reads the variables set here, so shellcheck sees them as unused.
+# Tests for the Docker actuator of fleet-regrade (files/regrade/fleet-regrade-docker.sh, over the part both k3s actuators share, fleet-regrade-k3s.sh): which level the node is at, and how a level is entered. Run as `bash tests/regrade/regrade-docker.sh <path to fleet-regrade-core.sh> <path to fleet-regrade-k3s.sh> <path to fleet-regrade-docker.sh>`. docker is a stand-in that keeps one container in a directory (tests/regrade/fake-docker.sh) and kubectl is the lease test's (tests/regrade/fake-kubectl.sh), so nothing here touches a container or a cluster. The core calls the functions defined here by name, and reads the variables set here, so shellcheck sees them as unused.
 
 # shellcheck disable=SC2329,SC2034
 set -euo pipefail
 
-core=${1:?usage: regrade-docker.sh <core> <actuator>}
-actuator=${2:?usage: regrade-docker.sh <core> <actuator>}
+core=${1:?usage: regrade-docker.sh <core> <k3s actuator> <actuator>}
+k3s_actuator=${2:?usage: regrade-docker.sh <core> <k3s actuator> <actuator>}
+actuator=${3:?usage: regrade-docker.sh <core> <k3s actuator> <actuator>}
 here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -36,6 +37,8 @@ export FLEET_REGRADE_ENV=$work/env LEVEL_FILE=$work/node/level-file STARTED_FILE
 . "$here/testlib.sh"
 # shellcheck source=/dev/null
 . "$core"
+# shellcheck source=/dev/null
+. "$k3s_actuator"
 # shellcheck source=/dev/null
 . "$actuator"
 POLL_SECONDS=1
