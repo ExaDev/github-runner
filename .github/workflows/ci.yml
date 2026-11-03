@@ -28,8 +28,6 @@ jobs:
       - name: Lint every shell script
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
           mapfile -t scripts < <(find . -type f -name '*.sh' -not -path './.git/*')
           echo "Found ${#scripts[@]} shell script(s)."
           if [ "${#scripts[@]}" -gt 0 ]; then
@@ -43,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install actionlint
-        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
       - name: Lint every workflow file
         run: ./actionlint -color
 
@@ -56,8 +54,6 @@ jobs:
       - name: Lint every YAML file
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq yamllint
           yamllint .
 
   hadolint:
@@ -103,16 +99,6 @@ jobs:
           for playbook in ../playbooks/*.yml; do
             echo "Syntax-checking ${playbook}"
             ansible-playbook -i ../examples/three-server-tailscale/inventory.yml "${playbook}" --syntax-check
-          done
-      - name: Build the collection
-        # Proves galaxy.yml's build_ignore still ships what the roles need at runtime, such as the k3s node's Compose file and build context under roles/github_runner_cluster/files.
-        run: |
-          set -euo pipefail
-          ansible-galaxy collection build --output-path "${RUNNER_TEMP}/collection"
-          tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
-          tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
-          for file in Dockerfile fleet-regrade.sh fleet-regrade-core.sh fleet-regrade-docker.sh; do
-            tar -tzf "${RUNNER_TEMP}"/collection/*.tar.gz | grep -Fx "roles/github_runner_cluster/files/regrade/${file}"
           done
 
   unit-tests:
@@ -171,13 +157,19 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Install Ansible
+      - name: Build the collection tarball
+        # ansible-galaxy and ansible-doc come with the ansible-core the ubuntu-latest image already has: building, installing and reading a collection's own plugins needs no other collection.
+        run: ansible-galaxy collection build --force
+      - name: Check the tarball ships what the roles need at runtime
+        # Proves galaxy.yml's build_ignore still ships what the roles need at runtime, such as the k3s node's Compose file and build context under roles/github_runner_cluster/files.
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ansible
-      - name: Build the collection tarball
-        run: ansible-galaxy collection build --force
+          tarball=$(ls exadev-github_runner-*.tar.gz)
+          tar -tzf "$tarball" | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
+          tar -tzf "$tarball" | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
+          for file in Dockerfile fleet-regrade.sh fleet-regrade-core.sh fleet-regrade-docker.sh; do
+            tar -tzf "$tarball" | grep -Fx "roles/github_runner_cluster/files/regrade/${file}"
+          done
       - name: Install the built tarball and verify its content
         run: |
           set -euo pipefail
@@ -210,19 +202,6 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: npx --no-install commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
-
-  commitlint-pr-title:
-    name: Lint PR title
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
       # Rebase-merges keep each commit's own message, so the title isn't what lands on main; it's still checked so the PR list reads consistently. Passed through env, never interpolated into the script.
       - name: Lint the pull request title
         env:
@@ -231,7 +210,7 @@ jobs:
 
   required-checks:
     name: Required Checks
-    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, unit-tests, ansible-lint, collection-build, commitlint, commitlint-pr-title]
+    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, unit-tests, ansible-lint, collection-build, commitlint]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
     runs-on: ubuntu-latest
