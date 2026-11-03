@@ -4,7 +4,7 @@ server: {{ github_runner_cluster_native_join_url | to_json }}
 token-file: {{ (github_runner_cluster_native_config_dir ~ '/token') | to_json }}
 node-name: {{ github_runner_cluster_effective_node_name | to_json }}
 vpn-auth-file: {{ (github_runner_cluster_native_config_dir ~ '/vpn-auth') | to_json }}
-resolv-conf: "/run/github-runner-k3s/resolv.conf"
+resolv-conf: {{ (github_runner_cluster_native_run_dir ~ '/' ~ github_runner_cluster_native_agent_runtime_dir ~ '/resolv.conf') | to_json }}
 {% if github_runner_cluster_node_taints | length > 0 %}
 node-taint:
 {% for taint in github_runner_cluster_node_taints %}

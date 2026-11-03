@@ -22,7 +22,7 @@ etcd-arg:
   - {{ ('heartbeat-interval=' ~ github_runner_cluster_etcd_heartbeat_interval) | to_json }}
   - {{ ('election-timeout=' ~ github_runner_cluster_etcd_election_timeout) | to_json }}
 {% endif %}
-resolv-conf: "/run/github-runner-k3s/resolv.conf"
+resolv-conf: {{ (github_runner_cluster_native_run_dir ~ '/' ~ github_runner_cluster_native_server_runtime_dir ~ '/resolv.conf') | to_json }}
 {% if github_runner_cluster_node_taints | length > 0 %}
 node-taint:
 {% for taint in github_runner_cluster_node_taints %}

@@ -1117,6 +1117,8 @@ scenario_native_server() {
   # Restart=always must not start the agent unit again, whose condition now fails.
   native_exec systemctl start k3s-agent || true
   native_unit_is k3s-agent inactive || fail "k3s-agent started on a server"
+  # And the skipped start must leave the server's own runtime directory alone, which holds the resolver file its kubelet reads.
+  native_exec test -s /run/github-runner-k3s-server/resolv.conf </dev/null || fail "a skipped start of k3s-agent removed the server's resolver file"
 
   log "Rerunning the role on the native server, which must not restart it"
   local before
@@ -1352,7 +1354,7 @@ EOF
   log "At etcd-only ${native_host} keeps its seat and its vote, runs all but etcd off, and runs no pod"
   native_at_level etcd-only || fail "${native_host} does not read etcd-only"
   [ "$(native_dropin_keys)" = "$native_etcd_only_keys" ] || fail "the drop-in does not turn all but etcd off: $(native_dropin_keys)"
-  [ "$(native_exec cat /run/github-runner-k3s/regrade-level </dev/null)" = etcd-only ] || fail "the unit's start did not record etcd-only"
+  [ "$(native_exec cat /run/github-runner-k3s-server/regrade-level </dev/null)" = etcd-only ] || fail "the unit's start did not record etcd-only"
   wait_for "${native_host}'s Node to report NotReady" 240 native_node_is NotReady,SchedulingDisabled
   [ "$(native_level_label)" = etcd-only ] || fail "the Node does not carry the level label"
   [ "$(native_member_ids)" = "$ids" ] || fail "the etcd members changed: $(native_member_ids) (was ${ids})"

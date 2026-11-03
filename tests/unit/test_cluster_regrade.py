@@ -230,7 +230,7 @@ class SettingsFileTest(unittest.TestCase):
             "K3S_SERVICE": "k3s",
             "K3S_DATA_DIR": "/var/lib/rancher/k3s",
             "LEVEL_FILE": "/var/lib/rancher/k3s/regrade-level",
-            "STARTED_FILE": "/run/github-runner-k3s/regrade-level",
+            "STARTED_FILE": "/run/github-runner-k3s-server/regrade-level",
         })
         self.assertNotIn("NODE_CONTAINER=", self.render("-e", "github_runner_cluster_node_mode=native"))
 

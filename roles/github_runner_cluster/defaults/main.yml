@@ -302,12 +302,15 @@ github_runner_cluster_native_config_dir: /etc/rancher/k3s
 github_runner_cluster_native_unit_dir: /etc/systemd/system
 github_runner_cluster_native_data_dir: /var/lib/rancher/k3s
 github_runner_cluster_native_tailscale_cli: /usr/bin/tailscale
-# Not settings: where a native server's regrading lives, variables only so the tests can point them at a stand-in. run_dir is the server unit's runtime directory (RuntimeDirectory=github-runner-k3s under /run), which systemd keeps across a restart of the unit and removes when it stops; psi_file is the kernel's memory pressure, which the role reads to refuse regrading on a kernel that has none.
-github_runner_cluster_native_run_dir: /run/github-runner-k3s
+# Not settings, variables only so the tests can point them at a stand-in: run_dir is where systemd makes each unit's runtime directory (/run), and psi_file is the kernel's memory pressure, which the role reads to refuse regrading on a kernel that has none.
+github_runner_cluster_native_run_dir: /run
 github_runner_cluster_native_psi_file: /proc/pressure/memory
+# Derived, never set directly: the runtime directory of each unit (RuntimeDirectory=, under run_dir), which systemd keeps across a restart of the unit and removes when the unit stops. One per unit, never shared: systemd removes a unit's runtime directory whenever that unit leaves the active state, which includes a start that the unit's ExecCondition skips, so a start of the agent unit on a server (by hand, or by anything that starts every unit it finds) would otherwise remove the running server's resolver file and regrading record.
+github_runner_cluster_native_agent_runtime_dir: github-runner-k3s-agent
+github_runner_cluster_native_server_runtime_dir: github-runner-k3s-server
 # Derived, never set directly: the regrading level fleet-regrade last requested for a native server, on k3s's data directory so that it outlives a restart and a reboot, and the level its k3s started at, in the unit's runtime directory, so that it exists only while k3s runs. The server unit's ExecStartPre writes the second from the first (files/native/write-regrade-level.sh); the systemd actuator writes the first and reads the second (files/regrade/fleet-regrade-systemd.sh).
 github_runner_cluster_native_regrade_level_file: "{{ github_runner_cluster_native_data_dir }}/regrade-level"
-github_runner_cluster_native_regrade_started_file: "{{ github_runner_cluster_native_run_dir }}/regrade-level"
+github_runner_cluster_native_regrade_started_file: "{{ github_runner_cluster_native_run_dir }}/{{ github_runner_cluster_native_server_runtime_dir }}/regrade-level"
 # Derived, never set directly: where a native server's regrade scripts and settings go, and the name of the unit that runs them.
 github_runner_cluster_native_regrade_dir: "{{ github_runner_cluster_native_lib_dir }}/regrade"
 github_runner_cluster_native_regrade_service: fleet-regrade

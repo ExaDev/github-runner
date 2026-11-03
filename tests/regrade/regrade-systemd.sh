@@ -131,6 +131,10 @@ check "current_level is unknown with a requested level but no record of what sta
 unit_at etcd-only
 systemctl stop k3s
 check "current_level is unknown while the unit is not running" test "$(current_level)" = unknown
+unit_at etcd-only
+# A unit that is starting again is not active until its ExecStartPre has run, and its runtime directory, kept across a restart, still holds the record of the run before.
+rm "$FAKE_HOST/active"
+check "current_level is unknown while the unit is not active, whatever record its runtime directory still holds" test "$(current_level)" = unknown
 unit_at full
 echo etcd-only > "$level_file"
 check "current_level reads what runs, not what was last requested" test "$(current_level)" = full

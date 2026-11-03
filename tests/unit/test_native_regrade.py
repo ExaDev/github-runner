@@ -30,7 +30,7 @@ class NativeRegradeTest(NativeRoleHarness):
         return self.file("github_runner_cluster_native_unit_dir", "fleet-regrade.service").read_text()
 
     def started_level(self) -> str:
-        return self.file("github_runner_cluster_native_run_dir", "regrade-level").read_text().strip()
+        return self.file("github_runner_cluster_native_run_dir", "github-runner-k3s-server/regrade-level").read_text().strip()
 
     def test_a_native_server_runs_the_fleet_regrade_unit_with_the_systemd_actuator(self) -> None:
         result = self.run_server(**ON)
@@ -45,7 +45,7 @@ class NativeRegradeTest(NativeRoleHarness):
         self.assertEqual(settings["K3S_SERVICE"], "k3s")
         self.assertEqual(settings["K3S_DATA_DIR"], str(self.paths["github_runner_cluster_native_data_dir"]))
         self.assertEqual(settings["LEVEL_FILE"], str(self.file("github_runner_cluster_native_data_dir", "regrade-level")))
-        self.assertEqual(settings["STARTED_FILE"], str(self.file("github_runner_cluster_native_run_dir", "regrade-level")))
+        self.assertEqual(settings["STARTED_FILE"], str(self.file("github_runner_cluster_native_run_dir", "github-runner-k3s-server/regrade-level")))
         self.assertEqual(settings["NODE_NAME"], "laptop")
         self.assertNotIn("NODE_CONTAINER", settings)
         # Every other server, never this one's own API.
@@ -76,7 +76,7 @@ class NativeRegradeTest(NativeRoleHarness):
         self.assertEqual(self.run_server().returncode, 0)
         off = self.file("github_runner_cluster_native_unit_dir", "k3s.service").read_text()
         lib, config = self.paths["github_runner_cluster_native_lib_dir"], self.paths["github_runner_cluster_native_config_dir"]
-        line = f"ExecStartPre={lib}/write-regrade-level {self.file('github_runner_cluster_native_data_dir', 'regrade-level')} {config}/server.yaml.d/50-regrade.yaml {self.file('github_runner_cluster_native_run_dir', 'regrade-level')}"
+        line = f"ExecStartPre={lib}/write-regrade-level {self.file('github_runner_cluster_native_data_dir', 'regrade-level')} {config}/server.yaml.d/50-regrade.yaml {self.file('github_runner_cluster_native_run_dir', 'github-runner-k3s-server/regrade-level')}"
         self.assertIn(line, off.splitlines())
         self.assertEqual(self.file("github_runner_cluster_native_lib_dir", "write-regrade-level").read_text(), (ROLE / "files" / "native" / "write-regrade-level.sh").read_text())
         # The start the stand-in made ran it: a server never stepped down starts at full, with a drop-in that sets nothing.
@@ -126,7 +126,7 @@ class NativeRegradeTest(NativeRoleHarness):
 
     def test_turning_regrading_off_below_full_is_refused_and_removes_nothing(self) -> None:
         self.assertEqual(self.run_server(**ON).returncode, 0)
-        self.file("github_runner_cluster_native_run_dir", "regrade-level").write_text("etcd-only\n")
+        self.file("github_runner_cluster_native_run_dir", "github-runner-k3s-server/regrade-level").write_text("etcd-only\n")
         before = len(self.calls())
         result = self.run_server()
         self.assertNotEqual(result.returncode, 0)

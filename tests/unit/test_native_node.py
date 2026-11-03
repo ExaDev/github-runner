@@ -337,6 +337,8 @@ class DefaultsTest(unittest.TestCase):
             "github_runner_cluster_native_regrade_dir",
             "github_runner_cluster_native_regrade_service",
             "github_runner_cluster_native_regrade_commands",
+            "github_runner_cluster_native_agent_runtime_dir",
+            "github_runner_cluster_native_server_runtime_dir",
         }
         self.assertEqual(set(SPECS), native - derived)
         for name, spec in SPECS.items():
@@ -413,7 +415,7 @@ class NativeRoleTest(NativeRoleHarness):
             "token-file": str(self.file(config_dir, "token")),
             "node-name": "laptop",
             "vpn-auth-file": str(self.file(config_dir, "vpn-auth")),
-            "resolv-conf": "/run/github-runner-k3s/resolv.conf",
+            "resolv-conf": str(self.paths["github_runner_cluster_native_run_dir"] / "github-runner-k3s-agent" / "resolv.conf"),
         })
         self.assertEqual(self.file(config_dir, "token").read_text(), TOKEN)
         self.assertEqual(self.file(config_dir, "vpn-auth").read_text(), f"name=tailscale,joinKey={JOIN_KEY}")
@@ -449,11 +451,11 @@ class NativeRoleTest(NativeRoleHarness):
         service = sections["Service"]
         self.assertIn(f"ExecStart={bin_dir}/k3s agent --config {self.paths['github_runner_cluster_native_config_dir']}/agent.yaml", service)
         self.assertIn(f"ExecCondition={lib}/fleet-role-is agent {self.paths['github_runner_cluster_native_data_dir']}/fleet-role", service)
-        self.assertIn(f"ExecStartPre={lib}/write-resolv-conf /run/github-runner-k3s/resolv.conf", service)
+        self.assertIn(f"ExecStartPre={lib}/write-resolv-conf {self.paths['github_runner_cluster_native_run_dir']}/github-runner-k3s-agent/resolv.conf", service)
         self.assertIn(f'Environment="PATH={lib}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"', service)
         self.assertIn(f'Environment="GITHUB_RUNNER_TAILSCALE={self.stubs / "bin" / "tailscale"}"', service)
         self.assertIn(f'Environment="GITHUB_RUNNER_JOIN_HOST=server1.{DOMAIN}"', service)
-        for setting in ("Type=exec", "KillMode=process", "Delegate=yes", "Restart=always", "TimeoutStartSec=0", "RuntimeDirectory=github-runner-k3s", "RuntimeDirectoryPreserve=restart"):
+        for setting in ("Type=exec", "KillMode=process", "Delegate=yes", "Restart=always", "TimeoutStartSec=0", "RuntimeDirectory=github-runner-k3s-agent", "RuntimeDirectoryPreserve=restart"):
             self.assertIn(setting, service)
         self.assertIn("Wants=network-online.target tailscaled.service", sections["Unit"])
         self.assertIn("After=network-online.target tailscaled.service", sections["Unit"])

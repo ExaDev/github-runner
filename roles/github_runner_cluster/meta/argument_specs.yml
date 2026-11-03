@@ -82,8 +82,8 @@ argument_specs:
         description: Where Tailscale's apt repository list file goes. Not a setting, and a variable only so the tests can point it at a stand-in.
       github_runner_cluster_native_run_dir:
         type: path
-        default: /run/github-runner-k3s
-        description: The server and agent units' runtime directory (RuntimeDirectory=github-runner-k3s), which systemd keeps across a restart of the unit and removes when it stops; it holds the regrading level a native server's k3s started at. Not a setting, and a variable only so the tests can point it at a stand-in.
+        default: /run
+        description: Where systemd makes the server and agent units' runtime directories, which hold the resolver file the kubelet reads and the regrading level a native server's k3s started at. Not a setting, and a variable only so the tests can point it at a stand-in.
       github_runner_cluster_native_psi_file:
         type: path
         default: /proc/pressure/memory
