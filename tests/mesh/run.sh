@@ -566,7 +566,7 @@ write_host_network_inventory() {
 
 # With host networking, every node's Tailscale client must reach every other node directly at that node's daemon's own address (its stand-in LAN address), not through a relay, and the node container must publish no port.
 assert_direct_paths() {
-  local index other status deadline
+  local index other status deadline own outside
   for index in $(seq 1 "$node_count"); do
     [ "$(docker_on "$index" inspect --format '{{.HostConfig.NetworkMode}}' "$(container "$index")")" = host ] || fail "$(container "$index") is not on the host network"
     [ -z "$(docker_on "$index" port "$(container "$index")")" ] || fail "$(container "$index") publishes ports: $(docker_on "$index" port "$(container "$index")")"
@@ -580,6 +580,15 @@ assert_direct_paths() {
       done
       echo "  $(node_name "$index") -> $(node_name "$other"): $(echo "$status" | tail -n 1)"
     done
+  done
+  # Every endpoint each node advertises for itself is an address of its own VM's interfaces (the test network address, and the bridges its Docker and k3s create): none is an address learnt over STUN, which belongs to the runner's NAT and would let its peers pick a path through it instead (see start_vms). tailscale status lists a node's own endpoints under Self.Addrs, and none for its peers (UpdateStatus in wgengine/magicsock/magicsock.go of the pinned Tailscale fills Self only). The node container is on its VM's host network, so the VM's interfaces are the node's.
+  for index in $(seq 1 "$node_count"); do
+    own=$(docker exec "$(vm "$index")" ip -o addr show | awk '{ split($4, parts, "/"); print parts[1] }')
+    status=$(docker_on "$index" exec "$(container "$index")" tailscale status --json </dev/null)
+    outside=$(echo "$status" | python3 -c 'import json, sys
+own = set(sys.argv[1].split())
+print(" ".join(addr for addr in json.load(sys.stdin)["Self"]["Addrs"] if addr.rsplit(":", 1)[0].strip("[]") not in own))' "$own")
+    [ -z "$outside" ] || fail "$(node_name "$index") advertises endpoints that are not its own VM's addresses: ${outside}"
   done
   log "Every node reaches every other directly at its daemon's address"
 }
