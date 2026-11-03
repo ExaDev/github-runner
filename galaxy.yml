@@ -40,6 +40,7 @@ build_ignore:
   - heartbeat
   - pull-secret-renewer
   - node-recovery
+  - fleet-role
   - tool-images
   - scripts
   - Dockerfile
