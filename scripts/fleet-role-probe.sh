@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The role controller's per-node probe (see roles/github_runner_arc/templates/fleet-role.yaml.j2): the `fleet-role-probe` DaemonSet runs this on every node that has a kubelet, with host networking, so it measures the path the node's own etcd and kubelet use. Every REPORT_SECONDS it takes one sample and appends it to this node's entry in the shared probe ConfigMap, which scripts/fleet-role.sh reads. An entry keeps the last window of samples, so it survives this pod being replaced.
 #
+# Only a node the controller judges is measured: a voter, or a host the owner marks eligible (ELIGIBLE_LABEL, with the value true). Any other node has nothing recorded, and an entry it has from when it was one is removed, so the ConfigMap, which holds at most a mebibyte, grows with the hosts that decide the cluster's control plane and not with the fleet.
+#
 # A sample holds, per node: the TCP connect time to every voter's etcd peer port (a connect that does not complete within the election timeout is recorded as the election timeout, so loss shows as tail latency); on a voter, what etcd's own metrics gained since the last sample (the WAL fsync and backend commit histograms, the round trip to each peer, leader changes) and whether it has a leader, is a learner and is connected to its peers; on a node that is not a voter, an fdatasync probe in the k3s data directory once per window, with the write size etcd's own fio check uses; the memory pressure and MemAvailable the regrade core reads; and the link the default route leaves by.
 #
 # `fleet-role-probe.sh check link|connect <address>|memory|etcd|fsync` takes one of those readings alone, prints it and exits, with no cluster access (connect needs ELECTION_TIMEOUT_MS; the others need nothing but the settings below), so that each can be compared with a reading taken by hand on the host it runs on.
@@ -9,6 +11,7 @@
 # - NODE_NAME: the node this pod runs on (the downward API's spec.nodeName). Required.
 # - NAMESPACE: the namespace of the ConfigMap. Required.
 # - ELECTION_TIMEOUT_MS: the cluster's etcd election timeout, which is how long a peer connect may take before it counts as lost. Required.
+# - ELIGIBLE_LABEL: the Node label, with the value true, that marks a host the controller may promote or demote. Required.
 # - PROBE_CONFIGMAP: the shared ConfigMap, created by the role, that every probe patches its own key of (default fleet-role-probe).
 # - REPORT_SECONDS: seconds between samples (default 15, the node recovery watcher's poll).
 # - REPORT_ONCE: when "true", take one sample and exit, for tests.
@@ -100,12 +103,23 @@ fsync_ms() {
 
 # Takes one sample and publishes it. $1 is "true" on the first pass of this process, which for a node that is not a voter is the only sign this probe has of k3s having restarted (a voter sees it in etcd's counters going backwards).
 report() {
-  local first=$1 now entry voters is_voter tcp='{}' peer_name peer_ip ms etcd='null' restarted=false cumulative='null' etcd_id='null'
+  local first=$1 now entry voters is_voter eligible tcp='{}' peer_name peer_ip ms etcd='null' restarted=false cumulative='null' etcd_id='null'
   local iface fsync='null' fsync_at patch metrics reading change psi=''
   now="$(date +%s)"
   entry="$(kubectl get configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" -o json | jq -c --arg node "$NODE_NAME" '(.data[$node] // "null") | fromjson')"
   voters="$(kubectl get nodes -l "$VOTER_LABEL" -o json | jq -c '[.items[] | {name: .metadata.name, ip: ([.status.addresses[]? | select(.type == "InternalIP") | .address] | .[0])}]')"
   is_voter="$(jq --arg node "$NODE_NAME" 'any(.[]; .name == $node)' <<< "$voters")"
+  eligible="$(kubectl get node "$NODE_NAME" -o json | jq --arg label "$ELIGIBLE_LABEL" '(.metadata.labels // {})[$label] == "true"')"
+  if [ "$is_voter" != true ] && [ "$eligible" != true ]; then
+    # A key set to null in a merge patch is removed.
+    if [ "$entry" != null ]; then
+      patch="$(mktemp)"
+      jq -n --arg node "$NODE_NAME" '{data: {($node): null}}' > "$patch"
+      kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null
+      rm -f "$patch"
+    fi
+    return 0
+  fi
 
   while IFS=$'\t' read -r peer_name peer_ip; do
     ms="$(connect_ms "$peer_ip")"
@@ -173,6 +187,7 @@ fi
 : "${NODE_NAME:?NODE_NAME is required}"
 : "${NAMESPACE:?NAMESPACE is required}"
 : "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
+: "${ELIGIBLE_LABEL:?ELIGIBLE_LABEL is required}"
 
 first=true
 while true; do

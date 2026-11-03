@@ -123,7 +123,7 @@ class ManifestTest(unittest.TestCase):
     def test_the_probe_gets_every_setting_its_script_requires(self) -> None:
         daemonset = of_kind(self.manifests, "DaemonSet")[0]
         required = script_requirements("fleet-role-probe.sh")
-        self.assertEqual(required, {"NODE_NAME", "NAMESPACE", "ELECTION_TIMEOUT_MS"})
+        self.assertEqual(required, {"NODE_NAME", "NAMESPACE", "ELECTION_TIMEOUT_MS", "ELIGIBLE_LABEL"})
         self.assertLessEqual(required, set(env_of(daemonset)))
 
     def test_the_default_settings_reach_the_controller_as_strings(self) -> None:

@@ -194,6 +194,8 @@ spec:
               value: {{ namespace | to_json }}
             - name: ELECTION_TIMEOUT_MS
               value: {{ github_runner_arc_role_controller_election_timeout_ms | string | to_json }}
+            - name: ELIGIBLE_LABEL
+              value: {{ github_runner_arc_role_controller_eligible_label | to_json }}
             - name: PROBE_CONFIGMAP
               value: {{ probe_configmap | to_json }}
             - name: REPORT_SECONDS

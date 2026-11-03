@@ -64,6 +64,13 @@ FAKE_KUBECTL = textwrap.dedent(
             items = [n for n in items if n["metadata"].get("labels", {}).get(key) == value]
         print(json.dumps({"items": items}))
         sys.exit(0)
+    if args[:2] == ["get", "node"]:
+        match = [n for n in store["nodes"] if n["metadata"]["name"] == args[2]]
+        if not match:
+            sys.stderr.write('Error from server (NotFound): nodes "%s" not found\\n' % args[2])
+            sys.exit(1)
+        print(json.dumps(match[0]))
+        sys.exit(0)
     if args[:2] == ["get", "configmap"]:
         key = flag("-n") + "/" + args[2]
         if key not in store["configmaps"]:
@@ -74,7 +81,12 @@ FAKE_KUBECTL = textwrap.dedent(
     if args[:2] == ["patch", "configmap"]:
         key = flag("-n") + "/" + args[2]
         patch = json.load(open(flag("--patch-file")))
-        store["configmaps"][key]["data"].update(patch["data"])
+        data = store["configmaps"][key]["data"]
+        for name, value in patch["data"].items():
+            if value is None:
+                data.pop(name, None)
+            else:
+                data[name] = value
         json.dump(store, open(os.environ["FAKE_STORE"], "w"))
         sys.exit(0)
     sys.stderr.write("unexpected kubectl call: %s\\n" % args)
