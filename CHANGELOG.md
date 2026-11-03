@@ -1,3 +1,10 @@
+## [2.28.2](https://github.com/ExaDev/github-runner/compare/v2.28.1...v2.28.2) (2026-11-03)
+
+### Bug Fixes
+
+* **arc:** read the node pressure reporter's figures from its own procfs ([66969b9](https://github.com/ExaDev/github-runner/commit/66969b91bf8253d458a3a2605d7a7e48f585afbd))
+* **arc:** run the role controller's probe only on voters and eligible hosts ([2c707ce](https://github.com/ExaDev/github-runner/commit/2c707ceffde2aa588c00fc88c4e1a81a1d089ad9))
+
 ## [2.28.1](https://github.com/ExaDev/github-runner/compare/v2.28.0...v2.28.1) (2026-11-03)
 
 ### Bug Fixes
