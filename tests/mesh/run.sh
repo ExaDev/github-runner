@@ -969,12 +969,17 @@ native_is_voter() {
   [ "$(kubectl_on 1 get node "$native_host" -o 'jsonpath={.status.conditions[?(@.type=="EtcdIsVoter")].status}' 2>/dev/null)" = True ]
 }
 
-# Writes to the cluster through node 1 once a second until the stop file appears, recording each write as ok or failed; a write is a ConfigMap under a name of its own (write_marker).
+# Writes to the cluster through node 1 once a second until the stop file appears, recording each write as ok, or as failed with the time and what kubectl said. Each write is a ConfigMap named by its sequence number, so no two writes share a name: write_marker's random suffix repeats often enough over a promotion's worth of writes that a refusal for a name already taken would read as a lost write.
 write_throughout() {
-  local log="$1" stop="$2"
+  local log="$1" stop="$2" sequence=0 error
   : > "$log"
   until [ -e "$stop" ]; do
-    if write_marker 2>/dev/null; then echo ok >> "$log"; else echo "failed $(date -u +%H:%M:%S)" >> "$log"; fi
+    sequence=$((sequence + 1))
+    if error=$(kubectl_on 1 create configmap "grtest-native-write-${sequence}" --from-literal=a=1 2>&1 >/dev/null </dev/null); then
+      echo ok >> "$log"
+    else
+      echo "failed $(date -u +%H:%M:%S) ${error}" >> "$log"
+    fi
     sleep 1
   done
 }
