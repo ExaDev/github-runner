@@ -1,3 +1,10 @@
+## [2.29.0](https://github.com/ExaDev/github-runner/compare/v2.28.3...v2.29.0) (2026-11-03)
+
+### Features
+
+* **cluster:** publish the medium of each host's link as a Node label ([f156bd1](https://github.com/ExaDev/github-runner/commit/f156bd12533c80a75c5c72503c1cd98c3a2073b0))
+* **role:** report the link medium the cluster role labelled each node with ([06f8977](https://github.com/ExaDev/github-runner/commit/06f89779118d04c999ff67d7cc167bcc84f61bd3))
+
 ## [2.28.3](https://github.com/ExaDev/github-runner/compare/v2.28.2...v2.28.3) (2026-11-03)
 
 ### Bug Fixes
