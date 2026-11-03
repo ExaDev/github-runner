@@ -155,6 +155,16 @@ $config as $c
 
   def disk_ms($m): $m.node.voter as $voter | if $voter then $m.wal_p99_ms else $m.fsync_p99_ms end;
 
+  def rank($m): [(link_rank[$m.link] // link_rank.unknown), ($m.rtt_ms // infinite), (disk_ms($m) // infinite), $m.node.name];
+
+  # A measurement as if $peer were not a voter: a candidate is judged against the voters that would remain, since a slow link to the very voter it would replace says nothing against it.
+  def without($peer):
+    .pairs |= map(select(.peer != $peer))
+    | (.pairs | map(.ms) | map(select(. != null)) | max) as $rtt
+    | .rtt_ms = $rtt
+    | .rtt_peer = (.pairs | max_by(.ms // 0) | .peer)
+    | .pairs_complete = (.pairs | all(.readings >= window_samples));
+
   def host($node):
     measure($node) as $m
     | gaps($m) as $gaps
@@ -171,7 +181,8 @@ $config as $c
                  wal_fsync_p99_ms: ($m.wal_p99_ms | round2), backend_commit_p99_ms: ($m.commit_p99_ms | round2), fdatasync_p99_ms: ($m.fsync_p99_ms | round2),
                  min_available_mib: (if $m.min_available_bytes == null then null else ($m.min_available_bytes / 1048576 | round) end),
                  leader_changes: $m.leader_changes, restarts: $m.restarts},
-       rank: [(link_rank[$m.link] // link_rank.unknown), ($m.rtt_ms // infinite), (disk_ms($m) // infinite), $node.name]};
+       rank: rank($m),
+       m: $m};
 
   # Hosts reported: every voter, and every eligible host that is not one.
   ([$all[] | select(.voter or .eligible)] | sort_by(.name) | map(host(.))) as $hosts
@@ -194,16 +205,22 @@ $config as $c
     (if $cooldown_until != null and $now < $cooldown_until then "the membership changed at \($changed_at), and the cooldown lasts until \($cooldown_until)" else empty end)
   ]) as $blocks
 
-# The swap: the worst-ranked unfit voter that is eligible and not pinned goes out, and the best fit eligible standby that ranks above it comes in.
-| ([$hosts[] | select(.role == "voter" and .eligible and (.pinned | not) and .verdict == "unfit")] | sort_by(.rank) | last) as $out
-| ([$hosts[] | select(.role == "standby" and .eligible and .verdict == "fit")] | sort_by(.rank)) as $fit_candidates
+# The swap. A slow link makes both of its ends unfit, since a voter is unfit when its round trip to any other voter is, so the voter to replace is the one at fault: the unfit voter on the most slow links (a link is slow when either end measures it above the unfit limit), the worst-ranked among those on as many. It goes out only if it is eligible and not pinned; when it is not, replacing a voter that shares a slow link with it would fix nothing, so nothing is swapped. The best fit eligible standby that ranks above it comes in, judged against the voters that would remain.
+| ([$hosts[] | select(.role == "voter") | .name as $a | .m.pairs[] | select(.ms != null and .ms > $unfit_rtt_ms) | [$a, .peer] | sort] | unique) as $slow_links
+| ([$hosts[] | select(.role == "voter" and .verdict == "unfit") | . + {slow_links: (.name as $n | [$slow_links[] | select(index($n) != null)] | length)}] | sort_by(.rank) | reverse | sort_by(-.slow_links) | first) as $culprit
+| (if $culprit != null and $culprit.eligible and ($culprit.pinned | not) then $culprit else null end) as $out
+| ([$hosts[] | select(.role == "standby" and .eligible)
+    | (if $out == null then .m else (.m | without($out.name)) end) as $m
+    | select((gaps($m) | length) == 0 and (faults($m) | length) == 0)
+    | . + {rank: rank($m)}] | sort_by(.rank)) as $fit_candidates
 | ($fit_candidates | map(select($out != null and .rank < $out.rank)) | first) as $in
-| ([$hosts[] | select(.role == "voter" and .verdict == "unfit" and ((.eligible | not) or .pinned)) | .name]) as $held
 | (if $eligible_count == 0 then ["no host is marked eligible"]
    elif $eligible_count < $c.target then ["\($eligible_count) hosts are eligible, fewer than the target \($c.target)"]
    else [] end) as $shortfall
-| (if $out == null then
-     {action: "none", swap: null, because: (["no unpinned eligible voter is unfit"] + (if ($held | length) > 0 then ["unfit but not replaceable: \($held | join(", "))"] else [] end) + $shortfall)}
+| (if $culprit == null then
+     {action: "none", swap: null, because: (["no voter is unfit"] + $shortfall)}
+   elif $out == null then
+     {action: "none", swap: null, because: (["voter \($culprit.name) is the most at fault and is pinned or not marked eligible, so it is not replaced"] + $shortfall)}
    elif $in == null then
      {action: "none", swap: null, because: (["voter \($out.name) is unfit and no eligible standby is fit and ranks above it"] + $shortfall)}
    elif ($blocks | length) > 0 or ($shortfall | length) > 0 then
@@ -218,7 +235,7 @@ $config as $c
              window_samples: window_samples, sample_seconds: $c.sample_seconds, window_seconds: $window_seconds, cooldown_seconds: $cooldown_seconds,
              quota_bytes: $quota_bytes},
     membership: {voters: $voter_names, changed_at: $changed_at, cooldown_until: $cooldown_until},
-    hosts: ($hosts | map({key: .name, value: del(.name, .rank)}) | from_entries),
+    hosts: ($hosts | map({key: .name, value: del(.name, .rank, .m)}) | from_entries),
     ranking: ($hosts | map(select(.verdict == "fit")) | sort_by(.rank) | map(.name)),
     blocks: $blocks,
     decision: $decision
