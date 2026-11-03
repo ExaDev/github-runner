@@ -176,6 +176,20 @@ jobs:
           echo "${MISE_SHA256}  ${directory}/mise.tar.gz" | sha256sum --check --strict
           tar -xzf "${directory}/mise.tar.gz" -C "${directory}"
           echo "${directory}/mise/bin" >> "$GITHUB_PATH"
+      - name: Install etcd for the probe's live test
+        # The probe's tests start a real three-member etcd to read its metrics from. Ubuntu's own etcd-server is 3.4, which has none of the 3.6 metrics the probe reads, so the official release is used: the exact version, and the SHA-256 of its linux-amd64 tarball as the release publishes it in its SHA256SUMS asset (https://github.com/etcd-io/etcd/releases/download/v3.6.15/SHA256SUMS), checked before anything is extracted. A mismatch fails the job.
+        env:
+          ETCD_VERSION: v3.6.15
+          ETCD_LINUX_AMD64_SHA256: b51d86e6bff2168de5ba8cd631c0fe6c785c7a1b32b083079f5677d6b7e2772c
+        run: |
+          set -euo pipefail
+          [ "$(uname -m)" = x86_64 ] || { echo "the pinned checksum is for linux-amd64, not $(uname -m)" >&2; exit 1; }
+          dir="${RUNNER_TEMP}/etcd"
+          mkdir -p "$dir"
+          curl -fsSL -o "${dir}/etcd.tar.gz" "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-amd64.tar.gz"
+          echo "${ETCD_LINUX_AMD64_SHA256}  ${dir}/etcd.tar.gz" | sha256sum --check --strict
+          tar -xzf "${dir}/etcd.tar.gz" -C "$dir" --strip-components=1 "etcd-${ETCD_VERSION}-linux-amd64/etcd" "etcd-${ETCD_VERSION}-linux-amd64/etcdctl"
+          echo "ETCD_BINARY=${dir}/etcd" >> "$GITHUB_ENV"
       - name: Unit-test the collection
         # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record. A module is a shard's when its position in the list of modules, largest first, leaves this shard's index modulo the number of shards.
         env:
@@ -271,9 +285,30 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: printf '%s\n' "$PR_TITLE" | npx --no-install commitlint --verbose
 
+  fleet-role-image:
+    name: Role controller image build
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      # Built and not pushed, from the same Dockerfile and context the release workflow builds it from, so a missing COPY source or a package apk cannot install fails the pull request and not the release.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: fleet-role/Dockerfile
+          push: false
+          load: true
+          tags: fleet-role:ci
+      - name: Run what the pods run
+        # The tools and files the pods need, the jq modules under the image's own jq, the probe's check mode through the regrade core the image carries, and one pass of the controller against a kubectl that answers an empty cluster. Nothing reaches a cluster.
+        run: tests/fleet_role/image-smoke.sh fleet-role:ci
+
   required-checks:
     name: Required Checks
-    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, unit-tests, ansible-lint, collection-build, commitlint]
+    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, unit-tests, ansible-lint, collection-build, commitlint, fleet-role-image]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
     runs-on: ubuntu-latest
