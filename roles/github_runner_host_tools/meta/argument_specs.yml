@@ -34,6 +34,10 @@ argument_specs:
         type: dict
         default: {}
         description: Variables for mise's env table whose value is a path below the connecting user's home directory, as a mapping of names to paths relative to it, written as mise's template for the home directory followed by the path. An absolute path, an empty one and one with a .. component are refused, and a name may not also be in the env table of github_runner_host_tools_mise_config.
+      github_runner_host_tools_mise_env_cpu_share:
+        type: dict
+        default: {}
+        description: Variables for mise's env table whose value is a share of the host's logical CPUs, as a mapping of names to an integer divisor of at least 1, written as a template for the CPU count divided by it, rounded down and never below 1. A name may not also be in the env table of github_runner_host_tools_mise_config or in github_runner_host_tools_mise_env_home_relative.
       github_runner_host_tools_npm_settings:
         type: dict
         default: {}
@@ -60,6 +64,10 @@ argument_specs:
         type: dict
         default: {}
         description: Environment variables whose value is a path below the connecting user's home directory, as a mapping of names to paths relative to it, each written as export NAME="$HOME/<path>" so the shell expands the home directory when it reads the startup file. An absolute path, an empty one and one with a .. component are refused. Placed and skipped like github_runner_host_tools_shell_env, and a name may be in only one of the two.
+      github_runner_host_tools_shell_env_cpu_share:
+        type: dict
+        default: {}
+        description: Environment variables whose value is a share of the host's logical CPUs, as a mapping of names to an integer divisor of at least 1, each written as an export line whose value the shell works out as the CPU count divided by it, rounded down and never below 1. Placed and skipped like github_runner_host_tools_shell_env, and a name may be in only one of the shell mappings.
       github_runner_host_tools_homebrew_prefix:
         type: str
         default: ""
