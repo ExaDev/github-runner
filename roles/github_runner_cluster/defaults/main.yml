@@ -248,6 +248,16 @@ github_runner_cluster_colima_modules_load_file: /etc/modules-load.d/br_netfilter
 github_runner_cluster_colima_sysctl_file: /etc/sysctl.d/90-github-runner-br-netfilter.conf
 # Derived, never set directly: the command that runs another command in the profile's VM as the VM's user, which has passwordless sudo.
 github_runner_cluster_colima_vm_command: "{{ ['colima', 'ssh', '--profile', github_runner_cluster_effective_runtime.colima_profile, '--'] }}"
+# The memory, in GiB, and the number of CPUs of this host's Colima VM: each a positive whole number, or empty (the default) to keep what the profile has. Colima hosts only: a host whose runtime is anything else and sets either fails before anything changes. When a value differs from what the profile's VM runs (`colima list --json`), the role resizes the VM through the quorum guard, one node at a time (tasks/colima_size.yml): it takes the fleet-regrade Lease, refusing while another step holds it, refuses unless the cluster stays safe without the node, cordons the node, waits for its runner pods to finish and drains it, checks the cluster again, stops the profile and starts it with the new size, waits for the node to be Ready again (and an etcd voter, on a server), uncordons it and gives the Lease back. `colima start` writes the size to the profile's configuration, so every later start, the launchd job's at boot or login included, keeps it. A node whose container is not running takes nothing from the cluster, and its VM is only stopped and started. Size the VM from what it runs, the autoscaler's measured per-job peaks plus the guest's own baseline, and record that beside the value in the inventory.
+github_runner_cluster_colima_memory_gib: ""
+github_runner_cluster_colima_cpus: ""
+# Derived, never set directly: how long the Lease a resize takes lasts if its holder never gives it back. It covers the holder's long steps, each bounded by its own timeout: the wait for the runner pods and the drain (github_runner_cluster_native_runner_wait_timeout each), and the stop, the start and the wait for the node to come back (github_runner_cluster_native_ready_timeout each). A holder that is working never loses it; one that crashed blocks other steps for no longer than this.
+github_runner_cluster_colima_resize_lease_seconds: "{{ 2 * (github_runner_cluster_native_runner_wait_timeout | int) + 3 * (github_runner_cluster_native_ready_timeout | int) }}"
+# Derived, never set directly: who a resize holds the Lease as. It names the node but is never a node name, so that the node's own regrade service, which holds it by node name, reads it as held by another and does not step meanwhile.
+github_runner_cluster_colima_resize_lease_holder: "colima-resize/{{ github_runner_cluster_effective_node_name }}"
+# Not settings: the Lease that serialises every step that takes a node away, as fleet-regrade's core names it (LEASE_NAME and LEASE_NAMESPACE in files/regrade/fleet-regrade-core.sh).
+github_runner_cluster_regrade_lease_name: fleet-regrade
+github_runner_cluster_regrade_lease_namespace: kube-system
 
 # The directory on the target host the role manages as this host's Compose project: it copies the collection's docker-compose.yml and k3s/ build context there, templates .env there, and k3s writes the kubeconfig to its kubeconfig/ subdirectory. Needs no checkout of anything on the host. The default reads HOME from the target's gathered facts, so it is the connecting user's home on that host, not the control node's.
 github_runner_cluster_dir: "{{ ansible_facts['env']['HOME'] }}/{{ github_runner_cluster_dir_name }}"
@@ -274,7 +284,7 @@ github_runner_cluster_node_mode: compose
 
 # Native mode only, from here on. Whether the role enables and starts the node's service (k3s-agent or k3s), restarts it when its binary or configuration changed, switches the host between the server and the agent unit when its role changed, and then waits for the node to report Ready as a server sees it. false installs and configures everything and leaves the services as it finds them (a first install stays disabled and stopped, and a host whose role changed keeps running its old unit), for staging a host before the cluster is joined or before its role is switched.
 github_runner_cluster_native_start: true
-# The most seconds, about, the role waits for the started node to report Ready on a heartbeat from the k3s that was just started. The same bound as a recreated server's.
+# The most seconds, about, the role waits for the started node to report Ready on a heartbeat from the k3s that was just started, a native node's or one whose Colima VM was resized, and the most each `colima stop` and `colima start` of a resize may take. The same bound as a recreated server's.
 github_runner_cluster_native_ready_timeout: "{{ github_runner_cluster_server_ready_timeout }}"
 # Where the k3s release binaries are downloaded from: <this>/<release tag, with "+" written %2B>/<asset>, as GitHub publishes them. The download is checked against the SHA-256 sum the same release lists for the asset, unless github_runner_cluster_native_k3s_sha256 is set. A variable so a mirror, or a test, can stand in.
 github_runner_cluster_native_k3s_download_url: https://github.com/k3s-io/k3s/releases/download
@@ -301,8 +311,10 @@ github_runner_cluster_native_role_file: "{{ github_runner_cluster_native_data_di
 github_runner_cluster_native_demotion_min_voters: 3
 # Derived, never set directly: the prefix of the file, one per unit (<prefix>-k3s-agent, <prefix>-k3s), that says the unit's files changed since it last started, so a restart that a run refused or did not reach is made by the next run.
 github_runner_cluster_native_restart_marker: "{{ github_runner_cluster_native_data_dir }}/fleet-restart-pending"
-# How long, about, a role switch waits for the runner pods on the node to finish after it has cordoned it, in seconds, before it gives up, uncordons the node and fails, changing nothing else: a planned switch never cuts a job. Each poll lists the node's pods, so a job that finishes is seen on the next poll.
+# How long, about, a planned restart of a node (a native node's role switch, a Colima VM resize) waits for the runner pods on the node to finish after it has cordoned it, in seconds, before it gives up, uncordons the node and fails, changing nothing else: a planned restart never cuts a job. Each poll lists the node's pods, so a job that finishes is seen on the next poll. The drain that follows is bounded by it too.
 github_runner_cluster_native_runner_wait_timeout: "{{ github_runner_cluster_native_ready_timeout }}"
+# Derived, never set directly: what tasks/native/drain.yml says was not done when it cannot empty the node, in words that follow "Not". A role switch's by default; another caller of drain.yml passes its own.
+github_runner_cluster_native_drain_for: "switching {{ inventory_hostname }} from {{ github_runner_cluster_native_current_role }} to {{ github_runner_cluster_native_role }}"
 # Not settings: where the native node's files live. Variables only so the tests can point them at a stand-in. The binary goes in bin_dir, the PATH wrapper and the helpers under lib_dir, the configurations and the two secrets (token, vpn-auth) in config_dir, the units in unit_dir, and data_dir is k3s's own data directory (a server's datastore is server/db under it, and the role file sits beside it); tailscale_cli is the Tailscale command the package installs.
 github_runner_cluster_native_bin_dir: /usr/local/bin
 github_runner_cluster_native_lib_dir: /usr/local/lib/github-runner-k3s

@@ -1,0 +1,15 @@
+# Runs the cluster role's tasks/colima_size.yml through the role itself, as tasks/main.yml includes it, for tests/unit/test_cluster_colima_size.py, on the hosts of an inventory the test writes (all on a local connection, so a task delegated to another server runs here too). The host's operating system is stood in for by runtime_system, and the docker and colima the tasks call are the test's stand-ins on PATH.
+- name: Run the cluster role's Colima VM size tasks
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Stand in for the host's facts
+      ansible.builtin.set_fact:
+        ansible_facts:
+          system: "{{ runtime_system | default('Darwin') }}"
+
+    - name: Include the role's tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: colima_size

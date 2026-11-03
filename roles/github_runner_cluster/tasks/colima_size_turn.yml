@@ -1,0 +1,218 @@
+---
+# One host's turn of resizing its Colima VM (tasks/colima_size.yml gives each host whose VM differs from the size set its turn, one at a time), through the quorum guard, as any change that takes a running node away is made. The node's k3s container runs inside the VM, so stopping the VM stops the node, and Docker starts the container again with the VM (restart: unless-stopped in files/docker-compose.yml). In order:
+#
+# 1. checks that the cluster stays safe without the node (tasks/restart_guard.yml, with its runner pods left out, since step 3 waits for them);
+# 2. takes the fleet-regrade Lease, the one every step that takes a node away holds (fleet-regrade's core takes it to step a server down), refusing while another holds it, so a resize never overlaps a regrade step or another resize, in this run or any other;
+# 3. cordons the node, waits for its runner pods to finish and drains it (tasks/native/drain.yml, which a native node's role switch uses too);
+# 4. checks the cluster again, runner pods included, since a peer may have gone away while the pods finished;
+# 5. stops the profile and starts it with the new size, through the same `colima start --profile <profile> --activate=false` that runtime.yml and the launchd job run;
+# 6. waits for the node to be Ready on a heartbeat later than the stop and, on a server, an etcd voter (tasks/native/server_ready.yml);
+# 7. uncordons the node, and gives the Lease back whatever happened.
+#
+# A node whose container is not running (a first install, or a node stopped by hand) takes nothing from the cluster, so its VM is only stopped and started. When a step fails the node is uncordoned again and the run fails, saying whether the VM was stopped. Under --check the cluster and the Lease are read, a refusal fails as it would in a real run, and the resize is reported and not made.
+
+- name: Read whether this node's container runs
+  # docker ps rather than docker inspect, so that a container that does not exist reads as not running while a daemon that cannot be reached fails the run.
+  ansible.builtin.command:
+    argv: [docker, ps, --all, --filter, "name=^/{{ github_runner_cluster_node_container }}$", --format, "{{ '{{' }}.State{{ '}}' }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_colima_size_container
+  changed_when: false
+  check_mode: false
+
+- name: Note what the resize changes and whether it takes a node away
+  ansible.builtin.set_fact:
+    github_runner_cluster_colima_size_live: "{{ github_runner_cluster_colima_size_container.stdout | trim == 'running' }}"
+    github_runner_cluster_colima_size_action: >-
+      resizing the Colima VM of {{ github_runner_cluster_effective_node_name }} ({{ github_runner_cluster_colima_size_plan.changes | join(', ') }}), which restarts its node
+
+- name: Check, before anything changes, that the cluster stays safe without this node
+  ansible.builtin.include_tasks: restart_guard.yml
+  vars:
+    github_runner_cluster_restart_guard_action: "{{ github_runner_cluster_colima_size_action }}"
+    github_runner_cluster_restart_guard_runners: false
+  when: github_runner_cluster_colima_size_live | bool
+
+- name: Work out which server's API the resize goes through
+  # This host's own when it is a server, since its API answers until the VM stops and again before the node is uncordoned; otherwise another server of the inventory's. Worked out whether or not the node runs, though only a running one is read through it, since Ansible templates a task's delegate_to before its condition, and api.yml reads nothing.
+  ansible.builtin.include_tasks: native/api.yml
+  vars:
+    github_runner_cluster_native_api_self: "{{ github_runner_cluster_effective_node_role == 'server' }}"
+
+- name: Read the fleet-regrade Lease
+  # A read that fails is recorded rather than failing here, so the refusal below says why. Bounded by github_runner_cluster_cluster_read_timeout, as the API call's --request-timeout.
+  become: "{{ github_runner_cluster_native_api_become }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ github_runner_cluster_native_api_argv + ['get', 'lease', github_runner_cluster_regrade_lease_name, '--namespace', github_runner_cluster_regrade_lease_namespace,
+         '--output', 'json', '--request-timeout=' ~ github_runner_cluster_cluster_read_timeout ~ 's'] }}
+  environment: "{{ github_runner_cluster_native_api_environment }}"
+  delegate_to: "{{ github_runner_cluster_native_api_host }}"
+  register: github_runner_cluster_colima_size_lease
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: github_runner_cluster_colima_size_live | bool
+
+- name: Work out whether the resize may take the Lease
+  ansible.builtin.set_fact:
+    github_runner_cluster_colima_size_claim: >-
+      {{ github_runner_cluster_colima_size_lease
+         | exadev.github_runner.cluster_lease_claim(github_runner_cluster_colima_resize_lease_holder, now().timestamp(),
+                                                    github_runner_cluster_colima_resize_lease_seconds, github_runner_cluster_regrade_lease_name,
+                                                    github_runner_cluster_regrade_lease_namespace) }}
+  when: github_runner_cluster_colima_size_live | bool
+
+- name: Refuse while another step holds the Lease, or when it cannot be read
+  ansible.builtin.fail:
+    msg: >-
+      Not {{ github_runner_cluster_colima_size_action }}:
+      {{ ('the fleet-regrade Lease is held by ' ~ github_runner_cluster_colima_size_claim.holder ~ ', which is taking a node away now')
+         if github_runner_cluster_colima_size_claim.state == 'held'
+         else ('the fleet-regrade Lease cannot be read (' ~ github_runner_cluster_colima_size_claim.problem ~ ')') }}.
+      Only one node is taken away at a time. Nothing was changed; run again once the Lease is free.
+  when:
+    - github_runner_cluster_colima_size_live | bool
+    - github_runner_cluster_colima_size_claim.verb | length == 0
+
+- name: Report the resize a real run would make
+  ansible.builtin.debug:
+    msg: >-
+      Would resize the Colima VM of {{ github_runner_cluster_effective_node_name }} ({{ github_runner_cluster_colima_size_plan.changes | join(', ') }}):
+      {{ 'take the fleet-regrade Lease, cordon the node, wait for its runner pods and drain it, ' if github_runner_cluster_colima_size_live | bool else '' }}stop
+      the profile {{ github_runner_cluster_effective_runtime.colima_profile }} and start it with
+      {{ github_runner_cluster_colima_size_plan.arguments | join(' ') }}{{ ', wait for the node to be Ready again, uncordon it and give the Lease back'
+      if github_runner_cluster_colima_size_live | bool else ' (its node container is not running, so the cluster is not involved)' }}.
+  changed_when: true
+  when: ansible_check_mode
+
+- name: Resize the VM
+  when: not ansible_check_mode
+  block:
+    - name: Take the fleet-regrade Lease
+      # The write fails if the Lease changed, or was created, since it was read, so two steps can never both take it. The Lease is piped to `kubectl create -f -` or `replace -f -`, and docker exec passes its standard input on only with --interactive; a native server's `k3s kubectl` reads it directly.
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ ((github_runner_cluster_native_api_argv[:2] + ['--interactive'] + github_runner_cluster_native_api_argv[2:])
+              if github_runner_cluster_native_api_argv[0] == 'docker' else github_runner_cluster_native_api_argv)
+             + [github_runner_cluster_colima_size_claim.verb, '-f', '-'] }}
+        stdin: "{{ github_runner_cluster_colima_size_claim.manifest | to_json }}"
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+      when: github_runner_cluster_colima_size_live | bool
+
+    - name: Empty the node
+      ansible.builtin.include_tasks: native/drain.yml
+      vars:
+        github_runner_cluster_native_drain_for: "{{ github_runner_cluster_colima_size_action }}"
+      when: github_runner_cluster_colima_size_live | bool
+
+    - name: Check again, now the node is empty, that the cluster stays safe without it
+      ansible.builtin.include_tasks: restart_guard.yml
+      vars:
+        github_runner_cluster_restart_guard_action: "{{ github_runner_cluster_colima_size_action }}"
+        github_runner_cluster_restart_guard_runners: true
+      when: github_runner_cluster_colima_size_live | bool
+
+    - name: Stop the Colima profile
+      ansible.builtin.command:
+        argv: [colima, stop, --profile, "{{ github_runner_cluster_effective_runtime.colima_profile }}"]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      timeout: "{{ github_runner_cluster_native_ready_timeout | int }}"
+
+    - name: Read when the VM had stopped
+      # On the host, whose clock Lima keeps the VM's in step with: any renewal of the node's kubelet lease later than this is the restarted kubelet's, since the old one stopped with the VM.
+      ansible.builtin.command:
+        argv: [date, -u, "+%Y-%m-%dT%H:%M:%S"]
+      register: github_runner_cluster_colima_size_stopped
+      changed_when: false
+
+    - name: Start the Colima profile with the new size
+      # --memory and --cpus take effect only on a start of a stopped profile, and are written to the profile's configuration, so later starts keep them (PreRunE and prepareConfig in abiosoft/colima cmd/start.go).
+      ansible.builtin.command:
+        argv: >-
+          {{ ['colima', 'start', '--profile', github_runner_cluster_effective_runtime.colima_profile, '--activate=false']
+             + github_runner_cluster_colima_size_plan.arguments }}
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      timeout: "{{ github_runner_cluster_native_ready_timeout | int }}"
+
+    - name: Wait for the node to come back
+      ansible.builtin.include_tasks: native/server_ready.yml
+      vars:
+        github_runner_cluster_native_role: "{{ github_runner_cluster_effective_node_role }}"
+        github_runner_cluster_native_started: "{{ github_runner_cluster_colima_size_stopped }}"
+      when: github_runner_cluster_colima_size_live | bool
+
+    - name: Uncordon the node
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_native_api_argv + ['uncordon', github_runner_cluster_effective_node_name] }}"
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+      when: github_runner_cluster_colima_size_live | bool
+  rescue:
+    - name: Uncordon the node again, since the resize did not finish
+      # Through the same API, which answers unless this host is a server whose VM did not come back; then the node stays cordoned and the failure below says so.
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_native_api_argv + ['uncordon', github_runner_cluster_effective_node_name] }}"
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      register: github_runner_cluster_colima_size_uncordoned
+      changed_when: github_runner_cluster_colima_size_uncordoned.rc == 0
+      failed_when: false
+      when: github_runner_cluster_colima_size_live | bool
+
+    - name: Fail, saying where the resize stopped
+      vars:
+        github_runner_cluster_colima_size_failure: >-
+          {{ ansible_failed_task.name }} failed: {{ ansible_failed_result.msg | default('') | trim }}{{ ' ' ~ (ansible_failed_result.stderr | default('') | trim) if ansible_failed_result.stderr | default('') | trim | length > 0 else '' }}
+        github_runner_cluster_colima_size_cordon: >-
+          {{ '' if not github_runner_cluster_colima_size_live | bool
+             else ('The node was uncordoned again.' if github_runner_cluster_colima_size_uncordoned.rc | default(1) == 0
+                   else 'The node could not be uncordoned and is still cordoned: uncordon it once it is back (kubectl uncordon ' ~ github_runner_cluster_effective_node_name ~ ').') }}
+      ansible.builtin.fail:
+        msg: >-
+          {% if github_runner_cluster_colima_size_stopped is defined or ansible_failed_task.name == 'Stop the Colima profile' %}The Colima VM of
+          {{ github_runner_cluster_effective_node_name }} was {{ 'stopped' if github_runner_cluster_colima_size_stopped is defined else 'being stopped' }} to resize it
+          ({{ github_runner_cluster_colima_size_plan.changes | join(', ') }}), and {{ github_runner_cluster_colima_size_failure }}.
+          If the VM is not running, start it with `colima start --profile {{ github_runner_cluster_effective_runtime.colima_profile }} --activate=false`
+          and check its node before running again.{% else %}Not {{ github_runner_cluster_colima_size_action }}: {{ github_runner_cluster_colima_size_failure }}.
+          The VM was not touched.{% endif %} {{ github_runner_cluster_colima_size_cordon }}
+  always:
+    - name: Read the Lease again, to give it back
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ github_runner_cluster_native_api_argv + ['get', 'lease', github_runner_cluster_regrade_lease_name, '--namespace', github_runner_cluster_regrade_lease_namespace,
+             '--output', 'json', '--request-timeout=' ~ github_runner_cluster_cluster_read_timeout ~ 's'] }}
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      register: github_runner_cluster_colima_size_lease_held
+      changed_when: false
+      failed_when: false
+      when: github_runner_cluster_colima_size_live | bool
+
+    - name: Give the Lease back, if this resize still holds it
+      # A Lease that cannot be given back now (this server's API did not come back) expires on its own after github_runner_cluster_colima_resize_lease_seconds.
+      vars:
+        github_runner_cluster_colima_size_release: >-
+          {{ github_runner_cluster_colima_size_lease_held | exadev.github_runner.cluster_lease_release(github_runner_cluster_colima_resize_lease_holder) }}
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ ((github_runner_cluster_native_api_argv[:2] + ['--interactive'] + github_runner_cluster_native_api_argv[2:])
+              if github_runner_cluster_native_api_argv[0] == 'docker' else github_runner_cluster_native_api_argv)
+             + [github_runner_cluster_colima_size_release.verb, '-f', '-'] }}
+        stdin: "{{ github_runner_cluster_colima_size_release.manifest | to_json }}"
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_colima_size_live | bool
+        - github_runner_cluster_colima_size_release.verb | length > 0

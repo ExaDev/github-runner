@@ -78,6 +78,10 @@
   # Before anything changes on the host, and so before the mesh step, which starts the bootstrap server's Compose project itself with the headscale_in_cluster provider.
   ansible.builtin.include_tasks: host_network.yml
 
+- name: Size this host's Colima VM from the inventory, one node at a time through the quorum guard
+  # After the runtime is up and the topology decided, both of which the resize reads. See tasks/colima_size.yml.
+  ansible.builtin.include_tasks: colima_size.yml
+
 - name: Check the Compose files the node's .env names
   ansible.builtin.include_tasks: compose_files.yml
 
