@@ -153,6 +153,9 @@ class ManifestTest(unittest.TestCase):
             github_runner_cluster_regrade_pressure_threshold=20,
             github_runner_cluster_regrade_available_floor_percent=25,
             github_runner_cluster_regrade_level_label="example.com/level",
+            github_runner_cluster_voters=5,
+            github_runner_cluster_voter_eligible_label="example.com/candidate",
+            github_runner_cluster_voter_pinned_label="example.com/pinned",
         )
         env = env_of(of_kind(manifests, "Deployment")[0])
         self.assertEqual(
@@ -160,6 +163,10 @@ class ManifestTest(unittest.TestCase):
             ("7", "3000", "20", "25", "example.com/level"),
         )
         self.assertEqual(env_of(of_kind(manifests, "DaemonSet")[0])["ELECTION_TIMEOUT_MS"], "3000")
+        self.assertEqual(
+            (env["FLEET_ROLE_VOTERS"], env["FLEET_ROLE_ELIGIBLE_LABEL"], env["FLEET_ROLE_PINNED_LABEL"], env_of(of_kind(manifests, "DaemonSet")[0])["ELIGIBLE_LABEL"]),
+            ("5", "example.com/candidate", "example.com/pinned", "example.com/candidate"),
+        )
 
     def test_the_controller_and_the_probe_agree_on_the_election_timeout_and_the_period(self) -> None:
         manifests = render(**{ARC + "sample_seconds": 30})
@@ -294,6 +301,11 @@ class DefaultsAgreeWithTheClusterRoleTest(unittest.TestCase):
     def test_the_regrade_limit(self) -> None:
         self.assertEqual(int(self.fallback("pressure_threshold")), self.cluster["github_runner_cluster_regrade_pressure_threshold"])
         self.assertEqual(int(self.fallback("available_floor_percent")), self.cluster["github_runner_cluster_regrade_available_floor_percent"])
+
+    def test_the_voter_target_and_the_two_voter_labels(self) -> None:
+        self.assertEqual(int(self.fallback("voters")), self.cluster["github_runner_cluster_voters"])
+        self.assertEqual(self.fallback("eligible_label"), self.cluster["github_runner_cluster_voter_eligible_label"])
+        self.assertEqual(self.fallback("pinned_label"), self.cluster["github_runner_cluster_voter_pinned_label"])
 
     def test_the_level_label(self) -> None:
         self.assertEqual(self.fallback("level_label"), self.cluster["github_runner_cluster_regrade_level_label"])

@@ -1,0 +1,8 @@
+# Merged after docker-compose.yml by the github_runner_cluster role when this host has node labels to publish (github_runner_cluster_node_labels in defaults/main.yml: the role controller is on, or this host is marked a voter candidate or pinned): gives both services the labels the entrypoint passes to k3s as --node-label. Its own file, as docker-compose.api-port.yml is, so that a host that uses neither setting keeps the Compose configuration it has and its container is not recreated by an upgrade.
+services:
+  k3s:
+    environment:
+      - K3S_NODE_LABELS=${K3S_NODE_LABELS:-}
+  k3s-agent:
+    environment:
+      - K3S_NODE_LABELS=${K3S_NODE_LABELS:-}

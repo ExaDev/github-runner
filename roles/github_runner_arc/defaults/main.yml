@@ -197,7 +197,7 @@ github_runner_arc_role_controller_image: "ghcr.io/exadev/github-runner-fleet-rol
 # Seconds between probe samples and between controller passes. A figure is read over a window of 100 samples (the fewest that give the 99th percentile a sample of its own), so this sets how long a window is: 1500 seconds at the default, node recovery's own poll.
 github_runner_arc_role_controller_sample_seconds: 15
 # The number of etcd voters the cluster is held at: odd, at least 3, and at most github_runner_arc_role_controller_max_servers minus one, which leaves a swap (the new voter joins before the old one leaves) one place of headroom.
-github_runner_arc_role_controller_voters: 3
+github_runner_arc_role_controller_voters: "{{ github_runner_cluster_voters | default(3) }}"
 # The cluster role's github_runner_cluster_max_servers, which the controller must agree with. Read from the cluster role's variable when it is defined, so the two cannot differ; the fallback is that variable's default (tests/unit/test_fleet_role_arc.py holds the two together).
 github_runner_arc_role_controller_max_servers: "{{ github_runner_cluster_max_servers | default(5) }}"
 # The cluster's etcd election timeout in milliseconds, which sets the round trip a voter may have (a tenth of it) and a standby must (a twentieth). The cluster role's github_runner_cluster_etcd_election_timeout when that is set; k3s's own default, 1000, when it is empty.
@@ -205,9 +205,9 @@ github_runner_arc_role_controller_election_timeout_ms: "{{ github_runner_cluster
 # The regrade core's memory limit, which a host over for any sample of a window is unfit for: the cluster role's github_runner_cluster_regrade_pressure_threshold and github_runner_cluster_regrade_available_floor_percent when defined, else their defaults (held together by the same test).
 github_runner_arc_role_controller_pressure_threshold: "{{ github_runner_cluster_regrade_pressure_threshold | default(10) }}"
 github_runner_arc_role_controller_available_floor_percent: "{{ github_runner_cluster_regrade_available_floor_percent | default(15) }}"
-# The Node labels, with the value true, that mark a host the controller may promote or demote and one it must never demote, and the label regrading puts on a server below full. The inventory publishes the first two (github_runner_cluster_voter_eligible and github_runner_cluster_voter_pinned); with none marked eligible the controller only reports the voters.
-github_runner_arc_role_controller_eligible_label: github-runner.exadev.com/voter-eligible
-github_runner_arc_role_controller_pinned_label: github-runner.exadev.com/voter-pinned
+# The Node labels, with the value true, that mark a host the controller may promote or demote and one it must never demote, and the label regrading puts on a server below full. The cluster role publishes the first two from github_runner_cluster_voter_eligible and github_runner_cluster_voter_pinned, and these take its label names and its github_runner_cluster_voters when those are defined; with none marked eligible the controller only reports the voters.
+github_runner_arc_role_controller_eligible_label: "{{ github_runner_cluster_voter_eligible_label | default('github-runner.exadev.com/voter-eligible') }}"
+github_runner_arc_role_controller_pinned_label: "{{ github_runner_cluster_voter_pinned_label | default('github-runner.exadev.com/voter-pinned') }}"
 github_runner_arc_role_controller_level_label: "{{ github_runner_cluster_regrade_level_label | default('github-runner.exadev.com/regrade-level') }}"
 # The ConfigMaps in the platform namespace that the probes publish to (a key per node) and that the controller publishes its status to, which the heartbeat republishes beside the autoscaler's.
 github_runner_arc_role_controller_probe_configmap: fleet-role-probe

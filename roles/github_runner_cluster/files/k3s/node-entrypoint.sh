@@ -16,6 +16,15 @@ for node_taint in ${K3S_NODE_TAINTS:-}; do
   node_taint_flags="$node_taint_flags --node-taint $node_taint"
 done
 
+# One --node-label flag per entry of K3S_NODE_LABELS (key=value entries separated by spaces, none containing a space), for the server and the agent alike. The kubelet writes them to its Node each time it starts, overwriting a value a label already has, so the role publishes both of its voter labels with true or false and a setting turned off is written over. Nothing removes a label the role stops passing.
+set_node_label_flags() {
+  node_label_flags=""
+  for node_label in ${K3S_NODE_LABELS:-}; do
+    node_label_flags="$node_label_flags --node-label $node_label"
+  done
+}
+set_node_label_flags
+
 # Sets etcd_timing_flags from etcd's timing, for the server only (the agent runs no etcd): K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT, in milliseconds, both set or both empty (the role checks that the election timeout is at least five times the heartbeat interval, and that every server has the same values). Empty leaves etcd on k3s's own timing. Each is passed as an --etcd-arg, which k3s also hands to the temporary etcd it starts on every restart to reconcile with an initialised datastore; these two flags do not change what that instance binds to, unlike the listen-peer-urls override that once broke it (see the README's known issues).
 set_etcd_timing_flags() {
   etcd_timing_flags=""
@@ -212,8 +221,8 @@ supervise_self_hosted() {
     fi
     echo "Starting k3s server ($mode)"
     rm -f /output/kubeconfig.yaml
-    # shellcheck disable=SC2086 # Word splitting of server_args and node_taint_flags is deliberate: every argument is a flag or a value without spaces.
-    /bin/k3s server $server_args $node_taint_flags &
+    # shellcheck disable=SC2086 # Word splitting of server_args, node_taint_flags and node_label_flags is deliberate: every argument is a flag or a value without spaces.
+    /bin/k3s server $server_args $node_taint_flags $node_label_flags &
     k3s_pid=$!
     watcher_pid=""
     if [ "$mode" = direct ] && [ -n "$join_key" ]; then
@@ -239,13 +248,13 @@ case "$role" in
     set_regrade_flags
     mesh_server_args
     # shellcheck disable=SC2086 # As above.
-    PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s server $server_args $node_taint_flags
+    PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s server $server_args $node_taint_flags $node_label_flags
     ;;
   agent)
     agent_join_host=$(join_host_of "${K3S_URL:-}")
     install_tailscale_up_wait "$agent_join_host" "$tailscale_up_wait_dir" /usr/local/bin/tailscale
     # shellcheck disable=SC2086 # As above.
-    PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s agent --vpn-auth="$vpn_auth" --resolv-conf=/etc/k3s-resolv.conf $node_taint_flags
+    PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s agent --vpn-auth="$vpn_auth" --resolv-conf=/etc/k3s-resolv.conf $node_taint_flags $node_label_flags
     ;;
   *)
     echo "usage: node-entrypoint.sh server|agent" >&2
