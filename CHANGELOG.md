@@ -1,3 +1,19 @@
+## [2.23.0](https://github.com/ExaDev/github-runner/compare/v2.22.0...v2.23.0) (2026-11-03)
+
+### Features
+
+* **host-tools:** add shell variables whose value is a path below the home directory ([508ff75](https://github.com/ExaDev/github-runner/commit/508ff7579bec9f01d49c8c2852612fc3baf2f1bc))
+
+### Bug Fixes
+
+* **host-tools:** write shell variables above the bashrc interactive guard ([0c98b20](https://github.com/ExaDev/github-runner/commit/0c98b2099211d77a09b0da4d381f1431bcc8d1f1))
+* **test:** pull the node recovery stand-in image on each kind node ([86f02ce](https://github.com/ExaDev/github-runner/commit/86f02cecc07d0f991dd6520eaae4c49195e3c6ee))
+* **test:** quote the etcd role label so shellcheck reads it as a string ([fa96020](https://github.com/ExaDev/github-runner/commit/fa96020092094d69d12e228f42491fc4d5d71793))
+
+### Continuous Integration
+
+* **unit-tests:** install zsh for the tests that read shell startup lines back ([c12ccbe](https://github.com/ExaDev/github-runner/commit/c12ccbef119e209c312c9e545d6eddceb197af5f))
+
 ## [2.22.0](https://github.com/ExaDev/github-runner/compare/v2.21.1...v2.22.0) (2026-11-03)
 
 ### Features
