@@ -371,6 +371,9 @@ argument_specs:
         type: str
         default: github-runner.exadev.io/removable
         description: The label key a node must carry, with the value true, to be pruned. A Kubernetes qualified name.
+      github_runner_arc_node_recovery_level_label:
+        type: str
+        description: The label regrading puts on a server it has stepped down, which the node recovery watcher never taints, from github_runner_cluster_regrade_level_label when defined, else github-runner.exadev.com/regrade-level.
       github_runner_arc_node_recovery_image:
         type: str
         description: Image the node recovery watcher runs, pulled without a pull Secret.

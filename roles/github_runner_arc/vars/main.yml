@@ -13,6 +13,11 @@ github_runner_arc_pull_secret_field_manager: github-runner-pull-secret-renewer
 # Annotation the node recovery watcher writes alongside the out-of-service taint it applies, recording when it applied it. The watcher removes only a taint carrying this annotation, so an operator's own out-of-service taint is left alone.
 github_runner_arc_node_recovery_annotation: github-runner.exadev/out-of-service-applied-at
 
+# The Lease that serialises voter swaps and regrading steps (the cluster role's fleet-regrade-core.sh, LEASE_NAMESPACE and LEASE_NAME), and the annotation on it that lists the nodes a swap is moving through, which the role controller writes: the node recovery watcher reads them to leave those nodes alone, and its Role grants get on that one name.
+github_runner_arc_node_recovery_lease_namespace: kube-system
+github_runner_arc_node_recovery_lease_name: fleet-regrade
+github_runner_arc_node_recovery_swap_nodes_annotation: github-runner.exadev.com/swap-nodes
+
 # Whether the runner pods and the platform's Deployments reference a pull Secret at all. With github_runner_arc_image_pull_secret_source none every image they run is public, so the role writes, checks and references none, and removes one an earlier run wrote.
 github_runner_arc_pull_secret_in_use: "{{ github_runner_arc_image_pull_secret_source != 'none' }}"
 

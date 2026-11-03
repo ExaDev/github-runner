@@ -186,6 +186,8 @@ github_runner_arc_node_recovery_poll_seconds: 15
 github_runner_arc_node_recovery_prune_after_seconds: ""
 # The label a node must carry, with the value true, to be pruned. Set it on the nodes that may go (for a k3s agent, --node-label on its command line, which it applies again each time it registers), never on a server.
 github_runner_arc_node_recovery_prune_label: github-runner.exadev.io/removable
+# The label regrading puts on a server it has stepped down, with the level as its value, which the watcher never taints: the cluster role's github_runner_cluster_regrade_level_label when that is defined, else github-runner.exadev.com/regrade-level (held together with the role controller's by the same expression).
+github_runner_arc_node_recovery_level_label: "{{ github_runner_cluster_regrade_level_label | default('github-runner.exadev.com/regrade-level') }}"
 # Image the watcher runs. Pulled without a pull Secret, so it must be public.
 github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:2.31.0"
 
