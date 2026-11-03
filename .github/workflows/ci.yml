@@ -149,12 +149,12 @@ jobs:
     needs: verified
     if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # Each module is run on its own by discovery, dealt out by size so that the shards take about the same amount of work: the tests that run Ansible playbooks cost a process each, and the suite no longer fits one job.
-    timeout-minutes: 20
+    # Each module is run on its own by discovery, dealt out by size, a rough stand-in for its work: the tests that run Ansible playbooks cost a process each, so a module's runs, not its bytes, decide its time, and the suite no longer fits one job. The timeout is a guard against a hung test, set above the heaviest shard's run, never a budget the shards are fitted to.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
       - name: Install Ansible
