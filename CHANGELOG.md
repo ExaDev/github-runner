@@ -1,3 +1,13 @@
+## [2.30.2](https://github.com/ExaDev/github-runner/compare/v2.30.1...v2.30.2) (2026-11-03)
+
+### Bug Fixes
+
+* **macos-host:** refresh Tailscale only where it is behind and run the formula from its keg ([2888a42](https://github.com/ExaDev/github-runner/commit/2888a425c15a8819d82db60054e131decb8a3157))
+
+### Tests
+
+* **macos-host:** stand in for the app's own binary behind the wrapper script ([d9aed1d](https://github.com/ExaDev/github-runner/commit/d9aed1dd4aa994222c52870fca47cfc9f2fd5239))
+
 ## [2.30.1](https://github.com/ExaDev/github-runner/compare/v2.30.0...v2.30.1) (2026-11-03)
 
 ### Bug Fixes
