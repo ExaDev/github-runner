@@ -474,17 +474,15 @@ class RoleTasksTest(unittest.TestCase):
         self.assertNotIn("regrade_service.yml", [step.get("ansible.builtin.include_tasks") for step in agent["block"]])
 
     def test_the_wait_for_ready_leaves_out_a_server_regrading_has_stepped_down(self) -> None:
-        text = (ROLE / "tasks" / "main.yml").read_text()
-        waits = re.findall(r"kubectl wait --for=condition=Ready node (.*)$", text, re.MULTILINE)
-        self.assertEqual(len(waits), 2, "the wait and its retry")
-        for wait in waits:
-            self.assertIn("--selector '!{{ github_runner_cluster_regrade_level_label }}'", wait)
-            self.assertNotIn("--all", wait)
+        text = (ROLE / "tasks" / "wait_for_ready.yml").read_text()
+        self.assertIn("reject('in', github_runner_cluster_nodes_stepped_down.stdout_lines)", text)
+        self.assertNotIn("--all", text)
 
     def test_the_self_healing_leaves_a_stepped_down_servers_node_password_alone(self) -> None:
-        text = (ROLE / "tasks" / "main.yml").read_text()
+        text = (ROLE / "tasks" / "wait_for_nodes.yml").read_text()
         self.assertIn("github_runner_cluster_nodes_stepped_down.stdout_lines", text)
-        self.assertLess(text.index("Read which nodes memory-pressure regrading has stepped down"), text.index("Pick the non-bootstrap hosts whose node has not rejoined"))
+        self.assertLess(text.index("Read which nodes are Ready and which regrading has stepped down"), text.index("Pick the non-bootstrap hosts whose node has not rejoined"))
+        self.assertIn("Read which nodes memory-pressure regrading has stepped down", (ROLE / "tasks" / "node_readiness.yml").read_text())
 
     def test_a_server_below_full_stops_the_play_before_any_host_removes_its_service(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "regrade_service.yml").read_text())
