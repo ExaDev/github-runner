@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from mise_reader import mise_reads
 
 ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / "roles" / "github_runner_host_tools"
@@ -152,6 +153,17 @@ ENV_BLOCK_UV = "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools env-UV_PY
 TURBO_BLOCK = "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools env-TURBO_CACHE_DIR\nexport TURBO_CACHE_DIR=\"$HOME/.cache/turbo\"\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools env-TURBO_CACHE_DIR\n"
 
 
+class Unsafe(str):
+    """A string written to the test inventory with the ``!unsafe`` tag, so that Ansible does not template the braces in it before the role sees it, as a fleet's inventory has to mark such a value."""
+
+
+class InventoryDumper(yaml.SafeDumper):
+    """Writes an Unsafe string as ``!unsafe``."""
+
+
+InventoryDumper.add_representer(Unsafe, lambda dumper, value: dumper.represent_scalar("!unsafe", str(value)))
+
+
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     """Serves a directory without writing a line to the test output for every request."""
 
@@ -193,6 +205,7 @@ class DefaultsTest(unittest.TestCase):
         for name in ("homebrew", "mise", "shell_integration"):
             self.assertIs(DEFAULTS[f"github_runner_host_tools_{name}"], True)
         self.assertEqual(DEFAULTS["github_runner_host_tools_mise_config"], {})
+        self.assertEqual(DEFAULTS["github_runner_host_tools_mise_env_home_relative"], {})
         self.assertEqual(DEFAULTS["github_runner_host_tools_homebrew_prefix"], "")
 
     def test_the_installer_is_pinned_to_a_commit_and_a_checksum_of_the_right_shape(self) -> None:
@@ -398,7 +411,7 @@ class RoleTest(unittest.TestCase):
             **variables,
         }
         inventory = self.work / "inventory.yml"
-        inventory.write_text(yaml.safe_dump({"all": {"hosts": {"node1": host}}}))
+        inventory.write_text(yaml.dump({"all": {"hosts": {"node1": host}}}, Dumper=InventoryDumper))
         env = {
             **os.environ,
             "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"),
@@ -729,9 +742,84 @@ class RoleTest(unittest.TestCase):
 
     def test_a_mise_configuration_the_filter_cannot_render_fails_the_run(self) -> None:
         self.have_homebrew()
-        result = self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_config={"env": {"A": "b"}})
+        result = self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_config={"plugins": {"A": "b"}})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("renders only tools and settings", self.squashed(result))
+        self.assertIn("renders only tools, settings, env", self.squashed(result))
+        self.assertFalse(self.fleet_file().exists())
+
+    # The test inventory is written with sorted keys, so the paths come out in that order.
+    def test_the_env_table_and_home_relative_paths_are_written_untouched_by_ansibles_templating_and_a_second_run_changes_nothing(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        variables = {
+            "github_runner_host_tools_shell_integration": False,
+            "github_runner_host_tools_mise_config": {"env": {"EXAMPLE_FLAG": True, "EXAMPLE_TEXT": Unsafe("a $HOME {{ env.HOME }} {% raw %}")}},
+            "github_runner_host_tools_mise_env_home_relative": {"TURBO_CACHE_DIR": ".cache/turbo", "EXAMPLE_TEMPLATED": Unsafe("{{ x }}/$HOME")},
+        }
+        self.ok(self.run_role(**variables))
+        written = self.fleet_file().read_text()
+        self.assertEqual(
+            written,
+            '# Managed by Ansible (exadev.github_runner.github_runner_host_tools). Edits to this file are overwritten.\n[env]\nEXAMPLE_FLAG = "true"\nEXAMPLE_TEXT = "a $$HOME {{ \'{\' }}{ env.HOME }} {{ \'{\' }}% raw %}"\nEXAMPLE_TEMPLATED = "{{ env.HOME }}/{{ \'{\' }}{ x }}/$$HOME"\nTURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"\n',
+        )
+        result = self.run_role(**variables)
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual(self.fleet_file().read_text(), written)
+
+    def test_mise_reads_the_file_the_role_wrote_back_with_the_home_directory_it_runs_in(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        self.ok(self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_config={"env": {"EXAMPLE_TEXT": Unsafe("a $HOME {{ env.HOME }}")}}, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        elsewhere = self.work / "another user's home"
+        (elsewhere / ".config" / "mise").mkdir(parents=True)
+        shutil.copytree(self.fleet_file().parent, elsewhere / ".config" / "mise" / "conf.d")
+        exported, _ = mise_reads(elsewhere)
+        self.assertEqual(exported["TURBO_CACHE_DIR"], f"{elsewhere}/.cache/turbo")
+        self.assertEqual(exported["EXAMPLE_TEXT"], "a $HOME {{ env.HOME }}")
+
+    def test_home_relative_paths_alone_are_enough_to_write_the_file(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        self.ok(self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
+        self.assertEqual(self.fleet_file().read_text().splitlines()[1:], ["[env]", 'TURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"'])
+
+    def test_a_changed_home_relative_path_rewrites_the_file(self) -> None:
+        self.have_homebrew()
+        (self.stub / "mise.state").write_text("current")
+        self.ok(self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/old"}))
+        result = self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
+        self.ok(result)
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+        self.assertIn(".cache/turbo", self.fleet_file().read_text())
+
+    def test_check_mode_reports_a_home_relative_path_without_a_directory_to_write_it_in(self) -> None:
+        self.have_homebrew()
+        result = self.run_role("--check", github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
+        self.ok(result)
+        self.assertFalse((self.home / ".config").exists())
+        self.assertIn("00-fleet.toml would be written", result.stdout)
+
+    def test_a_home_relative_path_that_is_not_below_the_home_directory_fails_the_run_and_writes_nothing(self) -> None:
+        self.have_homebrew()
+        cases = {"absolute": ("/var/cache/turbo", "relative to the user's home"), "parent": ("../turbo", "'..' component"), "empty": ("", "must not be empty")}
+        for label, (path, message) in cases.items():
+            with self.subTest(label):
+                result = self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": path})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, self.squashed(result))
+                self.assertFalse(self.fleet_file().exists())
+
+    def test_a_variable_in_both_the_env_table_and_the_home_relative_mapping_fails_the_run_and_writes_nothing(self) -> None:
+        self.have_homebrew()
+        result = self.run_role(github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_config={"env": {"TURBO_CACHE_DIR": "/x"}}, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TURBO_CACHE_DIR is set both", self.squashed(result))
+        self.assertFalse(self.fleet_file().exists())
+
+    def test_the_home_relative_paths_are_not_written_when_mise_is_left_out(self) -> None:
+        self.have_homebrew()
+        self.ok(self.run_role(github_runner_host_tools_mise=False, github_runner_host_tools_shell_integration=False, github_runner_host_tools_mise_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"}))
         self.assertFalse(self.fleet_file().exists())
 
 
@@ -1302,7 +1390,7 @@ class RoleTest(unittest.TestCase):
     def test_a_variable_in_both_mappings_is_refused_before_any_file_is_changed(self) -> None:
         result = self.run_settings(github_runner_host_tools_shell_env={"TURBO_CACHE_DIR": "/x"}, github_runner_host_tools_shell_env_home_relative={"TURBO_CACHE_DIR": ".cache/turbo"})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("set in both", self.squashed(result))
+        self.assertIn("set both as a plain value", self.squashed(result))
         self.assertEqual(list(self.home.iterdir()), [])
 
     def test_a_home_relative_mapping_of_the_wrong_type_is_refused_by_the_argument_specs(self) -> None:

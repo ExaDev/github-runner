@@ -44,10 +44,11 @@ A host whose startup files already do this, set up by hand or by a dotfiles mana
 
 ## Global mise defaults
 
-`github_runner_host_tools_mise_config` is a mapping that the role renders to `~/.config/mise/conf.d/00-fleet.toml`. It is empty by default, and empty it writes nothing and leaves an existing `00-fleet.toml` alone. It is never written to `~/.config/mise/config.toml`: that file is the host's own and takes precedence over `conf.d`, so the role neither writes nor deletes it, and a host's own choice of a tool version wins over the fleet's default. Two tables are understood:
+`github_runner_host_tools_mise_config` is a mapping that the role renders to `~/.config/mise/conf.d/00-fleet.toml`. It is empty by default, and empty it writes nothing and leaves an existing `00-fleet.toml` alone. It is never written to `~/.config/mise/config.toml`: that file is the host's own and takes precedence over `conf.d`, so the role neither writes nor deletes it, and a host's own choice of a tool version wins over the fleet's default. Three tables are understood:
 
 - `tools`: a tool name to a version string or a list of them. A name that is not a bare TOML key, such as `npm:typescript`, is quoted in the file.
 - `settings`: a setting name to a string, a number, a boolean or a list of those.
+- `env`: a variable name to a string, a number or a boolean, which mise exports with exactly that value.
 
 ```yaml
 github_runner_host_tools_mise_config:
@@ -56,6 +57,8 @@ github_runner_host_tools_mise_config:
     python: ["3.13", "3.12"]
   settings:
     experimental: true
+  env:
+    RUST_BACKTRACE: 1
 ```
 
 renders to
@@ -67,7 +70,30 @@ python = ["3.13", "3.12"]
 
 [settings]
 experimental = true
+
+[env]
+RUST_BACKTRACE = "1"
 ```
+
+mise renders each `env` value as a template and then expands `$VAR` and `${VAR}` in the result, with `$$` as a literal dollar sign ([mise, Environments](https://mise.jdx.dev/environments/); the `$$` escape is tested in [mise's `e2e/env/test_env_shell_expand`](https://github.com/jdx/mise/blob/main/e2e/env/test_env_shell_expand)). So the role writes each value so that it reaches the variable exactly as given: a `$` is doubled, and a brace that would start a template tag, expression or comment (`{{`, `{%`, `{#`) is written as the template expression that renders as that brace. A number or a boolean is exported as its text (`true`, `false`, `3`) and written as a string. A variable name must be one a shell accepts, and a value must be one line. A value with braces in it that comes from an inventory is templated by Ansible before the role sees it, so write it with the `!unsafe` tag there (`EXAMPLE: !unsafe "{{ literal }}"`).
+
+### Paths below the home directory
+
+`github_runner_host_tools_mise_env_home_relative` is a mapping of variable names to paths relative to the connecting user's home directory, written into the same `env` table. The play runs with `gather_facts: false`, so a fleet cannot name the home directory, and a plain `env` value cannot hold one:
+
+```yaml
+github_runner_host_tools_mise_env_home_relative:
+  TURBO_CACHE_DIR: .cache/turbo
+```
+
+renders to
+
+```toml
+[env]
+TURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"
+```
+
+so mise works the home directory out when it reads the file, whichever user and home the host has. The path reaches the variable exactly as given (the same escaping as for a plain value, applied to the path). The rules are those of `github_runner_host_tools_shell_env_home_relative`, whose validation the role shares: a path that is empty, absolute, has a `..` component, is not a string or holds a newline or a NUL fails the run before anything is written, and a variable that is both a plain `env` value and here fails it too. With `github_runner_host_tools_mise_config` empty, this mapping alone makes the role write the file. A fleet that wants one value in the shell's startup file and in mise gives it to both `github_runner_host_tools_shell_env_home_relative` and this mapping: the shell file serves commands run by a shell, and mise's table serves commands run by `mise exec`, `mise run` and shims.
 
 Any other table, or a value of a kind its table does not take, fails the run with a message rather than being written in a form mise might read differently.
 
@@ -163,6 +189,7 @@ The variables are written whether or not `github_runner_host_tools_shell_integra
 - `github_runner_host_tools_shell_integration` (default true): add the Homebrew and mise lines to the connecting user's shell startup file where none has them.
 - `github_runner_host_tools_homebrew_install_commit`, `github_runner_host_tools_homebrew_install_sha256`: the commit of Homebrew/install whose `install.sh` is downloaded, and that file's SHA-256 checksum. Both are checked to be full lower-case hexadecimal hashes (40 and 64 characters) before anything runs; `defaults/main.yml` holds the values.
 - `github_runner_host_tools_mise_config` (default an empty mapping): see Global mise defaults above.
+- `github_runner_host_tools_mise_env_home_relative` (default an empty mapping): variables for mise's `env` table whose value is a path below the user's home directory; see Paths below the home directory above.
 - `github_runner_host_tools_npm_settings` (default an empty mapping): npmrc keys and values written to `~/.npmrc`; see Package-install security settings above.
 - `github_runner_host_tools_npm_min_release_age_exclude` (default an empty list): package names or patterns written as `min-release-age-exclude[]=NAME` lines in the same block.
 - `github_runner_host_tools_pnpm_settings` (default an empty mapping): top-level keys and values merged into pnpm's global `config.yaml`.
@@ -202,8 +229,10 @@ github_runner_host_tools_shell_env:
   UV_PYTHON_DOWNLOADS: never
 github_runner_host_tools_shell_env_home_relative:
   TURBO_CACHE_DIR: .cache/turbo
+github_runner_host_tools_mise_env_home_relative:
+  TURBO_CACHE_DIR: .cache/turbo
 ```
 
 ## Testing
 
-`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. They also check the package-install settings and the shell variables: that nothing is read or written when the variables are empty, that the `.npmrc` block holds only the role's lines, keeps the user's lines and credentials (made-up values) out of the output, is idempotent and shrinks as entries are dropped, that a key the user sets outside the block is kept and reported, that a new `.npmrc` is `0600` and no existing file or symlink changes mode, that the pnpm merge keeps unrelated keys and comments, and that a shell variable's value, quotes and dollar signs included, round-trips through `sh` and `bash` reading the written file. The bash cases run against `tests/host_tools/ubuntu-26.04-skel.bashrc`, a byte-for-byte copy of Ubuntu's default `/etc/skel/.bashrc` (its checksum is asserted), and read the result with a real non-interactive `bash`, which sees a variable only when the block is above the interactive guard; they cover a block an earlier version appended below the guard being moved to the top without a duplicate, a second run and `--check` changing nothing, and a variable the file assigns already being kept. The home-relative variables are read back through real `sh`, `bash` and `zsh` with a home directory whose name has a space, a quote and a dollar sign, and a path with every character special in double quotes, to show that the home directory is expanded when the file is read and nothing else is. Nothing is downloaded and no real package manager, privilege or startup file is touched.
+`tests/unit/test_host_tools.py` covers the filters in `plugins/filter/host_tools.py` (the prefix of each system and architecture, the shell startup lines, and the TOML rendering against golden strings), the defaults against the argument specs and this file, the shape of the pinned commit and checksum, that the only formula the role ever names to Homebrew is mise, the wiring in `playbooks/site.yml`, and the role's tasks (`tests/host_tools/run.yml`) against stand-ins for `brew`, `sudo`, `apt-get`, `dpkg-query`, `getent`, `dscl` and Homebrew's installer on `PATH`, with the installer served from a local directory and every shell startup file in a temporary home. They check that the installer runs non-interactively as the user and only when its checksum matches, that a second run and `--check` change nothing, that root is refused, that a startup file keeps its mode, its content and its symlink, and that `config.toml` is never written. The mise `env` table is read back with a real `mise env`, which has to be on `PATH` (the CI job installs it), for values with `$`, template braces, quotes and a home directory whose name has a space, a quote and a dollar sign. They also check the package-install settings and the shell variables: that nothing is read or written when the variables are empty, that the `.npmrc` block holds only the role's lines, keeps the user's lines and credentials (made-up values) out of the output, is idempotent and shrinks as entries are dropped, that a key the user sets outside the block is kept and reported, that a new `.npmrc` is `0600` and no existing file or symlink changes mode, that the pnpm merge keeps unrelated keys and comments, and that a shell variable's value, quotes and dollar signs included, round-trips through `sh` and `bash` reading the written file. The bash cases run against `tests/host_tools/ubuntu-26.04-skel.bashrc`, a byte-for-byte copy of Ubuntu's default `/etc/skel/.bashrc` (its checksum is asserted), and read the result with a real non-interactive `bash`, which sees a variable only when the block is above the interactive guard; they cover a block an earlier version appended below the guard being moved to the top without a duplicate, a second run and `--check` changing nothing, and a variable the file assigns already being kept. The home-relative variables are read back through real `sh`, `bash` and `zsh` with a home directory whose name has a space, a quote and a dollar sign, and a path with every character special in double quotes, to show that the home directory is expanded when the file is read and nothing else is. Nothing is downloaded and no real package manager, privilege or startup file is touched.

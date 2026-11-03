@@ -29,7 +29,11 @@ argument_specs:
       github_runner_host_tools_mise_config:
         type: dict
         default: {}
-        description: Global mise defaults, as a mapping with the tables tools and settings. Empty writes nothing; otherwise it is rendered to ~/.config/mise/conf.d/00-fleet.toml.
+        description: Global mise defaults, as a mapping with the tables tools, settings and env. Empty writes nothing; otherwise it is rendered to ~/.config/mise/conf.d/00-fleet.toml. Values of the env table reach mise's exported variables exactly as given.
+      github_runner_host_tools_mise_env_home_relative:
+        type: dict
+        default: {}
+        description: Variables for mise's env table whose value is a path below the connecting user's home directory, as a mapping of names to paths relative to it, written as mise's template for the home directory followed by the path. An absolute path, an empty one and one with a .. component are refused, and a name may not also be in the env table of github_runner_host_tools_mise_config.
       github_runner_host_tools_npm_settings:
         type: dict
         default: {}
