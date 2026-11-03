@@ -180,8 +180,9 @@ $config as $c
     (if ($voters | length) != $c.target then "there are \($voters | length) voters, not the target \($c.target)" else empty end),
     ($voter_nodes[] | select(.regrade_level != null) | "voter \(.name) is at regrade level \(.regrade_level), below full"),
     ($voter_nodes[] | select(.ready | not) | "voter \(.name) is not Ready"),
-    ($voter_names[] as $v | $probes[$v].samples[-1].etcd as $e
-       | if $e == null then "etcd's state on voter \($v) is unknown"
+    ($voter_names[] as $v | $probes[$v].samples[-1] as $last | $last.etcd as $e
+       | if $last == null or $last.t < ($now - $stale_seconds) then "voter \($v) has no probe report in the last \($stale_seconds) s"
+         elif $e == null then "etcd's state on voter \($v) is unknown"
          elif ($e.has_leader | not) then "voter \($v) reports no leader"
          elif $e.is_learner then "voter \($v) is a learner"
          elif $e.known_members != ($voters | length) then "voter \($v) knows \($e.known_members) members, not the \($voters | length) voters: a learner or a member that has not started"

@@ -398,6 +398,21 @@ class GateTest(ControllerCase):
         status = self.refused(c={"ready": False})
         self.assertIn("voter c is not Ready", status["decision"]["because"])
 
+    def test_no_swap_while_a_voters_probe_has_stopped_reporting_as_when_it_is_paused(self) -> None:
+        stale = STALE_AFTER_SAMPLES * SAMPLE_SECONDS
+        status = self.refused(b={"stale_by": stale + 30})
+        self.assertIn(f"voter b has no probe report in the last {stale} s", status["decision"]["because"])
+        self.assertEqual(status["hosts"]["b"]["verdict"], "unknown")
+
+    def test_no_swap_while_a_voters_etcd_metrics_could_not_be_read(self) -> None:
+        populate(self.cluster, healthy(a={"tcp": UNFIT_RTT_MS + 50}))
+        entries = self.cluster.probes()
+        entries["b"]["samples"][-1]["etcd"] = None
+        self.cluster.set_probes(entries)
+        completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("etcd's state on voter b is unknown", self.cluster.status()["decision"]["because"])
+
     def test_no_swap_while_etcd_reports_no_leader(self) -> None:
         status = self.refused(b={"etcd": {"has_leader": False}})
         self.assertIn("voter b reports no leader", status["decision"]["because"])
