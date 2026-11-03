@@ -1,5 +1,5 @@
 ---
-# Decides, before Docker Compose touches this server's container, whether that run would recreate it, and refuses when the recreate would take quorum away. Compose recreates a container whose configuration hash (the com.docker.compose.config-hash label it put on the container) differs from the hash of the configuration it renders now, so the role compares the two the same way, from the files on the host. A server's recreate stops its etcd member, so it goes ahead only while every other server reports Ready; the caller (tasks/start_server.yml) takes one server's turn at a time, so two servers are never away together. Publishes github_runner_cluster_recreate_reason (empty when Compose would keep the container, or there is none), github_runner_cluster_recreate_running (whether the container that would be recreated is running) and github_runner_cluster_recreate_held (whether other servers are registered and so hold quorum for it). Every task only reads; under --check the same answers are reported, as a change when a container would be recreated and as a failure when the run would refuse. Compares what the files on the host hold now, so a difference this same run would only write (the Compose file or .env a task before this one has just changed, which --check does not write) shows once they are written.
+# Decides, before Docker Compose touches this server's container, whether that run would recreate it, and refuses when the recreate would take quorum away. Compose recreates a container whose configuration hash (the com.docker.compose.config-hash label it put on the container) differs from the hash of the configuration it renders now, so the role compares the two the same way, from the files on the host. A server's recreate stops its etcd member, so it goes ahead only while every other server reports Ready; the caller (tasks/start_server.yml) takes one server's turn at a time, so two servers are never away together. Publishes github_runner_cluster_recreate_reason (empty when Compose would keep the container, or there is none), github_runner_cluster_recreate_running (whether the container that would be recreated is running) and github_runner_cluster_recreate_held (whether other servers are registered and so hold quorum for it). Every task only reads; under --check the same answers are reported, as a change when a container would be recreated and as a failure when the run would refuse. Compares what the files on the host hold now, so a difference this same run would only write (the .env or a Compose file a task before this one has just changed, which --check does not write) shows once they are written. A Compose file the role would add to the host is named in Compose's rendering by leaving it out (github_runner_cluster_compose_files_in_use) and in the reason by name, since adding an override file always changes the configuration.
 
 - name: Read the state and Compose configuration hash of this server's container
   # docker ps rather than docker inspect, so that a container that does not exist reads as absent while a daemon that cannot be reached fails the run. The label is empty on a container Compose did not make.
@@ -20,7 +20,7 @@
   ansible.builtin.command:
     argv: >-
       {{ ['docker', 'compose', '--project-name', github_runner_cluster_compose_project, '--project-directory', github_runner_cluster_dir]
-         + (github_runner_cluster_compose_file_list | map('regex_replace', '^(?!/)', github_runner_cluster_dir ~ '/') | map('regex_replace', '^', '--file=') | list)
+         + (github_runner_cluster_compose_files_in_use | map('regex_replace', '^(?!/)', github_runner_cluster_dir ~ '/') | map('regex_replace', '^', '--file=') | list)
          + ['--profile', github_runner_cluster_effective_node_role, 'config', '--hash', '*'] }}
   environment: "{{ github_runner_cluster_docker_cli_environment }}"
   register: github_runner_cluster_recreate_rendered
@@ -36,7 +36,8 @@
     github_runner_cluster_recreate_reason: >-
       {{ ((github_runner_cluster_recreate_lines | select('match', '^hash=') | first | regex_replace('^hash=', ''))
           | exadev.github_runner.cluster_recreate_reason(github_runner_cluster_recreate_rendered.stdout
-                                                         | exadev.github_runner.cluster_rendered_config_hash(github_runner_cluster_node_service)))
+                                                         | exadev.github_runner.cluster_rendered_config_hash(github_runner_cluster_node_service))
+          or ('the configuration gains ' ~ (github_runner_cluster_compose_files_unwritten | join(', ')) ~ ', which a real run writes' if github_runner_cluster_compose_files_unwritten | length > 0 else ''))
          if 'state=absent' not in github_runner_cluster_recreate_lines else '' }}
 
 - name: List the other servers of the cluster

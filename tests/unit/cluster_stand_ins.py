@@ -160,6 +160,11 @@ elif command == "cp":
             die("Error response from daemon: No such container: " + container)
         absorb(filesystem(container))
 elif command == "compose" and "config" in args:
+    # Real Compose reads every file it is given, and fails on one that is not there.
+    for argument in args:
+        if argument.startswith("--file=") and not os.path.exists(argument.removeprefix("--file=")):
+            die("open " + argument.removeprefix("--file=") + ": no such file or directory")
+    write("config-files.log", text=(read("config-files.log") or "") + args[args.index("--project-name") + 1] + ": " + ",".join(os.path.basename(a.removeprefix("--file=")) for a in args if a.startswith("--file=")) + "\\n")
     text = read("rendered", args[args.index("--project-name") + 1] + ".txt")
     if text is None:
         die("no configuration to render")
@@ -212,6 +217,13 @@ def main():
     )
     stub = os.environ["DOCKER_STUB"]
     project = module.params["project_name"]
+    # The module, like Compose itself, reads the files it is named (docker-compose.yml when none) from the project directory, and fails on one that is not there, in check mode as in a real run.
+    named = module.params["files"] or ["docker-compose.yml"]
+    for name in named:
+        if not os.path.exists(os.path.join(module.params["project_src"], name)):
+            module.fail_json(msg='Cannot find Compose file "%s" relative to project directory "%s"' % (name, module.params["project_src"]))
+    with open(os.path.join(stub, "compose-files.log"), "a") as log:
+        log.write("%s: %s\\n" % (project, ",".join(named)))
     with open(os.path.join(stub, "calls.log"), "a") as log:
         log.write("module up %s profiles=%s check=%s\\n" % (project, ",".join(module.params["profiles"] or []), module.check_mode))
     changed = False
@@ -284,6 +296,7 @@ class RoleTestCase(unittest.TestCase):
             server = name in servers
             # Every earlier run of the role created the node's Compose project directory, which the role reads before starting Compose under --check.
             (self.work / "nodes" / name).mkdir(parents=True, exist_ok=True)
+            (self.work / "nodes" / name / "docker-compose.yml").write_text("services: {}\n")
             hosts[name] = {
                 "github_runner_cluster_effective_node_role": "server" if server else "agent",
                 "github_runner_cluster_effective_node_name": name,
@@ -330,6 +343,11 @@ class RoleTestCase(unittest.TestCase):
 
     def nodes(self, **status: str) -> None:
         self.write("cluster.nodes", text="".join(f"{name} {value}\n" for name, value in status.items()))
+
+    def compose_files(self, log: str) -> list[str]:
+        """The lines of a log of the Compose files each call named, as ``project: file,file`` (log is ``config-files.log`` for the commands, ``compose-files.log`` for the module)."""
+        path = self.stub / log
+        return path.read_text().splitlines() if path.exists() else []
 
     def calls(self) -> list[str]:
         log = self.stub / "calls.log"

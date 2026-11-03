@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import itertools
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -436,7 +437,7 @@ class StartServersTest(RoleTestCase):
         # A first run's dry run creates no project directory, and Compose cannot read a project directory that does not exist.
         hosts, group_vars = self.hosts(("node1", "node2", "node3"))
         for name in hosts:
-            (self.work / "nodes" / name).rmdir()
+            shutil.rmtree(self.work / "nodes" / name)
         result = self.run_tasks("start_servers", hosts, group_vars, check=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for n in (1, 2, 3):
@@ -487,8 +488,10 @@ class ComposeHashTest(unittest.TestCase):
 class TaskStructureTest(unittest.TestCase):
     def test_servers_start_through_their_turns_and_agents_do_not(self) -> None:
         tasks = flatten(role_tasks("main.yml"))
-        starts = [task for task in tasks if "community.docker.docker_compose_v2" in task]
-        self.assertEqual([task["community.docker.docker_compose_v2"]["profiles"] for task in starts], [["agent"]])
+        self.assertEqual([task for task in tasks if "community.docker.docker_compose_v2" in task], [], "a Compose start is in a task file of its own, which --check and the role's tests can run")
+        self.assertIn("start_agent.yml", [task.get("ansible.builtin.include_tasks") for task in tasks])
+        (start,) = [task for task in flatten(role_tasks("start_agent.yml")) if "community.docker.docker_compose_v2" in task]
+        self.assertEqual(start["community.docker.docker_compose_v2"]["profiles"], ["agent"])
         self.assertIn("start_servers.yml", [task.get("ansible.builtin.include_tasks") for task in tasks])
         self.assertNotIn("server_recreate_check.yml", [task.get("ansible.builtin.include_tasks") for task in tasks], "agents are exempt from the quorum guard")
 

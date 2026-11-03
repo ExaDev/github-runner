@@ -178,6 +178,17 @@ github_runner_cluster_compose_file_list: >-
      + (['docker-compose.node-labels.yml'] if github_runner_cluster_node_labels | length > 0 else [])
      + github_runner_cluster_compose_files
      + (['docker-compose.host-network.yml'] if github_runner_cluster_network_mode == 'host' else []) }}
+# Derived, never set directly: the Compose files this role writes into github_runner_cluster_dir itself, by the name the list above gives them. A user's own entry in github_runner_cluster_compose_files is not among them, and a missing one of those is an error in a check run as in a real one.
+github_runner_cluster_compose_files_written:
+  - docker-compose.yml
+  - docker-compose.api-port.yml
+  - docker-compose.node-labels.yml
+  - docker-compose.host-network.yml
+  - docker-compose.mesh.yml
+# Derived, never set directly: the Compose files a Compose command run now can name. Every file in the list above in a real run, since the run has written the ones it owns before any Compose command; under --check, which writes nothing, tasks/compose_files_in_use.yml leaves out the ones this role would write and the host does not have yet. Compose refuses a command that names a file that is not there, and a check run that fails on one fails the README's promise that --check runs before every deploy.
+github_runner_cluster_compose_files_in_use: "{{ github_runner_cluster_compose_file_list }}"
+# Derived, never set directly: the files this role writes that a check run left out of the list above because the host does not have them yet; empty in a real run.
+github_runner_cluster_compose_files_unwritten: []
 # The Docker context this host's node runs in, pinned by name (for example "colima"). Empty, the default, follows the host's current Docker context, or DOCKER_HOST when that is set. When set, every community.docker module call in the role passes it as cli_context and every docker CLI command runs with DOCKER_CONTEXT set to it, so both always reach the same daemon, whatever the host's current context is at the time. The role fails before touching the host if the context does not exist there, or if DOCKER_HOST is set as well, and it never changes the host's current context. Set it on any host with more than one Docker engine installed: on a Mac running its node in Colima with Docker Desktop also installed, merely launching Docker Desktop makes desktop-linux the current context, and an unpinned run would then build a second, empty node in Docker Desktop instead of managing the real one. Per host, like every value here that names something on the host; the Headscale tasks read it from the inventory of the host they act on.
 github_runner_cluster_docker_context: ""
 # The names of this host's k3s server container and k3s agent container, which docker-compose.yml takes from .env. Container names are unique on a Docker daemon, so a second cluster on the same Docker hosts needs both set to names of its own (see github_runner_cluster_api_port); the defaults are the names every existing node runs under, so leaving them unset changes nothing. Changing one on a running host makes Compose recreate that container under the new name, on the same volumes, which a server's turn treats as any other recreate.
