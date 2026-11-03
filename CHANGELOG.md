@@ -1,3 +1,14 @@
+## [2.27.1](https://github.com/ExaDev/github-runner/compare/v2.27.0...v2.27.1) (2026-11-03)
+
+### Bug Fixes
+
+* **cluster:** name only the Compose files the host has when checking a deploy ([98861a6](https://github.com/ExaDev/github-runner/commit/98861a65eabce9fbcd2c645615b36769401d5df0))
+
+### Tests
+
+* **cluster:** follow the agent's Compose start into its own task file ([d93d607](https://github.com/ExaDev/github-runner/commit/d93d607930506daa145f7e568fef19d4a95bf5e3))
+* **role:** check a deploy on hosts that lack the node-labels Compose file ([3e2eae7](https://github.com/ExaDev/github-runner/commit/3e2eae79c6bfc6bd55c405036801b51e8037a6ff))
+
 ## [2.27.0](https://github.com/ExaDev/github-runner/compare/v2.26.2...v2.27.0) (2026-11-03)
 
 ### Features
