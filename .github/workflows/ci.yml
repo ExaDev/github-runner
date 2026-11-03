@@ -202,9 +202,15 @@ jobs:
           python3 -c 'import ansible.release; print("ansible-core", ansible.release.__version__)'
           mapfile -t modules < <(find tests/unit -maxdepth 1 -name 'test_*.py' -printf '%s %p\n' | LC_ALL=C sort -k1,1nr -k2,2 | cut -d' ' -f2- | awk -v shard="$SHARD" -v shards="$SHARDS" '(NR - 1) % shards == shard')
           echo "Shard ${SHARD} of ${SHARDS}: ${#modules[@]} module(s)"
+          # Every module runs whatever an earlier one did, so one failure never hides another's; the shard fails afterwards, naming each module that failed.
+          failed=()
           for module in "${modules[@]}"; do
-            python3 -m unittest discover -s tests/unit -p "$(basename "$module")" -v
+            python3 -m unittest discover -s tests/unit -p "$(basename "$module")" -v || failed+=("$module")
           done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::Failed module(s): ${failed[*]}"
+            exit 1
+          fi
 
   ansible-lint:
     name: ansible-lint
