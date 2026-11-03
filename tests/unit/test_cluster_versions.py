@@ -194,6 +194,14 @@ class VersionChangeBlockersTest(unittest.TestCase):
         reads = [answered("a", "server1 v1.34.1+k3s1 true\nagent1 v1.35.0+k3s1")]
         self.assertEqual(versions.cluster_k3s_version_change_blockers("v1.34.1-k3s1", "server1", "", reads, "server"), ["Agent agent1 runs v1.35.0+k3s1, a newer minor than v1.34.1-k3s1; a kubelet may not be newer than the API servers."])
 
+    def test_this_node_s_live_role_decides_the_rules_over_the_inventory_s(self) -> None:
+        # A native host the inventory lists as an agent that the cluster now runs as a server (its units were switched at run time) is held to the servers' rule, and the other way round.
+        reads = [answered("a", "server1 v1.34.1+k3s1 true\nnative1 v1.34.1+k3s1 true\nagent1 v1.35.0+k3s1")]
+        self.assertEqual(versions.cluster_k3s_version_change_blockers("v1.34.1-k3s1", "native1", "", reads, "agent"), ["Agent agent1 runs v1.35.0+k3s1, a newer minor than v1.34.1-k3s1; a kubelet may not be newer than the API servers."])
+        demoted = [answered("a", "server1 v1.34.1+k3s1 true\nnative1 v1.34.1+k3s1\nagent1 v1.35.0+k3s1")]
+        self.assertEqual(versions.cluster_k3s_version_change_blockers("v1.34.1-k3s1", "native1", "", demoted, "server"), [])
+        self.assertEqual(versions.cluster_k3s_version_change_blockers("v1.35.0-k3s1", "native1", "", demoted, "server"), ["Server server1 runs v1.34.1+k3s1, an older minor than v1.35.0-k3s1; an agent's kubelet may not be newer than the API servers, so upgrade the servers first."])
+
     def test_this_node_s_own_entry_in_the_node_list_counts_as_this_node(self) -> None:
         reads = [answered("a", "server1 v1.35.0+k3s1 true\nserver2 v1.35.0+k3s1 true")]
         self.assertEqual(versions.cluster_k3s_version_change_blockers("v1.34.9-k3s1", "server1", "", reads, "server")[0], "Node server1 runs v1.35.0+k3s1, newer than v1.34.9-k3s1; k3s cannot be downgraded.")
@@ -365,7 +373,7 @@ class RoleTest(unittest.TestCase):
     def running(self, *extra: str, pin: str | None = None, run_on: str = "node2", roles: dict[str, str] | None = None, bootstrap: str | None = "node1", unreachable: str | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
         """Run tasks/running_version.yml on one host of a three-host group (servers unless ``roles`` says otherwise) whose topology names ``bootstrap`` as its bootstrap host, or none; ``unreachable`` names a host reached over SSH on a port nothing listens on."""
         roles = {"node1": "server", "node2": "server", "node3": "server", **(roles or {})}
-        topology = {"hosts": {name: {"role": role, "bootstrap": name == bootstrap, "node_name": name} for name, role in roles.items()}}
+        topology = {"hosts": {name: {"role": role, "bootstrap": name == bootstrap, "node_name": name, "native": False, "eligible": False} for name, role in roles.items()}}
         common: dict[str, Any] = {"github_runner_cluster_topology": topology, **({"github_runner_cluster_k3s_version": pin} if pin else {})}
         hosts = {
             name: {
