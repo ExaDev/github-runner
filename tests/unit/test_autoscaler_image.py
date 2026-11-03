@@ -17,11 +17,13 @@ IMAGE_REPOSITORY = "ghcr.io/exadev/github-runner-autoscaler"
 
 
 def scripts_run_from_the_image() -> set[str]:
-    """The names of the scripts under /app/scripts that the role's tasks and templates run."""
+    """The names of the scripts under /app/scripts that the role's tasks and templates run from this image. The role controller's manifests run theirs from the image of their own (fleet-role/Dockerfile, held by tests/unit/test_fleet_role_arc.py)."""
     found: set[str] = set()
     for directory in ("tasks", "templates"):
         for path in (ROLE / directory).iterdir():
-            found.update(re.findall(r"/app/scripts/([A-Za-z0-9._-]+\.sh)", path.read_text()))
+            text = path.read_text()
+            if "role_controller_image" not in text:
+                found.update(re.findall(r"/app/scripts/([A-Za-z0-9._-]+\.sh)", text))
     return found
 
 

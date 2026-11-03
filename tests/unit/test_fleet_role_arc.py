@@ -202,6 +202,33 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(len(images), 1)
         self.assertRegex(images.pop(), r"^ghcr\.io/exadev/github-runner-fleet-role:\d+\.\d+\.\d+$")
 
+    def test_every_script_the_manifests_run_is_copied_into_the_image_and_made_executable(self) -> None:
+        dockerfile = (ROOT / "fleet-role" / "Dockerfile").read_text()
+        template = (ROLE / "templates" / "fleet-role.yaml.j2").read_text()
+        scripts = set(re.findall(r"/app/scripts/([A-Za-z0-9._-]+\.sh)", template))
+        self.assertEqual(scripts, {"fleet-role-probe.sh"})
+        scripts.add("fleet-role.sh")  # run by the image's entrypoint
+        chmod = re.search(r"RUN chmod \+x ([^\n]+)", dockerfile)
+        assert chmod is not None
+        for script in scripts:
+            with self.subTest(script):
+                self.assertTrue((ROOT / "scripts" / script).is_file())
+                self.assertRegex(dockerfile, rf"COPY [^\n]*scripts/{re.escape(script)}[^\n]* /app/scripts/")
+                self.assertIn(f"/app/scripts/{script}", chmod.group(1).split())
+        self.assertIn("/app/loop.sh", chmod.group(1).split())
+        entrypoint = (ROOT / "fleet-role" / "loop.sh").read_text()
+        self.assertIn("/app/scripts/fleet-role.sh", entrypoint)
+
+    def test_every_jq_module_the_scripts_include_is_copied_beside_them(self) -> None:
+        dockerfile = (ROOT / "fleet-role" / "Dockerfile").read_text()
+        for program in ("fleet-role.jq", "fleet-role-stats.jq"):
+            for module in re.findall(r'^include "([A-Za-z0-9._-]+)";', (ROOT / "scripts" / program).read_text(), re.MULTILINE):
+                with self.subTest(program=program, module=module):
+                    self.assertTrue((ROOT / "scripts" / f"{module}.jq").is_file())
+                    self.assertRegex(dockerfile, rf"COPY [^\n]*scripts/{re.escape(module)}\.jq[^\n]* /app/scripts/")
+        for program in ("fleet-role.jq", "fleet-role-stats.jq"):
+            self.assertRegex(dockerfile, rf"COPY [^\n]*scripts/{re.escape(program)}[^\n]* /app/scripts/")
+
     def test_the_probe_reads_the_regrade_core_the_image_carries(self) -> None:
         dockerfile = (ROOT / "fleet-role" / "Dockerfile").read_text()
         script = (ROOT / "scripts" / "fleet-role-probe.sh").read_text()
