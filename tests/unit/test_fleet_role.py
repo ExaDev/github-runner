@@ -384,7 +384,7 @@ class RankingTest(ControllerCase):
     def slow_voter_c(self, **changes: dict[str, Any]) -> list[Host]:
         """Voter c has a slow link to every other host, as a voter on a poor path does: both ends of each of its links measure it slow, so a and b are unfit too, by the rule that a voter is unfit when its round trip to any other voter is."""
         hosts = healthy(
-            a={"tcp": {"b": 5.0, "c": self.SLOW + 300}},  # the worst single reading is a's, but c is on the most slow links
+            a={"tcp": {"b": 5.0, "c": self.SLOW + 300}},  # the worst single reading is a's, but c is the end slow to every other voter
             b={"tcp": {"a": 5.0, "c": self.SLOW}},
             c={"tcp": {"a": self.SLOW, "b": self.SLOW}},
             d={"tcp": {"a": 5.0, "b": 5.0, "c": self.SLOW}},
@@ -394,10 +394,11 @@ class RankingTest(ControllerCase):
                 setattr(host, key, value)
         return hosts
 
-    def test_a_slow_link_makes_both_its_ends_unfit_and_the_voter_on_the_most_slow_links_is_replaced(self) -> None:
+    def test_a_slow_link_makes_both_its_ends_unfit_and_the_voter_at_fault_is_replaced(self) -> None:
         status = self.pass_(self.slow_voter_c())
         self.assertEqual(self.verdicts(status), {"a": "unfit", "b": "unfit", "c": "unfit", "d": "unfit"})
-        self.assertEqual(status["decision"]["swap"], {"out": "c", "in": "d"}, "c is on two slow links, a and b on one each")
+        self.assertEqual(status["decision"]["swap"], {"out": "c", "in": "d"}, "c is slow to a and b, which reach each other fast")
+        self.assertEqual(status["attribution"], {"c": ["a", "b", "c", "d"]})
 
     def test_a_candidate_is_judged_against_the_voters_that_would_remain(self) -> None:
         # d measures c slow, as everyone does, and is unfit against the full set; without c it is fit, which is what the swap needs.
@@ -413,6 +414,57 @@ class RankingTest(ControllerCase):
         self.assertEqual(self.verdicts(status)["a"], "unfit")
         self.assertEqual(status["decision"]["action"], "none")
         self.assertEqual(status["decision"]["because"], ["voter c is the most at fault and is pinned or not marked eligible, so it is not replaced"])
+
+    def test_when_every_link_is_slow_the_voter_whose_other_links_are_slow_too_is_at_fault(self) -> None:
+        # As on a live fleet: a is on a poor path, slow to everyone, and b to c is only just over the limit. Every voter is unfit and every link is slow, so counting slow links ties, and b, which measures the worst single tail, ranks worst; the slowness follows a.
+        just_over = UNFIT_RTT_MS + 10
+        hosts = healthy(
+            a={"tcp": {"b": self.SLOW, "c": self.SLOW}},
+            b={"tcp": {"a": self.SLOW + 500, "c": just_over}},
+            c={"tcp": {"a": self.SLOW, "b": just_over}},
+            d={"tcp": {"a": self.SLOW, "b": 5.0, "c": 5.0}},
+        )
+        status = self.pass_(hosts)
+        self.assertEqual(self.verdicts(status), {"a": "unfit", "b": "unfit", "c": "unfit", "d": "unfit"})
+        self.assertEqual({name: host["attributed_to"] for name, host in status["hosts"].items()}, {"a": ["a"], "b": ["a"], "c": ["a"], "d": ["a"]})
+        self.assertEqual(status["attribution"], {"a": ["a", "b", "c", "d"]})
+        self.assertEqual(status["decision"]["swap"], {"out": "a", "in": "d"})
+        self.assertIn("b (voter, link wired): unfit, round trip p99 to a", self.log)
+        self.assertIn("(attributed to a)", self.log)
+
+    def test_a_hosts_own_fault_is_attributed_to_it_and_a_link_fault_to_the_end_at_fault(self) -> None:
+        status = self.pass_(self.slow_voter_c(a={"wal": WAL_LIMIT_MS + 5}))
+        self.assertEqual(status["hosts"]["a"]["attributed_to"], ["a", "c"], "a's disk is its own, its slow link is c's")
+        self.assertEqual(status["hosts"]["b"]["attributed_to"], ["c"])
+        self.assertEqual(status["attribution"], {"a": ["a"], "c": ["a", "b", "c", "d"]})
+
+    def test_a_standby_slow_to_every_voter_is_at_fault_itself(self) -> None:
+        status = self.pass_(healthy(d={"tcp": FIT_RTT_MS + 20}))
+        self.assertEqual((status["hosts"]["d"]["verdict"], status["hosts"]["d"]["attributed_to"]), ("unfit", ["d"]))
+        self.assertEqual(status["attribution"], {"d": ["d"]})
+
+    def test_a_standby_slow_to_a_voter_it_alone_reaches_slowly_shares_the_fault_with_it(self) -> None:
+        # d is fast to b and c, and a is fast to b and c: nothing says which end of the one slow link is at fault.
+        status = self.pass_(healthy(d={"tcp": {"a": FIT_RTT_MS + 20, "b": 5.0, "c": 5.0}}))
+        self.assertEqual((status["hosts"]["d"]["verdict"], status["hosts"]["d"]["attributed_to"]), ("unfit", ["a", "d"]))
+        self.assertEqual(status["hosts"]["a"]["attributed_to"], [], "a's own verdict is fit")
+
+    def test_a_slow_link_between_voters_whose_other_links_are_fast_is_attributed_to_both(self) -> None:
+        # Only the link between a and b is slow: a is fast to c, and so is b, so nothing says which end is at fault.
+        status = self.pass_(healthy(a={"tcp": {"b": UNFIT_RTT_MS + 50, "c": 5.0}}))
+        self.assertEqual(status["hosts"]["a"]["attributed_to"], ["a", "b"])
+        self.assertEqual(status["hosts"]["b"]["attributed_to"], [], "b's own verdict is fit")
+
+    def test_a_voter_slow_to_every_other_voter_is_at_fault_though_a_standby_reaches_it_fast(self) -> None:
+        # a measures both its voter links slow, and b and c reach each other fast; d's one-sided reading of a does not clear it.
+        status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}))
+        self.assertEqual(status["hosts"]["a"]["attributed_to"], ["a"])
+        self.assertEqual(status["attribution"], {"a": ["a"]})
+
+    def test_a_verdict_that_is_not_unfit_is_attributed_to_no_one(self) -> None:
+        status = self.pass_(healthy(d={"samples": WINDOW_SAMPLES - 1}))
+        self.assertEqual({name: host["attributed_to"] for name, host in status["hosts"].items()}, {"a": [], "b": [], "c": [], "d": []})
+        self.assertEqual(status["attribution"], {})
 
     def test_an_unfit_standby_is_not_a_candidate(self) -> None:
         status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}, d={"fsync_ms": 50.0}))

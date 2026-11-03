@@ -123,13 +123,18 @@ $config as $c
         etcd: ($entry.samples[-1].etcd // null)
       };
 
-  # What makes a measured host unfit, as sentences carrying their numbers; empty when nothing does. A voter is judged by the unfit round trip limit and the disk it serves etcd from, a candidate by the stricter fit limit and a disk probe.
-  def faults($m):
+  # What makes a measured host unfit, as sentences carrying their numbers; empty when nothing does. A voter is judged by the unfit round trip limit and the disk it serves etcd from, a candidate by the stricter fit limit and a disk probe. The round trip is a link's, and another node may be at fault for it; every other fault is the host's own.
+  def rtt_faults($m):
     $m.node as $node
     | [
         (if $m.rtt_ms != null and $m.rtt_ms > (if $node.voter then $unfit_rtt_ms else $fit_rtt_ms end)
          then "round trip p99 to \($m.rtt_peer) is \($m.rtt_ms | round2) ms, over \(if $node.voter then $unfit_rtt_ms else $fit_rtt_ms end) ms (a \(if $node.voter then "tenth" else "twentieth" end) of the \($c.election_timeout_ms) ms election timeout)"
-         else empty end),
+         else empty end)
+      ];
+
+  def own_faults($m):
+    $m.node as $node
+    | [
         (if $node.voter then
            (if $m.wal_p99_ms != null and $m.wal_p99_ms >= wal_fsync_limit_ms then "WAL fsync p99 is \($m.wal_p99_ms | round2) ms, not under \(wal_fsync_limit_ms) ms" else empty end),
            (if $m.commit_p99_ms != null and $m.commit_p99_ms >= backend_commit_limit_ms then "backend commit p99 is \($m.commit_p99_ms | round2) ms, not under \(backend_commit_limit_ms) ms" else empty end)
@@ -141,6 +146,8 @@ $config as $c
         (if $m.not_ready then "the node is not Ready" elif $m.not_ready_spell then "the node was not Ready within the last \($window_seconds) s" else empty end),
         (if $m.restarts > 0 then "k3s restarted \($m.restarts) time(s) in the window" else empty end)
       ];
+
+  def faults($m): rtt_faults($m) + own_faults($m);
 
   # What is missing for a verdict, as sentences; empty when the readings are all there.
   def gaps($m):
@@ -187,7 +194,31 @@ $config as $c
        m: $m};
 
   # Hosts reported: every voter, and every eligible host that is not one.
-  ([$all[] | select(.voter or .eligible)] | sort_by(.name) | map(host(.))) as $hosts
+  ([$all[] | select(.voter or .eligible)] | sort_by(.name) | map(host(.))) as $measured
+
+# Every link a probe measured, between two hosts, as the worse of the two ends' tails (a standby measures its links to the voters alone, so those have one end's).
+| ([$measured[] | .name as $a | .m.pairs[] | select(.ms != null) | {ends: ([$a, .peer] | sort), ms}]
+   | group_by(.ends) | map({ends: .[0].ends, ms: (map(.ms) | max)})) as $links
+
+# The best of a host's links to the voters other than $excluded, in milliseconds: how fast its path is where the link in question plays no part. Links to the voters alone, since every host measures those (a voter's to a standby is the standby's one-sided reading). Null when it has no other.
+| def elsewhere($host; $excluded):
+    [$links[] | select((.ends | index($host)) != null and (.ends | index($excluded)) == null)
+     | select(.ends | map(select(. != $host)) | .[0] as $other | $voter_names | index($other) != null) | .ms] | min;
+
+  # The end at fault for a slow link between $host and $peer: the one whose other links are slower too, since a node on a poor path is slow to every peer and a node on a good one is fast to its others. Both ends when their other links are as fast as each other's, or one has none to compare.
+  def at_fault($host; $peer):
+    elsewhere($host; $peer) as $own
+    | elsewhere($peer; $host) as $theirs
+    | if $own == null or $theirs == null or $own == $theirs then [$host, $peer] | sort
+      elif $theirs > $own then [$peer]
+      else [$host] end;
+
+  # The nodes an unfit verdict is attributed to: for its round trip, the end at fault for the slow link to its worst peer; for any other fault (its own disk, memory, readiness or restarts), the host itself. Empty for a verdict that is not unfit.
+  def attributed($h):
+    if $h.verdict != "unfit" then []
+    else (if (rtt_faults($h.m) | length) > 0 then at_fault($h.name; $h.m.rtt_peer) else [] end) + (if (own_faults($h.m) | length) > 0 then [$h.name] else [] end) | unique end;
+
+  ($measured | map(. + {attributed_to: attributed(.)})) as $hosts
 | ([$hosts[] | select(.eligible)] | length) as $eligible_count
 | ($all | map(select(.voter))) as $voter_nodes
 
@@ -207,9 +238,11 @@ $config as $c
     (if $cooldown_until != null and $now < $cooldown_until then "the membership changed at \($changed_at), and the cooldown lasts until \($cooldown_until)" else empty end)
   ]) as $blocks
 
-# The swap. A slow link makes both of its ends unfit, since a voter is unfit when its round trip to any other voter is, so the voter to replace is the one at fault: the unfit voter on the most slow links (a link is slow when either end measures it above the unfit limit), the worst-ranked among those on as many. It goes out only if it is eligible and not pinned; when it is not, replacing a voter that shares a slow link with it would fix nothing, so nothing is swapped. The best fit eligible standby that ranks above it comes in, judged against the voters that would remain.
-| ([$hosts[] | select(.role == "voter") | .name as $a | .m.pairs[] | select(.ms != null and .ms > $unfit_rtt_ms) | [$a, .peer] | sort] | unique) as $slow_links
-| ([$hosts[] | select(.role == "voter" and .verdict == "unfit") | . + {slow_links: (.name as $n | [$slow_links[] | select(index($n) != null)] | length)}] | sort_by(.rank) | reverse | sort_by(-.slow_links) | first) as $culprit
+# Which hosts' unfit verdicts each node accounts for, by node.
+| ([$hosts[] | .name as $h | .attributed_to[] | {node: ., host: $h}] | group_by(.node) | map({key: .[0].node, value: map(.host)}) | from_entries) as $attribution
+
+# The swap. A slow link makes both of its ends unfit, since a voter is unfit when its round trip to any other voter is, so the voter to replace is the one at fault: the unfit voter the most hosts' unfit verdicts are attributed to, the worst-ranked among those with as many. It goes out only if it is eligible and not pinned; when it is not, replacing a voter that shares a slow link with it would fix nothing, so nothing is swapped. The best fit eligible standby that ranks above it comes in, judged against the voters that would remain.
+| ([$hosts[] | select(.role == "voter" and .verdict == "unfit") | . + {accounts_for: ($attribution[.name] // [] | length)}] | sort_by(.rank) | reverse | sort_by(-.accounts_for) | first) as $culprit
 | (if $culprit != null and $culprit.eligible and ($culprit.pinned | not) then $culprit else null end) as $out
 | ([$hosts[] | select(.role == "standby" and .eligible)
     | (if $out == null then .m else (.m | without($out.name)) end) as $m
@@ -238,6 +271,7 @@ $config as $c
              quota_bytes: $quota_bytes},
     membership: {voters: $voter_names, changed_at: $changed_at, cooldown_until: $cooldown_until},
     hosts: ($hosts | map({key: .name, value: del(.name, .rank, .m)}) | from_entries),
+    attribution: $attribution,
     ranking: ($hosts | map(select(.verdict == "fit")) | sort_by(.rank) | map(.name)),
     blocks: $blocks,
     decision: $decision
