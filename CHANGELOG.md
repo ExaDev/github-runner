@@ -1,3 +1,40 @@
+## [2.26.0](https://github.com/ExaDev/github-runner/compare/v2.25.0...v2.26.0) (2026-11-03)
+
+### Features
+
+* **arc:** install the role controller and its probe, off by default ([8fd02fe](https://github.com/ExaDev/github-runner/commit/8fd02fe3b48b6bb4897eea079815f8d0b9827730))
+* **cluster:** check the voter target and the hosts marked eligible for the role controller ([ce055bc](https://github.com/ExaDev/github-runner/commit/ce055bc9d48dabc5eda21ab59c09685097bb594d))
+* **cluster:** publish which hosts are eligible and pinned as Node labels ([322f45f](https://github.com/ExaDev/github-runner/commit/322f45f8d377551fe49ab68f79db3183015d5dec))
+* **cluster:** switch the role controller on with github_runner_cluster_role_controller ([ea3160e](https://github.com/ExaDev/github-runner/commit/ea3160e33457a6e8579a7abe488c6d3671c11679))
+* **heartbeat:** republish the role controller's status beside the autoscaler's ([f236a07](https://github.com/ExaDev/github-runner/commit/f236a070c24cc647fb9fafbb9ad28f380c6d016f))
+* **role:** decide which hosts are fit to hold an etcd vote, in dry-run ([1e2bfb6](https://github.com/ExaDev/github-runner/commit/1e2bfb6d2c8ffa1e624f7b79236e7b2faac3572a))
+* **role:** sample each node's link, round trips, memory and etcd health for the controller ([d26220c](https://github.com/ExaDev/github-runner/commit/d26220c4edfcbe8a74868826153ddcbe724d5dd6))
+* **role:** take each probe reading alone to compare it with one taken by hand ([4b242a6](https://github.com/ExaDev/github-runner/commit/4b242a640f6159ec59fd5a15846db9cf62b40a83))
+
+### Bug Fixes
+
+* **role:** ask the API for two things a sample, and carry on when it refuses one ([b7fed75](https://github.com/ExaDev/github-runner/commit/b7fed75d22e882508264566ee2d0625d0e4df892))
+* **role:** count a peer connected when either of etcd's two streams to it is up ([a256633](https://github.com/ExaDev/github-runner/commit/a25663303e1b2808b927cd55567f2d827cb79ecd))
+* **role:** pass the probes' entries to jq in files and on standard input ([af55a61](https://github.com/ExaDev/github-runner/commit/af55a613f4042baf3926062bc88f7e90c4e4ee7d))
+* **role:** record only on a voter or an eligible host ([682955f](https://github.com/ExaDev/github-runner/commit/682955f17d41289d633ae8d8b935be97e56c3db5))
+* **role:** replace the voter at fault, and judge a candidate without the voter it replaces ([b034346](https://github.com/ExaDev/github-runner/commit/b034346e981e0e434f31f522f8b21ca115f9828d))
+* **role:** report a voter whose probe has gone quiet as a reason not to act ([732f1c1](https://github.com/ExaDev/github-runner/commit/732f1c1df63f58958182fa7e9682d08abdafcf0f))
+* **role:** require the election timeout instead of defaulting it in the controller ([7d41a35](https://github.com/ExaDev/github-runner/commit/7d41a3516a4e1f1e77a2652ae4666bc85705dcbe))
+
+### Tests
+
+* **role:** keep the autoscaler image test to the scripts that image runs ([d5d39a4](https://github.com/ExaDev/github-runner/commit/d5d39a4a813301dd4872beccaf28cf90da5a99bc))
+* **role:** publish the controller scenario's labels through the inventory ([e7accd7](https://github.com/ExaDev/github-runner/commit/e7accd77b006c9befd1cdd1cbae6dcd25bf1b741))
+* **role:** run the role controller on real k3s with a slow voter and a paused one ([d60b860](https://github.com/ExaDev/github-runner/commit/d60b860a721ccdb9bdb09f3348a8a49d4d6eff1d))
+
+### Build System
+
+* **role:** publish the role controller image with each release ([ed298b3](https://github.com/ExaDev/github-runner/commit/ed298b3e011c7cc04b683504220cbdadfd0d5721))
+
+### Continuous Integration
+
+* **role:** build the role controller image and run the live etcd test on pull requests ([3659359](https://github.com/ExaDev/github-runner/commit/3659359d48a11b3aeef0c86cd7bbb9ccec0216cd))
+
 ## [2.25.0](https://github.com/ExaDev/github-runner/compare/v2.24.0...v2.25.0) (2026-11-03)
 
 ### Features
