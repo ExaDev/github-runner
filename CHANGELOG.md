@@ -1,3 +1,23 @@
+## [2.34.0](https://github.com/ExaDev/github-runner/compare/v2.33.0...v2.34.0) (2026-11-03)
+
+### Features
+
+* **cluster:** mount the host's role directory read-only into both node services ([d06b10d](https://github.com/ExaDev/github-runner/commit/d06b10da5362e03c0477e60cba809b44fcbd7df0))
+
+### Bug Fixes
+
+* **cluster:** keep a native server whose etcd member was removed from starting ([d6b5c71](https://github.com/ExaDev/github-runner/commit/d6b5c71a1e79b295b6b8c2f9da2de57877d2fd1b))
+* **cluster:** never start a second cluster from a former member ([c5af039](https://github.com/ExaDev/github-runner/commit/c5af0394c2d97044bb2d5bbeb35a5714fef5066b))
+
+### Documentation
+
+* **cluster:** describe the role directory and the guards for a former member ([88f6fc4](https://github.com/ExaDev/github-runner/commit/88f6fc4a04b1799502f7dd97661f5261c8fe9ac9))
+
+### Tests
+
+* **cluster:** read the native server condition from one run of the role ([472f1b6](https://github.com/ExaDev/github-runner/commit/472f1b6c24705e5d4dfb2f190d7a5aa70a80cd19))
+* **mesh:** add the rejoin scenario for a former member of the cluster ([f2d91de](https://github.com/ExaDev/github-runner/commit/f2d91de0ba1de05913a161f41cecaf205a20f41d))
+
 ## [2.33.0](https://github.com/ExaDev/github-runner/compare/v2.32.0...v2.33.0) (2026-11-03)
 
 ### Features
