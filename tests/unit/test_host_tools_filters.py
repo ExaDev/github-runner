@@ -52,11 +52,12 @@ class ShellIntegrationFilterTest(unittest.TestCase):
         )
 
     def test_mise_is_activated_for_the_shell_it_is_in(self) -> None:
-        [mise] = host_tools.host_tools_shell_integrations("/usr/local", "bash", False, True)
+        [mise] = [item for item in host_tools.host_tools_shell_integrations("/usr/local", "bash", False, True) if item["name"] == "mise"]
         self.assertTrue(mise["line"].endswith('activate bash)"'))
 
     def test_a_tool_that_is_not_wanted_has_no_line(self) -> None:
-        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_integrations("/usr/local", "bash", True, False)], ["homebrew"])
+        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_integrations("/usr/local", "bash", True, False)], ["path", "homebrew"])
+        self.assertEqual([item["name"] for item in host_tools.host_tools_shell_integrations("/usr/local", "zsh", True, False)], ["homebrew"])
         self.assertEqual(host_tools.host_tools_shell_integrations("/usr/local", "bash", False, False), [])
 
     def test_a_prefix_with_a_space_is_quoted(self) -> None:
@@ -75,6 +76,59 @@ class ShellIntegrationFilterTest(unittest.TestCase):
             host_tools.host_tools_shell_integrations("opt/homebrew", "zsh", True, True)
         with self.assertRaisesRegex(Exception, "zsh or bash"):
             host_tools.host_tools_shell_integrations("/opt/homebrew", "fish", True, True)
+
+
+class BashPathFilterTest(unittest.TestCase):
+    def path_item(self, prefix: str = "/home/linuxbrew/.linuxbrew", homebrew: bool = True, mise: bool = True) -> dict[str, object]:
+        [item] = [item for item in host_tools.host_tools_shell_integrations(prefix, "bash", homebrew, mise) if item["name"] == "path"]
+        return item
+
+    def test_bash_gets_one_line_with_the_shims_ahead_of_homebrews_directories_for_a_non_interactive_shell(self) -> None:
+        self.assertEqual(
+            self.path_item(),
+            {
+                "name": "path",
+                "pattern": "^[^#]*PATH=[^#]*/home/linuxbrew/\\.linuxbrew/bin",
+                "line": 'export PATH="$HOME/.local/share/mise/shims:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:$PATH"',
+                "non_interactive": True,
+            },
+        )
+
+    def test_only_the_tools_wanted_are_on_the_path(self) -> None:
+        self.assertEqual(self.path_item(mise=False)["line"], 'export PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:$PATH"')
+        self.assertEqual(self.path_item(homebrew=False)["line"], 'export PATH="$HOME/.local/share/mise/shims:$PATH"')
+
+    def test_the_tools_own_lines_stay_for_interactive_shells_only(self) -> None:
+        items = {item["name"]: item["non_interactive"] for item in host_tools.host_tools_shell_integrations("/usr/local", "bash", True, True)}
+        self.assertEqual(items, {"path": True, "homebrew": False, "mise": False})
+
+    def test_zsh_gets_no_path_line_because_zshenv_is_read_by_every_zsh(self) -> None:
+        self.assertNotIn("path", [item["name"] for item in host_tools.host_tools_shell_integrations("/usr/local", "zsh", True, True)])
+
+    def test_the_line_gives_a_shell_the_directories_exactly_whatever_the_prefix_and_home_hold(self) -> None:
+        for prefix in ("/home/linuxbrew/.linuxbrew", "/opt/my brew", "/opt/$brew", "/opt/`id`", '/opt/"q"', "/opt/it's", "/opt/back\\slash", "/opt/a:b"):
+            item = self.path_item(prefix)
+            for home in ("/home/example", "/home/a b", "/home/it's", '/home/"q"', "/home/$d"):
+                for shell in ("sh", "bash"):
+                    with self.subTest(prefix=prefix, home=home, shell=shell):
+                        result = subprocess.run([shell, "-c", str(item["line"]) + '\nprintf %s "$PATH"'], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": home})
+                        self.assertEqual(result.stdout, f"{home}/.local/share/mise/shims:{prefix}/bin:{prefix}/sbin:/usr/bin:/bin")
+                        self.assertEqual(result.stderr, "")
+
+    def test_the_pattern_finds_a_path_assignment_naming_the_prefix_and_nothing_else(self) -> None:
+        item = self.path_item()
+        pattern = str(item["pattern"])
+        for text in ('export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"', "PATH=$PATH:/home/linuxbrew/.linuxbrew/bin", '  export PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin'):
+            with self.subTest(text=text):
+                self.assertTrue(grep_finds(pattern, text))
+        for text in ('# export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"', 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"', 'export PATH="$HOME/.local/bin:$PATH"', 'export PATH="/home/linuxbrewX.linuxbrew/bin:$PATH"', 'export PATH="/opt/homebrew/bin:$PATH"'):
+            with self.subTest(text=text):
+                self.assertFalse(grep_finds(pattern, text))
+
+    def test_a_prefix_with_characters_special_in_a_regular_expression_is_matched_literally(self) -> None:
+        pattern = str(self.path_item("/opt/a+b(c)[d]{e}|f.g")["pattern"])
+        self.assertTrue(grep_finds(pattern, "export PATH=/opt/a+b(c)[d]{e}|f.g/bin:$PATH"))
+        self.assertFalse(grep_finds(pattern, "export PATH=/opt/aab(c)[d]{e}|fxg/bin:$PATH"))
 
 
 class MiseTomlFilterTest(unittest.TestCase):

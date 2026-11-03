@@ -5,7 +5,7 @@
 github_runner_host_tools_homebrew: true
 # Whether the role installs mise through Homebrew and keeps it at its latest release. Needs github_runner_host_tools_homebrew, since Homebrew is how mise is installed.
 github_runner_host_tools_mise: true
-# Whether the role adds Homebrew's shellenv and the mise activation to the connecting user's shell startup file. It adds a line only when none of that shell's startup files has it already, so a host that is set up by hand is left as it is.
+# Whether the role adds Homebrew's shellenv and the mise activation to the connecting user's shell startup file, and on a bash host a block at the top of ~/.bashrc that puts Homebrew's directories and mise's shim directory on PATH, which a non-interactive bash (an SSH command) reads and the two interactive lines are never reached by. It adds a line only when none of that shell's startup files has it already, so a host that is set up by hand is left as it is.
 github_runner_host_tools_shell_integration: true
 
 # The commit of Homebrew/install whose install.sh the role downloads, and the SHA-256 checksum of that file. The download is refused unless the file matches, so the installer is the one that was read, never whatever the branch holds later. Raise them together: take the commit, download its install.sh and take its checksum. Used only on a host that has no Homebrew.

@@ -17,7 +17,7 @@ argument_specs:
       github_runner_host_tools_shell_integration:
         type: bool
         default: true
-        description: Whether the role adds Homebrew's shellenv and the mise activation to the connecting user's shell startup file, when none of that shell's startup files has them.
+        description: Whether the role adds Homebrew's shellenv and the mise activation to the connecting user's shell startup file, when none of that shell's startup files has them, and on a bash host a block at the top of ~/.bashrc that puts Homebrew's directories and mise's shim directory on PATH for a non-interactive shell.
       github_runner_host_tools_homebrew_install_commit:
         type: str
         default: 8c82c081753d4263da0cfe615ef8d9433425f22b
