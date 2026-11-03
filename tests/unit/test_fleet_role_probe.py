@@ -408,6 +408,15 @@ class EtcdReadingTest(ProbeCase):
         # Cumulative as etcd reports it, so the sample after this one has something to subtract from.
         self.assertEqual(self.cluster.probes()["me"]["last"]["wal"], cumulative(after, "etcd_disk_wal_fsync_duration_seconds")[""])
 
+    def test_a_peer_with_two_active_streams_counts_once_as_k3ss_etcd_reports_it(self) -> None:
+        # A page from a follower of a three-server k3s cluster (etcd 3.6.4): its gauge for the leader is 2, one for each kind of stream, and for the other follower 1.
+        page_text = page("k3s-follower")
+        self.assertRegex(page_text, r'etcd_network_active_peers\{[^}]*\} 2')
+        with metrics_server([page_text]) as url:
+            self.pass_with(url)
+        etcd = self.newest()["etcd"]
+        self.assertEqual((etcd["active_peers"], etcd["known_members"]), (TARGET - 1, TARGET))
+
     def test_counters_that_go_backwards_mean_etcd_restarted(self) -> None:
         with metrics_server([page("after"), page("before")]) as url:
             self.pass_with(url)
