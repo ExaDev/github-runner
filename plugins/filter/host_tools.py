@@ -15,7 +15,7 @@ MACOS_PREFIXES = {"arm64": "/opt/homebrew", "x86_64": "/usr/local"}
 LINUX_PREFIX = "/home/linuxbrew/.linuxbrew"
 
 # The tables of a mise configuration file the role renders, in the order they are written.
-MISE_TABLES = ("tools", "settings")
+MISE_TABLES = ("tools", "settings", "env")
 
 # A TOML bare key, which needs no quotes.
 BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -105,12 +105,10 @@ def _export_line(name: str, word: str) -> dict[str, Any]:
     return {"name": f"env-{name}", "pattern": f"^[[:space:]]*(export[[:space:]]+)?{name}=", "line": f"export {name}={word}", "non_interactive": True}
 
 
-def _home_relative_value(name: str, value: Any) -> str:
-    """Return the shell word that expands to the user's home directory followed by a relative path: ``"$HOME/<path>"`` with the path escaped for double quotes.
+def _home_relative_path(name: str, value: Any) -> str:
+    """Return a path that is relative to the user's home directory and stays inside it, as given.
 
-    Inside double quotes the shell expands ``$`` and the backtick and gives the backslash and the double quote a meaning, and nothing else, in sh, bash and zsh alike, so a backslash before each of those four makes the path reach the variable exactly as given. (``!`` is special only to an interactive shell reading a typed line, never to one reading a startup file.)
-
-    :raises AnsibleFilterError: the value is not a string, is empty, is absolute, has a ``..`` component, or has a newline or a NUL, which a startup file line cannot hold.
+    :raises AnsibleFilterError: the value is not a string, is empty, is absolute, has a ``..`` component, or has a newline or a NUL, which a startup file line or a single-line value cannot hold.
     """
     if not isinstance(value, str):
         raise AnsibleFilterError(f"The home-relative path of {name} must be a string, not {type(value).__name__}.")
@@ -119,10 +117,30 @@ def _home_relative_value(name: str, value: Any) -> str:
     if not value:
         raise AnsibleFilterError(f"The home-relative path of {name} must not be empty.")
     if value.startswith("/"):
-        raise AnsibleFilterError(f"The path of {name} must be relative to the user's home directory, not absolute ({value!r}); a fixed absolute path belongs in github_runner_host_tools_shell_env.")
+        raise AnsibleFilterError(f"The path of {name} must be relative to the user's home directory, not absolute ({value!r}); a fixed absolute path is given as a plain value instead.")
     if ".." in value.split("/"):
         raise AnsibleFilterError(f"The path of {name} must stay inside the user's home directory, so it must not have a '..' component ({value!r}).")
-    return '"$HOME/' + re.sub(r'([\\$`"])', r"\\\1", value) + '"'
+    return value
+
+
+def _reject_names_in_both(env: dict[Any, Any], home_relative: dict[Any, Any]) -> None:
+    """Raise unless every variable is given once, as a plain value or as a path below the home directory.
+
+    :raises AnsibleFilterError: a name is in both mappings.
+    """
+    both = [name for name in env if name in home_relative]
+    if both:
+        raise AnsibleFilterError(f"{', '.join(map(str, both))} is set both as a plain value and as a home-relative path; give each variable once.")
+
+
+def _home_relative_value(name: str, value: Any) -> str:
+    """Return the shell word that expands to the user's home directory followed by a relative path: ``"$HOME/<path>"`` with the path escaped for double quotes.
+
+    Inside double quotes the shell expands ``$`` and the backtick and gives the backslash and the double quote a meaning, and nothing else, in sh, bash and zsh alike, so a backslash before each of those four makes the path reach the variable exactly as given. (``!`` is special only to an interactive shell reading a typed line, never to one reading a startup file.)
+
+    :raises AnsibleFilterError: as ``_home_relative_path``.
+    """
+    return '"$HOME/' + re.sub(r'([\\$`"])', r"\\\1", _home_relative_path(name, value)) + '"'
 
 
 def host_tools_shell_env(env: Any, home_relative: Any) -> list[dict[str, Any]]:
@@ -130,15 +148,13 @@ def host_tools_shell_env(env: Any, home_relative: Any) -> list[dict[str, Any]]:
 
     A value in ``env`` is quoted for the shell with ``shlex.quote``, so it reaches the variable exactly as given whatever it holds (spaces, quotes, ``$``, backticks), in zsh and in bash alike. A value in ``home_relative`` is a path below the user's home directory and is written as ``"$HOME/<path>"``, so the shell works out the home directory when the file is read, which the role cannot know when it runs without gathering facts. ``pattern`` is an extended regular expression that matches a line of a startup file that already assigns the variable, outside a comment, whatever its value, so a value the user chose is never overridden, and ``name`` tells the lines apart.
 
-    :param env: a mapping of variable names to string, number or boolean values. :param home_relative: a mapping of variable names to paths relative to the user's home directory. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, the variables of ``env`` in its order and then those of ``home_relative`` in its. :raises AnsibleFilterError: an argument is not a mapping, a name is not one the shell accepts or is in both mappings, a value of ``env`` is not a single-line string, a number or a boolean, or a path of ``home_relative`` is not a non-empty relative path without a ``..`` component.
+    :param env: a mapping of variable names to string, number or boolean values. :param home_relative: a mapping of variable names to paths relative to the user's home directory. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, the variables of ``env`` in its order and then those of ``home_relative`` in its. :raises AnsibleFilterError: an argument is not a mapping, a name is not one the shell accepts or is in both mappings (a name in both is refused by the same check as in ``host_tools_mise_toml``), a value of ``env`` is not a single-line string, a number or a boolean, or a path of ``home_relative`` is not a non-empty relative path without a ``..`` component.
     """
     if not isinstance(env, dict):
         raise AnsibleFilterError(f"The shell environment must be a mapping, not {type(env).__name__}.")
     if not isinstance(home_relative, dict):
         raise AnsibleFilterError(f"The home-relative shell environment must be a mapping, not {type(home_relative).__name__}.")
-    both = [name for name in env if name in home_relative]
-    if both:
-        raise AnsibleFilterError(f"{', '.join(map(str, both))} is set in both the shell environment and the home-relative one; give each variable once.")
+    _reject_names_in_both(env, home_relative)
     lines: list[dict[str, Any]] = []
     for name, value in env.items():
         lines.append(_export_line(name, shlex.quote(_env_value(_env_name(name), value))))
@@ -224,17 +240,44 @@ def _table(name: str, entries: Any) -> list[str]:
     return [f"[{name}]", *lines] if lines else []
 
 
-def host_tools_mise_toml(config: Any) -> str:
+def _mise_literal(text: str) -> str:
+    """Return the text of a mise ``[env]`` value that mise reads back as exactly ``text``.
+
+    mise renders a value as a Tera template and then expands ``$VAR`` and ``${VAR}`` in the result, with ``$$`` as a literal dollar sign. So a ``$`` is doubled, and a brace that starts a Tera tag, expression or comment (``{{``, ``{%`` and ``{#``) is written as the Tera expression ``{{ '{' }}``, which renders as that brace. Nothing else in a value is special to either.
+    """
+    return re.sub(r"\{(?=[{%#])", "{{ '{' }}", text.replace("$", "$$"))
+
+
+def _env_table(env: Any, home_relative: Any) -> list[str]:
+    """Return the lines of mise's ``[env]`` table, empty when neither mapping has an entry.
+
+    A plain value is read back as given. A home-relative path is written as ``{{ env.HOME }}/<path>``, so mise works the home directory out when it reads the file, which the role cannot know when it runs without gathering facts.
+
+    :raises AnsibleFilterError: a name is not one a shell accepts (a mise variable is exported to commands run by shells), is in both mappings, a plain value is not a single-line string, a number or a boolean, or a path is not a non-empty relative path without a ``..`` component.
+    """
+    if not isinstance(env, dict):
+        raise AnsibleFilterError(f"env must be a mapping, not {type(env).__name__}.")
+    if not isinstance(home_relative, dict):
+        raise AnsibleFilterError(f"The home-relative env must be a mapping, not {type(home_relative).__name__}.")
+    _reject_names_in_both(env, home_relative)
+    lines = [f"{_env_name(name)} = {_string(_mise_literal(_env_value(name, value)))}" for name, value in env.items()]
+    lines += [f"{_env_name(name)} = {_string('{{ env.HOME }}/' + _mise_literal(_home_relative_path(name, value)))}" for name, value in home_relative.items()]
+    return ["[env]", *lines] if lines else []
+
+
+def host_tools_mise_toml(config: Any, env_home_relative: Any) -> str:
     """Return a mise configuration file for a mapping of its tables.
 
-    :param config: a mapping with the tables ``tools`` (a tool name to a version string or a list of them) and ``settings`` (a setting name to a string, number or boolean, or a list of those). A table that is empty is left out. :returns: the TOML text, each table after a blank line and the whole ending in a newline, in the order tools then settings whatever the order of the mapping. :raises AnsibleFilterError: ``config`` is not a mapping, has a table the role does not render, a value of a kind its table does not take, or renders to nothing.
+    :param config: a mapping with the tables ``tools`` (a tool name to a version string or a list of them), ``settings`` (a setting name to a string, number or boolean, or a list of those) and ``env`` (a variable name to a string, number or boolean, read back by mise as given). A table that is empty is left out. :param env_home_relative: a mapping of variable names to paths relative to the user's home directory, written into the ``env`` table as mise's ``{{ env.HOME }}`` template followed by the path. :returns: the TOML text, each table after a blank line and the whole ending in a newline, in the order tools, settings and env whatever the order of the mapping. :raises AnsibleFilterError: an argument is not a mapping, ``config`` has a table the role does not render or a value of a kind its table does not take, a variable is in both ``config['env']`` and ``env_home_relative``, a path is absolute, empty or has a ``..`` component, or there is nothing to render.
     """
     if not isinstance(config, dict):
         raise AnsibleFilterError(f"The mise configuration must be a mapping, not {type(config).__name__}.")
     unknown = [name for name in config if name not in MISE_TABLES]
     if unknown:
-        raise AnsibleFilterError(f"The mise configuration has the tables {', '.join(map(repr, unknown))}; the role renders only {' and '.join(MISE_TABLES)}.")
-    blocks = [lines for name in MISE_TABLES if name in config and (lines := _table(name, config[name]))]
+        raise AnsibleFilterError(f"The mise configuration has the tables {', '.join(map(repr, unknown))}; the role renders only {', '.join(MISE_TABLES)}.")
+    tables = {name: _table(name, config[name]) for name in MISE_TABLES if name in config and name != "env"}
+    tables["env"] = _env_table(config.get("env", {}), env_home_relative)
+    blocks = [tables[name] for name in MISE_TABLES if tables.get(name)]
     if not blocks:
         raise AnsibleFilterError("The mise configuration has no entry in any table, so there is nothing to render.")
     return "\n\n".join("\n".join(lines) for lines in blocks) + "\n"

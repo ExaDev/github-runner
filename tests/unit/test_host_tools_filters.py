@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 import yaml
+from mise_reader import mise_env
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugins" / "filter" / "host_tools.py"
@@ -78,31 +81,31 @@ class MiseTomlFilterTest(unittest.TestCase):
     def test_tools_and_settings_render_as_two_tables(self) -> None:
         config = {"tools": {"node": "22", "python": ["3.13", "3.12"]}, "settings": {"experimental": True, "jobs": 4, "ratio": 0.5, "http_timeout": "30s"}}
         self.assertEqual(
-            host_tools.host_tools_mise_toml(config),
+            host_tools.host_tools_mise_toml(config, {}),
             '[tools]\nnode = "22"\npython = ["3.13", "3.12"]\n\n[settings]\nexperimental = true\njobs = 4\nratio = 0.5\nhttp_timeout = "30s"\n',
         )
 
     def test_the_tables_come_out_in_one_order_whatever_the_mapping_has(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"experimental": False}, "tools": {"node": "lts"}}), '[tools]\nnode = "lts"\n\n[settings]\nexperimental = false\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"experimental": False}, "tools": {"node": "lts"}}, {}), '[tools]\nnode = "lts"\n\n[settings]\nexperimental = false\n')
 
     def test_a_key_that_is_not_bare_is_quoted(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {"npm:typescript": "latest", "cargo:ripgrep": ["14"]}}), '[tools]\n"npm:typescript" = "latest"\n"cargo:ripgrep" = ["14"]\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {"npm:typescript": "latest", "cargo:ripgrep": ["14"]}}, {}), '[tools]\n"npm:typescript" = "latest"\n"cargo:ripgrep" = ["14"]\n')
 
     def test_strings_are_escaped(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"note": 'say "hi"\\\n\t\x01'}}), '[settings]\nnote = "say \\"hi\\"\\\\\\n\\t\\u0001"\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"note": 'say "hi"\\\n\t\x01'}}, {}), '[settings]\nnote = "say \\"hi\\"\\\\\\n\\t\\u0001"\n')
 
     def test_a_setting_can_be_a_list_of_scalars(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"disable_tools": ["node", "python"], "levels": [1, 2]}}), '[settings]\ndisable_tools = ["node", "python"]\nlevels = [1, 2]\n')
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"disable_tools": ["node", "python"], "levels": [1, 2]}}, {}), '[settings]\ndisable_tools = ["node", "python"]\nlevels = [1, 2]\n')
 
     def test_an_empty_table_is_left_out(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {}, "settings": {"experimental": True}}), "[settings]\nexperimental = true\n")
+        self.assertEqual(host_tools.host_tools_mise_toml({"tools": {}, "settings": {"experimental": True}}, {}), "[settings]\nexperimental = true\n")
 
     def test_a_boolean_is_not_written_as_a_number(self) -> None:
-        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"on": True, "one": 1}}), "[settings]\non = true\none = 1\n")
+        self.assertEqual(host_tools.host_tools_mise_toml({"settings": {"on": True, "one": 1}}, {}), "[settings]\non = true\none = 1\n")
 
     def test_what_it_cannot_render_is_refused(self) -> None:
         cases = {
-            "a table the role does not render": ({"env": {"A": "b"}}, "env"),
+            "a table the role does not render": ({"plugins": {"A": "b"}}, "renders only tools, settings, env"),
             "nothing to render": ({"tools": {}}, "nothing to render"),
             "not a mapping": (["node"], "must be a mapping"),
             "a tool given a number": ({"tools": {"node": 22}}, "tools.node"),
@@ -114,7 +117,84 @@ class MiseTomlFilterTest(unittest.TestCase):
         }
         for label, (config, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
-                host_tools.host_tools_mise_toml(config)
+                host_tools.host_tools_mise_toml(config, {})
+
+
+class MiseEnvFilterTest(unittest.TestCase):
+    def read_back(self, env: dict[str, object], home_relative: dict[str, str], home: str = "home") -> tuple[dict[str, str], str]:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        return mise_env(host_tools.host_tools_mise_toml({"env": env}, home_relative), root / home)
+
+    def test_the_env_table_is_written_last_with_plain_values_then_home_relative_paths(self) -> None:
+        self.assertEqual(
+            host_tools.host_tools_mise_toml({"env": {"B": "x", "A": True, "N": 3, "F": 0.5}, "tools": {"node": "22"}}, {"TURBO_CACHE_DIR": ".cache/turbo"}),
+            '[tools]\nnode = "22"\n\n[env]\nB = "x"\nA = "true"\nN = "3"\nF = "0.5"\nTURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"\n',
+        )
+
+    def test_home_relative_paths_alone_are_enough_to_render(self) -> None:
+        self.assertEqual(host_tools.host_tools_mise_toml({}, {"TURBO_CACHE_DIR": ".cache/turbo"}), '[env]\nTURBO_CACHE_DIR = "{{ env.HOME }}/.cache/turbo"\n')
+
+    def test_an_empty_env_table_is_left_out(self) -> None:
+        self.assertEqual(host_tools.host_tools_mise_toml({"env": {}, "tools": {"node": "22"}}, {}), '[tools]\nnode = "22"\n')
+
+    def test_a_dollar_sign_and_a_template_brace_are_escaped_for_mise_and_the_string_for_toml(self) -> None:
+        self.assertEqual(host_tools.host_tools_mise_toml({"env": {"A": 'a$b "c" {{d}} {%e%} {#f#} {g}'}}, {}), "[env]\nA = \"a$$b \\\"c\\\" {{ '{' }}{d}} {{ '{' }}%e%} {{ '{' }}#f#} {g}\"\n")
+
+    def test_a_home_relative_variable_is_expanded_by_mise_to_the_home_directory_it_reads_the_file_in(self) -> None:
+        for home in ("home", "a home", "it's", 'say "hi"', "$d"):
+            with self.subTest(home=home):
+                exported, _ = self.read_back({}, {"TURBO_CACHE_DIR": ".cache/turbo"}, home)
+                self.assertTrue(exported["TURBO_CACHE_DIR"].endswith(f"/{home}/.cache/turbo"), exported)
+
+    def test_a_value_reaches_the_variable_exactly_as_given_whatever_it_holds(self) -> None:
+        values = ["$HOME", "${HOME}", "$$", "a$", "$1", "${X:-y}", "$(id)", "`id`", "~", "~/x", "{{ env.HOME }}", "{{", "{%", "{#", "{", "}}", "{{x}}", "{% raw %}", "{% endraw %}", "{{ '{' }}", "a{b}c", "{ {", "$ {", "${{x}}", "it's", 'say "hi"', "back\\slash", "tab\there", "a b  c", "é", "", "-n", "true", "3", "*"]
+        exported, stderr = self.read_back({f"V{index}": value for index, value in enumerate(values)}, {})
+        for index, value in enumerate(values):
+            with self.subTest(value=value):
+                self.assertEqual(exported[f"V{index}"], value)
+        self.assertNotIn("not defined", stderr)
+
+    def test_a_number_and_a_boolean_are_exported_as_their_text(self) -> None:
+        exported, _ = self.read_back({"A": True, "B": False, "C": 3, "D": 0.5}, {})
+        self.assertEqual({key: exported[key] for key in "ABCD"}, {"A": "true", "B": "false", "C": "3", "D": "0.5"})
+
+    def test_a_path_reaches_the_variable_exactly_as_given_after_the_home_directory(self) -> None:
+        paths = [".cache/turbo", "a b  c", "it's", 'say "hi"', "$HOME", "${HOME}", "`id`", "$(id)", "back\\slash", "\\$", "tab\there", "*", "; echo injected", "-n", "~", "~/x", "a..b", "..x", "x..", "dir/", "./x", "é", "{{ env.HOME }}", "{{x}}", "{%x%}", "{#x#}", "{", "{{", "}}", "{% endraw %}", "$$", "a$"]
+        exported, stderr = self.read_back({}, {f"P{index}": path for index, path in enumerate(paths)}, "the home")
+        for index, path in enumerate(paths):
+            with self.subTest(path=path):
+                self.assertTrue(exported[f"P{index}"].endswith(f"/the home/{path}"), exported[f"P{index}"])
+                self.assertEqual(exported[f"P{index}"].count("/the home/"), 1)
+        self.assertNotIn("not defined", stderr)
+
+    def test_what_mise_would_not_take_as_a_variable_is_refused(self) -> None:
+        cases = {
+            "a name with a hyphen": ({"env": {"A-B": "x"}}, {}, "not a name a shell accepts"),
+            "a name starting with a digit": ({"env": {"1A": "x"}}, {}, "not a name a shell accepts"),
+            "a name that is not a string": ({"env": {1: "x"}}, {}, "not a name a shell accepts"),
+            "a home-relative name with a hyphen": ({}, {"A-B": "x"}, "not a name a shell accepts"),
+            "a list value": ({"env": {"A": ["a"]}}, {}, "must be a string, a number or a boolean"),
+            "a null value": ({"env": {"A": None}}, {}, "must be a string, a number or a boolean"),
+            "a newline": ({"env": {"A": "a\nb"}}, {}, "one line"),
+            "a NUL": ({"env": {"A": "a\x00b"}}, {}, "one line"),
+            "an env table that is not a mapping": ({"env": ["A"]}, {}, "env must be a mapping"),
+            "a home-relative mapping that is not a mapping": ({}, [".cache"], "home-relative env must be a mapping"),
+            "an absolute path": ({}, {"A": "/var/cache"}, "relative to the user's home"),
+            "an empty path": ({}, {"A": ""}, "must not be empty"),
+            "a parent component": ({}, {"A": "a/../b"}, "'..' component"),
+            "only a parent component": ({}, {"A": ".."}, "'..' component"),
+            "a number as a path": ({}, {"A": 3}, "must be a string"),
+            "a newline in a path": ({}, {"A": "a\nb"}, "one line"),
+            "a name in both": ({"env": {"A": "x"}}, {"A": ".cache"}, "A is set both"),
+        }
+        for label, (config, home_relative, message) in cases.items():
+            with self.subTest(label), self.assertRaisesRegex(Exception, message):
+                host_tools.host_tools_mise_toml(config, home_relative)
+
+    def test_nothing_in_either_mapping_is_nothing_to_render(self) -> None:
+        with self.assertRaisesRegex(Exception, "nothing to render"):
+            host_tools.host_tools_mise_toml({"env": {}}, {})
 
 
 def grep_finds(pattern: str, text: str) -> bool:
@@ -245,7 +325,7 @@ class HomeRelativeFilterTest(unittest.TestCase):
             host_tools.host_tools_shell_env({}, [".cache"])
 
     def test_a_variable_in_both_mappings_is_refused_and_named(self) -> None:
-        with self.assertRaisesRegex(Exception, "A is set in both"):
+        with self.assertRaisesRegex(Exception, "A is set both"):
             host_tools.host_tools_shell_env({"A": "x"}, {"A": "y"})
 
 

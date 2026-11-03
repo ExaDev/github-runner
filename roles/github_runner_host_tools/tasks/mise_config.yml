@@ -1,5 +1,5 @@
 ---
-# Writes the global mise defaults to conf.d, never to config.toml: that file is the host's own and takes precedence over conf.d, so the role neither writes nor deletes it. Only reached when there is something to write; an empty github_runner_host_tools_mise_config leaves any existing file alone.
+# Writes the global mise defaults to conf.d, never to config.toml: that file is the host's own and takes precedence over conf.d, so the role neither writes nor deletes it. Only reached when there is something to write; with github_runner_host_tools_mise_config and github_runner_host_tools_mise_env_home_relative both empty, any existing file is left alone. The content is a filter's output, which Ansible does not template again, so the braces of mise's own templates in it reach the file as they are.
 
 - name: Look for the conf.d directory
   ansible.builtin.stat:
@@ -16,7 +16,7 @@
 - name: Write the defaults
   # Under --check the directory above was not made if it was missing, and copy refuses a destination whose directory is not there, so that case is reported below.
   ansible.builtin.copy:
-    content: "# Managed by Ansible (exadev.github_runner.github_runner_host_tools). Edits to this file are overwritten.\n{{ github_runner_host_tools_mise_config | exadev.github_runner.host_tools_mise_toml }}"
+    content: "# Managed by Ansible (exadev.github_runner.github_runner_host_tools). Edits to this file are overwritten.\n{{ github_runner_host_tools_mise_config | exadev.github_runner.host_tools_mise_toml(github_runner_host_tools_mise_env_home_relative) }}"
     dest: "{{ ansible_facts['user_dir'] }}/.config/mise/conf.d/00-fleet.toml"
     mode: "0644"
   when: github_runner_host_tools_conf_dir.stat.exists or not ansible_check_mode
