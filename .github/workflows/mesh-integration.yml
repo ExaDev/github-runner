@@ -80,7 +80,8 @@ jobs:
             python3 -m venv "${RUNNER_TEMP}/venv"
           fi
           "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core
-          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install -r ansible/requirements.yml -p "${RUNNER_TEMP}/collections"
+          # --no-cache: ansible-core's Galaxy response cache keeps an empty entry when a request it retries (a 429, 502 or 520) fails, and the retry then reads that entry and fails the install with "Missing expected 'results'" (_call_galaxy in ansible/galaxy/api.py); without the cache the retry asks the server again.
+          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install --no-cache -r ansible/requirements.yml -p "${RUNNER_TEMP}/collections"
           echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
 
       - name: Run the ${{ matrix.scenario }} scenario
