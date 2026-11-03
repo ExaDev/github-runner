@@ -108,6 +108,15 @@ class NativeRoleHarness(unittest.TestCase):
         self.make_stand_ins()
         self.set_tailscale(None, None)
         self.facts = dict(FACTS)
+        # What the host holds before the role runs, which written() leaves out.
+        self.host_files = self.files_on_host()
+
+    def files_on_host(self) -> set[Path]:
+        return {path for path in self.root.rglob("*") if path.is_file()}
+
+    def written(self) -> list[Path]:
+        """The files on the stand-in host that were not there before the role ran, in path order."""
+        return sorted(self.files_on_host() - self.host_files)
 
     def make_stand_ins(self) -> None:
         bin_dir = self.stubs / "bin"

@@ -8,6 +8,7 @@ import unittest
 from typing import Any
 
 from native_stand_ins import DOMAIN, ROLE, NativeRoleHarness
+from regrade_settings import sourced
 
 ON = {"github_runner_cluster_regrade": True}
 
@@ -21,10 +22,7 @@ class NativeRegradeTest(NativeRoleHarness):
         return self.run_three(laptop=laptop, check=check)
 
     def settings(self) -> dict[str, str]:
-        text = self.file("github_runner_cluster_native_lib_dir", "regrade/fleet-regrade.env").read_text()
-        script = "set -eu\n. /dev/stdin <<'ENV'\n" + text + "ENV\nenv -0\n"
-        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, env={})
-        return dict(entry.split("=", 1) for entry in result.stdout.split("\0") if "=" in entry)
+        return sourced(self.file("github_runner_cluster_native_lib_dir", "regrade/fleet-regrade.env").read_text())
 
     def regrade_unit(self) -> str:
         return self.file("github_runner_cluster_native_unit_dir", "fleet-regrade.service").read_text()
