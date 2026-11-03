@@ -460,6 +460,21 @@ class NativeRoleTest(NativeRoleHarness):
         config = yaml.safe_load(self.file("github_runner_cluster_native_config_dir", "agent.yaml").read_text())
         self.assertEqual(config["node-taint"], taints)
 
+    def test_a_host_that_uses_no_voter_setting_gets_no_node_labels(self) -> None:
+        self.assertEqual(self.run_role().returncode, 0)
+        config = yaml.safe_load(self.file("github_runner_cluster_native_config_dir", "agent.yaml").read_text())
+        self.assertNotIn("node-label", config)
+
+    def test_an_eligible_host_gets_its_voter_labels_as_k3s_node_labels(self) -> None:
+        self.assertEqual(self.run_role(host_vars={"github_runner_cluster_voter_eligible": True}).returncode, 0)
+        config = yaml.safe_load(self.file("github_runner_cluster_native_config_dir", "agent.yaml").read_text())
+        self.assertEqual(config["node-label"], ["github-runner.exadev.com/voter-eligible=true", "github-runner.exadev.com/voter-pinned=false"])
+
+    def test_with_the_role_controller_on_every_host_gets_both_labels_false(self) -> None:
+        self.assertEqual(self.run_role(host_vars={"github_runner_cluster_role_controller": True}).returncode, 0)
+        config = yaml.safe_load(self.file("github_runner_cluster_native_config_dir", "agent.yaml").read_text())
+        self.assertEqual(config["node-label"], ["github-runner.exadev.com/voter-eligible=false", "github-runner.exadev.com/voter-pinned=false"])
+
     def test_a_host_that_sets_its_node_name_joins_under_it(self) -> None:
         self.assertEqual(self.run_role(host_vars={"github_runner_cluster_node_name": "laptop-renamed"}).returncode, 0)
         config = yaml.safe_load(self.file("github_runner_cluster_native_config_dir", "agent.yaml").read_text())

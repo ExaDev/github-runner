@@ -29,3 +29,9 @@ node-taint:
   - {{ taint | to_json }}
 {% endfor %}
 {% endif %}
+{% if github_runner_cluster_node_labels | length > 0 %}
+node-label:
+{% for label in github_runner_cluster_node_labels %}
+  - {{ label | to_json }}
+{% endfor %}
+{% endif %}

@@ -389,8 +389,7 @@ argument_specs:
         description: Seconds between probe samples and between controller passes. A figure is read over a window of 100 samples.
       github_runner_arc_role_controller_voters:
         type: int
-        default: 3
-        description: The number of etcd voters the cluster is held at. Odd, at least 3, and at most github_runner_arc_role_controller_max_servers minus one.
+        description: The number of etcd voters the cluster is held at, from github_runner_cluster_voters when that is defined, else 3. Odd, at least 3, and at most github_runner_arc_role_controller_max_servers minus one.
       github_runner_arc_role_controller_max_servers:
         type: int
         description: The cluster role's github_runner_cluster_max_servers when it is defined, else 5.
@@ -405,12 +404,10 @@ argument_specs:
         description: The regrade core's MemAvailable floor in percent of MemTotal, from github_runner_cluster_regrade_available_floor_percent when defined, else its default.
       github_runner_arc_role_controller_eligible_label:
         type: str
-        default: github-runner.exadev.com/voter-eligible
-        description: The Node label, with the value true, that marks a host the controller may promote or demote.
+        description: The Node label, with the value true, that marks a host the controller may promote or demote, from github_runner_cluster_voter_eligible_label when that is defined, else github-runner.exadev.com/voter-eligible.
       github_runner_arc_role_controller_pinned_label:
         type: str
-        default: github-runner.exadev.com/voter-pinned
-        description: The Node label, with the value true, that marks a voter the controller must never demote.
+        description: The Node label, with the value true, that marks a voter the controller must never demote, from github_runner_cluster_voter_pinned_label when that is defined, else github-runner.exadev.com/voter-pinned.
       github_runner_arc_role_controller_level_label:
         type: str
         description: The label regrading puts on a server below full, from github_runner_cluster_regrade_level_label when defined, else github-runner.exadev.com/regrade-level.
