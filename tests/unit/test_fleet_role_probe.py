@@ -652,6 +652,16 @@ class MemoryTest(ProbeCase):
         self.assertEqual((latest["psi"], latest["avail_kb"], latest["total_kb"]), (None, 8192000, 16384000))
 
 
+    @unittest.skipUnless(os.access("/proc/self/mem", os.R_OK), "needs Linux's /proc/self/mem")
+    def test_a_pressure_file_the_kernel_refuses_to_read_gives_a_sample_without_a_pressure_reading(self) -> None:
+        # An older kernel booted with psi=0 keeps /proc/pressure/memory and refuses to read it (EOPNOTSUPP). /proc/self/mem stands in for it: it exists and is readable by its mode, and a read at its start fails (EIO).
+        completed = self.probe(PSI_FILE="/proc/self/mem")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        latest = self.newest()
+        self.assertEqual((latest["psi"], latest["avail_kb"], latest["total_kb"]), (None, 8192000, 16384000))
+
+
 class RingTest(ProbeCase):
     def setUp(self) -> None:
         super().setUp()
@@ -907,6 +917,13 @@ class CheckTest(ProbeCase):
         completed = self.check("memory", PSI_FILE=str(self.cluster.dir / "no-such-dir" / "memory"))
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout), {"psi_avg300": None, "mem_available_kb": 4096000, "mem_total_kb": 32768000})
+
+    @unittest.skipUnless(os.access("/proc/self/mem", os.R_OK), "needs Linux's /proc/self/mem")
+    def test_memory_with_a_pressure_file_the_kernel_refuses_to_read_prints_no_pressure(self) -> None:
+        # As in MemoryTest: /proc/self/mem stands in for the pressure file of an older kernel booted with psi=0.
+        completed = self.check("memory", PSI_FILE="/proc/self/mem")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"psi_avg300": None, "mem_available_kb": 8192000, "mem_total_kb": 16384000})
 
     def test_connect_prints_the_milliseconds_to_a_listener(self) -> None:
         with listener() as port:
