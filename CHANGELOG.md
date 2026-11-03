@@ -1,3 +1,24 @@
+## [2.24.0](https://github.com/ExaDev/github-runner/compare/v2.23.0...v2.24.0) (2026-11-03)
+
+### Features
+
+* **cluster:** hold each node to the version rules of its live role ([2a4ee7c](https://github.com/ExaDev/github-runner/commit/2a4ee7c657824f88be1c79d323d81d0d96d6cfee))
+* **cluster:** let a native host be a server when the inventory asks ([1b0d49a](https://github.com/ExaDev/github-runner/commit/1b0d49aa979de07626f5795c57743d63052e40a8))
+* **cluster:** run a native host as a k3s server and etcd voter ([4f1dbd0](https://github.com/ExaDev/github-runner/commit/4f1dbd0a4451f67941f69d69a1e6ef3b016798c1))
+
+### Tests
+
+* **mesh:** bring the Docker servers up before the native host joins them ([99f2dbc](https://github.com/ExaDev/github-runner/commit/99f2dbcb7894d7d1562553de567d20c7025bcb33))
+* **mesh:** name each write of the native promotion uniquely and keep its error ([43a309c](https://github.com/ExaDev/github-runner/commit/43a309c9fc244680fef42b1cd3f3d8f622daccf8))
+* **mesh:** promote a native server in place beside the Docker servers ([887790c](https://github.com/ExaDev/github-runner/commit/887790c64ea78a639b9630d772e2a7ce39fedc6b))
+* **mesh:** read the native host's node by its own name ([24f3edb](https://github.com/ExaDev/github-runner/commit/24f3edb73480f1ad6cbeb82e1521cac93b3d90b1))
+* **native:** seed a running role instead of spending a run to reach it ([3e8792c](https://github.com/ExaDev/github-runner/commit/3e8792cc3aa614d12b30c1a39142d839dde0d28a))
+* **native:** split the native server tests into a module of their own ([cb94e2b](https://github.com/ExaDev/github-runner/commit/cb94e2b3f7e3ad24d30dcdccade58114cfb2fac3))
+
+### Continuous Integration
+
+* run the unit tests in five shards and treat the timeout as a hang guard ([03cf224](https://github.com/ExaDev/github-runner/commit/03cf224449b33a491e3d85cae52c1aef447afe44))
+
 ## [2.23.0](https://github.com/ExaDev/github-runner/compare/v2.22.0...v2.23.0) (2026-11-03)
 
 ### Features
