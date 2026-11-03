@@ -1,0 +1,40 @@
+---
+# Waits for every node this run manages to report Ready, self-healing a stale server/agent node-password registration if any of them fails to rejoin. The nodes this run manages are the inventory hosts' (github_runner_cluster_topology, each host's effective node name), the same set the rescue picks its rejoin hosts from; see tasks/wait_for_ready.yml for how a node outside the inventory is treated.
+
+- name: Wait for every node this run manages to report Ready
+  # A recreated container keeps its password (/etc/rancher/node is a named volume, seeded by tasks/node_password.yml), so this only fires for a node that is genuinely new under an old name: a replaced host or a node whose volume was removed generates a brand-new random password, but a server that already owns the node-password Secret store still holds the PREVIOUS password for that node name (a kube-system/<node>.node-password.k3s Secret) and rejects the mismatched rejoin. See the role README's Node passwords section; the same failure mode applies to a joining server, since it's the same k3s node-password mechanism regardless of join mode. Keyed on each host's effective node name (its github_runner_cluster_node_name override if set, else its inventory name, as tasks/topology.yml recorded it), since that, not the inventory name, is what k3s names the Node and its node-password Secret after. Only ever touches cluster members that are NOT the bootstrap host (as tasks/topology.yml decided it), and of those only the ones whose node is missing or not Ready: the bootstrap host owns the Secret store itself and fails Ready for entirely different reasons a stale-password wipe wouldn't fix anyway, and a Ready node's registration is not stale.
+  block:
+    - name: Wait for the nodes
+      ansible.builtin.include_tasks: wait_for_ready.yml
+  rescue:
+    - name: Read which nodes are Ready and which regrading has stepped down
+      ansible.builtin.include_tasks: node_readiness.yml
+
+    # Only the hosts whose node is missing or not Ready: clearing a Ready node's Node object makes the cluster evict every pod on it, so a single unreachable host must not take the registrations of healthy ones with it.
+    - name: Pick the non-bootstrap hosts whose node has not rejoined
+      ansible.builtin.set_fact:
+        github_runner_cluster_rejoin_hosts: >-
+          {{ github_runner_cluster_topology.hosts | dict2items | rejectattr('value.bootstrap')
+             | rejectattr('value.node_name', 'in', github_runner_cluster_node_readiness.stdout_lines | select('search', '=True$') | map('split', '=') | map('first') | list + github_runner_cluster_nodes_stepped_down.stdout_lines)
+             | map(attribute='key') | list }}
+
+    - name: Clear the stale node-password secret of each host that has not rejoined
+      kubernetes.core.k8s:
+        kubeconfig: "{{ github_runner_cluster_kubeconfig_path }}"
+        state: absent
+        kind: Secret
+        namespace: kube-system
+        name: "{{ github_runner_cluster_topology.hosts[item].node_name }}.node-password.k3s"
+      loop: "{{ github_runner_cluster_rejoin_hosts }}"
+
+    # Agents only. Deleting a server's Node object makes k3s remove that server's etcd member, and a removed member cannot rejoin on its own: its etcd refuses to start until its local datastore is cleared. The node-password Secret above is what a password mismatch needs; an agent's stale Node object is cleared as well so it re-registers cleanly.
+    - name: Clear the stale Node object of each agent that has not rejoined, to match
+      kubernetes.core.k8s:
+        kubeconfig: "{{ github_runner_cluster_kubeconfig_path }}"
+        state: absent
+        kind: Node
+        name: "{{ github_runner_cluster_topology.hosts[item].node_name }}"
+      loop: "{{ github_runner_cluster_rejoin_hosts | select('in', github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'agent') | map(attribute='key') | list) | list }}"
+
+    - name: Retry waiting for the nodes now that any stale registration is cleared
+      ansible.builtin.include_tasks: wait_for_ready.yml
