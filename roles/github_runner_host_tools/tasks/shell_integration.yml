@@ -28,7 +28,7 @@
   when: github_runner_host_tools_shell not in github_runner_host_tools_shell_files
 
 - name: Add what each shell startup file is missing
-  # The list is empty for a shell the role does not set up, because a loop is evaluated before its when and the filter refuses a shell it does not know. Homebrew's and mise's lines come first, only when the integration is on and Homebrew is managed (the prefix is worked out only then), and the environment variables follow.
+  # The list is empty for a shell the role does not set up, because a loop is evaluated before its when and the filter refuses a shell it does not know. Homebrew's and mise's lines come first (on bash, with the PATH block for a non-interactive shell, which is written at the top of the file), only when the integration is on and Homebrew is managed (the prefix is worked out only then), and the environment variables follow.
   ansible.builtin.include_tasks: shell_integration_line.yml
   loop: "{{ (((github_runner_host_tools_effective_prefix | exadev.github_runner.host_tools_shell_integrations(github_runner_host_tools_shell, github_runner_host_tools_homebrew | bool, github_runner_host_tools_mise | bool)) if github_runner_host_tools_shell_integration | bool and github_runner_host_tools_homebrew | bool else []) + (github_runner_host_tools_shell_env | exadev.github_runner.host_tools_shell_env(github_runner_host_tools_shell_env_home_relative))) if github_runner_host_tools_shell in github_runner_host_tools_shell_files else [] }}"
   loop_control:

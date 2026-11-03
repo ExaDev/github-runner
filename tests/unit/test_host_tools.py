@@ -175,6 +175,12 @@ def homebrew_block(prefix: Path) -> str:
     return f'# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools homebrew\n[ -x {prefix}/bin/brew ] && eval "$({prefix}/bin/brew shellenv)"\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools homebrew\n'
 
 
+def path_block(prefix: Path, homebrew: bool = True, mise: bool = True) -> str:
+    """The block a bash host gets at the top of ~/.bashrc, so that a non-interactive bash finds Homebrew and the mise shims."""
+    directories = (["$HOME/.local/share/mise/shims"] if mise else []) + ([f"{prefix}/bin", f"{prefix}/sbin"] if homebrew else [])
+    return "# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools path\nexport PATH=\"" + ":".join(directories) + ":$PATH\"\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools path\n"
+
+
 def mise_block(prefix: Path, shell: str) -> str:
     return f'# BEGIN ANSIBLE MANAGED BLOCK github_runner_host_tools mise\n[ -x {prefix}/bin/mise ] && eval "$({prefix}/bin/mise activate {shell})"\n# END ANSIBLE MANAGED BLOCK github_runner_host_tools mise\n'
 
@@ -605,14 +611,14 @@ class RoleTest(unittest.TestCase):
     def test_bash_gets_both_blocks_in_bashrc_with_the_shell_it_is_activated_for(self) -> None:
         self.have_homebrew()
         self.ok(self.run_role(system="Linux", os_family="Debian", machine="x86_64"))
-        self.assertEqual((self.home / ".bashrc").read_text(), homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
+        self.assertEqual((self.home / ".bashrc").read_text(), path_block(self.prefix) + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
         self.assertFalse((self.home / ".zshenv").exists())
 
     def test_the_login_shell_comes_from_the_account_entry_not_from_the_os(self) -> None:
         self.have_homebrew()
         (self.stub / "shell").write_text("/bin/bash")
         self.ok(self.run_role())
-        self.assertEqual((self.home / ".bashrc").read_text(), homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
+        self.assertEqual((self.home / ".bashrc").read_text(), path_block(self.prefix) + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
         self.assertIn("dscl . -read /Users/example UserShell", self.logged())
 
     def test_a_line_a_startup_file_has_already_is_not_added_again_in_any_file_of_that_shell(self) -> None:
@@ -1177,7 +1183,7 @@ class RoleTest(unittest.TestCase):
         (self.stub / "mise.state").write_text("current")
         skeleton = self.ubuntu_home()
         self.ok(self.run_role(system="Linux", os_family="Debian", machine="x86_64", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
-        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + skeleton + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + path_block(self.prefix) + skeleton + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
 
     def test_a_second_run_on_the_ubuntu_bashrc_changes_nothing(self) -> None:
         self.ubuntu_home()
@@ -1397,6 +1403,149 @@ class RoleTest(unittest.TestCase):
         result = self.run_settings(github_runner_host_tools_shell_env_home_relative=[".cache/turbo"])
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(list(self.home.iterdir()), [])
+
+    # Homebrew's and mise's directories on PATH for a non-interactive bash.
+
+    def tools_on_disk(self) -> None:
+        """What Homebrew and mise leave on a host: brew and mise in the prefix, and a shim in mise's shim directory."""
+        self.have_homebrew()
+        shutil.copy(self.tools / "brew", self.prefix / "bin" / "mise")
+        shims = self.home / ".local" / "share" / "mise" / "shims"
+        shims.mkdir(parents=True)
+        shutil.copy(self.tools / "brew", shims / "node")
+        (self.stub / "mise.state").write_text("current")
+
+    def bash_finds(self, *names: str, interactive: bool = False) -> str:
+        """Where a real bash that sources ~/.bashrc finds each command, with only the system PATH to start from, as sshd's non-interactive bash does."""
+        script = f'. "$1"\nfor name in {" ".join(names)}; do command -v "$name" || echo "$name: not found"; done'
+        result = subprocess.run(["bash", *(["-i"] if interactive else []), "-c", script, "bash", str(self.home / ".bashrc")], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)})
+        return result.stdout
+
+    def found(self, *names: str) -> str:
+        return "".join(f"{directory}/{name}\n" for name, directory in zip(names, (self.home / ".local" / "share" / "mise" / "shims", self.prefix / "bin", self.prefix / "bin")))
+
+    def changed_tasks(self, result: subprocess.CompletedProcess[str]) -> list[str]:
+        """The names of the tasks that reported a change, which under --check include Homebrew's and apt's own, so a test of the startup file looks at the shell tasks only."""
+        return [name for name, status in re.findall(r"TASK \[[^:\]]*: ([^\]]*)\] \**\n(\w+):", result.stdout) if status == "changed"]
+
+    def run_linux(self, *extra: str, **variables: Any) -> subprocess.CompletedProcess[str]:
+        return self.run_role(*extra, system="Linux", os_family="Debian", machine="x86_64", **variables)
+
+    def test_a_non_interactive_bash_on_the_ubuntu_bashrc_finds_brew_mise_and_the_shims_and_did_not_before(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        self.assertEqual(self.bash_finds("node", "brew", "mise"), "node: not found\nbrew: not found\nmise: not found\n")
+        self.ok(self.run_linux())
+        self.assertEqual(self.bash_finds("node", "brew", "mise"), self.found("node", "brew", "mise"))
+        self.assertEqual((self.home / ".bashrc").read_text(), path_block(self.prefix) + skeleton + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
+
+    def test_an_interactive_bash_finds_them_too_and_the_shims_stay_ahead_of_homebrews_directory(self) -> None:
+        self.tools_on_disk()
+        self.ubuntu_home()
+        self.ok(self.run_linux())
+        self.assertEqual(self.bash_finds("brew", "mise", interactive=True), f"{self.prefix}/bin/brew\n{self.prefix}/bin/mise\n")
+        path = subprocess.run(["bash", "-c", '. "$1"\nprintf %s "$PATH"', "bash", str(self.home / ".bashrc")], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)}).stdout
+        self.assertEqual(path, f"{self.home}/.local/share/mise/shims:{self.prefix}/bin:{self.prefix}/sbin:/usr/bin:/bin")
+
+    def test_a_second_run_and_check_mode_change_nothing_once_the_path_block_is_at_the_top(self) -> None:
+        self.tools_on_disk()
+        self.ubuntu_home()
+        self.ok(self.run_linux())
+        after_first = (self.home / ".bashrc").read_text()
+        result = self.run_linux()
+        self.ok(result)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual((self.home / ".bashrc").read_text(), after_first)
+        result = self.run_linux("--check")
+        self.ok(result)
+        self.assertEqual([name for name in self.changed_tasks(result) if "startup file" in name or "block" in name], [], result.stdout)
+        self.assertEqual((self.home / ".bashrc").read_text(), after_first)
+
+    def test_check_mode_reports_the_path_block_and_writes_nothing(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        result = self.run_linux("--check")
+        self.ok(result)
+        self.assertGreaterEqual(self.recap(result)["changed"], 1, result.stdout)
+        self.assertEqual((self.home / ".bashrc").read_text(), skeleton)
+
+    def test_a_host_set_up_by_an_earlier_version_gets_the_path_block_at_the_top_and_nothing_else_moves(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        earlier = skeleton + homebrew_block(self.prefix) + mise_block(self.prefix, "bash") + ENV_BLOCK_UV
+        (self.home / ".bashrc").write_text(earlier)
+        self.ok(self.run_linux(github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"}))
+        self.assertEqual((self.home / ".bashrc").read_text(), ENV_BLOCK_UV + path_block(self.prefix) + skeleton + homebrew_block(self.prefix) + mise_block(self.prefix, "bash"))
+        self.assertEqual(self.bash_finds("node", "brew", "mise"), self.found("node", "brew", "mise"))
+
+    def test_a_homebrew_line_the_host_has_below_the_guard_does_not_stop_the_path_block_being_written(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        own = f'eval "$({self.prefix}/bin/brew shellenv)"\n'
+        (self.home / ".bashrc").write_text(skeleton + own)
+        self.ok(self.run_linux())
+        self.assertEqual((self.home / ".bashrc").read_text(), path_block(self.prefix) + skeleton + own + mise_block(self.prefix, "bash"))
+
+    def test_a_path_assignment_that_puts_homebrew_on_the_path_already_is_kept_and_no_block_is_added(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        for name, assignment in (("export", f'export PATH="{self.prefix}/bin:$PATH"\n'), ("bare", f"PATH=$PATH:{self.prefix}/bin\n")):
+            with self.subTest(form=name):
+                (self.home / ".bashrc").write_text(assignment + skeleton)
+                self.ok(self.run_linux(github_runner_host_tools_shell_integration=True))
+                self.assertNotIn("github_runner_host_tools path", (self.home / ".bashrc").read_text())
+                self.assertTrue((self.home / ".bashrc").read_text().startswith(assignment))
+
+    def test_a_commented_out_path_assignment_does_not_count(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        own = f'# export PATH="{self.prefix}/bin:$PATH"\n'
+        (self.home / ".bashrc").write_text(own + skeleton)
+        self.ok(self.run_linux())
+        self.assertTrue((self.home / ".bashrc").read_text().startswith(path_block(self.prefix) + own))
+
+    def test_the_block_follows_the_prefix_and_the_tools_wanted_and_is_never_duplicated(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_linux())
+        other = self.work / "another-prefix"
+        (other / "bin").mkdir(parents=True)
+        shutil.copy(self.tools / "brew", other / "bin" / "brew")
+        shutil.copy(self.tools / "brew", other / "bin" / "mise")
+        self.ok(self.run_linux(github_runner_host_tools_homebrew_prefix=str(other)))
+        text = (self.home / ".bashrc").read_text()
+        self.assertEqual(text.count("github_runner_host_tools path"), 2)
+        self.assertTrue(text.startswith(path_block(other)))
+        self.assertTrue(text.endswith(homebrew_block(other) + mise_block(other, "bash")))
+        self.assertIn(skeleton, text)
+
+    def test_mise_left_out_puts_only_homebrews_directories_on_the_path(self) -> None:
+        self.tools_on_disk()
+        skeleton = self.ubuntu_home()
+        self.ok(self.run_linux(github_runner_host_tools_mise=False))
+        self.assertEqual((self.home / ".bashrc").read_text(), path_block(self.prefix, mise=False) + skeleton + homebrew_block(self.prefix))
+
+    def test_a_mise_switched_off_later_takes_the_shims_out_of_the_block_in_place(self) -> None:
+        self.tools_on_disk()
+        self.ubuntu_home()
+        self.ok(self.run_linux())
+        self.ok(self.run_linux(github_runner_host_tools_mise=False))
+        self.assertTrue((self.home / ".bashrc").read_text().startswith(path_block(self.prefix, mise=False) + "#"))
+        self.assertEqual((self.home / ".bashrc").read_text().count("github_runner_host_tools path"), 2)
+
+    def test_without_homebrew_the_role_writes_no_path_block_and_touches_nothing(self) -> None:
+        self.ok(self.run_settings(system="Linux", os_family="Debian", machine="x86_64", github_runner_host_tools_shell_integration=True))
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_the_integration_switched_off_writes_no_path_block(self) -> None:
+        self.tools_on_disk()
+        self.ok(self.run_linux(github_runner_host_tools_shell_integration=False))
+        self.assertFalse((self.home / ".bashrc").exists())
+
+    def test_zsh_gets_no_path_block_because_zshenv_is_read_by_every_zsh(self) -> None:
+        self.tools_on_disk()
+        self.ok(self.run_role())
+        self.assertNotIn("github_runner_host_tools path", (self.home / ".zshenv").read_text())
 
     def test_check_mode_reports_a_variable_and_writes_nothing(self) -> None:
         result = self.run_settings("--check", github_runner_host_tools_shell_env={"UV_PYTHON_DOWNLOADS": "never"})

@@ -52,12 +52,33 @@ def host_tools_homebrew_prefix(system: Any, machine: Any) -> str:
     raise AnsibleFilterError(f"Homebrew supports Darwin and Linux, not {system!r}.")
 
 
+# The characters special in an extended regular expression, which a literal path in a grep pattern has to escape.
+ERE_SPECIALS = re.compile(r"([.\[\]\\*^$+?(){}|])")
+
+# The directory of mise's shims, relative to the user's home directory, where mise puts them by default ([shims_dir](https://mise.jdx.dev/configuration/settings.html#shims_dir); https://mise.jdx.dev/dev-tools/shims.html).
+MISE_SHIMS_DIR = ".local/share/mise/shims"
+
+
+def _bash_path(prefix: str, homebrew: Any, mise: Any) -> dict[str, Any]:
+    """Return the line that puts Homebrew's and mise's directories on ``PATH`` for a non-interactive bash.
+
+    A non-interactive bash cannot use the lines that set Homebrew and mise up for an interactive one: it returns from ``~/.bashrc`` at the interactive guard before them, and mise's activation is a prompt hook that never runs without a prompt. What it needs is the directories themselves on ``PATH``, which mise documents for programs that never see an activated shell (https://mise.jdx.dev/dev-tools/shims.html, "Add shims to PATH"): the shim directory, ahead of Homebrew's so that a tool mise installs wins over one Homebrew ships. Homebrew's ``bin`` holds ``brew`` and, when it installed mise, ``mise``.
+
+    ``pattern`` matches a line outside a comment that assigns ``PATH`` with the prefix's ``bin`` in it, which a startup file that puts Homebrew on the path itself has.
+    """
+    directories = ([f"$HOME/{MISE_SHIMS_DIR}"] if mise else []) + ([_double_quoted(f"{prefix}/bin"), _double_quoted(f"{prefix}/sbin")] if homebrew else [])
+    escaped = ERE_SPECIALS.sub(r"\\\1", f"{prefix}/bin")
+    return {"name": "path", "pattern": f"^[^#]*PATH=[^#]*{escaped}", "line": 'export PATH="' + ":".join(directories) + ':$PATH"', "non_interactive": True}
+
+
 def host_tools_shell_integrations(prefix: Any, shell: Any, homebrew: Any, mise: Any) -> list[dict[str, Any]]:
     """Return the startup lines that bring Homebrew and mise into a shell.
 
-    Each line is guarded by a test that the binary is executable, so a startup file that outlives the tool does no harm. ``pattern`` is an extended regular expression that matches a line of a startup file that already does the same, outside a comment, ``name`` tells the integrations apart, and ``non_interactive`` is false because Homebrew and mise are wanted in an interactive shell only (the line goes where the file's own interactive setup is, never ahead of an early return for non-interactive shells).
+    Each tool's line is guarded by a test that the binary is executable, so a startup file that outlives the tool does no harm. ``pattern`` is an extended regular expression that matches a line of a startup file that already does the same, outside a comment, ``name`` tells the integrations apart, and ``non_interactive`` is false for the tools' own lines because Homebrew's environment and mise's activation are wanted in an interactive shell only (the line goes where the file's own interactive setup is, never ahead of an early return for non-interactive shells).
 
-    :param prefix: the Homebrew prefix, whose ``bin`` holds ``brew`` and ``mise``. :param shell: the shell's name, ``zsh`` or ``bash``, which mise's activation is generated for. :param homebrew: whether Homebrew is wanted in the shell. :param mise: whether mise is wanted in the shell. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, Homebrew first, with a dictionary for each tool that is wanted. :raises AnsibleFilterError: the prefix is not an absolute path or the shell is not one the role supports.
+    A bash host also gets a ``path`` line with ``non_interactive`` true, which puts the directories of the tools on ``PATH`` for a non-interactive bash, as ``sshd`` starts for a command (see ``_bash_path``). zsh needs none, because ``~/.zshenv`` is read in full by every zsh and is where its lines already go.
+
+    :param prefix: the Homebrew prefix, whose ``bin`` holds ``brew`` and ``mise``. :param shell: the shell's name, ``zsh`` or ``bash``, which mise's activation is generated for. :param homebrew: whether Homebrew is wanted in the shell. :param mise: whether mise is wanted in the shell. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, the ``path`` line of a bash host first, then Homebrew's, with a dictionary for each tool that is wanted. :raises AnsibleFilterError: the prefix is not an absolute path or the shell is not one the role supports.
     """
     if not isinstance(prefix, str) or not prefix.startswith("/"):
         raise AnsibleFilterError(f"The Homebrew prefix must be an absolute path, not {prefix!r}.")
@@ -66,6 +87,8 @@ def host_tools_shell_integrations(prefix: Any, shell: Any, homebrew: Any, mise: 
     brew = shlex.quote(f"{prefix}/bin/brew")
     mise_binary = shlex.quote(f"{prefix}/bin/mise")
     integrations: list[dict[str, Any]] = []
+    if shell == "bash" and (homebrew or mise):
+        integrations.append(_bash_path(prefix, homebrew, mise))
     if homebrew:
         integrations.append({"name": "homebrew", "pattern": "^[^#]*brew shellenv", "line": f'[ -x {brew} ] && eval "$({brew} shellenv)"', "non_interactive": False})
     if mise:
@@ -133,6 +156,11 @@ def _reject_names_in_both(env: dict[Any, Any], home_relative: dict[Any, Any]) ->
         raise AnsibleFilterError(f"{', '.join(map(str, both))} is set both as a plain value and as a home-relative path; give each variable once.")
 
 
+def _double_quoted(text: str) -> str:
+    """Return ``text`` escaped for the inside of a double-quoted shell word, where only ``$``, the backtick, the double quote and the backslash are special (in sh, bash and zsh alike), so it reaches the word exactly as given."""
+    return re.sub(r'([\\$`"])', r"\\\1", text)
+
+
 def _home_relative_value(name: str, value: Any) -> str:
     """Return the shell word that expands to the user's home directory followed by a relative path: ``"$HOME/<path>"`` with the path escaped for double quotes.
 
@@ -140,7 +168,7 @@ def _home_relative_value(name: str, value: Any) -> str:
 
     :raises AnsibleFilterError: as ``_home_relative_path``.
     """
-    return '"$HOME/' + re.sub(r'([\\$`"])', r"\\\1", _home_relative_path(name, value)) + '"'
+    return '"$HOME/' + _double_quoted(_home_relative_path(name, value)) + '"'
 
 
 def host_tools_shell_env(env: Any, home_relative: Any) -> list[dict[str, Any]]:
