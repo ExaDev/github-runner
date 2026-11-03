@@ -1,5 +1,5 @@
 ---
-# Reads, from the cluster itself, every node's Ready condition (github_runner_cluster_node_readiness, "<node>=<True|False|Unknown>" a line, the status empty for a node with no Ready condition yet) and the nodes memory-pressure regrading has stepped down (github_runner_cluster_nodes_stepped_down). Run when the answer is needed, never cached, since the rescue of tasks/wait_for_nodes.yml reads them after a wait that took a while.
+# Reads, from the cluster itself, every node's Ready condition (github_runner_cluster_node_readiness, "<node>=<True|False|Unknown>" a line, the status empty for a node with no Ready condition yet) and the nodes memory-pressure regrading has stepped down (github_runner_cluster_nodes_stepped_down). Run when the answer is needed, never cached, since the rescue of tasks/wait_for_nodes.yml reads them after a wait that took a while. Both reads change nothing, so they run under --check too: the wait that follows depends on their output.
 
 - name: Read which nodes are Ready
   ansible.builtin.command:
@@ -7,6 +7,7 @@
   environment:
     KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
   changed_when: false
+  check_mode: false
   register: github_runner_cluster_node_readiness
 
 - name: Read which nodes memory-pressure regrading has stepped down
@@ -16,4 +17,5 @@
   environment:
     KUBECONFIG: "{{ github_runner_cluster_kubeconfig_path }}"
   changed_when: false
+  check_mode: false
   register: github_runner_cluster_nodes_stepped_down
