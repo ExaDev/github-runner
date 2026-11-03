@@ -59,7 +59,7 @@ def etcd_series:
 
 def histogram_of($series; $name): [$series[] | select(.name == ($name + "_bucket")) | {(.labels.le): .value}] | add // {};
 
-# What the probe keeps of an etcd metrics page, cumulative as etcd reports it: the member's own id (the `To` label of its peers' round trip histograms is this id), whether it has a leader, whether it is a learner, the number of members it knows (itself included, and a learner or a member that has not started too, which is how a membership change in progress shows) and the number of peers it is connected to, its storage quota, the leader changes it has seen, and the three histograms the controller judges (the WAL fsync, the backend commit and, per peer id, the round trip).
+# What the probe keeps of an etcd metrics page, cumulative as etcd reports it: the member's own id (the `To` label of its peers' round trip histograms is this id), whether it has a leader, whether it is a learner, the number of members it knows (itself included, and a learner or a member that has not started too, which is how a membership change in progress shows) and the number of peers it is connected to (etcd keeps one gauge per peer that counts its active streams to it, up to two, so a peer counts when its gauge is at least 1), its storage quota, the leader changes it has seen, and the three histograms the controller judges (the WAL fsync, the backend commit and, per peer id, the round trip).
 def etcd_reading:
   etcd_series as $s
   | def gauge($name): [$s[] | select(.name == $name) | .value] | .[0];
@@ -67,7 +67,7 @@ def etcd_reading:
      has_leader: (gauge("etcd_server_has_leader") == 1),
      is_learner: (gauge("etcd_server_is_learner") == 1),
      known_members: ([$s[] | select(.name == "etcd_network_known_peers" and .value == 1)] | length),
-     active_peers: ([$s[] | select(.name == "etcd_network_active_peers" and .value == 1)] | length),
+     active_peers: ([$s[] | select(.name == "etcd_network_active_peers" and .value >= 1) | .labels.Remote] | unique | length),
      quota_bytes: gauge("etcd_server_quota_backend_bytes"),
      leader_changes: gauge("etcd_server_leader_changes_seen_total"),
      wal: histogram_of($s; "etcd_disk_wal_fsync_duration_seconds"),
