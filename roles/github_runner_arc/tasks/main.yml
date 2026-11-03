@@ -64,6 +64,9 @@
     - name: Install the node recovery watcher, or remove it when turned off
       ansible.builtin.include_tasks: install_node_recovery.yml
 
+    - name: Install the role controller, or remove it when turned off
+      ansible.builtin.include_tasks: install_fleet_role.yml
+
     - name: Ensure the fleet-health platform (heartbeat and autoscaler) is installed
       ansible.builtin.include_tasks: install_platform.yml
       when: github_runner_arc_heartbeat_gist_id | length > 0
