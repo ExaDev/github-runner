@@ -526,12 +526,12 @@ class SettingsTest(ControllerCase):
     def test_a_pass_that_is_not_a_dry_run_is_refused(self) -> None:
         self.refuses("FLEET_ROLE_DRY_RUN must be true", FLEET_ROLE_DRY_RUN="false")
 
-    def test_the_election_timeout_defaults_to_k3ss_own(self) -> None:
+    def test_the_election_timeout_is_required_so_that_the_controller_and_the_probe_cannot_disagree_on_a_default(self) -> None:
         populate(self.cluster, healthy())
         env = {k: v for k, v in CONTROLLER_ENV.items() if k != "FLEET_ROLE_ELECTION_TIMEOUT_MS"}
         completed = self.cluster.run("fleet-role.sh", **env)
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(self.cluster.status()["config"]["election_timeout_ms"], 1000)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("FLEET_ROLE_ELECTION_TIMEOUT_MS must be set", completed.stderr)
 
 
 class RegradeCoreAgreementTest(unittest.TestCase):
