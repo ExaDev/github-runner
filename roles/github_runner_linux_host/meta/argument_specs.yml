@@ -81,6 +81,38 @@ argument_specs:
         type: path
         default: /sys/module
         description: Where the kernel lists the modules it has loaded. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_containerd_apparmor_stacking_fix:
+        type: bool
+        default: false
+        description: Whether the AppArmor profile that lets a container's processes signal and trace each other under a stacked label (`cri-containerd.apparmor.d//&unconfined`, as Ubuntu 26.04 stacks it) is installed in /etc/apparmor.d and loaded, in place of the one containerd generates. A host without AppArmor is left alone. Fails when the host's k3s ships another containerd than github_runner_linux_host_containerd_apparmor_containerd_version.
+      github_runner_linux_host_containerd_apparmor_containerd_version:
+        type: str
+        default: v2.1.4-k3s2
+        description: The containerd version the profile's template was taken from. Not a setting; change it only together with the template.
+      github_runner_linux_host_containerd_apparmor_profile_name:
+        type: str
+        default: cri-containerd.apparmor.d
+        description: The profile's name, which is the one containerd gives its CRI containers. Not a setting.
+      github_runner_linux_host_containerd_apparmor_profile_file:
+        type: path
+        default: /etc/apparmor.d/cri-containerd.apparmor.d
+        description: Where the profile's file goes. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_apparmor_enabled_file:
+        type: path
+        default: /sys/module/apparmor/parameters/enabled
+        description: The file the kernel says whether AppArmor is enabled in. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_apparmor_profiles_file:
+        type: path
+        default: /sys/kernel/security/apparmor/profiles
+        description: The file the kernel lists the loaded profiles in. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_k3s_binary:
+        type: path
+        default: "{{ github_runner_cluster_native_bin_dir | default('/usr/local/bin') }}/k3s"
+        description: The k3s binary the cluster role installs. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_linux_host_k3s_data_dir:
+        type: path
+        default: /var/lib/rancher/k3s
+        description: The directory k3s unpacks its binaries into. Not a setting, and a variable only so the tests can point it at a stand-in.
       github_runner_linux_host_battery_charge_limit:
         type: bool
         default: false

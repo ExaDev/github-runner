@@ -29,6 +29,12 @@
     - ansible_facts['system'] == 'Linux'
     - github_runner_linux_host_k3s_prerequisites | bool
 
+- name: Let a container's processes signal each other under a stacked AppArmor label
+  ansible.builtin.include_tasks: containerd_apparmor.yml
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - github_runner_linux_host_containerd_apparmor_stacking_fix | bool
+
 - name: Limit the battery's charge
   ansible.builtin.include_tasks: battery.yml
   when:

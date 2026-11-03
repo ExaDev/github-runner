@@ -1,0 +1,171 @@
+---
+# Installs the AppArmor profile cri-containerd.apparmor.d in /etc/apparmor.d, so that the processes of one container can signal and trace each other under the stacked label Ubuntu 26.04 gives it (see github_runner_linux_host_containerd_apparmor_stacking_fix in defaults/main.yml), and loads it when the file changed or the profile is not loaded. containerd's own profile of that name is only generated when none is loaded, so this one wins, from the next time apparmor.service loads /etc/apparmor.d at boot and, for a running k3s, from the load here. A host without AppArmor enabled is left alone. Everything is read before anything is written, so a refusal changes nothing. The reads that need root (the parser, the kernel's list of loaded profiles) run with become and under --check too; under --check the install and the load are reported and not made.
+
+- name: Read whether AppArmor is enabled in the kernel
+  # The module parameter reads Y when enabled and N when it was switched off on the kernel command line; a kernel without the module has no file.
+  ansible.builtin.command:
+    argv: [cat, "{{ github_runner_linux_host_apparmor_enabled_file }}"]
+  register: github_runner_linux_host_apparmor_enabled
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Say that a host without AppArmor is left alone
+  ansible.builtin.debug:
+    msg: >-
+      The AppArmor profile for containerd is not installed on {{ inventory_hostname }}: AppArmor is not enabled in its kernel
+      ({{ github_runner_linux_host_apparmor_enabled_file }}: {{ github_runner_linux_host_apparmor_enabled.stdout | trim | default('no such file', true) }}),
+      so containers are not confined by a profile and nothing is stacked onto one.
+  when: github_runner_linux_host_apparmor_enabled.rc != 0 or github_runner_linux_host_apparmor_enabled.stdout | trim != 'Y'
+
+- name: Install the AppArmor profile for containerd
+  when:
+    - github_runner_linux_host_apparmor_enabled.rc == 0
+    - github_runner_linux_host_apparmor_enabled.stdout | trim == 'Y'
+  block:
+    - name: Read whether the AppArmor parser is installed
+      become: true
+      ansible.builtin.command:
+        argv: [apparmor_parser, --version]
+      register: github_runner_linux_host_apparmor_parser
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Fail if AppArmor is enabled but its parser is not installed
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_linux_host_containerd_apparmor_stacking_fix is true and AppArmor is enabled on {{ inventory_hostname }}, but apparmor_parser
+          cannot be run ({{ github_runner_linux_host_apparmor_parser.msg | default(github_runner_linux_host_apparmor_parser.stderr, true) | trim }}).
+          Install the apparmor package. Nothing was changed.
+      when: github_runner_linux_host_apparmor_parser.rc != 0
+
+    - name: Read whether the profile is loaded now
+      # The kernel lists each loaded profile as "<name> (<mode>)", root-readable only. grep exits 1 for no match, which is an answer, and 2 for an error, which is not.
+      become: true
+      ansible.builtin.command:
+        argv:
+          - grep
+          - --count
+          - --extended-regexp
+          - "^{{ github_runner_linux_host_containerd_apparmor_profile_name | regex_escape }} [(]"
+          - "{{ github_runner_linux_host_apparmor_profiles_file }}"
+      register: github_runner_linux_host_apparmor_loaded
+      changed_when: false
+      failed_when: github_runner_linux_host_apparmor_loaded.rc > 1
+      check_mode: false
+
+    - name: Read whether the cluster role has installed k3s
+      ansible.builtin.stat:
+        path: "{{ github_runner_linux_host_k3s_binary }}"
+      register: github_runner_linux_host_k3s_installed
+
+    - name: Read the release of the k3s binary on the host
+      # "k3s version v1.34.1+k3s1 (24fc436e)" on the first line.
+      ansible.builtin.command:
+        argv: ["{{ github_runner_linux_host_k3s_binary }}", --version]
+      register: github_runner_linux_host_k3s_version
+      changed_when: false
+      check_mode: false
+      when: github_runner_linux_host_k3s_installed.stat.exists
+
+    - name: Read whether k3s has unpacked the binary that carries containerd
+      ansible.builtin.stat:
+        path: "{{ github_runner_linux_host_k3s_data_dir }}/data/current/bin/k3s"
+      register: github_runner_linux_host_k3s_unpacked
+
+    - name: Read the releases that binary was built as
+      # The multicall binary k3s unpacks has the versions it was built with in its linker flags, among them the k3s release and the containerd it carries. grep exits 1 for no match, which the next task refuses.
+      ansible.builtin.command:
+        argv:
+          - grep
+          - --text
+          - --only-matching
+          - --regexp
+          - 'k3s/pkg/version[.]Version=[0-9A-Za-z.+_-]*'
+          - --regexp
+          - 'containerd/v2/version[.]Version=[0-9A-Za-z.+_-]*'
+          - "{{ github_runner_linux_host_k3s_data_dir }}/data/current/bin/k3s"
+      register: github_runner_linux_host_k3s_unpacked_versions
+      changed_when: false
+      failed_when: github_runner_linux_host_k3s_unpacked_versions.rc > 1
+      check_mode: false
+      when: github_runner_linux_host_k3s_unpacked.stat.exists
+
+    - name: Work out which containerd the host's k3s carries
+      # readable is true only when the unpacked binary is the one of the k3s on the host: k3s unpacks a release when it first starts at it, so right after the cluster role replaced the binary the unpacked one is the previous release's.
+      ansible.builtin.set_fact:
+        github_runner_linux_host_k3s_installed_release: "{{ (github_runner_linux_host_k3s_version.stdout_lines | default([''], true) | first) | regex_search('v[^ ]+[+]k3s[0-9]+') | default('', true) }}"
+        github_runner_linux_host_k3s_unpacked_release: "{{ github_runner_linux_host_k3s_unpacked_versions.stdout_lines | default([], true) | select('match', 'k3s/pkg/version') | map('regex_replace', '^[^=]*=', '') | first | default('', true) }}"
+        github_runner_linux_host_k3s_containerd: "{{ github_runner_linux_host_k3s_unpacked_versions.stdout_lines | default([], true) | select('match', 'containerd/v2/version') | map('regex_replace', '^[^=]*=', '') | first | default('', true) }}"
+
+    - name: Fail if the unpacked k3s does not say which containerd it carries
+      ansible.builtin.fail:
+        msg: >-
+          {{ github_runner_linux_host_k3s_data_dir }}/data/current/bin/k3s on {{ inventory_hostname }} does not carry the k3s release or the containerd version
+          in its linker flags (release {{ github_runner_linux_host_k3s_unpacked_release | default('not found', true) }}, containerd
+          {{ github_runner_linux_host_k3s_containerd | default('not found', true) }}), so the role cannot tell whether the profile it installs matches the containerd.
+          Nothing was changed.
+      when:
+        - github_runner_linux_host_k3s_unpacked.stat.exists
+        - github_runner_linux_host_k3s_unpacked_release == '' or github_runner_linux_host_k3s_containerd == ''
+
+    - name: Fail if the host's k3s carries another containerd than the profile was taken from
+      ansible.builtin.fail:
+        msg: >-
+          k3s {{ github_runner_linux_host_k3s_installed_release }} on {{ inventory_hostname }} carries containerd {{ github_runner_linux_host_k3s_containerd }},
+          and the profile this role installs was taken from containerd {{ github_runner_linux_host_containerd_apparmor_containerd_version }}
+          (github_runner_linux_host_containerd_apparmor_containerd_version). An override of a different containerd's profile would hide that containerd's own
+          one. Read contrib/apparmor/template.go of k3s-io/containerd at {{ github_runner_linux_host_k3s_containerd }}: when it already allows signals and
+          ptrace between peers of the stacked label (containerd/containerd PR 14487), turn github_runner_linux_host_containerd_apparmor_stacking_fix off and
+          remove the override (see the role README); otherwise regenerate templates/cri-containerd.apparmor.d.j2 from it and update the version. Nothing was changed.
+      when:
+        - github_runner_linux_host_k3s_installed.stat.exists
+        - github_runner_linux_host_k3s_unpacked.stat.exists
+        - github_runner_linux_host_k3s_unpacked_release == github_runner_linux_host_k3s_installed_release
+        - github_runner_linux_host_k3s_containerd != github_runner_linux_host_containerd_apparmor_containerd_version
+
+    - name: Say that the containerd of the host's k3s has not been checked
+      ansible.builtin.debug:
+        msg: >-
+          The containerd of k3s on {{ inventory_hostname }} was not checked against the profile's ({{ github_runner_linux_host_containerd_apparmor_containerd_version }}):
+          {{ 'k3s is not installed yet' if not github_runner_linux_host_k3s_installed.stat.exists
+          else 'k3s ' ~ github_runner_linux_host_k3s_installed_release ~ ' has not started on this host yet (the binary it unpacked is '
+          ~ (github_runner_linux_host_k3s_unpacked_release if github_runner_linux_host_k3s_unpacked.stat.exists else 'missing') ~ ')' }}.
+          Run the role again once k3s is running; it refuses then if that k3s carries another containerd.
+      when: >-
+        not github_runner_linux_host_k3s_installed.stat.exists
+        or not github_runner_linux_host_k3s_unpacked.stat.exists
+        or github_runner_linux_host_k3s_unpacked_release != github_runner_linux_host_k3s_installed_release
+
+    - name: Install the profile
+      # become makes root the owner of the file, as it does for the role's other files.
+      become: true
+      ansible.builtin.template:
+        src: cri-containerd.apparmor.d.j2
+        dest: "{{ github_runner_linux_host_containerd_apparmor_profile_file }}"
+        mode: "0644"
+        # Compiles the profile without loading it, before it replaces the file, so a profile the parser rejects never reaches /etc/apparmor.d where apparmor.service would load it.
+        validate: apparmor_parser --skip-kernel-load --skip-cache %s
+      register: github_runner_linux_host_apparmor_profile
+
+    - name: Work out whether the profile is to be loaded
+      ansible.builtin.set_fact:
+        github_runner_linux_host_apparmor_load: "{{ github_runner_linux_host_apparmor_profile.changed or github_runner_linux_host_apparmor_loaded.stdout | trim | int == 0 }}"
+
+    - name: Load the profile
+      become: true
+      ansible.builtin.command:
+        argv: [apparmor_parser, --replace, "{{ github_runner_linux_host_containerd_apparmor_profile_file }}"]
+      changed_when: true
+      when:
+        - github_runner_linux_host_apparmor_load | bool
+        - not ansible_check_mode
+
+    - name: Report the load a real run would make
+      ansible.builtin.debug:
+        msg: "apparmor_parser --replace {{ github_runner_linux_host_containerd_apparmor_profile_file }}"
+      changed_when: true
+      when:
+        - github_runner_linux_host_apparmor_load | bool
+        - ansible_check_mode
