@@ -1,0 +1,25 @@
+---
+# Works out how the role reaches the cluster's API for this native host: through this host's own server (`k3s kubectl`, as root, since k3s writes the admin kubeconfig for root only) when github_runner_cluster_native_api_self is true, and otherwise through the first other server of the inventory, a Docker server's container or a native server's `k3s kubectl` on its own host. Publishes github_runner_cluster_native_api_host (empty when the inventory names no other server, as for a node that joins a cluster outside it), github_runner_cluster_native_api_argv (the kubectl command, to which a task appends its arguments), github_runner_cluster_native_api_become and github_runner_cluster_native_api_environment. Only works things out; reads nothing.
+
+- name: Work out which server's API this host's checks go through
+  vars:
+    github_runner_cluster_native_api_other: >-
+      {{ github_runner_cluster_topology.servers | reject('equalto', inventory_hostname) | first | default('') }}
+    github_runner_cluster_native_api_chosen: >-
+      {{ inventory_hostname if github_runner_cluster_native_api_self | bool else github_runner_cluster_native_api_other }}
+    github_runner_cluster_native_api_chosen_native: >-
+      {{ github_runner_cluster_native_api_chosen | length > 0 and github_runner_cluster_topology.hosts[github_runner_cluster_native_api_chosen].native }}
+    github_runner_cluster_native_api_context: >-
+      {{ (hostvars[github_runner_cluster_native_api_chosen].github_runner_cluster_docker_context | default('') | trim)
+         if github_runner_cluster_native_api_chosen | length > 0 else '' }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_api_host: "{{ github_runner_cluster_native_api_chosen }}"
+    github_runner_cluster_native_api_become: "{{ github_runner_cluster_native_api_chosen_native | bool }}"
+    # A native server's k3s is where the inventory says that host keeps it, or the role's own place, the same constant on every host.
+    github_runner_cluster_native_api_argv: >-
+      {{ [(hostvars[github_runner_cluster_native_api_chosen].github_runner_cluster_native_bin_dir | default(github_runner_cluster_native_bin_dir)) ~ '/k3s', 'kubectl']
+         if github_runner_cluster_native_api_chosen_native | bool
+         else (['docker', 'exec', hostvars[github_runner_cluster_native_api_chosen].github_runner_cluster_container_name | default('github-runner-k3s'), 'kubectl']
+               if github_runner_cluster_native_api_chosen | length > 0 else []) }}
+    github_runner_cluster_native_api_environment: >-
+      {{ {'DOCKER_CONTEXT': github_runner_cluster_native_api_context} if github_runner_cluster_native_api_context | length > 0 else {} }}

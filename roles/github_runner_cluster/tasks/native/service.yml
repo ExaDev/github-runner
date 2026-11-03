@@ -1,76 +1,104 @@
 ---
-# Enables and starts the k3s-agent service, restarts it when anything it reads changed, and then checks the node: the service is running, the host's Tailscale client is logged in to the cluster's tailnet, and a server of the cluster sees the node Ready on a heartbeat from the k3s that was just started. Nothing here happens while github_runner_cluster_native_start is false, which leaves the service as it is: a first install stays disabled and stopped.
+# Runs the unit of the host's role and checks the node. Servers go first, one at a time (server_turn.yml, given each native server of the play in turn as tasks/start_servers.yml does for the Docker servers): a promotion from the agent, a first start, a restart when something it reads changed, or a start of a stopped server. Then a host that is to be an agent: a server is demoted (demote.yml), and an agent is enabled and started, or restarted when something it reads changed. Then the end checks. Nothing here happens while github_runner_cluster_native_start is false, which leaves the units as they are: a first install stays disabled and stopped, and a host whose role is to change keeps running its old unit. Needs role.yml and config.yml.
 
-- name: Reload systemd when the unit changed
+- name: Reload systemd when a unit changed
   become: true
   ansible.builtin.command:
     argv: [systemctl, daemon-reload]
   changed_when: true
   when:
-    - github_runner_cluster_native_unit is changed
+    - github_runner_cluster_native_units is changed
     - not ansible_check_mode
 
-- name: Start the node and check it
+- name: Run the unit of the host's role and check the node
   when: github_runner_cluster_native_start | bool
   block:
-    - name: Read whether the service is enabled and running
+    - name: Read whether each unit is enabled and running
       ansible.builtin.command:
-        argv: [systemctl, "{{ item }}", "{{ github_runner_cluster_native_service }}"]
-      loop: [is-enabled, is-active]
-      register: github_runner_cluster_native_service_state
+        argv: [systemctl, "{{ item[1] }}", "{{ item[0] }}"]
+      loop: "{{ [github_runner_cluster_native_agent_service, github_runner_cluster_native_server_service] | product(['is-enabled', 'is-active']) | list }}"
+      register: github_runner_cluster_native_unit_state
       changed_when: false
       failed_when: false
       check_mode: false
 
-    - name: Work out what the service needs
+    - name: Work out what the units need
       ansible.builtin.set_fact:
-        github_runner_cluster_native_enabled: "{{ github_runner_cluster_native_service_state.results[0].rc == 0 }}"
-        github_runner_cluster_native_active: "{{ github_runner_cluster_native_service_state.results[1].rc == 0 }}"
+        github_runner_cluster_native_agent_enabled: "{{ github_runner_cluster_native_unit_state.results[0].rc == 0 }}"
+        github_runner_cluster_native_agent_active: "{{ github_runner_cluster_native_unit_state.results[1].rc == 0 }}"
+        github_runner_cluster_native_server_enabled: "{{ github_runner_cluster_native_unit_state.results[2].rc == 0 }}"
+        github_runner_cluster_native_server_active: "{{ github_runner_cluster_native_unit_state.results[3].rc == 0 }}"
+        github_runner_cluster_native_agent_started: false
 
-    - name: Read the time on the host, before the service is started or restarted
-      # The node's Ready condition outlives a stopped k3s for a while, so the check below waits for a heartbeat later than this. The host's own clock, which the kubelet's heartbeat is stamped with.
-      ansible.builtin.command:
-        argv: [date, -u, "+%Y-%m-%dT%H:%M:%SZ"]
-      register: github_runner_cluster_native_started
-      changed_when: false
-      check_mode: false
-
-    - name: Enable the service
-      become: true
-      ansible.builtin.command:
-        argv: [systemctl, enable, "{{ github_runner_cluster_native_service }}"]
-      changed_when: true
+    - name: Give each native server its turn
+      # One at a time and in no fixed order, under Ansible's linear strategy (the default), where the tasks a host includes dynamically are its own copies: one turn's tasks run for that host alone while the others wait, so no two servers are ever away together. Hosts outside the play (--limit) take no turn.
+      ansible.builtin.include_tasks: native/server_turn.yml
+      loop: "{{ ansible_play_hosts_all | select('in', github_runner_cluster_topology.hosts | dict2items | selectattr('value.native') | map(attribute='key') | list) | list }}"
+      loop_control:
+        loop_var: github_runner_cluster_native_turn_host
       when:
-        - not github_runner_cluster_native_enabled | bool
-        - not ansible_check_mode
+        - github_runner_cluster_native_turn_host == inventory_hostname
+        - github_runner_cluster_native_role == 'server'
 
-    - name: Start the service
-      become: true
-      ansible.builtin.command:
-        argv: [systemctl, start, "{{ github_runner_cluster_native_service }}"]
-      changed_when: true
+    - name: Demote this server to an agent
+      ansible.builtin.include_tasks: native/demote.yml
       when:
-        - not github_runner_cluster_native_active | bool
-        - not ansible_check_mode
+        - github_runner_cluster_native_role == 'agent'
+        - github_runner_cluster_native_current_role == 'server'
 
-    - name: Restart the service, since its binary, configuration or secrets changed
-      # Pods keep running: the unit's KillMode=process leaves their containerd shims alone.
-      become: true
-      ansible.builtin.command:
-        argv: [systemctl, restart, "{{ github_runner_cluster_native_service }}"]
-      changed_when: true
+    - name: Run the agent unit
       when:
-        - github_runner_cluster_native_active | bool
-        - github_runner_cluster_native_changed | bool
-        - not ansible_check_mode
+        - github_runner_cluster_native_role == 'agent'
+        - github_runner_cluster_native_current_role != 'server'
+      block:
+        - name: Read the time on the host, before the agent is started or restarted
+          # The node's Ready condition outlives a stopped k3s for a while, so the end check waits for a heartbeat later than this. The host's own clock, which the kubelet's heartbeat is stamped with.
+          ansible.builtin.command:
+            argv: [date, -u, "+%Y-%m-%dT%H:%M:%SZ"]
+          register: github_runner_cluster_native_started
+          changed_when: false
+          check_mode: false
 
-    - name: Report what a real run would do to the service
-      ansible.builtin.debug:
-        msg: >-
-          {{ 'enable ' if not github_runner_cluster_native_enabled | bool else '' }}{{ 'start' if not github_runner_cluster_native_active | bool
-          else ('restart' if github_runner_cluster_native_changed | bool else 'leave running') }} {{ github_runner_cluster_native_service }}
-      changed_when: not github_runner_cluster_native_enabled | bool or not github_runner_cluster_native_active | bool or github_runner_cluster_native_changed | bool
-      when: ansible_check_mode
+        - name: Enable the agent unit
+          become: true
+          ansible.builtin.command:
+            argv: [systemctl, enable, "{{ github_runner_cluster_native_agent_service }}"]
+          changed_when: true
+          when:
+            - not github_runner_cluster_native_agent_enabled | bool
+            - not ansible_check_mode
+
+        - name: Start the agent unit, or restart it since something it reads changed
+          # Pods keep running across a restart: the unit's KillMode=process leaves their containerd shims alone.
+          become: true
+          ansible.builtin.command:
+            argv: [systemctl, "{{ 'restart' if github_runner_cluster_native_agent_active | bool else 'start' }}", "{{ github_runner_cluster_native_agent_service }}"]
+          changed_when: true
+          register: github_runner_cluster_native_agent_start
+          when:
+            - not github_runner_cluster_native_agent_active | bool or github_runner_cluster_native_agent_changed | bool
+            - not ansible_check_mode
+
+        - name: Clear the agent's waiting restart, since it has started on its files
+          become: true
+          ansible.builtin.file:
+            path: "{{ github_runner_cluster_native_restart_marker }}-{{ github_runner_cluster_native_agent_service }}"
+            state: absent
+          when: github_runner_cluster_native_agent_start is not skipped
+
+        - name: Record whether the agent was started
+          ansible.builtin.set_fact:
+            github_runner_cluster_native_agent_started: "{{ github_runner_cluster_native_agent_start is not skipped }}"
+
+        - name: Report what a real run would do to the agent
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'enable ' if not github_runner_cluster_native_agent_enabled | bool else '' }}{{ 'start' if not github_runner_cluster_native_agent_active | bool
+              else ('restart' if github_runner_cluster_native_agent_changed | bool else 'leave running') }} {{ github_runner_cluster_native_agent_service }}
+          changed_when: >-
+            not github_runner_cluster_native_agent_enabled | bool or not github_runner_cluster_native_agent_active | bool
+            or github_runner_cluster_native_agent_changed | bool
+          when: ansible_check_mode
 
     - name: Check the node
       ansible.builtin.include_tasks: native/end_checks.yml

@@ -1,0 +1,154 @@
+---
+# Switches a native server to the agent unit, keeping its node name, node password and Tailscale device. Make-before-break: the server's etcd member is removed only while at least three other voters, every one Ready, remain to hold quorum without it (etcd calls a two-member cluster unsafe, https://etcd.io/docs/v3.6/op-guide/runtime-configuration/), so a cluster grows a voter before it loses one. In order: the node is emptied (drain.yml); the role file is switched to agent, so that neither Restart=always nor a reboot can start the server unit again (k3s marks a removed member's datastore with a tombstone and, started again, would rejoin it as a learner; Register in pkg/etcd/etcd.go at v1.34.1+k3s1); the member is removed through k3s's own controller, which acts on the etcd.k3s.cattle.io/remove annotation and records etcd.k3s.cattle.io/removed-node-name once etcd has removed it (pkg/etcd/member_controller.go); the server unit is stopped and disabled; the server's datastore is moved aside, because k3s reuses any datastore it finds and would otherwise start the old member's etcd again on a later promotion (https://docs.k3s.io/datastore/ha-embedded); the server role labels and k3s's etcd annotations are taken off the Node, which k3s does not do for a server that runs as an agent, so the cluster reads the host's live role right; and the agent unit is enabled and started, the node waited for and uncordoned. Needs service.yml's unit state. Under --check every read runs, the refusal included, and the switch is reported, not made.
+
+- name: Reach the cluster through another server, since this one is to stop
+  ansible.builtin.include_tasks: native/api.yml
+  vars:
+    github_runner_cluster_native_api_self: false
+
+- name: Fail if no other server of the inventory can carry the switch
+  ansible.builtin.fail:
+    msg: >-
+      Not demoting {{ inventory_hostname }}: the inventory names no other server to reach the cluster through once this server stops.
+      Nothing was changed.
+  when: github_runner_cluster_native_api_host | length == 0
+
+- name: Read which nodes are etcd voters and whether each is Ready
+  become: "{{ github_runner_cluster_native_api_become }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ github_runner_cluster_native_api_argv + ['get', 'nodes', '--request-timeout=' ~ github_runner_cluster_cluster_read_timeout ~ 's', '-o',
+         'jsonpath={range .items[*]}{.metadata.name}{","}{.status.conditions[?(@.type=="Ready")].status}{","}{.metadata.labels.node-role\.kubernetes\.io/etcd}{"\n"}{end}'] }}
+  environment: "{{ github_runner_cluster_native_api_environment }}"
+  delegate_to: "{{ github_runner_cluster_native_api_host }}"
+  register: github_runner_cluster_native_voters
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+
+- name: Refuse unless at least three other voters, every one Ready, hold quorum without this server
+  vars:
+    github_runner_cluster_native_voter_problems: >-
+      {{ github_runner_cluster_native_voters | exadev.github_runner.cluster_native_voter_blockers(github_runner_cluster_effective_node_name,
+                                                                                                  github_runner_cluster_native_demotion_min_voters) }}
+  ansible.builtin.fail:
+    msg: >-
+      Not demoting {{ inventory_hostname }}: {{ github_runner_cluster_native_voter_problems | join('; ') }}. A demotion takes a vote away only
+      while enough Ready voters remain for etcd to keep a quorum that tolerates a failure, so add a server first, then demote this one.
+      Nothing was changed.
+  when: github_runner_cluster_native_voter_problems | length > 0
+
+- name: Report the demotion a real run would make
+  ansible.builtin.debug:
+    msg: "demote {{ inventory_hostname }}: stop {{ github_runner_cluster_native_server_service }}, move its datastore aside, start {{ github_runner_cluster_native_agent_service }}"
+  changed_when: true
+  when: ansible_check_mode
+
+- name: Switch this server to the agent unit
+  when: not ansible_check_mode
+  block:
+    - name: Empty the node before its server stops
+      ansible.builtin.include_tasks: native/drain.yml
+
+    - name: Record that the host is now an agent
+      become: true
+      ansible.builtin.copy:
+        content: agent
+        dest: "{{ github_runner_cluster_native_role_file }}"
+        mode: "0644"
+
+    - name: Ask k3s to remove this server's etcd member
+      # Asking again is harmless: once the member is removed, the controller sees removed-node-name naming it and does nothing (sync in pkg/etcd/member_controller.go).
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ github_runner_cluster_native_api_argv + ['annotate', '--overwrite', 'node', github_runner_cluster_effective_node_name,
+             'etcd.k3s.cattle.io/remove=true'] }}
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+
+    - name: Wait for k3s to record that the member was removed
+      # The member controller writes removed-node-name and deletes node-name in the same update, once etcd has removed the member.
+      vars:
+        github_runner_cluster_native_poll: 5
+        github_runner_cluster_native_member_read: "{{ github_runner_cluster_native_member.stdout | default('') | trim | split(',') }}"
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ github_runner_cluster_native_api_argv + ['get', 'node', github_runner_cluster_effective_node_name,
+             '--request-timeout=' ~ github_runner_cluster_cluster_read_timeout ~ 's', '-o',
+             'jsonpath={.metadata.annotations.etcd\.k3s\.cattle\.io/removed-node-name},{.metadata.annotations.etcd\.k3s\.cattle\.io/node-name}'] }}
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      register: github_runner_cluster_native_member
+      until:
+        - github_runner_cluster_native_member.rc == 0
+        - github_runner_cluster_native_member_read | length == 2
+        - github_runner_cluster_native_member_read[0] | length > 0
+        - github_runner_cluster_native_member_read[1] | length == 0
+      retries: "{{ ((github_runner_cluster_native_ready_timeout | int) / github_runner_cluster_native_poll) | round(0, 'ceil') | int }}"
+      delay: "{{ github_runner_cluster_native_poll }}"
+      changed_when: false
+
+    - name: Stop and disable the server unit
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, disable, --now, "{{ github_runner_cluster_native_server_service }}"]
+      changed_when: true
+
+    - name: Move the server's datastore aside, keeping only the newest copy
+      # A copy, not a deletion: it holds the snapshots this server took (server/db/snapshots). One copy only, the one from this demotion, so repeated switches do not fill the disk.
+      become: true
+      ansible.builtin.shell: |
+        set -eu
+        rm -rf "$server/db.demoted"
+        mv "$server/db" "$server/db.demoted"
+      environment:
+        server: "{{ github_runner_cluster_native_data_dir }}/server"
+      changed_when: true
+      when: github_runner_cluster_native_has_datastore | bool
+
+    - name: Take the server role labels and k3s's etcd annotations off the Node
+      # A trailing "-" removes a key; one that is not there is left alone.
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_native_api_argv + [item, 'node', github_runner_cluster_effective_node_name] + github_runner_cluster_native_keys[item] }}"
+      vars:
+        github_runner_cluster_native_keys:
+          label: [node-role.kubernetes.io/control-plane-, node-role.kubernetes.io/etcd-, node-role.kubernetes.io/master-]
+          annotate: [etcd.k3s.cattle.io/remove-, etcd.k3s.cattle.io/removed-node-name-, etcd.k3s.cattle.io/node-name-, etcd.k3s.cattle.io/node-address-]
+      loop: [label, annotate]
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true
+
+    - name: Read the time on the host, before the agent is started
+      ansible.builtin.command:
+        argv: [date, -u, "+%Y-%m-%dT%H:%M:%SZ"]
+      register: github_runner_cluster_native_started
+      changed_when: false
+
+    - name: Enable and start the agent unit
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, enable, --now, "{{ github_runner_cluster_native_agent_service }}"]
+      changed_when: true
+
+    - name: Clear the agent's waiting restart, since it has started on its files
+      become: true
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_native_restart_marker }}-{{ github_runner_cluster_native_agent_service }}"
+        state: absent
+
+    - name: Wait for a server to see this node Ready on a heartbeat from the agent just started
+      ansible.builtin.include_tasks: native/server_ready.yml
+
+    - name: Let the node run workloads again
+      become: "{{ github_runner_cluster_native_api_become }}"
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_native_api_argv + ['uncordon', github_runner_cluster_effective_node_name] }}"
+      environment: "{{ github_runner_cluster_native_api_environment }}"
+      delegate_to: "{{ github_runner_cluster_native_api_host }}"
+      changed_when: true

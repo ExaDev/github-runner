@@ -29,10 +29,12 @@ RestartSec=5s
 # Kept across restarts, so the file the kubelet reads is there while k3s starts again; removed when the service stops.
 RuntimeDirectory=github-runner-k3s
 RuntimeDirectoryPreserve=restart
+# Starts only while the role file names this host an agent (files/native/fleet-role-is.sh), so this unit and the k3s server unit never run together and Restart=always never starts the agent on a host that is now a server.
+ExecCondition={{ github_runner_cluster_native_lib_dir }}/fleet-role-is agent {{ github_runner_cluster_native_role_file }}
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
 ExecStartPre={{ github_runner_cluster_native_lib_dir }}/write-resolv-conf /run/github-runner-k3s/resolv.conf
-ExecStart={{ github_runner_cluster_native_bin_dir }}/k3s agent
+ExecStart={{ github_runner_cluster_native_bin_dir }}/k3s agent --config {{ github_runner_cluster_native_config_dir }}/agent.yaml
 
 [Install]
 WantedBy=multi-user.target

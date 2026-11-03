@@ -1,12 +1,14 @@
 ---
-# The checks that close a native node's run, so that a converge that leaves the node down or on the wrong tailnet fails here instead of reporting success. Needs service.yml to have started the service and recorded the time. A failure changes nothing on the host.
+# The checks that close a native node's run, so that a converge that leaves the node down or on the wrong tailnet fails here instead of reporting success: the unit of the host's role is running, the other one is not, and the host's Tailscale client is on the cluster's tailnet; for an agent that was started or restarted, a server sees its node Ready on a heartbeat from the k3s just started (a server's turn has already waited for that, and for its etcd vote). Needs service.yml. A failure changes nothing on the host.
 
-- name: Check the service and the node
+- name: Check the units and the node
   vars:
     # Seconds between reads, as tasks/server_ready.yml polls.
     github_runner_cluster_native_poll: 5
+    github_runner_cluster_native_other_service: >-
+      {{ github_runner_cluster_native_agent_service if github_runner_cluster_native_role == 'server' else github_runner_cluster_native_server_service }}
   block:
-    - name: Read whether the service is running
+    - name: Read whether the unit of the host's role is running
       ansible.builtin.command:
         argv: [systemctl, is-active, "{{ github_runner_cluster_native_service }}"]
       register: github_runner_cluster_native_running
@@ -16,17 +18,33 @@
       changed_when: false
       failed_when: false
 
-    - name: Fail unless the service is running
+    - name: Fail unless the unit of the host's role is running
       ansible.builtin.fail:
         msg: "{{ github_runner_cluster_native_service }} is {{ github_runner_cluster_native_running.stdout | trim }} on {{ inventory_hostname }}."
       when: github_runner_cluster_native_running.rc != 0
+
+    - name: Read whether the other unit is running
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ github_runner_cluster_native_other_service }}"]
+      register: github_runner_cluster_native_other_running
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if the other unit is running too
+      # Both units' conditions read the one role file, so this means something started a unit around them.
+      ansible.builtin.fail:
+        msg: >-
+          {{ github_runner_cluster_native_other_service }} is running on {{ inventory_hostname }} beside {{ github_runner_cluster_native_service }},
+          though the host's role file names {{ github_runner_cluster_native_role }}. Stop it with `systemctl disable --now
+          {{ github_runner_cluster_native_other_service }}`.
+      when: github_runner_cluster_native_other_running.rc == 0
 
     - name: Read which tailnet the host's Tailscale client is logged in to now
       become: true
       ansible.builtin.command:
         argv: ["{{ github_runner_cluster_native_tailscale_cli }}", status, --json, --peers=false]
       register: github_runner_cluster_native_tailscale_after
-      # k3s's own `tailscale up` runs as the service starts, so the client reaches the cluster's tailnet a moment after the service is active.
+      # k3s's own `tailscale up` runs as the unit starts, so the client reaches the cluster's tailnet a moment after the unit is active.
       until: >-
         github_runner_cluster_native_tailscale_after.rc == 0
         and (github_runner_cluster_native_tailscale_after.stdout | exadev.github_runner.cluster_native_tailnet_login(github_runner_cluster_tailnet_domain)).state == 'cluster'
@@ -49,40 +67,30 @@
         github_runner_cluster_native_tailscale_after.rc != 0
         or (github_runner_cluster_native_tailscale_after.stdout | exadev.github_runner.cluster_native_tailnet_login(github_runner_cluster_tailnet_domain)).state != 'cluster'
 
+    - name: Reach the cluster through a server of the inventory
+      ansible.builtin.include_tasks: native/api.yml
+      vars:
+        github_runner_cluster_native_api_self: false
+      when:
+        - github_runner_cluster_native_role == 'agent'
+        - github_runner_cluster_native_agent_started | bool
+
     - name: Say that no server of this inventory can confirm the node
       ansible.builtin.debug:
         msg: >-
           {{ github_runner_cluster_group }} bootstraps no cluster of its own, so no server of this inventory can confirm that
           {{ github_runner_cluster_effective_node_name }} is Ready; check it from the cluster that owns the servers.
-      when: github_runner_cluster_topology.bootstrap | length == 0
+      when:
+        - github_runner_cluster_native_role == 'agent'
+        - github_runner_cluster_native_agent_started | bool
+        - github_runner_cluster_native_api_host | length == 0
 
     - name: Wait for a server to see this node Ready on a heartbeat from the k3s just started
-      # Through the bootstrap server's container on its own host with its own pinned Docker context, as the version read does. Ready alone is not enough: the API keeps the old k3s's Ready condition for a while, so the node's lease must have been renewed after the time recorded before the start (the same rule as a recreated server's, tasks/server_ready.yml).
-      ansible.builtin.shell: |
-        set -eu
-        ready=$(docker exec "$container" kubectl get node "$node" --request-timeout=30s -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}')
-        renewed=$(docker exec "$container" kubectl get lease --namespace kube-node-lease "$node" --request-timeout=30s -o 'jsonpath={.spec.renewTime}')
-        echo "${ready:-unknown} ${renewed:-none}"
-      environment: >-
-        {{ ({'DOCKER_CONTEXT': github_runner_cluster_native_bootstrap_context} if github_runner_cluster_native_bootstrap_context | length > 0 else {})
-           | combine({'container': github_runner_cluster_native_bootstrap_container, 'node': github_runner_cluster_effective_node_name}) }}
-      # delegate_to is templated before the condition below is read, and may not be empty: a cluster outside the inventory has no bootstrap host, and then the task is skipped on this host.
-      delegate_to: "{{ github_runner_cluster_topology.bootstrap | default(inventory_hostname, true) }}"
-      vars:
-        github_runner_cluster_native_bootstrap_container: "{{ hostvars[github_runner_cluster_topology.bootstrap].github_runner_cluster_container_name | default('github-runner-k3s') }}"
-        github_runner_cluster_native_bootstrap_context: "{{ hostvars[github_runner_cluster_topology.bootstrap].github_runner_cluster_docker_context | default('') | trim }}"
-        github_runner_cluster_native_ready_read: "{{ github_runner_cluster_native_ready.stdout | default('') | trim | split(' ') }}"
-      register: github_runner_cluster_native_ready
-      until:
-        - github_runner_cluster_native_ready.rc == 0
-        - github_runner_cluster_native_ready_read | length == 2
-        - github_runner_cluster_native_ready_read[0] == 'True'
-        - github_runner_cluster_native_ready_read[1] is match('[0-9]{4}-[0-9]{2}-[0-9]{2}T')
-        - github_runner_cluster_native_ready_read[1][:19] > (github_runner_cluster_native_started.stdout | trim)[:19]
-      retries: "{{ ((github_runner_cluster_native_ready_timeout | int) / (2 * github_runner_cluster_native_poll)) | round(0, 'ceil') | int }}"
-      delay: "{{ github_runner_cluster_native_poll }}"
-      changed_when: false
-      when: github_runner_cluster_topology.bootstrap | length > 0
+      ansible.builtin.include_tasks: native/server_ready.yml
+      when:
+        - github_runner_cluster_native_role == 'agent'
+        - github_runner_cluster_native_agent_started | bool
+        - github_runner_cluster_native_api_host | length > 0
   rescue:
     - name: Fail with where to look
       ansible.builtin.fail:

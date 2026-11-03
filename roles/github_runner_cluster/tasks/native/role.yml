@@ -1,0 +1,102 @@
+---
+# Decides which role this native host runs, server or agent, and, for a server, whether it bootstraps a new cluster or joins one. Publishes github_runner_cluster_native_current_role (what the host runs now: its role file, or agent for a host set up before the file existed, or empty on a first install), github_runner_cluster_native_role (what it is to run after this run; plugins/filter/cluster_native.py's cluster_native_role says how the two are decided), github_runner_cluster_native_stage_server (whether the server's files are written: a server, or a host marked eligible, staged as a standby) and github_runner_cluster_native_cluster_init. Needs topology.yml. Every task only reads, and runs under --check too.
+
+- name: Read the role file, the agent unit and the datastores on the host
+  # The server's directory under k3s's data directory is root's alone (k3s makes it 0700), so the reads take become.
+  become: true
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ github_runner_cluster_native_role_file }}"
+    - "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_native_agent_service }}.service"
+    - "{{ github_runner_cluster_native_data_dir }}/server/db"
+    - "{{ github_runner_cluster_native_data_dir }}/server/db.demoted"
+  register: github_runner_cluster_native_role_paths
+
+- name: Read the role the host's role file names
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ github_runner_cluster_native_role_file }}"
+  register: github_runner_cluster_native_role_recorded
+  when: github_runner_cluster_native_role_paths.results[0].stat.exists
+
+- name: Read which of the two units is running
+  ansible.builtin.command:
+    argv: [systemctl, is-active, --quiet, "{{ item }}"]
+  loop:
+    - "{{ github_runner_cluster_native_server_service }}"
+    - "{{ github_runner_cluster_native_agent_service }}"
+  register: github_runner_cluster_native_role_units
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Work out the role the host runs now and the role it is to run
+  vars:
+    github_runner_cluster_native_roles: >-
+      {{ (github_runner_cluster_native_role_recorded.content | b64decode if github_runner_cluster_native_role_recorded is not skipped else '')
+         | exadev.github_runner.cluster_native_role(github_runner_cluster_native_role_paths.results[1].stat.exists,
+                                                    github_runner_cluster_topology.hosts[inventory_hostname].eligible,
+                                                    github_runner_cluster_effective_node_role,
+                                                    (['server'] if github_runner_cluster_native_role_units.results[0].rc == 0 else [])
+                                                    + (['agent'] if github_runner_cluster_native_role_units.results[1].rc == 0 else [])) }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_current_role: "{{ github_runner_cluster_native_roles.current }}"
+    github_runner_cluster_native_role: "{{ github_runner_cluster_native_roles.desired }}"
+    github_runner_cluster_native_stage_server: "{{ github_runner_cluster_native_roles.desired == 'server' or github_runner_cluster_topology.hosts[inventory_hostname].eligible }}"
+    github_runner_cluster_native_has_datastore: "{{ github_runner_cluster_native_role_paths.results[2].stat.exists }}"
+    github_runner_cluster_native_was_member: >-
+      {{ github_runner_cluster_native_role_paths.results[2].stat.exists or github_runner_cluster_native_role_paths.results[3].stat.exists }}
+
+- name: Read whether another server of the inventory runs a cluster already
+  # Only for the bootstrap host about to run as a server that has never been a member: such a host has nothing on disk to say a cluster exists, so the other servers are asked. A host that has a datastore, or one a demotion moved aside, has been a member of a cluster and always joins it.
+  ansible.builtin.include_tasks: cluster_nodes_read.yml
+  vars:
+    github_runner_cluster_running_read_always: true
+  when:
+    - github_runner_cluster_native_role == 'server'
+    - github_runner_cluster_effective_bootstrap | bool
+    - not github_runner_cluster_native_was_member | bool
+
+- name: Work out whether this server bootstraps a new cluster
+  vars:
+    github_runner_cluster_native_bootstrap_read: >-
+      {{ github_runner_cluster_running_reads.results | exadev.github_runner.cluster_native_cluster_init(inventory_hostname) }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_cluster_init: >-
+      {{ github_runner_cluster_native_role == 'server' and github_runner_cluster_effective_bootstrap | bool
+         and not github_runner_cluster_native_was_member | bool and github_runner_cluster_native_bootstrap_read.cluster_init }}
+    github_runner_cluster_native_bootstrap_unread: >-
+      {{ github_runner_cluster_native_bootstrap_read.unread
+         if github_runner_cluster_native_role == 'server' and github_runner_cluster_effective_bootstrap | bool and not github_runner_cluster_native_was_member | bool
+         else [] }}
+
+- name: Join the first server that runs the cluster, for a bootstrap host that finds one
+  # The bootstrap host's own join URL is empty, and the first other server of the inventory may be one that is down; one that answered is up.
+  ansible.builtin.set_fact:
+    github_runner_cluster_native_join_url: >-
+      https://{{ github_runner_cluster_topology.hosts[(github_runner_cluster_running_reads.results | exadev.github_runner.cluster_native_cluster_init(inventory_hostname)).running | first].address }}:{{ github_runner_cluster_api_port }}
+  when:
+    - github_runner_cluster_native_role == 'server'
+    - github_runner_cluster_effective_bootstrap | bool
+    - not github_runner_cluster_native_was_member | bool
+    - (github_runner_cluster_running_reads.results | exadev.github_runner.cluster_native_cluster_init(inventory_hostname)).running | length > 0
+
+- name: Fail if whether a cluster already exists cannot be told
+  # Starting a new cluster beside one that exists would split the fleet in two, so a server that could not be read counts against it, as it does in the version check.
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} is the bootstrap host and has no datastore, so it would start a new cluster (cluster-init) unless another
+      server already runs one, and that cannot be told: {{ github_runner_cluster_native_bootstrap_unread | join('; ') }}. Bring the other
+      servers' hosts back within reach, or, if no cluster exists, stop their servers. Nothing was changed.
+  when: github_runner_cluster_native_bootstrap_unread | length > 0
+
+- name: Fail if this host would join no server
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }} is to run as a {{ github_runner_cluster_native_role }} with no server to join: it does not bootstrap a new
+      cluster, the inventory names no other server, and github_runner_cluster_server_url is not set. Nothing was changed.
+  when:
+    - github_runner_cluster_native_join_url | length == 0
+    - not github_runner_cluster_native_cluster_init | bool
+    - not (github_runner_cluster_native_role == 'server' and github_runner_cluster_native_has_datastore | bool)

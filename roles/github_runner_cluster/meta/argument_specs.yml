@@ -5,21 +5,29 @@ argument_specs:
     short_description: Brings a host up as a k3s node, in a container under Docker Compose or natively under systemd.
     description:
       - With github_runner_cluster_node_mode compose (the default) the host runs its k3s node as a server or an agent in a container under Docker Compose, with Tailscale inside the container.
-      - With github_runner_cluster_node_mode native a Linux host runs k3s as an agent directly under systemd, with no Docker or Compose layer, and its own Tailscale client joins the cluster's tailnet through k3s's --vpn-auth. Its tasks that change the host use become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
+      - With github_runner_cluster_node_mode native a Linux host runs k3s directly under systemd, as the k3s-agent unit or, when the inventory makes it a server, the k3s unit, with no Docker or Compose layer, and its own Tailscale client joins the cluster's tailnet through k3s's --vpn-auth. Its tasks that change the host use become (sudo), so run the play with passwordless sudo for the connecting user or with --ask-become-pass.
     options:
       github_runner_cluster_node_mode:
         type: str
         default: compose
         choices: [compose, native]
-        description: How this host runs its k3s node. compose is a container under Docker Compose. native is the k3s-agent systemd service on a Linux host, always as an agent.
+        description: How this host runs its k3s node. compose is a container under Docker Compose. native is a systemd unit on a Linux host, k3s-agent for an agent and k3s for a server; a native host is a server only when it sets github_runner_cluster_node_role server or github_runner_cluster_bootstrap true.
       github_runner_cluster_native_start:
         type: bool
         default: true
-        description: Whether a native node's service is enabled, started and restarted when its binary or configuration changed, and the node then waited for until it reports Ready. false installs and configures everything and leaves the service as it is.
+        description: Whether a native node's unit is enabled, started, restarted when its binary or configuration changed and switched when the host's role changed, and the node then waited for until it reports Ready. false installs and configures everything and leaves the units as they are.
       github_runner_cluster_native_ready_timeout:
         type: int
         default: 600
         description: The most seconds, about, the role waits for a native node to report Ready after it started.
+      github_runner_cluster_native_runner_wait_timeout:
+        type: int
+        default: 600
+        description: The most seconds, about, a switch between the server and agent units waits for the runner pods on the cordoned node to finish before it uncordons the node and fails, changing nothing else.
+      github_runner_cluster_native_demotion_min_voters:
+        type: int
+        default: 3
+        description: The fewest other etcd voters, every one Ready, a demotion of a native server leaves. Not a setting; three is the smallest membership that keeps quorum through a failure.
       github_runner_cluster_native_k3s_download_url:
         type: str
         default: https://github.com/k3s-io/k3s/releases/download
@@ -47,15 +55,19 @@ argument_specs:
       github_runner_cluster_native_lib_dir:
         type: path
         default: /usr/local/lib/github-runner-k3s
-        description: Where the Tailscale wrapper and the resolver helper are installed. Not a setting, and a variable only so the tests can point it at a stand-in.
+        description: Where the Tailscale wrapper and the helpers the units run are installed. Not a setting, and a variable only so the tests can point it at a stand-in.
       github_runner_cluster_native_config_dir:
         type: path
         default: /etc/rancher/k3s
-        description: Where k3s reads its configuration, and where the role keeps the node's token and --vpn-auth value. Not a setting, and a variable only so the tests can point it at a stand-in.
+        description: Where k3s reads its configurations (agent.yaml, server.yaml and server.yaml.d), and where the role keeps the node's token and --vpn-auth value. Not a setting, and a variable only so the tests can point it at a stand-in.
       github_runner_cluster_native_unit_dir:
         type: path
         default: /etc/systemd/system
-        description: Where the k3s-agent unit is installed. Not a setting, and a variable only so the tests can point it at a stand-in.
+        description: Where the k3s-agent and k3s units are installed. Not a setting, and a variable only so the tests can point it at a stand-in.
+      github_runner_cluster_native_data_dir:
+        type: path
+        default: /var/lib/rancher/k3s
+        description: k3s's own data directory, which holds a server's datastore (server/db) and the role file. Not a setting, and a variable only so the tests can point it at a stand-in.
       github_runner_cluster_native_tailscale_cli:
         type: path
         default: /usr/bin/tailscale
