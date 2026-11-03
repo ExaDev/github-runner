@@ -332,6 +332,11 @@ class DefaultsTest(unittest.TestCase):
             "github_runner_cluster_native_join_host",
             "github_runner_cluster_native_role_file",
             "github_runner_cluster_native_restart_marker",
+            "github_runner_cluster_native_regrade_level_file",
+            "github_runner_cluster_native_regrade_started_file",
+            "github_runner_cluster_native_regrade_dir",
+            "github_runner_cluster_native_regrade_service",
+            "github_runner_cluster_native_regrade_commands",
         }
         self.assertEqual(set(SPECS), native - derived)
         for name, spec in SPECS.items():
@@ -625,7 +630,6 @@ class NativeRoleTest(NativeRoleHarness):
             ({"github_runner_cluster_native_k3s_sha256": "ABC"}, "must be empty or 64 lower-case hexadecimal digits"),
             ({"github_runner_cluster_k3s_token": ""}, "github_runner_cluster_k3s_token is not set"),
             ({"github_runner_cluster_k3s_version": "latest"}, "must be a pinned rancher/k3s tag"),
-            ({"github_runner_cluster_regrade": True}, "a native server has none yet"),
             ({"github_runner_cluster_node_mode": "container"}, "must be one of: compose, native"),
             ({"github_runner_cluster_network_mode": "host"}, "which sets github_runner_cluster_node_mode: native"),
         ]

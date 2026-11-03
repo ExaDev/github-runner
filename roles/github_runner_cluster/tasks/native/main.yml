@@ -54,11 +54,6 @@
         host's own network with the host's own Tailscale client, and has no Docker network to choose. Remove
         github_runner_cluster_network_mode (or set it to bridge) for this host.
       bad: "{{ github_runner_cluster_network_mode == 'host' }}"
-    - msg: >-
-        github_runner_cluster_regrade is true for {{ inventory_hostname }}, which sets github_runner_cluster_node_mode: native. Memory-pressure
-        regrading steps a server down through its actuator, and the only one there is drives a Docker server's container; a native server has
-        none yet. Remove github_runner_cluster_regrade for this host.
-      bad: "{{ github_runner_cluster_regrade | bool }}"
   loop_control:
     label: "{{ item.msg | split(' ') | first }}"
   when: item.bad | bool
@@ -91,6 +86,9 @@
 - name: Decide which role the host runs, and whether a server bootstraps a new cluster
   ansible.builtin.include_tasks: native/role.yml
 
+- name: Check the memory-pressure regrading settings, for the role the host is to run
+  ansible.builtin.include_tasks: regrade.yml
+
 - name: Install the pinned Tailscale client and check the tailnet it is logged in to
   ansible.builtin.include_tasks: native/tailscale.yml
 
@@ -102,3 +100,6 @@
 
 - name: Run the unit of the host's role and check the node joined
   ansible.builtin.include_tasks: native/service.yml
+
+- name: Run the fleet-regrade unit beside this server, or remove it
+  ansible.builtin.include_tasks: native/regrade_service.yml

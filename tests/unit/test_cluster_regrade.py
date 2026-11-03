@@ -211,6 +211,29 @@ class SettingsFileTest(unittest.TestCase):
     def test_the_wrapper_runs_the_docker_actuator(self) -> None:
         self.assertEqual(self.sourced(self.render(), "FLEET_REGRADE_ACTUATOR"), {"FLEET_REGRADE_ACTUATOR": "docker"})
 
+    def test_a_native_servers_core_and_actuator_read_every_setting_they_need(self) -> None:
+        scripts = "".join((FILES / "regrade" / name).read_text() for name in ("fleet-regrade-core.sh", "fleet-regrade-k3s.sh", "fleet-regrade-systemd.sh"))
+        referenced = set(re.findall(r"\$\{?([A-Z][A-Z_]+)\b", scripts))
+        assigned = set(re.findall(r"\b([A-Z][A-Z_]+)=", scripts))
+        needed = referenced - assigned - {"SECONDS", "BASH_SOURCE"}
+        text = self.render("-e", "github_runner_cluster_node_mode=native")
+        provided = {line.split("=", 1)[0] for line in text.splitlines() if re.match(r"[A-Z_]+=", line)}
+        self.assertEqual(sorted(needed - provided), [])
+        self.assertIn("K3S_SERVICE", needed, "the check reads the actuator too")
+
+    def test_a_native_server_runs_the_systemd_actuator_with_k3s_and_its_admin_kubeconfig(self) -> None:
+        values = self.sourced(self.render("-e", "github_runner_cluster_node_mode=native"), "FLEET_REGRADE_ACTUATOR", "KUBECTL", "KUBECONFIG_PATH", "K3S_SERVICE", "K3S_DATA_DIR", "LEVEL_FILE", "STARTED_FILE")
+        self.assertEqual(values, {
+            "FLEET_REGRADE_ACTUATOR": "systemd",
+            "KUBECTL": "/usr/local/bin/k3s kubectl",
+            "KUBECONFIG_PATH": "/etc/rancher/k3s/k3s.yaml",
+            "K3S_SERVICE": "k3s",
+            "K3S_DATA_DIR": "/var/lib/rancher/k3s",
+            "LEVEL_FILE": "/var/lib/rancher/k3s/regrade-level",
+            "STARTED_FILE": "/run/github-runner-k3s/regrade-level",
+        })
+        self.assertNotIn("NODE_CONTAINER=", self.render("-e", "github_runner_cluster_node_mode=native"))
+
     def test_the_values_are_the_role_variables(self) -> None:
         values = self.sourced(self.render(), "PRESSURE_THRESHOLD", "AVAILABLE_FLOOR_PERCENT", "SAMPLE_SECONDS", "SUSTAIN_SECONDS", "COOLDOWN_SECONDS", "OPERATION_TIMEOUT_SECONDS", "LEASE_DURATION_SECONDS", "NODE_NAME", "STEP_UP")
         self.assertEqual(

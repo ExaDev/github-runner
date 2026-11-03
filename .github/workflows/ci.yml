@@ -244,7 +244,7 @@ jobs:
           tarball=$(ls exadev-github_runner-*.tar.gz)
           tar -tzf "$tarball" | grep -Fx roles/github_runner_cluster/files/docker-compose.yml
           tar -tzf "$tarball" | grep -Fx roles/github_runner_cluster/files/k3s/node-entrypoint.sh
-          for file in Dockerfile fleet-regrade.sh fleet-regrade-core.sh fleet-regrade-k3s.sh fleet-regrade-docker.sh; do
+          for file in Dockerfile fleet-regrade.sh fleet-regrade-core.sh fleet-regrade-k3s.sh fleet-regrade-docker.sh fleet-regrade-systemd.sh; do
             tar -tzf "$tarball" | grep -Fx "roles/github_runner_cluster/files/regrade/${file}"
           done
       - name: Install the built tarball and verify its content

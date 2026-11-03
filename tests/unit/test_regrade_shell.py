@@ -14,6 +14,8 @@ TESTS = ROOT / "tests" / "regrade"
 CORE = FILES / "fleet-regrade-core.sh"
 K3S_ACTUATOR = FILES / "fleet-regrade-k3s.sh"
 DOCKER_ACTUATOR = FILES / "fleet-regrade-docker.sh"
+SYSTEMD_ACTUATOR = FILES / "fleet-regrade-systemd.sh"
+PRESTART = ROOT / "roles" / "github_runner_cluster" / "files" / "native" / "write-regrade-level.sh"
 SERVICE = FILES / "fleet-regrade.sh"
 
 
@@ -46,6 +48,13 @@ class DockerActuatorTest(unittest.TestCase):
         self.assertIn("all passed", result.stdout)
 
 
+class SystemdActuatorTest(unittest.TestCase):
+    def test_levels_current_level_the_restart_between_them_and_the_pods_left_at_etcd_only(self) -> None:
+        result = run_script("regrade-systemd.sh", CORE, K3S_ACTUATOR, SYSTEMD_ACTUATOR, PRESTART)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("all passed", result.stdout)
+
+
 class ServiceTest(unittest.TestCase):
     """The wrapper the regrade service runs: it must refuse to decide without the kernel's memory pressure, before it touches docker."""
 
@@ -71,6 +80,14 @@ class ServiceTest(unittest.TestCase):
         # up and down never read it: they reach docker, which the stub refuses, rather than stopping at the pressure check.
         result = self.run_service("down", PSI_FILE="/nonexistent/pressure")
         self.assertNotIn("exposes no memory pressure", result.stderr)
+
+    def test_an_actuator_that_is_neither_docker_nor_systemd_is_refused_before_anything_runs(self) -> None:
+        for actuator in ("", "nix"):
+            with self.subTest(actuator=actuator):
+                result = self.run_service("status", FLEET_REGRADE_ACTUATOR=actuator)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("it must be docker or systemd", result.stderr)
+                self.assertNotIn("docker called", result.stderr)
 
     def test_a_readable_pressure_file_passes_the_check(self) -> None:
         with tempfile.NamedTemporaryFile("w") as psi:

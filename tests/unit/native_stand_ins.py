@@ -1,4 +1,4 @@
-"""Shared stand-ins and a base class for the tests that run the github_runner_cluster role against a native node (test_native_node.py, its agent, and test_native_server.py, its server): stand-ins for systemctl, tailscale, dpkg-query, apt-get, docker and kubectl first on the playbook's PATH, a local server for the k3s release, a k3s data directory laid out as a server leaves it, and the helpers that run the role through tests/native/run.yml, so that no real service, package, tailnet or cluster is touched."""
+"""Shared stand-ins and a base class for the tests that run the github_runner_cluster role against a native node (test_native_node.py, its agent, test_native_server.py, its server, and test_native_regrade.py, its regrading): stand-ins for systemctl, journalctl, tailscale, dpkg-query, apt-get, docker and kubectl first on the playbook's PATH, a local server for the k3s release, a k3s data directory laid out as a server leaves it, and the helpers that run the role through tests/native/run.yml, so that no real service, package, tailnet or cluster is touched."""
 
 from __future__ import annotations
 
@@ -93,6 +93,8 @@ class NativeRoleHarness(unittest.TestCase):
             "github_runner_cluster_native_config_dir": self.root / "etc" / "rancher" / "k3s",
             "github_runner_cluster_native_unit_dir": self.root / "etc" / "systemd" / "system",
             "github_runner_cluster_native_data_dir": self.root / "var" / "lib" / "rancher" / "k3s",
+            "github_runner_cluster_native_run_dir": self.root / "run" / "github-runner-k3s",
+            "github_runner_cluster_native_psi_file": self.root / "proc" / "pressure" / "memory",
             "github_runner_cluster_native_apt_keyring": self.root / "usr" / "share" / "keyrings" / "tailscale-archive-keyring.gpg",
             "github_runner_cluster_native_apt_source": self.root / "etc" / "apt" / "sources.list.d" / "tailscale.list",
         }
@@ -101,6 +103,8 @@ class NativeRoleHarness(unittest.TestCase):
         # Directories every host has already: the role puts files in them and creates no others of the system's.
         self.paths["github_runner_cluster_native_bin_dir"].mkdir(exist_ok=True)
         self.paths["github_runner_cluster_native_unit_dir"].mkdir(exist_ok=True)
+        # A kernel with memory pressure, as every kernel the role supports has unless it was built or booted without it.
+        self.paths["github_runner_cluster_native_psi_file"].write_text("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
         self.make_stand_ins()
         self.set_tailscale(None, None)
         self.facts = dict(FACTS)
@@ -136,11 +140,25 @@ case "$command" in
     if [ -n "$now" ]; then touch "$state/active-$unit"; case "$unit" in k3s|k3s-agent) join ;; esac; fi ;;
   disable) rm -f "$state/enabled-$unit"; if [ -n "$now" ]; then rm -f "$state/active-$unit"; fi ;;
   start|restart) touch "$state/active-$unit"; case "$unit" in k3s|k3s-agent) join ;; esac ;;
+  # Each start of a unit is a new run, with an invocation id of its own.
+  show) cat "$state/invocation-$unit" 2>/dev/null || echo 0 ;;
+esac
+# A start of the server unit runs its ExecStartPre that records the regrading level, as systemd would, from the unit the role wrote: the real helper the role placed, with the paths the unit gives it.
+case "$command:$unit" in
+  enable:k3s|start:k3s|restart:k3s)
+    if [ "$command" != enable ] || [ -n "$now" ]; then
+      echo $(( $(cat "$state/invocation-k3s" 2>/dev/null || echo 0) + 1 )) > "$state/invocation-k3s"
+      pre=$(sed -n 's/^ExecStartPre=\(.*write-regrade-level .*\)$/\1/p' "$UNIT_DIR/k3s.service")
+      [ -z "$pre" ] || sh -c "$pre"
+    fi ;;
 esac
 # What the role file named when a k3s unit was started, which is what its ExecCondition would have read.
 case "$command:$unit" in
   enable:k3s*|start:k3s*|restart:k3s*) if [ "$command" != enable ] || [ -n "$now" ]; then echo "$command $unit $(cat "$ROLE_FILE" 2>/dev/null || echo none)" >> "$STUB/starts.log"; fi ;;
 esac
+""")
+        # What the journal holds for a run of a unit: the line k3s logs once its etcd serves, unless the state says it never came.
+        stand_in(bin_dir / "journalctl", log + r"""[ -e "$STUB/state/no-etcd" ] || echo "ETCD server is now running"
 """)
         stand_in(bin_dir / "tailscale", log + r"""case "$1" in
   status) [ -e "$STUB/state/tailscale.json" ] || exit 1; cat "$STUB/state/tailscale.json" ;;
@@ -228,6 +246,7 @@ esac
             "PATH": f"{self.stubs / 'bin'}:{os.environ['PATH']}",
             "STUB": str(self.stubs),
             "ROLE_FILE": str(self.file("github_runner_cluster_native_data_dir", "fleet-role")),
+            "UNIT_DIR": str(self.paths["github_runner_cluster_native_unit_dir"]),
             "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"),
             "ANSIBLE_NOCOLOR": "1",
             "ANSIBLE_FORCE_COLOR": "0",
@@ -243,11 +262,11 @@ esac
     def calls(self) -> list[str]:
         """The commands the stand-ins were run with, one per call (a call whose arguments hold a line break logs more lines, which are not calls)."""
         log = self.stubs / "calls.log"
-        return [line for line in log.read_text().splitlines() if re.match(r"^(systemctl|tailscale|apt-get|dpkg-query|docker|kubectl) ", line)] if log.exists() else []
+        return [line for line in log.read_text().splitlines() if re.match(r"^(systemctl|journalctl|tailscale|apt-get|dpkg-query|docker|kubectl) ", line)] if log.exists() else []
 
     def mutations(self, since: int = 0) -> list[str]:
         """The calls that change something, from the ``since``-th call on."""
-        return [call for call in self.calls()[since:] if call.split()[0] in ("apt-get", "systemctl") and call.split()[1] not in ("is-enabled", "is-active")] + [call for call in self.calls()[since:] if call in ("tailscale logout",) or (call.startswith("kubectl ") and call.split()[1] in ("cordon", "uncordon", "drain", "label", "annotate"))]
+        return [call for call in self.calls()[since:] if call.split()[0] in ("apt-get", "systemctl") and call.split()[1] not in ("is-enabled", "is-active", "show")] + [call for call in self.calls()[since:] if call in ("tailscale logout",) or (call.startswith("kubectl ") and call.split()[1] in ("cordon", "uncordon", "drain", "label", "annotate"))]
 
     def file(self, key: str, name: str) -> Path:
         return self.paths[key] / name
@@ -282,7 +301,7 @@ esac
         return log.read_text().splitlines() if log.exists() else []
 
     def unit_calls(self, since: int = 0) -> list[str]:
-        return [call for call in self.calls()[since:] if call.startswith("systemctl") and " is-" not in call and "daemon-reload" not in call]
+        return [call for call in self.calls()[since:] if call.startswith("systemctl") and " is-" not in call and "daemon-reload" not in call and not call.startswith("systemctl show ")]
 
     def running_as(self, role: str) -> None:
         """Leave the host as a run of the role leaves one that runs ``role``: the role file names it, and its unit is enabled and active. For a test whose subject is the next run, so that it need not spend a run of the role getting there; the role writes every file it reads afresh."""
