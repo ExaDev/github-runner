@@ -8,6 +8,11 @@
       if github_runner_macos_host_homebrew_prefix | length > 0
       else ('/opt/homebrew' if ansible_facts['machine'] == 'arm64' else '/usr/local') }}
 
+- name: Work out where the formula's binaries are
+  # The keg's own bin directory through Homebrew's stable opt path, not the prefix's bin directory: Homebrew links the formula there only when nothing else holds the names (the standalone app's wrapper script holds tailscale on a Mac that has the app), and the role needs the formula's binaries whether or not it is linked.
+  ansible.builtin.set_fact:
+    github_runner_macos_host_tailscale_formula_bin: "{{ github_runner_macos_host_effective_prefix }}/opt/tailscale/bin"
+
 - name: Look for the Tailscale system daemon's launchd definition
   ansible.builtin.stat:
     path: "{{ github_runner_macos_host_tailscale_plist }}"
@@ -18,18 +23,15 @@
   when: not github_runner_macos_host_tailscale_daemon.stat.exists
   block:
     - name: Install the Tailscale Homebrew formula
-      community.general.homebrew:
-        name: tailscale
-        state: present
-        path: "{{ github_runner_macos_host_effective_prefix }}/bin"
-      environment:
-        PATH: "{{ github_runner_macos_host_path }}"
+      ansible.builtin.include_tasks: tailscale_formula.yml
+      vars:
+        github_runner_macos_host_tailscale_formula_latest: false
 
     - name: Install and start the tailscaled system daemon
       # Copies tailscaled to /usr/local/bin, writes the launchd definition and starts it, which takes root. Never joins a tailnet.
       become: true
       ansible.builtin.command:
-        argv: ["{{ github_runner_macos_host_effective_prefix }}/bin/tailscaled", install-system-daemon]
+        argv: ["{{ github_runner_macos_host_tailscale_formula_bin }}/tailscaled", install-system-daemon]
         creates: "{{ github_runner_macos_host_tailscale_plist }}"
       when: not ansible_check_mode
 
@@ -47,8 +49,9 @@
 
 # Joining needs an auth key, a secret only the tailnet's owner can create, so it happens only when one is given. The login state is read from the daemon, so a host that is already logged in, and a failed join, are both handled by rerunning.
 - name: Find the Tailscale command line the role installed
+  # The formula's, which talks to the tailscaled daemon: the prefix's tailscale can be the standalone app's wrapper, which talks to the app.
   ansible.builtin.stat:
-    path: "{{ github_runner_macos_host_effective_prefix }}/bin/tailscale"
+    path: "{{ github_runner_macos_host_tailscale_formula_bin }}/tailscale"
   register: github_runner_macos_host_tailscale_cli
   when: github_runner_macos_host_tailscale_auth_key | length > 0
 
@@ -61,7 +64,7 @@
   block:
     - name: Read the daemon's login state
       ansible.builtin.command:
-        argv: ["{{ github_runner_macos_host_effective_prefix }}/bin/tailscale", status, --json, --peers=false]
+        argv: ["{{ github_runner_macos_host_tailscale_formula_bin }}/tailscale", status, --json, --peers=false]
       register: github_runner_macos_host_tailscale_status
       changed_when: false
       check_mode: false
@@ -74,7 +77,7 @@
       become: true
       ansible.builtin.command:
         argv: >-
-          {{ [github_runner_macos_host_effective_prefix ~ '/bin/tailscale', 'up', '--auth-key=file:/dev/stdin']
+          {{ [github_runner_macos_host_tailscale_formula_bin ~ '/tailscale', 'up', '--auth-key=file:/dev/stdin']
           + github_runner_macos_host_tailscale_up_args }}
         # The key is read from standard input, so it is in no process listing.
         stdin: "{{ github_runner_macos_host_tailscale_auth_key }}"
