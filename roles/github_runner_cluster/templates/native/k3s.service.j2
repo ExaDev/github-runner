@@ -26,14 +26,14 @@ TasksMax=infinity
 TimeoutStartSec=0
 Restart=always
 RestartSec=5s
-# Kept across restarts, so the file the kubelet reads is there while k3s starts again; removed when the service stops.
-RuntimeDirectory=github-runner-k3s
+# Kept across restarts, so the file the kubelet reads is there while k3s starts again; removed when the service stops, and when a start is skipped by the condition below, so it is this unit's alone and never shared with the other k3s unit.
+RuntimeDirectory={{ github_runner_cluster_native_server_runtime_dir }}
 RuntimeDirectoryPreserve=restart
 # Starts only while the role file names this host a server (files/native/fleet-role-is.sh), so this unit and the k3s agent unit never run together and Restart=always never starts a server that has been demoted, which would join the cluster again as a learner.
 ExecCondition={{ github_runner_cluster_native_lib_dir }}/fleet-role-is server {{ github_runner_cluster_native_role_file }}
 ExecStartPre=-/sbin/modprobe br_netfilter
 ExecStartPre=-/sbin/modprobe overlay
-ExecStartPre={{ github_runner_cluster_native_lib_dir }}/write-resolv-conf /run/github-runner-k3s/resolv.conf
+ExecStartPre={{ github_runner_cluster_native_lib_dir }}/write-resolv-conf {{ github_runner_cluster_native_run_dir }}/{{ github_runner_cluster_native_server_runtime_dir }}/resolv.conf
 # etcd's peer URL is the host's Tailscale address, written as node-ip into the configuration's drop-in directory before each start (files/native/write-node-ip.sh).
 ExecStartPre={{ github_runner_cluster_native_lib_dir }}/write-node-ip {{ github_runner_cluster_native_config_dir }}/server.yaml.d/00-node-ip.yaml {{ github_runner_cluster_native_config_dir }}/vpn-auth
 # The regrading level fleet-regrade last recorded for this server (files/native/write-regrade-level.sh): the drop-in that turns all but etcd off at etcd-only, and the record of the level k3s starts at, which the systemd actuator (files/regrade/fleet-regrade-systemd.sh) reads. Written before every start whether or not regrading is on, so that turning it on or off changes nothing in this unit; a server that has never been stepped down starts at full.

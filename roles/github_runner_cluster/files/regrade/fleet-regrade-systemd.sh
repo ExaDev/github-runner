@@ -8,7 +8,7 @@
 
 K3S_DATA_DIR=${K3S_DATA_DIR:-/var/lib/rancher/k3s}
 LEVEL_FILE=${LEVEL_FILE:-$K3S_DATA_DIR/regrade-level}
-STARTED_FILE=${STARTED_FILE:-/run/github-runner-k3s/regrade-level}
+STARTED_FILE=${STARTED_FILE:-/run/github-runner-k3s-server/regrade-level}
 
 # Runs a command on the host while the server's unit is active, and fails without running it otherwise, as `docker exec` does for a container that is not running. A unit that is still starting is not active yet (Type=exec reports activating until its ExecStartPre commands have run), so a level is never read from a record its start has not written.
 on_server() {

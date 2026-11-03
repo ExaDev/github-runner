@@ -27,7 +27,7 @@ class NativeServerTest(NativeRoleHarness):
             "write-kubeconfig-mode": "0600",
             "tls-san": [f"laptop.{DOMAIN}"],
             "etcd-arg": ["heartbeat-interval=500", "election-timeout=5000"],
-            "resolv-conf": "/run/github-runner-k3s/resolv.conf",
+            "resolv-conf": str(self.paths["github_runner_cluster_native_run_dir"] / "github-runner-k3s-server" / "resolv.conf"),
         })
         self.assertEqual(yaml.safe_load(self.file(config_dir, "server.yaml.d/10-join.yaml").read_text()), {"cluster-init": True})
         for name in ("server.yaml", "server.yaml.d/10-join.yaml"):
@@ -48,9 +48,13 @@ class NativeServerTest(NativeRoleHarness):
         self.assertIn(f"ExecCondition={lib}/fleet-role-is server {self.paths['github_runner_cluster_native_data_dir']}/fleet-role", service)
         self.assertIn(f"ExecStartPre={lib}/write-node-ip {config}/server.yaml.d/00-node-ip.yaml {config}/vpn-auth", service)
         self.assertIn(f"ExecStart={self.paths['github_runner_cluster_native_bin_dir']}/k3s server --config {config}/server.yaml", service)
+        # Each unit has a runtime directory of its own: systemd removes a unit's when a start of it is skipped by its condition, which would otherwise take the running unit's files.
+        self.assertIn("RuntimeDirectory=github-runner-k3s-server", service)
+        self.assertIn(f"ExecStartPre={lib}/write-resolv-conf {self.paths['github_runner_cluster_native_run_dir']}/github-runner-k3s-server/resolv.conf", service)
         # Everything else is the agent unit's: one runs at a time, under the same limits.
         agent = [line for line in self.file("github_runner_cluster_native_unit_dir", "k3s-agent.service").read_text().split("[Service]")[1].split("[Install]")[0].splitlines() if line and not line.startswith("#")]
-        self.assertEqual([line for line in service if not line.startswith(("ExecCondition=", "ExecStart"))], [line for line in agent if not line.startswith(("ExecCondition=", "ExecStart"))])
+        own = ("ExecCondition=", "ExecStart", "RuntimeDirectory=")
+        self.assertEqual([line for line in service if not line.startswith(own)], [line for line in agent if not line.startswith(own)])
         for helper in ("write-node-ip", "fleet-role-is"):
             self.assertEqual(self.file("github_runner_cluster_native_lib_dir", helper).read_text(), (ROLE / "files" / "native" / f"{helper}.sh").read_text())
 

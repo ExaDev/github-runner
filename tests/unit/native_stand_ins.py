@@ -93,7 +93,7 @@ class NativeRoleHarness(unittest.TestCase):
             "github_runner_cluster_native_config_dir": self.root / "etc" / "rancher" / "k3s",
             "github_runner_cluster_native_unit_dir": self.root / "etc" / "systemd" / "system",
             "github_runner_cluster_native_data_dir": self.root / "var" / "lib" / "rancher" / "k3s",
-            "github_runner_cluster_native_run_dir": self.root / "run" / "github-runner-k3s",
+            "github_runner_cluster_native_run_dir": self.root / "run",
             "github_runner_cluster_native_psi_file": self.root / "proc" / "pressure" / "memory",
             "github_runner_cluster_native_apt_keyring": self.root / "usr" / "share" / "keyrings" / "tailscale-archive-keyring.gpg",
             "github_runner_cluster_native_apt_source": self.root / "etc" / "apt" / "sources.list.d" / "tailscale.list",
