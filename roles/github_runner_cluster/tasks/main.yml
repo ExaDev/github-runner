@@ -61,6 +61,9 @@
 - name: Check etcd's heartbeat interval and election timeout
   ansible.builtin.include_tasks: etcd_timing.yml
 
+- name: Check the role controller's settings
+  ansible.builtin.include_tasks: voters.yml
+
 - name: Check the memory-pressure regrading settings
   ansible.builtin.include_tasks: regrade.yml
 
@@ -100,6 +103,7 @@
   loop:
     - {src: docker-compose.yml, mode: "0644"}
     - {src: docker-compose.api-port.yml, mode: "0644"}
+    - {src: docker-compose.node-labels.yml, mode: "0644"}
     - {src: docker-compose.host-network.yml, mode: "0644"}
     - {src: k3s/Dockerfile, mode: "0644"}
     - {src: k3s/node-entrypoint.sh, mode: "0755"}

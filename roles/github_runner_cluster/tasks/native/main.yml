@@ -69,6 +69,9 @@
 - name: Check etcd's heartbeat interval and election timeout, which a native server passes to its etcd as every server does
   ansible.builtin.include_tasks: etcd_timing.yml
 
+- name: Check the role controller's settings
+  ansible.builtin.include_tasks: voters.yml
+
 - name: Check the versions the node is pinned to
   ansible.builtin.include_tasks: versions.yml
 
