@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FILES = ROOT / "roles" / "github_runner_cluster" / "files" / "regrade"
 TESTS = ROOT / "tests" / "regrade"
 CORE = FILES / "fleet-regrade-core.sh"
+K3S_ACTUATOR = FILES / "fleet-regrade-k3s.sh"
 DOCKER_ACTUATOR = FILES / "fleet-regrade-docker.sh"
 SERVICE = FILES / "fleet-regrade.sh"
 
@@ -40,7 +41,7 @@ class CoreTest(unittest.TestCase):
 
 class DockerActuatorTest(unittest.TestCase):
     def test_levels_current_level_and_the_restart_between_them(self) -> None:
-        result = run_script("regrade-docker.sh", CORE, DOCKER_ACTUATOR)
+        result = run_script("regrade-docker.sh", CORE, K3S_ACTUATOR, DOCKER_ACTUATOR)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("all passed", result.stdout)
 
@@ -54,7 +55,7 @@ class ServiceTest(unittest.TestCase):
             stub.parent.mkdir()
             stub.write_text("#!/bin/sh\necho \"docker called: $*\" >&2\nexit 1\n")
             stub.chmod(0o755)
-            full_env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}", "FLEET_REGRADE_ENV": str(Path(work) / "none"), **env}
+            full_env = {**os.environ, "PATH": f"{stub.parent}:{os.environ['PATH']}", "FLEET_REGRADE_ENV": str(Path(work) / "none"), "FLEET_REGRADE_ACTUATOR": "docker", **env}
             return subprocess.run(["bash", str(SERVICE), *args], capture_output=True, text=True, check=False, env=full_env)
 
     def test_watching_without_memory_pressure_stops_with_the_reason(self) -> None:
