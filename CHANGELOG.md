@@ -1,3 +1,9 @@
+## [2.28.3](https://github.com/ExaDev/github-runner/compare/v2.28.2...v2.28.3) (2026-11-03)
+
+### Bug Fixes
+
+* **cluster:** read node readiness under check mode so the wait can judge it ([962caff](https://github.com/ExaDev/github-runner/commit/962caff5dddc5be48656512e3f83140fab782499))
+
 ## [2.28.2](https://github.com/ExaDev/github-runner/compare/v2.28.1...v2.28.2) (2026-11-03)
 
 ### Bug Fixes
