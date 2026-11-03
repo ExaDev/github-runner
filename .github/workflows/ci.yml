@@ -19,8 +19,43 @@ permissions:
   contents: read
 
 jobs:
+  verified:
+    name: Already verified
+    # A push to main whose tree is the tree its pull request was merged with, and whose pull request passed Required Checks on that head, has nothing new to check: the same files give the same result. Every other push, and every pull request, runs the full set. A failure here runs the full set too (the other jobs only skip on an explicit "true").
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    outputs:
+      skip: ${{ steps.compare.outputs.skip }}
+    steps:
+      - id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          skip=false
+          head=$(gh api "repos/${REPO}/commits/${SHA}/pulls" --jq '.[0].head.sha // empty')
+          if [ -n "$head" ]; then
+            pushed_tree=$(gh api "repos/${REPO}/git/commits/${SHA}" --jq .tree.sha)
+            merged_tree=$(gh api "repos/${REPO}/git/commits/${head}" --jq .tree.sha)
+            verdict=$(gh api "repos/${REPO}/commits/${head}/check-runs?filter=latest&check_name=Required%20Checks" --jq '.check_runs[0].conclusion // empty')
+            echo "pushed tree ${pushed_tree}, pull request head ${head} tree ${merged_tree}, its Required Checks: ${verdict:-none}"
+            if [ "$pushed_tree" = "$merged_tree" ] && [ "$verdict" = success ]; then
+              skip=true
+            fi
+          fi
+          echo "skip=${skip}" >> "$GITHUB_OUTPUT"
+
   shellcheck:
     name: Shellcheck
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -36,6 +71,8 @@ jobs:
 
   actionlint:
     name: actionlint
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -47,6 +84,8 @@ jobs:
 
   yamllint:
     name: YAML lint
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -58,6 +97,8 @@ jobs:
 
   hadolint:
     name: hadolint
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -85,6 +126,8 @@ jobs:
 
   ansible-syntax-check:
     name: Ansible syntax check
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -103,6 +146,8 @@ jobs:
 
   unit-tests:
     name: Unit tests (shard ${{ matrix.shard }})
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # Each module is run on its own by discovery, dealt out by size so that the shards take about the same amount of work: the tests that run Ansible playbooks cost a process each, and the suite no longer fits one job.
     timeout-minutes: 20
@@ -135,6 +180,8 @@ jobs:
 
   ansible-lint:
     name: ansible-lint
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -153,6 +200,8 @@ jobs:
 
   collection-build:
     name: Collection build check
+    needs: verified
+    if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
