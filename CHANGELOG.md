@@ -1,3 +1,22 @@
+## [2.35.0](https://github.com/ExaDev/github-runner/compare/v2.34.0...v2.35.0) (2026-11-03)
+
+### Features
+
+* **role:** derive a Colima node VM's memory from what its host must keep ([5c61236](https://github.com/ExaDev/github-runner/commit/5c612361c8ba63f1016c5c0b124a4537fe86c2e0))
+* **role:** size a Colima node VM from the inventory through the quorum guard ([8f81c0a](https://github.com/ExaDev/github-runner/commit/8f81c0a2b17d3ee9b037d364e136a81e2d84e929)), closes [#208](https://github.com/ExaDev/github-runner/issues/208)
+
+### Code Refactoring
+
+* **role:** share the quorum guard between steps that restart a node ([f344b11](https://github.com/ExaDev/github-runner/commit/f344b11b2496526e06291ca75f939b950a7ac0bd))
+
+### Documentation
+
+* **role:** name the host memory fact without reading it from the defaults ([52d0d47](https://github.com/ExaDev/github-runner/commit/52d0d47c5ffa33b5c6c86b512ac8a1343a3fe7a1))
+
+### Tests
+
+* **role:** count the drain's refusal wording among the native role's derived defaults ([456d527](https://github.com/ExaDev/github-runner/commit/456d5276e28efa24965c4f37e305adfdcb90d518))
+
 ## [2.34.0](https://github.com/ExaDev/github-runner/compare/v2.33.0...v2.34.0) (2026-11-03)
 
 ### Features
