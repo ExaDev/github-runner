@@ -1,3 +1,10 @@
+## [2.21.1](https://github.com/ExaDev/github-runner/compare/v2.21.0...v2.21.1) (2026-11-03)
+
+### Continuous Integration
+
+* skip the run on main for a tree its pull request already passed ([0a722a1](https://github.com/ExaDev/github-runner/commit/0a722a1e102e67a11ecc8ac602f1172971fc3102))
+* stop repeating work the hosted runner has already done ([fa496e2](https://github.com/ExaDev/github-runner/commit/fa496e29e7790c3c2da946bb7a7a5ce264b2f8b3))
+
 ## [2.21.0](https://github.com/ExaDev/github-runner/compare/v2.20.1...v2.21.0) (2026-11-03)
 
 ### Features
