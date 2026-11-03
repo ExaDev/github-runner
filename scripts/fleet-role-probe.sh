@@ -3,6 +3,8 @@
 #
 # A sample holds, per node: the TCP connect time to every voter's etcd peer port (a connect that does not complete within the election timeout is recorded as the election timeout, so loss shows as tail latency); on a voter, what etcd's own metrics gained since the last sample (the WAL fsync and backend commit histograms, the round trip to each peer, leader changes) and whether it has a leader, is a learner and is connected to its peers; on a node that is not a voter, an fdatasync probe in the k3s data directory once per window, with the write size etcd's own fio check uses; the memory pressure and MemAvailable the regrade core reads; and the link the default route leaves by.
 #
+# `fleet-role-probe.sh check link|connect <address>|memory|etcd|fsync` takes one of those readings alone, prints it and exits, with no cluster access (connect needs ELECTION_TIMEOUT_MS; the others need nothing but the settings below), so that each can be compared with a reading taken by hand on the host it runs on.
+#
 # Env:
 # - NODE_NAME: the node this pod runs on (the downward API's spec.nodeName). Required.
 # - NAMESPACE: the namespace of the ConfigMap. Required.
@@ -18,9 +20,6 @@
 # - FLEET_REGRADE_CORE: the regrade core (roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh), whose own psi_avg300 and meminfo_kb read the memory signals (default /app/fleet-regrade-core.sh). PSI_FILE and MEMINFO_FILE, which it reads, default here to the host's /proc/pressure mounted at /host-pressure and the node's /proc/meminfo.
 set -euo pipefail
 
-: "${NODE_NAME:?NODE_NAME is required}"
-: "${NAMESPACE:?NAMESPACE is required}"
-: "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
 PROBE_CONFIGMAP="${PROBE_CONFIGMAP:-fleet-role-probe}"
 REPORT_SECONDS="${REPORT_SECONDS:-15}"
 REPORT_ONCE="${REPORT_ONCE:-false}"
@@ -85,6 +84,7 @@ link_type() {
 # The time curl took to connect to a peer's etcd peer port, in milliseconds. The request itself is not the point (the port speaks TLS, and curl's HTTP is refused), only the connection: curl reports a connect time of zero when it never completed, and then the reading is the election timeout.
 connect_ms() {
   local host=$1 seconds
+  : "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
   [[ "$host" != *:* ]] || host="[${host}]"
   seconds="$(curl --silent --output /dev/null --connect-timeout "$(awk -v ms="$ELECTION_TIMEOUT_MS" 'BEGIN { printf "%.3f", ms / 1000 }')" \
     --write-out '%{time_connect}' "http://${host}:${ETCD_PEER_PORT}/" 2> /dev/null || true)"
@@ -153,6 +153,26 @@ report() {
   kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null
   rm -f "$patch"
 }
+
+# One reading alone, for comparing with a reading taken by hand.
+if [ "${1:-}" = check ]; then
+  case "${2:-}" in
+    link)
+      iface="$(default_route_interface)"
+      jq -nc --arg interface "$iface" --arg link "$(link_type "$iface")" '{interface: $interface, link: $link}'
+      ;;
+    connect) connect_ms "${3:?usage: check connect <address>}" ;;
+    memory) jq -nc --arg psi "$(psi_avg300)" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" '{psi_avg300: ($psi | tonumber), mem_available_kb: ($avail | tonumber), mem_total_kb: ($total | tonumber)}' ;;
+    etcd) curl --silent --show-error --fail --max-time "$REPORT_SECONDS" "$ETCD_METRICS_URL" | jq -Rsc -L "$MODULES" 'include "fleet-role-stats"; etcd_reading | {id, has_leader, is_learner, known_members, active_peers, quota_bytes, leader_changes, wal_fsync_p99_ms: (.wal | per_bucket | histogram_quantile(tail_percentile) * 1000), backend_commit_p99_ms: (.commit | per_bucket | histogram_quantile(tail_percentile) * 1000)}' ;;
+    fsync) fsync_ms ;;
+    *) echo "usage: $0 check link|connect <address>|memory|etcd|fsync" >&2; exit 2 ;;
+  esac
+  exit 0
+fi
+
+: "${NODE_NAME:?NODE_NAME is required}"
+: "${NAMESPACE:?NAMESPACE is required}"
+: "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
 
 first=true
 while true; do
