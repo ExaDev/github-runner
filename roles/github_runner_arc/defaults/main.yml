@@ -190,7 +190,8 @@ github_runner_arc_node_recovery_prune_label: github-runner.exadev.io/removable
 github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:2.25.0"
 
 # The role controller (see tasks/install_fleet_role.yml, scripts/fleet-role.sh and scripts/fleet-role-probe.sh): a `fleet-role-probe` DaemonSet that measures, on every node with a kubelet, what decides whether a host is fit to hold an etcd vote, and a `fleet-role` Deployment that reads the measurements and reports which eligible hosts are fit and which swap of an unfit voter for a fit standby it would make. It reports and changes nothing: its only writes are its own two ConfigMaps. Off by default, so a consumer that upgrades changes nothing.
-github_runner_arc_role_controller_enabled: false
+# The cluster role's github_runner_cluster_role_controller when it is defined, so one inventory setting turns it on; set this one to turn it on from a host that does not run the cluster role (playbooks/arc.yml against a kubeconfig).
+github_runner_arc_role_controller_enabled: "{{ github_runner_cluster_role_controller | default(false) }}"
 # Image the controller and the probe run, one image whose entrypoint is the controller. Pulled without a pull Secret, so it must be public.
 github_runner_arc_role_controller_image: "ghcr.io/exadev/github-runner-fleet-role:2.22.0"
 # Seconds between probe samples and between controller passes. A figure is read over a window of 100 samples (the fewest that give the 99th percentile a sample of its own), so this sets how long a window is: 1500 seconds at the default, node recovery's own poll.
