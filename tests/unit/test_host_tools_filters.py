@@ -1,4 +1,4 @@
-"""Tests the filters of the github_runner_host_tools role in plugins/filter/host_tools.py: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell or set environment variables in it, mise's configuration rendered to TOML, the lines of the managed block of an npmrc file and a YAML file merged with settings, against golden strings."""
+"""Tests the filters of the github_runner_host_tools role in plugins/filter/host_tools.py: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell or set environment variables in it, whether a managed block leads its startup file, mise's configuration rendered to TOML, the lines of the managed block of an npmrc file and a YAML file merged with settings, against golden strings."""
 
 from __future__ import annotations
 
@@ -43,8 +43,8 @@ class ShellIntegrationFilterTest(unittest.TestCase):
         self.assertEqual(
             host_tools.host_tools_shell_integrations("/opt/homebrew", "zsh", True, True),
             [
-                {"name": "homebrew", "pattern": "^[^#]*brew shellenv", "line": '[ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)"'},
-                {"name": "mise", "pattern": "^[^#]*mise activate", "line": '[ -x /opt/homebrew/bin/mise ] && eval "$(/opt/homebrew/bin/mise activate zsh)"'},
+                {"name": "homebrew", "pattern": "^[^#]*brew shellenv", "line": '[ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)"', "non_interactive": False},
+                {"name": "mise", "pattern": "^[^#]*mise activate", "line": '[ -x /opt/homebrew/bin/mise ] && eval "$(/opt/homebrew/bin/mise activate zsh)"', "non_interactive": False},
             ],
         )
 
@@ -125,7 +125,7 @@ def grep_finds(pattern: str, text: str) -> bool:
 class ShellEnvFilterTest(unittest.TestCase):
     def test_a_variable_becomes_a_quoted_export_line_and_a_pattern_that_finds_an_assignment_of_it(self) -> None:
         [item] = host_tools.host_tools_shell_env({"UV_PYTHON_DOWNLOADS": "never"})
-        self.assertEqual(item, {"name": "env-UV_PYTHON_DOWNLOADS", "pattern": "^[[:space:]]*(export[[:space:]]+)?UV_PYTHON_DOWNLOADS=", "line": "export UV_PYTHON_DOWNLOADS=never"})
+        self.assertEqual(item, {"name": "env-UV_PYTHON_DOWNLOADS", "pattern": "^[[:space:]]*(export[[:space:]]+)?UV_PYTHON_DOWNLOADS=", "line": "export UV_PYTHON_DOWNLOADS=never", "non_interactive": True})
 
     def test_the_variables_come_out_in_the_order_of_the_mapping(self) -> None:
         self.assertEqual([item["name"] for item in host_tools.host_tools_shell_env({"B": "1", "A": "2"})], ["env-B", "env-A"])
@@ -176,6 +176,53 @@ class ShellEnvFilterTest(unittest.TestCase):
         for label, (env, message) in cases.items():
             with self.subTest(label), self.assertRaisesRegex(Exception, message):
                 host_tools.host_tools_shell_env(env)
+
+
+STEM = "# {mark} ANSIBLE MANAGED BLOCK example "
+OWN = "# BEGIN ANSIBLE MANAGED BLOCK example env-A\nexport A=1\n# END ANSIBLE MANAGED BLOCK example env-A\n"
+OTHER = OWN.replace("env-A", "env-B").replace("A=1", "B=2")
+
+
+class BlockLeadsFilterTest(unittest.TestCase):
+    def leads(self, text: str) -> bool:
+        return bool(host_tools.host_tools_block_leads(text, STEM + "env-A", STEM))
+
+    def test_a_block_at_the_start_of_the_file_leads(self) -> None:
+        self.assertTrue(self.leads(OWN + "export X=1\n"))
+
+    def test_blank_lines_and_comments_above_the_block_do_not_matter(self) -> None:
+        self.assertTrue(self.leads("#!/bin/bash\n\n  # a note\n" + OWN))
+
+    def test_other_blocks_of_the_role_above_it_do_not_matter_whatever_they_hold(self) -> None:
+        self.assertTrue(self.leads(OTHER + OWN))
+        self.assertTrue(self.leads(OTHER.replace("export B=2", "[ -z \"$PS1\" ] && return") + OWN))
+
+    def test_any_code_above_the_block_means_it_does_not_lead(self) -> None:
+        for code in ("export X=1\n", "case $- in\n    *i*) ;;\n      *) return;;\nesac\n", "[ -z \"$PS1\" ] && return\n", "  return\n"):
+            with self.subTest(code=code):
+                self.assertFalse(self.leads("# note\n" + code + OWN))
+                self.assertFalse(self.leads(OTHER + code + OWN))
+
+    def test_the_real_ubuntu_skeleton_with_the_block_appended_does_not_lead_and_with_it_prepended_does(self) -> None:
+        skeleton = (ROOT / "tests" / "host_tools" / "ubuntu-26.04-skel.bashrc").read_text()
+        self.assertFalse(self.leads(skeleton + OWN))
+        self.assertTrue(self.leads(OWN + skeleton))
+
+    def test_blocks_below_it_do_not_matter(self) -> None:
+        self.assertTrue(self.leads(OTHER + OWN + OTHER.replace("B", "C")))
+
+    def test_the_block_is_matched_by_its_whole_marker_line(self) -> None:
+        text = OWN.replace("env-A", "env-AB")
+        with self.assertRaisesRegex(Exception, "no block"):
+            host_tools.host_tools_block_leads(text, STEM + "env-A", STEM)
+
+    def test_a_file_without_the_block_is_refused(self) -> None:
+        with self.assertRaisesRegex(Exception, "no block"):
+            host_tools.host_tools_block_leads("# note\n", STEM + "env-A", STEM)
+
+    def test_what_is_not_text_is_refused(self) -> None:
+        with self.assertRaisesRegex(Exception, "must be strings"):
+            host_tools.host_tools_block_leads(None, STEM + "env-A", STEM)
 
 
 MARKER = "# {mark} ANSIBLE MANAGED BLOCK example"

@@ -1,4 +1,4 @@
-"""Filters the github_runner_host_tools role uses: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell or set environment variables in it, mise's configuration rendered to TOML, the managed lines of an npmrc file and a YAML file merged with settings."""
+"""Filters the github_runner_host_tools role uses: the Homebrew prefix a host has, the shell startup lines that bring Homebrew and mise into a shell or set environment variables in it, whether a managed block leads its startup file, mise's configuration rendered to TOML, the managed lines of an npmrc file and a YAML file merged with settings."""
 
 from __future__ import annotations
 
@@ -52,12 +52,12 @@ def host_tools_homebrew_prefix(system: Any, machine: Any) -> str:
     raise AnsibleFilterError(f"Homebrew supports Darwin and Linux, not {system!r}.")
 
 
-def host_tools_shell_integrations(prefix: Any, shell: Any, homebrew: Any, mise: Any) -> list[dict[str, str]]:
+def host_tools_shell_integrations(prefix: Any, shell: Any, homebrew: Any, mise: Any) -> list[dict[str, Any]]:
     """Return the startup lines that bring Homebrew and mise into a shell.
 
-    Each line is guarded by a test that the binary is executable, so a startup file that outlives the tool does no harm. ``pattern`` is an extended regular expression that matches a line of a startup file that already does the same, outside a comment, and ``name`` tells the integrations apart.
+    Each line is guarded by a test that the binary is executable, so a startup file that outlives the tool does no harm. ``pattern`` is an extended regular expression that matches a line of a startup file that already does the same, outside a comment, ``name`` tells the integrations apart, and ``non_interactive`` is false because Homebrew and mise are wanted in an interactive shell only (the line goes where the file's own interactive setup is, never ahead of an early return for non-interactive shells).
 
-    :param prefix: the Homebrew prefix, whose ``bin`` holds ``brew`` and ``mise``. :param shell: the shell's name, ``zsh`` or ``bash``, which mise's activation is generated for. :param homebrew: whether Homebrew is wanted in the shell. :param mise: whether mise is wanted in the shell. :returns: ``[{"name", "pattern", "line"}, ...]``, Homebrew first, with a dictionary for each tool that is wanted. :raises AnsibleFilterError: the prefix is not an absolute path or the shell is not one the role supports.
+    :param prefix: the Homebrew prefix, whose ``bin`` holds ``brew`` and ``mise``. :param shell: the shell's name, ``zsh`` or ``bash``, which mise's activation is generated for. :param homebrew: whether Homebrew is wanted in the shell. :param mise: whether mise is wanted in the shell. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]``, Homebrew first, with a dictionary for each tool that is wanted. :raises AnsibleFilterError: the prefix is not an absolute path or the shell is not one the role supports.
     """
     if not isinstance(prefix, str) or not prefix.startswith("/"):
         raise AnsibleFilterError(f"The Homebrew prefix must be an absolute path, not {prefix!r}.")
@@ -65,11 +65,11 @@ def host_tools_shell_integrations(prefix: Any, shell: Any, homebrew: Any, mise: 
         raise AnsibleFilterError(f"The shell must be zsh or bash, not {shell!r}.")
     brew = shlex.quote(f"{prefix}/bin/brew")
     mise_binary = shlex.quote(f"{prefix}/bin/mise")
-    integrations: list[dict[str, str]] = []
+    integrations: list[dict[str, Any]] = []
     if homebrew:
-        integrations.append({"name": "homebrew", "pattern": "^[^#]*brew shellenv", "line": f'[ -x {brew} ] && eval "$({brew} shellenv)"'})
+        integrations.append({"name": "homebrew", "pattern": "^[^#]*brew shellenv", "line": f'[ -x {brew} ] && eval "$({brew} shellenv)"', "non_interactive": False})
     if mise:
-        integrations.append({"name": "mise", "pattern": "^[^#]*mise activate", "line": f'[ -x {mise_binary} ] && eval "$({mise_binary} activate {shell})"'})
+        integrations.append({"name": "mise", "pattern": "^[^#]*mise activate", "line": f'[ -x {mise_binary} ] && eval "$({mise_binary} activate {shell})"', "non_interactive": False})
     return integrations
 
 
@@ -90,22 +90,46 @@ def _env_value(name: str, value: Any) -> str:
     raise AnsibleFilterError(f"The value of {name} must be a string, a number or a boolean, not {type(value).__name__}.")
 
 
-def host_tools_shell_env(env: Any) -> list[dict[str, str]]:
-    """Return the startup lines that set environment variables in a shell, in the shape host_tools_shell_integrations returns.
+def host_tools_shell_env(env: Any) -> list[dict[str, Any]]:
+    """Return the startup lines that set environment variables in a shell, in the shape host_tools_shell_integrations returns, with ``non_interactive`` true: a variable is for every shell the user's commands run in, and a non-interactive bash returns from ``~/.bashrc`` at the file's interactive guard, so the caller writes these lines ahead of everything else in the file.
 
     Each value is quoted for the shell with ``shlex.quote``, so it reaches the variable exactly as given whatever it holds (spaces, quotes, ``$``, backticks), in zsh and in bash alike. ``pattern`` is an extended regular expression that matches a line of a startup file that already assigns the variable, outside a comment, whatever its value, so a value the user chose is never overridden, and ``name`` tells the lines apart.
 
-    :param env: a mapping of variable names to string, number or boolean values. :returns: ``[{"name", "pattern", "line"}, ...]`` in the mapping's order, with a dictionary for each variable. :raises AnsibleFilterError: ``env`` is not a mapping, a name is not one the shell accepts, or a value is not a single-line string, a number or a boolean.
+    :param env: a mapping of variable names to string, number or boolean values. :returns: ``[{"name", "pattern", "line", "non_interactive"}, ...]`` in the mapping's order, with a dictionary for each variable. :raises AnsibleFilterError: ``env`` is not a mapping, a name is not one the shell accepts, or a value is not a single-line string, a number or a boolean.
     """
     if not isinstance(env, dict):
         raise AnsibleFilterError(f"The shell environment must be a mapping, not {type(env).__name__}.")
-    lines: list[dict[str, str]] = []
+    lines: list[dict[str, Any]] = []
     for name, value in env.items():
         if not isinstance(name, str) or not ENV_NAME.match(name):
             raise AnsibleFilterError(f"{name!r} is not a name a shell accepts for an environment variable.")
         text = _env_value(name, value)
-        lines.append({"name": f"env-{name}", "pattern": f"^[[:space:]]*(export[[:space:]]+)?{name}=", "line": f"export {name}={shlex.quote(text)}"})
+        lines.append({"name": f"env-{name}", "pattern": f"^[[:space:]]*(export[[:space:]]+)?{name}=", "line": f"export {name}={shlex.quote(text)}", "non_interactive": True})
     return lines
+
+
+def host_tools_block_leads(existing: Any, marker: Any, stem: Any) -> bool:
+    """Return whether a managed block comes before everything in a startup file that could return early.
+
+    The role writes the blocks a non-interactive shell must read at the top of the file, because a non-interactive bash reads ``~/.bashrc`` only as far as the interactive guard (``case $- in *i*) ;; *) return;; esac``). A block leads the file when every line above its BEGIN marker is blank, a comment, or inside a block of the role's own, which never returns. The test is the file's own order, not a guess at what the guard looks like, so a guard written any other way is handled alike: any code above the block counts as the guard.
+
+    :param existing: the text of the startup file. :param marker: the block's marker line with ``{mark}`` where BEGIN and END go. :param stem: the start of the marker line of every block the role writes in this file, with ``{mark}`` where BEGIN and END go (the marker without the block's name). :returns: whether nothing but blank lines, comments and the role's blocks come above the block. :raises AnsibleFilterError: an argument is not a string, or the file has no block with the marker.
+    """
+    if not (isinstance(existing, str) and isinstance(marker, str) and isinstance(stem, str)):
+        raise AnsibleFilterError("The startup file's text, the block's marker and the marker stem must be strings.")
+    begin, own_begin, own_end = marker.replace("{mark}", "BEGIN"), stem.replace("{mark}", "BEGIN"), stem.replace("{mark}", "END")
+    inside = False
+    for line in existing.splitlines():
+        text = line.rstrip()
+        if text == begin:
+            return True
+        if inside:
+            inside = not text.startswith(own_end)
+        elif text.startswith(own_begin):
+            inside = True
+        elif text.strip() and not text.lstrip().startswith("#"):
+            return False
+    raise AnsibleFilterError(f"The startup file has no block that starts with {begin!r}.")
 
 
 def _key(name: Any) -> str:
@@ -356,6 +380,7 @@ class FilterModule:
             "host_tools_homebrew_prefix": host_tools_homebrew_prefix,
             "host_tools_shell_integrations": host_tools_shell_integrations,
             "host_tools_shell_env": host_tools_shell_env,
+            "host_tools_block_leads": host_tools_block_leads,
             "host_tools_mise_toml": host_tools_mise_toml,
             "host_tools_npmrc": host_tools_npmrc,
             "host_tools_yaml_merge": host_tools_yaml_merge,
