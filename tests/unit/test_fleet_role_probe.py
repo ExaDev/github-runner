@@ -644,35 +644,72 @@ class RingTest(ProbeCase):
         patches = [json.loads(line) for line in self.cluster.calls.read_text().splitlines() if '"patch"' in line]
         self.assertEqual([call[:3] for call in patches], [["patch", "configmap", "fleet-role-probe"]])
 
-    def test_a_node_that_is_not_a_voter_marks_its_first_sample_as_a_restart_and_a_later_one_as_none(self) -> None:
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
-        # The loop form: one process taking two samples.
+    def recorded(self) -> list[dict[str, Any]]:
+        for _ in range(50):
+            try:
+                return json.loads(self.cluster.read_store()["configmaps"][f"{NAMESPACE}/fleet-role-probe"]["data"].get("me", "{}")).get("samples", [])
+            except json.JSONDecodeError:
+                time.sleep(0.1)  # the stand-in kubectl was rewriting the store
+        raise AssertionError("the store could not be read")
+
+    def loop(self, wanted: int, **env: str) -> list[dict[str, Any]]:
+        """Runs the probe as the DaemonSet does, one process taking a sample a second, until it has recorded this many samples (or a minute has gone), and returns them."""
         self.cluster.nodes = self.nodes
         self.cluster.write_store()
         process = subprocess.Popen(
             [str(Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh")],
             env=self.cluster.env(
                 NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), ELIGIBLE_LABEL=ELIGIBLE_LABEL, REPORT_SECONDS="1", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
-                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo),
+                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
             ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         try:
-            deadline = time.monotonic() + 30
-            samples: list[dict[str, Any]] = []
-            while time.monotonic() < deadline and len(samples) < 2:
-                time.sleep(0.2)
-                try:
-                    stored = self.cluster.read_store()["configmaps"][f"{NAMESPACE}/fleet-role-probe"]["data"].get("me", "{}")
-                except json.JSONDecodeError:
-                    continue  # the stand-in kubectl was rewriting the store
-                samples = json.loads(stored).get("samples", [])
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and len(self.recorded()) < wanted:
+                time.sleep(0.3)
         finally:
             process.terminate()
             process.wait(timeout=20)
+        return self.recorded()
+
+    def test_a_node_that_is_not_a_voter_marks_its_first_sample_as_a_restart_and_a_later_one_as_none(self) -> None:
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        samples = self.loop(2)
         self.assertGreaterEqual(len(samples), 2)
         self.assertEqual([s["restarted"] for s in samples[:2]], [True, False])
+
+    def test_a_sample_after_the_first_costs_two_api_calls_the_nodes_and_the_patch(self) -> None:
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        samples = self.loop(3)
+        calls = [json.loads(line) for line in self.cluster.calls.read_text().splitlines()]
+        self.assertGreaterEqual(len(samples), 3)
+        reads = [c[:2] for c in calls if c[0] == "get"]
+        patches = [c for c in calls if c[0] == "patch"]
+        self.assertEqual(reads.count(["get", "configmap"]), 1, "this node's entry is read once, when the process starts")
+        # The process may have been stopped between a sample's read of the nodes and its patch, so the nodes were read once for each patch and at most once more.
+        self.assertIn(reads.count(["get", "nodes"]) - len(patches), (0, 1), reads)
+        self.assertGreaterEqual(len(patches), len(samples))
+
+    def test_a_patch_the_api_refuses_is_retried_next_period_without_the_process_exiting_and_the_first_sample_still_marks_the_restart(self) -> None:
+        refusals = self.cluster.dir / "refusals"
+        refusals.write_text("2")
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        samples = self.loop(2, FAKE_FAIL_PATCHES=str(refusals))
+        self.assertEqual(refusals.read_text(), "0")
+        self.assertGreaterEqual(len(samples), 2, "the probe went on after the refusals")
+        self.assertEqual([s["restarted"] for s in samples[:2]], [True, False])
+        patches = [c for c in (json.loads(line) for line in self.cluster.calls.read_text().splitlines()) if c[0] == "patch"]
+        self.assertEqual(len(patches), len(samples) + 2)
+
+    def test_a_patch_the_api_refuses_fails_a_single_sample_run(self) -> None:
+        refusals = self.cluster.dir / "refusals"
+        refusals.write_text("1")
+        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        completed = self.probe(FAKE_FAIL_PATCHES=str(refusals))
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(self.cluster.probes()["me"]["samples"], [])
 
 
 @unittest.skipUnless(FIO, "needs fio, which the probe's fdatasync reading is taken with")

@@ -106,10 +106,17 @@ report() {
   local first=$1 now entry voters is_voter eligible tcp='{}' peer_name peer_ip ms etcd='null' restarted=false cumulative='null' etcd_id='null'
   local iface fsync='null' fsync_at patch metrics reading change psi=''
   now="$(date +%s)"
-  entry="$(kubectl get configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" -o json | jq -c --arg node "$NODE_NAME" '(.data[$node] // "null") | fromjson')"
-  voters="$(kubectl get nodes -l "$VOTER_LABEL" -o json | jq -c '[.items[] | {name: .metadata.name, ip: ([.status.addresses[]? | select(.type == "InternalIP") | .address] | .[0])}]')"
+  # This node's entry is read from the ConfigMap once, when the process starts, and kept from then on: the probe is the only writer of its key, and two API calls a sample (the nodes, then the patch) are all a probe on a poor path can be asked to make in a period.
+  if [ "$entry_loaded" != true ]; then
+    entry="$(kubectl get configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" -o json | jq -c --arg node "$NODE_NAME" '(.data[$node] // "null") | fromjson')" || return 1
+    entry_loaded=true
+  else
+    entry="$kept_entry"
+  fi
+  nodes_json="$(kubectl get nodes -o json)" || return 1
+  voters="$(jq -c --arg label "${VOTER_LABEL%%=*}" --arg value "${VOTER_LABEL#*=}" '[.items[] | select((.metadata.labels // {})[$label] == $value) | {name: .metadata.name, ip: ([.status.addresses[]? | select(.type == "InternalIP") | .address] | .[0])}]' <<< "$nodes_json")"
   is_voter="$(jq --arg node "$NODE_NAME" 'any(.[]; .name == $node)' <<< "$voters")"
-  eligible="$(kubectl get node "$NODE_NAME" -o json | jq --arg label "$ELIGIBLE_LABEL" '(.metadata.labels // {})[$label] == "true"')"
+  eligible="$(jq --arg node "$NODE_NAME" --arg label "$ELIGIBLE_LABEL" 'any(.items[]; .metadata.name == $node and (.metadata.labels // {})[$label] == "true")' <<< "$nodes_json")"
   if [ "$is_voter" != true ] && [ "$eligible" != true ]; then
     # A key set to null in a merge patch is removed.
     if [ "$entry" != null ]; then
@@ -117,6 +124,7 @@ report() {
       jq -n --arg node "$NODE_NAME" '{data: {($node): null}}' > "$patch"
       kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null
       rm -f "$patch"
+      kept_entry=null
     fi
     return 0
   fi
@@ -155,9 +163,8 @@ report() {
     psi="$(psi_avg300)"
   fi
 
-  patch="$(mktemp)"
   # The entry goes in on standard input, never as an argument: it holds a window of samples, and one argument is limited to a fraction of the argument space (128 KiB on Linux).
-  jq -L "$MODULES" --arg node "$NODE_NAME" --argjson now "$now" --argjson tcp "$tcp" --argjson etcd "$etcd" \
+  new_entry="$(jq -c -L "$MODULES" --argjson now "$now" --argjson tcp "$tcp" --argjson etcd "$etcd" \
     --argjson restarted "$restarted" --argjson cumulative "$cumulative" --argjson etcd_id "$etcd_id" --argjson fsync "$fsync" --argjson fsync_at "$fsync_at" \
     --arg psi "$psi" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" --arg iface "$iface" --arg link "$(link_type "$iface")" '
     include "fleet-role-stats";
@@ -165,9 +172,13 @@ report() {
     . as $entry
     | {t: $now, tcp: $tcp, etcd: $etcd, restarted: $restarted, psi: ($psi | number), avail_kb: ($avail | number), total_kb: ($total | number),
      link: $link, iface: (if $iface == "" then null else $iface end), fsync_ms: $fsync} as $sample
-    | {data: {($node): ({etcd_id: $etcd_id, last: $cumulative, fsync_at: $fsync_at, samples: ((($entry.samples // []) + [$sample]) | .[-window_samples:])} | tojson)}}' <<< "$entry" > "$patch"
-  kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null
+    | {etcd_id: $etcd_id, last: $cumulative, fsync_at: $fsync_at, samples: ((($entry.samples // []) + [$sample]) | .[-window_samples:])}' <<< "$entry")" || return 1
+  patch="$(mktemp)"
+  jq --arg node "$NODE_NAME" '{data: {($node): tojson}}' <<< "$new_entry" > "$patch"
+  kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null || { rm -f "$patch"; return 1; }
   rm -f "$patch"
+  # Kept only once published, so a patch that failed is read again from the ConfigMap and not taken as written.
+  kept_entry="$new_entry"
 }
 
 # One reading alone, for comparing with a reading taken by hand.
@@ -191,10 +202,18 @@ fi
 : "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
 : "${ELIGIBLE_LABEL:?ELIGIBLE_LABEL is required}"
 
+# This node's entry as the ConfigMap holds it, read once and then kept (see report).
+entry_loaded=false
+kept_entry=null
 first=true
 while true; do
-  report "$first"
-  first=false
+  # A sample the API would not take is not recorded, and the next period tries again: a probe on a poor path is the case the controller exists for, and a process that exited on it would be started again as a restart. "First" stays until a sample is recorded, since it is the only sign a node that is not a voter has of its k3s having restarted.
+  if report "$first"; then
+    first=false
+  else
+    [ "$REPORT_ONCE" != true ] || exit 1
+    log "could not record a sample; trying again in ${REPORT_SECONDS}s"
+  fi
   [ "$REPORT_ONCE" = true ] && exit 0
   sleep "$REPORT_SECONDS"
 done

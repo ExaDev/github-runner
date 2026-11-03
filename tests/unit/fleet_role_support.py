@@ -79,6 +79,13 @@ FAKE_KUBECTL = textwrap.dedent(
             sys.exit(1)
         print(json.dumps({"metadata": {"name": args[2]}, "data": store["configmaps"][key]["data"]}))
         sys.exit(0)
+    if args[:2] == ["patch", "configmap"] and os.environ.get("FAKE_FAIL_PATCHES"):
+        # Refuses the next patches as an API server on a poor path does: the count is kept in the file the variable names.
+        remaining = int(open(os.environ["FAKE_FAIL_PATCHES"]).read() or "0")
+        if remaining > 0:
+            open(os.environ["FAKE_FAIL_PATCHES"], "w").write(str(remaining - 1))
+            sys.stderr.write("Unable to connect to the server: net/http: TLS handshake timeout\\n")
+            sys.exit(1)
     if args[:2] == ["patch", "configmap"]:
         key = flag("-n") + "/" + args[2]
         patch = json.load(open(flag("--patch-file")))
