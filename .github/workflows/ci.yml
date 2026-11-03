@@ -149,7 +149,7 @@ jobs:
     needs: verified
     if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # Each module is run on its own by discovery, dealt out by size, a rough stand-in for its work: the tests that run Ansible playbooks cost a process each, so a module's runs, not its bytes, decide its time, and the suite no longer fits one job. The timeout is a guard against a hung test, set above the heaviest shard's run, never a budget the shards are fitted to.
+    # Each module is run on its own by discovery, and scripts/ci/shard_unit_tests.py deals the modules out by the work counted from their tests: the tests that run Ansible playbooks cost a process each, so the playbook runs a module's tests reach, not its bytes, decide its time, and the suite no longer fits one job. The timeout is a guard against a hung test, set above the heaviest shard's run, never a budget the shards are fitted to.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -191,7 +191,7 @@ jobs:
           tar -xzf "${dir}/etcd.tar.gz" -C "$dir" --strip-components=1 "etcd-${ETCD_VERSION}-linux-amd64/etcd" "etcd-${ETCD_VERSION}-linux-amd64/etcdctl"
           echo "ETCD_BINARY=${dir}/etcd" >> "$GITHUB_ENV"
       - name: Unit-test the collection
-        # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record. A module is a shard's when its position in the list of modules, largest first, leaves this shard's index modulo the number of shards.
+        # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record. The modules this shard runs are the ones scripts/ci/shard_unit_tests.py deals to it, imported from this checkout, so ansible must already be importable and ANSIBLE_PLAYBOOK set, as they are here.
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
@@ -200,7 +200,9 @@ jobs:
           export PATH="/usr/bin:${PATH}" ANSIBLE_PLAYBOOK=/usr/bin/ansible-playbook
           ansible-playbook --version | head -n 1
           python3 -c 'import ansible.release; print("ansible-core", ansible.release.__version__)'
-          mapfile -t modules < <(find tests/unit -maxdepth 1 -name 'test_*.py' -printf '%s %p\n' | LC_ALL=C sort -k1,1nr -k2,2 | cut -d' ' -f2- | awk -v shard="$SHARD" -v shards="$SHARDS" '(NR - 1) % shards == shard')
+          # An assignment, not a process substitution, so that a failed dealing stops the step instead of leaving a shard with no modules to pass.
+          shard_modules=$(python3 scripts/ci/shard_unit_tests.py "$SHARD" "$SHARDS")
+          mapfile -t modules <<< "$shard_modules"
           echo "Shard ${SHARD} of ${SHARDS}: ${#modules[@]} module(s)"
           # Every module runs whatever an earlier one did, so one failure never hides another's; the shard fails afterwards, naming each module that failed.
           failed=()
