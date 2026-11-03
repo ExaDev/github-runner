@@ -64,7 +64,7 @@ github_runner_cluster_voter_eligible_label: "github-runner.exadev.com/voter-elig
 github_runner_cluster_voter_pinned_label: "github-runner.exadev.com/voter-pinned"
 # The Node label the role publishes the medium of this host's link under, wired, wifi or unknown, which tasks/link.yml reads on the host: the medium of the interface a Mac's Colima VM is bridged to (or of the interface the Mac's default route leaves by, for a VM that is not bridged or a runtime that is not Colima), or of the interface a Linux host's default route leaves by. The role controller's probe reports it (github_runner_arc_role_controller_link_label defaults to this), since a node in a container or a VM cannot see the link beneath its own virtual interface.
 github_runner_cluster_link_label: "github-runner.exadev.com/link"
-# Derived, never set directly: whether this host publishes the labels above, which it does while the role controller is on or the host is marked eligible or pinned, so that a fleet that uses none of them keeps its nodes' configuration as it is (a Docker node is not recreated by an upgrade).
+# Derived, never set directly: whether this host publishes the labels above, which it does while the role controller is on or the host is marked eligible or pinned, so that a fleet that uses none of them keeps its nodes' configuration as it is (a Docker node is not recreated by an upgrade). The same hosts mount the role directory into a Docker node (docker-compose.fleet-role.yml).
 github_runner_cluster_publishes_node_labels: >-
   {{ github_runner_cluster_role_controller | bool or github_runner_cluster_voter_eligible | bool or github_runner_cluster_voter_pinned | bool }}
 # Derived, never set directly: this host's labels, as the key=value entries every runtime passes to k3s as --node-label, empty unless github_runner_cluster_publishes_node_labels. github_runner_cluster_link is the medium tasks/link.yml read on the host in this run.
@@ -176,12 +176,13 @@ github_runner_cluster_network_probe_image: "busybox:1.37"
 
 # Extra Compose files merged after docker-compose.yml for this host's k3s project, as paths relative to github_runner_cluster_dir or absolute. Nothing needs them in normal use; the mesh integration tests use one to put several nodes on one Docker host.
 github_runner_cluster_compose_files: []
-# Derived, never set directly: every Compose file for this host's k3s project, in merge order: docker-compose.yml, then the override the headscale_in_cluster provider writes for the bootstrap server, then docker-compose.api-port.yml when github_runner_cluster_api_port is not the default, then docker-compose.node-labels.yml when the host has node labels, then github_runner_cluster_compose_files, then, with github_runner_cluster_network_mode host, docker-compose.host-network.yml, last so that its emptied port list wins over any file that publishes one. With no files beyond docker-compose.yml the role passes none at all and Compose reads it by itself, exactly as a plain `docker compose up` in github_runner_cluster_dir would.
+# Derived, never set directly: every Compose file for this host's k3s project, in merge order: docker-compose.yml, then the override the headscale_in_cluster provider writes for the bootstrap server, then docker-compose.api-port.yml when github_runner_cluster_api_port is not the default, then docker-compose.node-labels.yml when the host has node labels, then docker-compose.fleet-role.yml when the host takes part in the role controller (github_runner_cluster_publishes_node_labels, the same hosts), then github_runner_cluster_compose_files, then, with github_runner_cluster_network_mode host, docker-compose.host-network.yml, last so that its emptied port list wins over any file that publishes one. With no files beyond docker-compose.yml the role passes none at all and Compose reads it by itself, exactly as a plain `docker compose up` in github_runner_cluster_dir would.
 github_runner_cluster_compose_file_list: >-
   {{ ['docker-compose.yml']
      + (['docker-compose.mesh.yml'] if github_runner_cluster_mesh == 'headscale_in_cluster' and github_runner_cluster_effective_bootstrap | default(false) | bool else [])
      + (['docker-compose.api-port.yml'] if github_runner_cluster_api_port | int != github_runner_cluster_k3s_default_api_port | int else [])
      + (['docker-compose.node-labels.yml'] if github_runner_cluster_node_labels | length > 0 else [])
+     + (['docker-compose.fleet-role.yml'] if github_runner_cluster_publishes_node_labels | bool else [])
      + github_runner_cluster_compose_files
      + (['docker-compose.host-network.yml'] if github_runner_cluster_network_mode == 'host' else []) }}
 # Derived, never set directly: the Compose files this role writes into github_runner_cluster_dir itself, by the name the list above gives them. A user's own entry in github_runner_cluster_compose_files is not among them, and a missing one of those is an error in a check run as in a real one.
@@ -189,6 +190,7 @@ github_runner_cluster_compose_files_written:
   - docker-compose.yml
   - docker-compose.api-port.yml
   - docker-compose.node-labels.yml
+  - docker-compose.fleet-role.yml
   - docker-compose.host-network.yml
   - docker-compose.mesh.yml
 # Derived, never set directly: the Compose files a Compose command run now can name. Every file in the list above in a real run, since the run has written the ones it owns before any Compose command; under --check, which writes nothing, tasks/compose_files_in_use.yml leaves out the ones this role would write and the host does not have yet. Compose refuses a command that names a file that is not there, and a check run that fails on one fails the README's promise that --check runs before every deploy.

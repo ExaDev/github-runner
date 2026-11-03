@@ -1,0 +1,8 @@
+# Merged after docker-compose.yml by the github_runner_cluster role when this host takes part in the role controller (github_runner_cluster_publishes_node_labels in defaults/main.yml: the controller is on, or this host is marked a voter candidate or pinned): mounts the host's role directory, fleet-role.d in the Compose project directory, read-only into both services at /etc/github-runner, where k3s/node-entrypoint.sh reads the role the host runs and the server a promoted server joins. A directory rather than its files, because a file replaced by a rename has a new inode, which a bind mount of the file itself does not follow. Its own file, as docker-compose.node-labels.yml is, so that a host the controller never moves keeps the Compose configuration it has and its container is not recreated by an upgrade.
+services:
+  k3s:
+    volumes:
+      - ./fleet-role.d:/etc/github-runner:ro
+  k3s-agent:
+    volumes:
+      - ./fleet-role.d:/etc/github-runner:ro

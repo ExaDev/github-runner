@@ -86,7 +86,7 @@
   ansible.builtin.include_tasks: instance_check.yml
 
 - name: Create this host's Compose project directory
-  # The kubeconfig directory is the connecting user's alone: the kubeconfig k3s writes into it holds the cluster's admin credentials, and is readable by others so that this user can read it where the container writes it as root (see --write-kubeconfig-mode in k3s/node-entrypoint.sh).
+  # The kubeconfig directory is the connecting user's alone: the kubeconfig k3s writes into it holds the cluster's admin credentials, and is readable by others so that this user can read it where the container writes it as root (see --write-kubeconfig-mode in k3s/node-entrypoint.sh). fleet-role.d is the host's role directory, created empty, which docker-compose.fleet-role.yml mounts read-only into both services: whatever changes the host's role writes `role` and `join-url` into it, and the entrypoint reads them (an absent file changes nothing). Created on every host, so that it exists before any Compose command that mounts it, which would otherwise have Docker create it as root.
   ansible.builtin.file:
     path: "{{ github_runner_cluster_dir }}/{{ item.path }}"
     state: directory
@@ -95,6 +95,7 @@
     - {path: "", mode: "0755"}
     - {path: k3s, mode: "0755"}
     - {path: kubeconfig, mode: "0700"}
+    - {path: fleet-role.d, mode: "0755"}
   loop_control:
     label: "{{ item.path }}"
 
@@ -108,6 +109,7 @@
     - {src: docker-compose.yml, mode: "0644"}
     - {src: docker-compose.api-port.yml, mode: "0644"}
     - {src: docker-compose.node-labels.yml, mode: "0644"}
+    - {src: docker-compose.fleet-role.yml, mode: "0644"}
     - {src: docker-compose.host-network.yml, mode: "0644"}
     - {src: k3s/Dockerfile, mode: "0644"}
     - {src: k3s/node-entrypoint.sh, mode: "0755"}

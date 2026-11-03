@@ -147,7 +147,7 @@ class RoleTest(unittest.TestCase):
         expected = f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=true {PINNED_LABEL}=false {LINK_LABEL}=wired"
         self.assertIn(expected, server)
         self.assertIn(expected, agent)
-        self.assertEqual(files, ["docker-compose.yml", "docker-compose.node-labels.yml"])
+        self.assertEqual(files, ["docker-compose.yml", "docker-compose.node-labels.yml", "docker-compose.fleet-role.yml"])
 
     def test_a_pinned_host_publishes_pinned_true(self) -> None:
         server, _, _ = self.render_env("-e", f"{PINNED}=true")
@@ -158,6 +158,7 @@ class RoleTest(unittest.TestCase):
         for lines in (server, agent):
             self.assertIn(f"K3S_NODE_LABELS={ELIGIBLE_LABEL}=false {PINNED_LABEL}=false {LINK_LABEL}=wired", lines)
         self.assertIn("docker-compose.node-labels.yml", files)
+        self.assertIn("docker-compose.fleet-role.yml", files)
 
     def test_the_label_names_can_be_changed(self) -> None:
         server, _, _ = self.render_env("-e", f"{ELIGIBLE}=true", "-e", "github_runner_cluster_voter_eligible_label=example.com/candidate")
