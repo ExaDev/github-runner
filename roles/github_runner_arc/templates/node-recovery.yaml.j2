@@ -1,7 +1,8 @@
-{# The node recovery watcher (see tasks/install_node_recovery.yml and scripts/node-recovery.sh): a ServiceAccount, a ClusterRole allowing get, list and patch on nodes and, only while github_runner_arc_node_recovery_prune_after_seconds is set, delete, its binding, and the Deployment. The namespace is ensured separately, since the platform's other Deployments share it. #}
+{# The node recovery watcher (see tasks/install_node_recovery.yml and scripts/node-recovery.sh): a ServiceAccount, a ClusterRole allowing get, list and patch on nodes and, only while github_runner_arc_node_recovery_prune_after_seconds is set, delete, its binding, a Role allowing get on the one Lease that serialises voter swaps and regrading with its binding, and the Deployment. The namespace is ensured separately, since the platform's other Deployments share it. #}
 {% set name = 'node-recovery' %}
 {% set prune = github_runner_arc_node_recovery_prune_after_seconds | string | length > 0 %}
 {% set cluster_name = 'github-runner-node-recovery' %}
+{% set lease_role = 'github-runner-node-recovery-lease' %}
 {% set labels = {'app.kubernetes.io/name': name, 'app.kubernetes.io/part-of': 'github-runner'} %}
 apiVersion: v1
 kind: ServiceAccount
@@ -34,6 +35,34 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ cluster_name | to_json }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ lease_role | to_json }}
+  namespace: {{ github_runner_arc_node_recovery_lease_namespace | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  # Reading the Lease is how the watcher learns which nodes a swap or a regrade step is moving through. Named, so it can read no other Lease.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ github_runner_arc_node_recovery_lease_name | to_json }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ lease_role | to_json }}
+  namespace: {{ github_runner_arc_node_recovery_lease_namespace | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ github_runner_arc_platform_namespace | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ lease_role | to_json }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -92,6 +121,14 @@ spec:
               value: {{ github_runner_arc_node_recovery_poll_seconds | string | to_json }}
             - name: NODE_RECOVERY_ANNOTATION
               value: {{ github_runner_arc_node_recovery_annotation | to_json }}
+            - name: NODE_RECOVERY_LEASE_NAMESPACE
+              value: {{ github_runner_arc_node_recovery_lease_namespace | to_json }}
+            - name: NODE_RECOVERY_LEASE_NAME
+              value: {{ github_runner_arc_node_recovery_lease_name | to_json }}
+            - name: NODE_RECOVERY_SWAP_NODES_ANNOTATION
+              value: {{ github_runner_arc_node_recovery_swap_nodes_annotation | to_json }}
+            - name: NODE_RECOVERY_LEVEL_LABEL
+              value: {{ github_runner_arc_node_recovery_level_label | to_json }}
 {% if prune %}
             - name: NODE_RECOVERY_PRUNE_AFTER_SECONDS
               value: {{ github_runner_arc_node_recovery_prune_after_seconds | string | to_json }}

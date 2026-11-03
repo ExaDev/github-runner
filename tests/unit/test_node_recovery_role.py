@@ -91,6 +91,39 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(manifests["ClusterRoleBinding"]["subjects"][0]["name"], manifests["ServiceAccount"]["metadata"]["name"])
 
 
+class LeaseAccessTest(unittest.TestCase):
+    """What the watcher may read to know a voter swap or a regrade step is under way: the Lease that serialises both, and nothing else in its namespace."""
+
+    LEASE_NAME = "fleet-regrade"
+    LEASE_NAMESPACE = "kube-system"
+    LEVEL_LABEL = "github-runner.exadev.com/regrade-level"
+
+    def test_the_role_allows_get_on_the_regrade_lease_by_name_and_nothing_else(self) -> None:
+        for role_vars in ({}, ON):
+            with self.subTest(role_vars):
+                role = render(**role_vars)["Role"]
+                self.assertEqual(role["metadata"]["namespace"], self.LEASE_NAMESPACE)
+                self.assertEqual(role["rules"], [{"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "resourceNames": [self.LEASE_NAME], "verbs": ["get"]}])
+
+    def test_the_role_is_bound_to_the_watchers_service_account_in_the_leases_namespace(self) -> None:
+        manifests = render()
+        binding = manifests["RoleBinding"]
+        self.assertEqual(binding["metadata"]["namespace"], self.LEASE_NAMESPACE)
+        self.assertEqual(binding["roleRef"], {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": manifests["Role"]["metadata"]["name"]})
+        [subject] = binding["subjects"]
+        self.assertEqual((subject["kind"], subject["name"], subject["namespace"]), ("ServiceAccount", manifests["ServiceAccount"]["metadata"]["name"], manifests["ServiceAccount"]["metadata"]["namespace"]))
+
+    def test_the_watcher_is_told_which_lease_and_label_to_look_for(self) -> None:
+        env = container_env(render())
+        self.assertEqual(
+            (env["NODE_RECOVERY_LEASE_NAMESPACE"], env["NODE_RECOVERY_LEASE_NAME"], env["NODE_RECOVERY_SWAP_NODES_ANNOTATION"], env["NODE_RECOVERY_LEVEL_LABEL"]),
+            (self.LEASE_NAMESPACE, self.LEASE_NAME, "github-runner.exadev.com/swap-nodes", self.LEVEL_LABEL),
+        )
+
+    def test_the_level_label_follows_the_cluster_roles_setting(self) -> None:
+        self.assertEqual(container_env(render(github_runner_cluster_regrade_level_label="example.com/level"))["NODE_RECOVERY_LEVEL_LABEL"], "example.com/level")
+
+
 class ValidationTest(unittest.TestCase):
     """The prune settings' checks in tasks/validate.yml, evaluated by Ansible itself the way the role evaluates them, every case in one run."""
 
