@@ -1,23 +1,52 @@
 ---
-# Sizes this host's Colima VM from github_runner_cluster_colima_memory_gib and github_runner_cluster_colima_cpus (see their defaults). With neither set it reads and changes nothing. With either set it checks the values and that the host's runtime is a Colima profile, before anything is read, then reads the size of the profile's VM with `colima list --json` and works out what differs; a VM that already has every size set is left as it is, so a second run changes nothing. The hosts whose VM differs are then resized one at a time, each in its own turn (tasks/colima_size_turn.yml), in the same way tasks/start_servers.yml gives each server its turn: Ansible's linear strategy runs every host's copy of a task together, except that the tasks one host includes dynamically are its own, so while one host's turn runs the others wait and no two nodes are ever away together. Needs runtime.yml (the runtime and its environment) and topology.yml to have run. Under --check the values are checked and the size, the Lease and the cluster are read, a resize is reported as a change and a refusal as a failure, and nothing is changed.
+# Sizes this host's Colima VM from github_runner_cluster_colima_memory_gib, or the memory derived from github_runner_cluster_colima_memory_reserved_gib, and github_runner_cluster_colima_cpus (see their defaults). A host whose runtime is not a Colima profile is left alone, so the sizes and the reserve can be set for a group that also holds Docker Desktop and Linux hosts; with nothing declared a Colima host is left alone too. Otherwise it checks the values before anything is read from the VM, works out the memory, then reads the size of the profile's VM with `colima list --json` and works out what differs; a VM that already has every size wanted is left as it is, so a second run changes nothing. The hosts whose VM differs are then resized one at a time, each in its own turn (tasks/colima_size_turn.yml), in the same way tasks/start_servers.yml gives each server its turn: Ansible's linear strategy runs every host's copy of a task together, except that the tasks one host includes dynamically are its own, so while one host's turn runs the others wait and no two nodes are ever away together. Needs runtime.yml (the runtime and its environment) and topology.yml to have run. Under --check the values are checked and the host's memory, the VM's size, the Lease and the cluster are read, a resize is reported as a change and a refusal as a failure, and nothing is changed.
 
-- name: Check the sizes set for the Colima VM
-  # On every host, so that a value colima could not take fails here, before a VM is stopped for it. Empty values keep the profile's own size.
+- name: Note whether this host's runtime is a Colima profile
+  # Only a VM the role can stop and start with colima is sized. github_runner_cluster_effective_runtime is published by runtime.yml, which runs on macOS only, so the operating system is tested first.
+  ansible.builtin.set_fact:
+    github_runner_cluster_colima_size_applies: "{{ ansible_facts['system'] == 'Darwin' and github_runner_cluster_effective_runtime.kind == 'colima' }}"
+
+- name: Read this host's memory, to derive the VM's from it
+  # Only the hardware subset, which holds memtotal_mb, and only when a derivation needs it and the caller did not gather it. Read-only, so it runs under --check too.
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "!min"
+      - hardware
+  when:
+    - github_runner_cluster_colima_size_applies | bool
+    - github_runner_cluster_colima_memory_gib | string | length == 0
+    - github_runner_cluster_colima_memory_reserved_gib | string | length > 0
+    - "'memtotal_mb' not in ansible_facts"
+
+- name: Work out the memory the Colima VM is to have
+  # Before anything is read from the VM, so that a value colima could not take, or a derivation missing what it needs, fails here rather than after a VM is stopped for it.
+  ansible.builtin.set_fact:
+    github_runner_cluster_colima_memory: >-
+      {{ github_runner_cluster_colima_memory_gib
+         | exadev.github_runner.cluster_colima_memory(ansible_facts['memtotal_mb'] | default(''), github_runner_cluster_colima_memory_reserved_gib,
+                                                     github_runner_cluster_colima_memory_host_reserve_gib, github_runner_cluster_colima_guest_baseline_gib,
+                                                     github_runner_cluster_colima_runner_memory_limit_gib) }}
+  when: github_runner_cluster_colima_size_applies | bool
+
+- name: Warn that the derived memory is below the node floor
+  # The VM is never sized below the floor, since a node that cannot hold its own baseline and one runner pod takes runner jobs it cannot finish; the host then keeps less than its reserves ask for, which this says.
+  ansible.builtin.debug:
+    msg: >-
+      Warning: the Colima VM of {{ github_runner_cluster_effective_node_name }} would get the host's
+      {{ (ansible_facts['memtotal_mb'] | int / 1024) | round(1) }} GiB less {{ github_runner_cluster_colima_memory_reserved_gib }} GiB reserved for
+      the host's other workloads and {{ github_runner_cluster_colima_memory_host_reserve_gib }} GiB for its operating system:
+      {{ github_runner_cluster_colima_memory.available_gib }} GiB is below the node floor of {{ github_runner_cluster_colima_memory.floor_gib }} GiB
+      (the guest's baseline and one runner pod's memory limit), so the VM is sized at the floor and the host keeps less than its reserves.
+  when:
+    - github_runner_cluster_colima_size_applies | bool
+    - github_runner_cluster_colima_memory.clamped
+
+- name: Check the sizes wanted for the Colima VM
   ansible.builtin.set_fact:
     github_runner_cluster_colima_size_wanted: >-
-      {{ github_runner_cluster_colima_memory_gib | exadev.github_runner.cluster_colima_size(github_runner_cluster_colima_cpus) }}
-
-- name: Fail unless this host's runtime is a Colima profile
-  # The role sizes only a VM it can stop and start with colima; a size set for any other host would otherwise be ignored without a word.
-  ansible.builtin.fail:
-    msg: >-
-      {{ inventory_hostname }} sets github_runner_cluster_colima_memory_gib or github_runner_cluster_colima_cpus, but only a Colima profile can
-      be resized, and this host's container runtime is
-      {{ github_runner_cluster_effective_runtime.kind if ansible_facts['system'] == 'Darwin' else 'the Docker of a ' ~ ansible_facts['system'] ~ ' host' }}.
-      Remove both from this host's variables. Nothing was changed.
-  when:
-    - github_runner_cluster_colima_size_wanted.arguments | length > 0
-    - ansible_facts['system'] != 'Darwin' or github_runner_cluster_effective_runtime.kind != 'colima'
+      {{ (github_runner_cluster_colima_memory.memory_gib | exadev.github_runner.cluster_colima_size(github_runner_cluster_colima_cpus))
+         if github_runner_cluster_colima_size_applies | bool else {'memory_gib': none, 'cpus': none, 'arguments': []} }}
 
 - name: Read the size of the profile's VM
   # The VM Lima runs, not the profile's configuration file, since a `colima start` given sizes while the profile runs writes them to the file and leaves the VM as it is (RunE and PreRunE in abiosoft/colima cmd/start.go). Read-only, so it runs under --check too.
@@ -29,12 +58,12 @@
   check_mode: false
   when: github_runner_cluster_colima_size_wanted.arguments | length > 0
 
-- name: Work out how the VM's size differs from the one set
+- name: Work out how the VM's size differs from the one wanted
   ansible.builtin.set_fact:
     github_runner_cluster_colima_size_plan: >-
       {{ (github_runner_cluster_colima_size_listing.stdout
           | exadev.github_runner.cluster_colima_resize(github_runner_cluster_effective_runtime.colima_profile,
-                                                      github_runner_cluster_colima_memory_gib, github_runner_cluster_colima_cpus))
+                                                      github_runner_cluster_colima_size_wanted.memory_gib, github_runner_cluster_colima_cpus))
          if github_runner_cluster_colima_size_wanted.arguments | length > 0 else {'changes': [], 'arguments': []} }}
 
 - name: Resize each host's VM in its own turn

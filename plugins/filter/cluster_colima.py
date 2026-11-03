@@ -1,9 +1,10 @@
-"""Filters the github_runner_cluster role uses to size a Colima node VM from the inventory (tasks/colima_size.yml): which sizes are set, and what `colima start` must be given to bring the profile's VM to them."""
+"""Filters the github_runner_cluster role uses to size a Colima node VM from the inventory (tasks/colima_size.yml): the memory it is to have, set or derived from what the host must keep, which sizes are wanted, and what `colima start` must be given to bring the profile's VM to them."""
 
 from __future__ import annotations
 
 import json
 import re
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any
 
 from ansible.errors import AnsibleFilterError
@@ -13,6 +14,14 @@ BYTES_PER_GIB = 1024**3
 WHOLE_NUMBER = re.compile(r"^[1-9][0-9]*$")
 MEMORY_VARIABLE = "github_runner_cluster_colima_memory_gib"
 CPUS_VARIABLE = "github_runner_cluster_colima_cpus"
+RESERVED_VARIABLE = "github_runner_cluster_colima_memory_reserved_gib"
+HOST_RESERVE_VARIABLE = "github_runner_cluster_colima_memory_host_reserve_gib"
+BASELINE_VARIABLE = "github_runner_cluster_colima_guest_baseline_gib"
+RUNNER_VARIABLE = "github_runner_cluster_colima_runner_memory_limit_gib"
+HOST_MEMORY_FACT = "ansible_facts['memtotal_mb']"
+# ansible_facts['memtotal_mb'] is in MiB (the hardware facts divide the bytes macOS's hw.memsize reports by 2^20), so a GiB is 2^10 of them.
+MIB_PER_GIB = 1024
+AMOUNT = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
 def _size(name: str, value: Any) -> int | None:
@@ -35,6 +44,52 @@ def cluster_colima_size(memory_gib: Any, cpus: Any) -> dict[str, Any]:
     count = _size(CPUS_VARIABLE, cpus)
     arguments = (["--memory", str(memory)] if memory is not None else []) + (["--cpus", str(count)] if count is not None else [])
     return {"memory_gib": memory, "cpus": count, "arguments": arguments}
+
+
+def _amount(name: str, value: Any) -> Decimal | None:
+    """A non-negative number of GiB given as a number or as text, or None for an empty value."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)) or not AMOUNT.match(str(value)):
+        raise AnsibleFilterError(f"{name} must be a number of GiB, zero or more, not {value!r}.")
+    return Decimal(str(value))
+
+
+def _needed(name: str, value: Any) -> Decimal:
+    amount = _amount(name, value)
+    if amount is None:
+        raise AnsibleFilterError(f"{name} must be set to derive the Colima VM's memory from {RESERVED_VARIABLE}.")
+    return amount
+
+
+def _number(amount: Decimal) -> int | float:
+    return int(amount) if amount == amount.to_integral_value() else float(amount)
+
+
+def cluster_colima_memory(memory_gib: Any, host_memory_mb: Any, reserved_gib: Any, host_reserve_gib: Any, guest_baseline_gib: Any, runner_limit_gib: Any) -> dict[str, Any]:
+    """Work out the memory a Colima node VM is to have: the value set, or what the host can spare, never less than a node needs to run one runner.
+
+    :param memory_gib: github_runner_cluster_colima_memory_gib: the VM's memory in GiB, which wins when set. :param host_memory_mb: ansible_facts['memtotal_mb'], the host's memory in MiB, needed only to derive. :param reserved_gib: github_runner_cluster_colima_memory_reserved_gib: the GiB the host's other workloads need; empty derives nothing. :param host_reserve_gib: github_runner_cluster_colima_memory_host_reserve_gib: the GiB kept for the host's operating system. :param guest_baseline_gib: github_runner_cluster_colima_guest_baseline_gib: the GiB the node VM uses with no runner pod on it. :param runner_limit_gib: github_runner_cluster_colima_runner_memory_limit_gib: one runner pod's memory limit in GiB.
+    :returns: ``{"memory_gib": int | None, "source": "set" | "derived" | "none", "available_gib": <the host's memory less both reserves, or None>, "floor_gib": <the guest baseline and one runner's limit rounded up to a whole GiB, or None>, "clamped": bool}``. A derived memory is the available memory rounded down to a whole GiB, since `colima start --memory` takes whole GiB and rounding up would take memory the reserves keep; below the floor it is the floor, with ``clamped`` true. ``memory_gib`` None keeps the profile's own.
+    :raises AnsibleFilterError: if a value is set and is not a number of the kind its variable takes, or a derivation lacks the runner's limit or the host's memory.
+    """
+    explicit = _size(MEMORY_VARIABLE, memory_gib)
+    reserved = _amount(RESERVED_VARIABLE, reserved_gib)
+    if explicit is not None:
+        return {"memory_gib": explicit, "source": "set", "available_gib": None, "floor_gib": None, "clamped": False}
+    if reserved is None:
+        return {"memory_gib": None, "source": "none", "available_gib": None, "floor_gib": None, "clamped": False}
+    host_reserve = _needed(HOST_RESERVE_VARIABLE, host_reserve_gib)
+    baseline = _needed(BASELINE_VARIABLE, guest_baseline_gib)
+    runner = _needed(RUNNER_VARIABLE, runner_limit_gib)
+    if runner == 0:
+        raise AnsibleFilterError(f"{RUNNER_VARIABLE} must be more than zero: a node VM is sized to run at least one runner pod.")
+    if isinstance(host_memory_mb, bool) or not isinstance(host_memory_mb, (int, str)) or not WHOLE_NUMBER.match(str(host_memory_mb)):
+        raise AnsibleFilterError(f"{HOST_MEMORY_FACT} must give the host's memory in MiB to derive the Colima VM's memory, not {host_memory_mb!r}.")
+    available = Decimal(int(host_memory_mb)) / MIB_PER_GIB - reserved - host_reserve
+    floor = int((baseline + runner).to_integral_value(rounding=ROUND_CEILING))
+    derived = int(available.to_integral_value(rounding=ROUND_FLOOR))
+    return {"memory_gib": max(derived, floor), "source": "derived", "available_gib": _number(available), "floor_gib": floor, "clamped": derived < floor}
 
 
 def _gib(memory: int) -> str:
@@ -69,4 +124,4 @@ class FilterModule:
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"cluster_colima_size": cluster_colima_size, "cluster_colima_resize": cluster_colima_resize}
+        return {"cluster_colima_memory": cluster_colima_memory, "cluster_colima_size": cluster_colima_size, "cluster_colima_resize": cluster_colima_resize}

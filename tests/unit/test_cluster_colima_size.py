@@ -83,6 +83,60 @@ class ColimaSizeFilterTest(unittest.TestCase):
         self.assertIs(filters["cluster_colima_resize"], colima.cluster_colima_resize)
 
 
+# A 32 GiB host as ansible_facts['memtotal_mb'] gives it (MiB). With a 3.4 GiB guest baseline and a 7 GiB runner limit the node floor is ceil(3.4 + 7) = 11 GiB.
+HOST_MIB = 32 * 1024
+
+
+def memory(explicit: Any = "", reserved: Any = "", host_reserve: Any = 2, runner: Any = 7, host_mib: Any = HOST_MIB, baseline: Any = 3.4) -> dict[str, Any]:
+    result: dict[str, Any] = colima.cluster_colima_memory(explicit, host_mib, reserved, host_reserve, baseline, runner)
+    return result
+
+
+class ColimaMemoryFilterTest(unittest.TestCase):
+    def test_the_derived_memory_is_the_host_less_what_its_other_workloads_and_its_os_need(self) -> None:
+        plan = memory(reserved=6, host_reserve=2)
+        self.assertEqual((plan["memory_gib"], plan["source"], plan["clamped"]), (24, "derived", False))
+
+    def test_changing_the_reserved_memory_changes_the_derived_cap(self) -> None:
+        self.assertEqual([memory(reserved=reserved)["memory_gib"] for reserved in (4, 10, "12.5")], [26, 20, 17])
+
+    def test_a_part_of_a_gib_left_over_is_kept_by_the_host(self) -> None:
+        # 32 - 6.5 - 2 = 23.5 GiB available: the VM gets the whole GiB below it, never more than the host can spare.
+        self.assertEqual(memory(reserved="6.5")["memory_gib"], 23)
+
+    def test_the_floor_is_the_guest_baseline_and_one_runner_rounded_up_to_a_whole_gib(self) -> None:
+        self.assertEqual(memory(reserved=6)["floor_gib"], 11)
+        self.assertEqual(memory(reserved=6, runner=8, baseline=3)["floor_gib"], 11)
+
+    def test_a_derivation_below_the_floor_is_clamped_to_it(self) -> None:
+        plan = memory(reserved=20, host_reserve=4)
+        self.assertEqual((plan["memory_gib"], plan["available_gib"], plan["clamped"]), (11, 8, True))
+
+    def test_a_memory_set_explicitly_wins_over_the_derivation(self) -> None:
+        plan = memory(explicit=16, reserved=6)
+        self.assertEqual((plan["memory_gib"], plan["source"], plan["clamped"]), (16, "set", False))
+
+    def test_nothing_declared_keeps_the_profile_as_it_is(self) -> None:
+        plan = memory()
+        self.assertEqual((plan["memory_gib"], plan["source"]), (None, "none"))
+        # Without a derivation the host's memory and the runner's limit are not needed.
+        self.assertEqual(memory(runner="", host_mib="")["memory_gib"], None)
+
+    def test_a_derivation_needs_the_runner_limit_and_the_host_memory(self) -> None:
+        with self.assertRaisesRegex(colima.AnsibleFilterError, "github_runner_cluster_colima_runner_memory_limit_gib"):
+            memory(reserved=6, runner="")
+        with self.assertRaisesRegex(colima.AnsibleFilterError, "memtotal_mb"):
+            memory(reserved=6, host_mib="")
+
+    def test_a_reserve_that_is_not_a_number_is_refused_with_its_name(self) -> None:
+        for arguments, name in (({"reserved": "six"}, "github_runner_cluster_colima_memory_reserved_gib"), ({"reserved": -1}, "github_runner_cluster_colima_memory_reserved_gib"), ({"reserved": 6, "host_reserve": "two"}, "github_runner_cluster_colima_memory_host_reserve_gib"), ({"reserved": True}, "github_runner_cluster_colima_memory_reserved_gib")):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(colima.AnsibleFilterError, name):
+                memory(**arguments)
+
+    def test_the_filter_is_registered(self) -> None:
+        self.assertIs(colima.FilterModule().filters()["cluster_colima_memory"], colima.cluster_colima_memory)
+
+
 def lease(holder: str, renewed: str = "2026-01-01T00:00:00.000000Z", duration: int = 60, version: str = "7") -> dict[str, Any]:
     return {"rc": 0, "stdout": json.dumps({"metadata": {"name": "fleet-regrade", "namespace": "kube-system", "resourceVersion": version}, "spec": {"holderIdentity": holder, "renewTime": renewed, "leaseDurationSeconds": duration}}), "stderr": ""}
 
@@ -467,14 +521,38 @@ class ColimaSizeRoleTest(unittest.TestCase):
         self.assertIn("github_runner_cluster_colima_memory_gib must be a positive whole number", result.stdout)
         self.assertEqual(self.calls(), [])
 
-    def test_a_host_whose_runtime_is_not_colima_fails_before_anything_is_read(self) -> None:
+    def test_a_host_whose_runtime_is_not_colima_is_left_alone(self) -> None:
+        # The sizes and the reserve are typically set for a whole group, which can hold Docker Desktop and Linux hosts as well.
         for variables in ({"github_runner_cluster_effective_runtime": {"kind": "docker_desktop", "colima_profile": ""}}, {"runtime_system": "Linux"}):
             with self.subTest(variables=variables):
                 (self.stub / "calls.log").unlink(missing_ok=True)
-                result = self.run_role(limit="server1", github_runner_cluster_colima_cpus=4, **variables)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("only a Colima profile can be resized", result.stdout)
+                result = self.run_role(limit="server1", github_runner_cluster_colima_cpus=4, github_runner_cluster_colima_memory_reserved_gib=6, **variables)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(self.calls(), [])
+                self.assertEqual(self.recap(result, "server1")["changed"], 0)
+
+    def test_the_memory_derived_from_the_host_is_what_colima_starts_with(self) -> None:
+        result = self.run_role(limit="agent1", runtime_memtotal_mb=HOST_MIB, github_runner_cluster_colima_memory_reserved_gib=6, github_runner_cluster_colima_memory_host_reserve_gib=2, github_runner_cluster_colima_runner_memory_limit_gib=7)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("colima start --profile agent1 --activate=false --memory 24", self.mutating())
+        # The warning task runs only for a clamp; its header is printed whether or not it runs, so its message is what is looked for.
+        self.assertNotIn("GiB is below the node floor of", result.stdout)
+
+    def test_a_larger_reserve_gives_a_smaller_vm(self) -> None:
+        result = self.run_role(limit="agent1", runtime_memtotal_mb=HOST_MIB, github_runner_cluster_colima_memory_reserved_gib=12, github_runner_cluster_colima_memory_host_reserve_gib=2, github_runner_cluster_colima_runner_memory_limit_gib=7)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("colima start --profile agent1 --activate=false --memory 18", self.mutating())
+
+    def test_a_derivation_below_the_floor_starts_at_the_floor_and_warns(self) -> None:
+        result = self.run_role(limit="agent1", runtime_memtotal_mb=HOST_MIB, github_runner_cluster_colima_memory_reserved_gib=24, github_runner_cluster_colima_memory_host_reserve_gib=2, github_runner_cluster_colima_runner_memory_limit_gib=7)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("colima start --profile agent1 --activate=false --memory 11", self.mutating())
+        self.assertIn("6 GiB is below the node floor of 11 GiB", result.stdout)
+
+    def test_an_explicit_memory_wins_over_the_reserve(self) -> None:
+        result = self.run_role(limit="agent1", runtime_memtotal_mb=HOST_MIB, github_runner_cluster_colima_memory_gib=9, github_runner_cluster_colima_memory_reserved_gib=6, github_runner_cluster_colima_runner_memory_limit_gib=7)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("colima start --profile agent1 --activate=false --memory 9", self.mutating())
 
     def test_an_agent_is_drained_through_a_server_and_waits_for_ready_without_a_vote(self) -> None:
         result = self.run_role(limit="agent1", github_runner_cluster_colima_cpus=4)
@@ -526,6 +604,8 @@ class ColimaSizeRoleTest(unittest.TestCase):
 class StaticTest(unittest.TestCase):
     def test_the_sizes_keep_the_profile_as_it_is_by_default(self) -> None:
         self.assertEqual((DEFAULTS["github_runner_cluster_colima_memory_gib"], DEFAULTS["github_runner_cluster_colima_cpus"]), ("", ""))
+        # No reserve declared, so nothing is derived until a host says what its other workloads need.
+        self.assertEqual((DEFAULTS["github_runner_cluster_colima_memory_reserved_gib"], DEFAULTS["github_runner_cluster_colima_runner_memory_limit_gib"]), ("", ""))
 
     def test_the_resize_is_included_after_the_topology_and_the_runtime_and_before_the_node_starts(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
@@ -553,7 +633,7 @@ class StaticTest(unittest.TestCase):
 
     def test_every_new_variable_is_in_the_readme(self) -> None:
         readme = (ROLE / "README.md").read_text()
-        for name in ("github_runner_cluster_colima_memory_gib", "github_runner_cluster_colima_cpus"):
+        for name in ("github_runner_cluster_colima_memory_gib", "github_runner_cluster_colima_cpus", "github_runner_cluster_colima_memory_reserved_gib", "github_runner_cluster_colima_memory_host_reserve_gib", "github_runner_cluster_colima_guest_baseline_gib", "github_runner_cluster_colima_runner_memory_limit_gib"):
             with self.subTest(name=name):
                 self.assertIn(f"`{name}`", readme)
 
