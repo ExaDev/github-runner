@@ -64,6 +64,11 @@ diagnose() {
     docker_on "$index" exec "grtest-node${index}-regrade-1" fleet-regrade status </dev/null 2>&1 | head -n 5 || true
     docker_on "$index" logs --tail 40 "grtest-node${index}-regrade-1" 2>&1 | cut -c1-400 || true
   done
+  if docker inspect "$native_host" >/dev/null 2>&1; then
+    echo "----- ${native_host}: units, role file, Tailscale and the last journal lines"
+    docker exec "$native_host" sh -c 'systemctl is-active k3s k3s-agent tailscaled; cat /var/lib/rancher/k3s/fleet-role; tailscale status | head -n 20' </dev/null 2>&1 || true
+    docker exec "$native_host" journalctl -u k3s -u k3s-agent -u tailscaled --no-pager -n 80 </dev/null 2>&1 | cut -c1-400 || true
+  fi
   if docker inspect grtest-headscale >/dev/null 2>&1; then
     echo "----- grtest-headscale: nodes and routes"
     docker exec grtest-headscale headscale nodes list </dev/null 2>&1 || true
@@ -988,8 +993,10 @@ scenario_native_server() {
   start_native_host
   native_role=agent
   write_inventory hosted
-  log "Bringing up three Docker servers and the native host as an agent"
-  run_role
+  # A play runs a native host's tasks before any Docker host's (the role's first task includes them, and Ansible's linear strategy runs an include for its hosts while the others wait), so the servers a native node joins are brought up first, as the role README says.
+  log "Bringing up three Docker servers, then the native host as an agent"
+  run_role --limit "$(node_name 1),$(node_name 2),$(node_name 3)"
+  run_role --limit "$native_host"
   wait_for "${native_host} to be Ready as an agent" 300 node_is 1 "$native_host" Ready
   native_unit_is k3s-agent active || fail "${native_host} does not run k3s-agent"
   native_unit_is k3s inactive || fail "${native_host} runs k3s as an agent"
