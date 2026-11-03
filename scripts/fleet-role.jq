@@ -95,6 +95,7 @@ $config as $c
     | ([$etcd[].commit] | sum_buckets | histogram_quantile(tail_percentile)) as $commit
     | ([$w[] | .fsync_ms | select(. != null)] | max) as $fsync
     | ($w | map(select(.psi != null and over_regrade_limit($c))) | length) as $over
+    | ($w | map(.psi | select(. != null))) as $pressures
     | ($w | map(.avail_kb | select(. != null)) | min) as $min_avail_kb
     | ($w | map(select(.restarted == true)) | length) as $restarts
     | ($node.ready | not) as $not_ready
@@ -115,6 +116,8 @@ $config as $c
         commit_p99_ms: (if $commit == null then null else $commit * 1000 end),
         fsync_p99_ms: $fsync,
         over_limit_samples: $over,
+        pressure_max: ($pressures | max),
+        pressure_samples: ($pressures | length),
         min_available_bytes: (if $min_avail_kb == null then null else $min_avail_kb * kib end),
         restarts: $restarts,
         not_ready: $not_ready,
@@ -148,6 +151,9 @@ $config as $c
       ];
 
   def faults($m): rtt_faults($m) + own_faults($m);
+
+  # The signals no sample of the window could read but that do not withhold a verdict, by name: memory pressure, on a kernel without pressure stall information, where the regrade limit (which needs both pressure and a low MemAvailable) cannot be reached and MemAvailable is judged against the storage quota alone.
+  def unknown_signals($m): if $m.samples > 0 and $m.pressure_samples == 0 then ["memory pressure"] else [] end;
 
   # What is missing for a verdict, as sentences; empty when the readings are all there.
   def gaps($m):
@@ -186,8 +192,10 @@ $config as $c
        link: $m.link,
        link_source: $m.link_source,
        samples: $m.samples,
+       unknown_signals: unknown_signals($m),
        figures: {rtt_p99_ms: ($m.rtt_ms | round2), rtt_peer: $m.rtt_peer,
                  wal_fsync_p99_ms: ($m.wal_p99_ms | round2), backend_commit_p99_ms: ($m.commit_p99_ms | round2), fdatasync_p99_ms: ($m.fsync_p99_ms | round2),
+                 psi_avg300_max: ($m.pressure_max | round2),
                  min_available_mib: (if $m.min_available_bytes == null then null else ($m.min_available_bytes / 1048576 | round) end),
                  leader_changes: $m.leader_changes, restarts: $m.restarts},
        rank: rank($m),
