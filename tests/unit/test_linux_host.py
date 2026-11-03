@@ -1,4 +1,4 @@
-"""Tests the github_runner_linux_host role: its defaults, argument specs and README, and its tasks (tests/linux_host/run.yml) against stand-ins for systemctl, nmcli, iw, udevadm, modprobe, sysctl, apt-get, dpkg-query, uname and shutdown on PATH, with every file the role writes or reads redirected, so that no real target, drop-in, radio, module, package or reboot is touched."""
+"""Tests the github_runner_linux_host role: its defaults, argument specs and README, and its tasks (tests/linux_host/run.yml) against stand-ins for systemctl, nmcli, iw, udevadm, modprobe, sysctl, apt-get, dpkg-query, apparmor_parser, uname and shutdown on PATH, with every file the role writes or reads redirected, so that no real target, drop-in, radio, module, package, profile or reboot is touched."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ STEPS = [
     "github_runner_linux_host_keep_awake",
     "github_runner_linux_host_wifi_powersave_off",
     "github_runner_linux_host_k3s_prerequisites",
+    "github_runner_linux_host_containerd_apparmor_stacking_fix",
     "github_runner_linux_host_battery_charge_limit",
     "github_runner_linux_host_headless",
     "github_runner_linux_host_disable_unneeded_services",
@@ -135,6 +136,11 @@ class Harness(unittest.TestCase):
         self.wifi_rule = self.host / "etc" / "udev" / "rules.d" / "90-github-runner-wifi-powersave.rules"
         self.apt_file = self.host / "etc" / "apt" / "apt.conf.d" / "52github-runner-unattended-upgrades"
         self.reboot_required = self.host / "var" / "run" / "reboot-required"
+        self.apparmor_enabled = self.host / "sys" / "module" / "apparmor" / "parameters" / "enabled"
+        self.apparmor_profiles = self.host / "sys" / "kernel" / "security" / "apparmor" / "profiles"
+        self.apparmor_profile = self.host / "etc" / "apparmor.d" / "cri-containerd.apparmor.d"
+        self.k3s_binary = self.host / "usr" / "local" / "bin" / "k3s"
+        self.k3s_data = self.host / "var" / "lib" / "rancher" / "k3s"
         # Directories every host has already: the role puts files in them and creates no others of the system's.
         for path in (self.sys_module, self.power_supply, self.sysfs_net, self.reboot_required.parent, self.battery_unit.parent, self.wifi_rule.parent, self.modules_file.parent, self.sysctl_file.parent, self.apt_file.parent):
             path.mkdir(parents=True, exist_ok=True)
@@ -262,6 +268,16 @@ esac
         stand_in(bin_dir / "sudo", log + r"""while [ "$1" != /bin/sh ]; do shift; done
 exec "$@"
 """)
+        # Only what the role calls: the version read, the compile without loading that validates the file, and the replace that loads it, which lists the profile the file declares among the loaded ones as the kernel does.
+        stand_in(bin_dir / "apparmor_parser", log + r"""[ -e "$STUB/state/no-apparmor-parser" ] && { echo "apparmor_parser: command not found" >&2; exit 127; }
+case "$1" in
+  --version) echo "AppArmor parser version 5.0.2" ;;
+  --skip-kernel-load) shift 2; [ -e "$STUB/state/profile-rejected" ] && { echo "AppArmor parser error for $1: syntax error" >&2; exit 1; }; true ;;
+  --replace)
+    name=$(sed -n 's/^profile \([^ ]*\) .*/\1/p' "$2")
+    awk -v name="$name" '$1 == name { found = 1 } END { exit !found }' "$APPARMOR_PROFILES" 2>/dev/null || printf '%s (enforce)\n' "$name" >> "$APPARMOR_PROFILES" ;;
+esac
+""")
         stand_in(bin_dir / "uname", r"""echo 6.14.0-test
 """)
         stand_in(bin_dir / "shutdown", log)
@@ -283,6 +299,11 @@ exec "$@"
             "github_runner_linux_host_battery_unit": str(self.battery_unit),
             "github_runner_linux_host_unattended_upgrades_file": str(self.apt_file),
             "github_runner_linux_host_reboot_required_file": str(self.reboot_required),
+            "github_runner_linux_host_apparmor_enabled_file": str(self.apparmor_enabled),
+            "github_runner_linux_host_apparmor_profiles_file": str(self.apparmor_profiles),
+            "github_runner_linux_host_containerd_apparmor_profile_file": str(self.apparmor_profile),
+            "github_runner_linux_host_k3s_binary": str(self.k3s_binary),
+            "github_runner_linux_host_k3s_data_dir": str(self.k3s_data),
             "github_runner_linux_host_reboot_timeout": 5,
             # The other steps are about their own, and an installed Tailscale package would be upgraded in them: the update has tests of its own, which turn it on.
             TAILSCALE: False,
@@ -296,6 +317,7 @@ exec "$@"
             "STUB": str(self.stubs),
             "SYS_MODULE": str(self.sys_module),
             "REBOOT_REQUIRED": str(self.reboot_required),
+            "APPARMOR_PROFILES": str(self.apparmor_profiles),
             "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"),
             "ANSIBLE_NOCOLOR": "1",
             "ANSIBLE_LOCALHOST_WARNING": "false",
@@ -312,7 +334,7 @@ exec "$@"
         return log.read_text().splitlines() if log.exists() else []
 
     def changes(self) -> list[str]:
-        return [call for call in self.calls() if re.match(r"^(systemctl (mask|kill|enable|disable|stop|set-default|daemon-reload)|nmcli general|iw dev \S+ set|udevadm|modprobe|sysctl -w|apt-get|shutdown)", call)]
+        return [call for call in self.calls() if re.match(r"^(systemctl (mask|kill|enable|disable|stop|set-default|daemon-reload)|nmcli general|iw dev \S+ set|udevadm|modprobe|sysctl -w|apt-get|shutdown|apparmor_parser --replace)", call)]
 
     def changed(self, result: subprocess.CompletedProcess[str]) -> int:
         return int(re.search(r"changed=(\d+)", result.stdout).group(1))  # type: ignore[union-attr]
@@ -911,6 +933,230 @@ class BaselineRoleTest(Harness):
         self.assertIn(f"reboot host: {self.reboot_required} exists", result.stdout)
         self.assertTrue((self.state / "upgradable").exists())
 
+
+class ContainerdAppArmorTest(Harness):
+    """The AppArmor step: the profile that lets a container's processes signal each other under a stacked label, installed and loaded once, and refused for a k3s whose containerd it was not taken from."""
+
+    PROFILE_NAME = "cri-containerd.apparmor.d"
+    RELEASE = "v1.34.1+k3s1"
+    CONTAINERD = "v2.1.4-k3s2"
+    APPLY = {"github_runner_linux_host_containerd_apparmor_stacking_fix": True}
+
+    def apparmor_host(self, *, enabled: str | None = "Y", loaded: bool = False, k3s: bool = True, release: str = RELEASE, unpacked: bool = True, unpacked_release: str | None = None, containerd: str = CONTAINERD) -> None:
+        """A host the way Ubuntu has it: AppArmor's module parameter and securityfs list, the cluster role's k3s binary, and the binary k3s unpacked into <data dir>/data/<hash>/bin/k3s with data/current a symlink to <hash>, as k3s makes it."""
+        if enabled is not None:
+            self.apparmor_enabled.parent.mkdir(parents=True, exist_ok=True)
+            self.apparmor_enabled.write_text(enabled + "\n")
+        self.apparmor_profiles.parent.mkdir(parents=True, exist_ok=True)
+        # Decoys: a profile whose name starts with the profile's, and one that differs from it only where its name has a dot, among profiles that are not it.
+        lines = ["docker-default (enforce)", f"{self.PROFILE_NAME}.old (enforce)", self.PROFILE_NAME.replace(".", "-") + " (enforce)", "unconfined"]
+        self.apparmor_profiles.write_text("\n".join(lines + ([f"{self.PROFILE_NAME} (enforce)"] if loaded else [])) + "\n")
+        self.apparmor_profile.parent.mkdir(parents=True, exist_ok=True)
+        if k3s:
+            (self.state / "k3s-release").write_text(release)
+            self.k3s_binary.parent.mkdir(parents=True, exist_ok=True)
+            stand_in(self.k3s_binary, 'echo "k3s version $(cat "$STUB/state/k3s-release") (24fc436e)"\necho "go version go1.24.6"\n')
+        if unpacked:
+            self.unpack("0123abcd", unpacked_release or release, containerd, current=True)
+
+    def unpack(self, name: str, release: str, containerd: str, *, current: bool) -> None:
+        """Unpacks a multicall binary as k3s does: the linker flags it was built with sit in a binary's worth of other bytes."""
+        binary = self.k3s_data / "data" / name / "bin" / "k3s"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        flags = f"-ldflags=\" -X github.com/k3s-io/k3s/pkg/version.Version={release}  -X github.com/containerd/containerd/v2/version.Version={containerd}  -X github.com/containerd/containerd/v2/version.Package=github.com/k3s-io/containerd/v2 -w -s\""
+        binary.write_bytes(b"\x7fELF\x00\x01\x02\xff" * 64 + b"build\t" + flags.encode() + b"\n" + b"\x00\xfe" * 64)
+        if current:
+            link = self.k3s_data / "data" / "current"
+            link.unlink(missing_ok=True)
+            link.symlink_to(binary.parent.parent)
+
+    def replaces(self) -> list[str]:
+        return [call for call in self.calls() if call.startswith("apparmor_parser --replace")]
+
+    def apply(self, *, check: bool = False, **variables: Any) -> subprocess.CompletedProcess[str]:
+        return self.run_role(check=check, **self.APPLY, **variables)
+
+    def test_the_step_is_off_by_default_and_touches_nothing(self) -> None:
+        self.apparmor_host()
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.apparmor_profile.exists())
+
+    def test_the_profile_is_validated_installed_and_loaded(self) -> None:
+        self.apparmor_host()
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(stat.S_IMODE(self.apparmor_profile.stat().st_mode), 0o644)
+        profile = self.apparmor_profile.read_text()
+        for rule in (
+            "signal (send,receive) peer=cri-containerd.apparmor.d,",
+            "signal (send,receive) peer=cri-containerd.apparmor.d//&*,",
+            "ptrace (trace,tracedby,read,readby) peer=cri-containerd.apparmor.d,",
+            "ptrace (trace,tracedby,read,readby) peer=cri-containerd.apparmor.d//&*,",
+        ):
+            self.assertIn(f"\n  {rule}\n", profile)
+        self.assertIn("profile cri-containerd.apparmor.d flags=(attach_disconnected,mediate_deleted) {\n", profile)
+        self.assertIn(f"containerd {self.CONTAINERD}'s default CRI profile", profile)
+        self.assertNotIn("{{", profile)
+        self.assertEqual(self.changes(), [f"apparmor_parser --replace {self.apparmor_profile}"])
+        validations = [call for call in self.calls() if call.startswith("apparmor_parser --skip-kernel-load --skip-cache ")]
+        self.assertEqual(len(validations), 1)
+        self.assertNotIn(str(self.apparmor_profile), validations[0], "the file is compiled before it replaces the profile, not after")
+        self.assertLess(self.calls().index(validations[0]), self.calls().index(self.replaces()[0]))
+        self.assertIn(f"\n{self.PROFILE_NAME} (enforce)\n", self.apparmor_profiles.read_text())
+
+    def test_a_second_run_changes_nothing_and_loads_nothing(self) -> None:
+        self.apparmor_host()
+        self.assertEqual(self.apply().returncode, 0)
+        before = len(self.calls())
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if re.match(r"^apparmor_parser (--replace|--skip)", call)], [])
+
+    def test_a_changed_file_is_put_back_and_loaded_again(self) -> None:
+        self.apparmor_host()
+        self.assertEqual(self.apply().returncode, 0)
+        installed = self.apparmor_profile.read_text()
+        self.apparmor_profile.write_text(installed.replace("  ptrace (trace,tracedby,read,readby) peer=cri-containerd.apparmor.d//&*,\n", ""))
+        before = len(self.replaces())
+        self.assertEqual(self.apply().returncode, 0)
+        self.assertEqual(self.apparmor_profile.read_text(), installed)
+        self.assertEqual(len(self.replaces()), before + 1)
+
+    def test_a_profile_that_is_not_loaded_is_loaded_once_though_its_file_is_there(self) -> None:
+        self.apparmor_host()
+        self.assertEqual(self.apply().returncode, 0)
+        # Only profiles that are not it, though their names look like it, are listed now.
+        self.apparmor_profiles.write_text(f"docker-default (enforce)\n{self.PROFILE_NAME}.old (enforce)\n{self.PROFILE_NAME.replace('.', '-')} (enforce)\n")
+        before = len(self.replaces())
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.replaces()), before + 1)
+        self.assertIn(f"\n{self.PROFILE_NAME} (enforce)\n", self.apparmor_profiles.read_text())
+        self.assertEqual(self.changed(self.apply()), 0)
+
+    def test_a_check_run_reports_the_install_and_the_load_and_makes_none(self) -> None:
+        self.apparmor_host()
+        result = self.apply(check=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.apparmor_profile.exists())
+        self.assertIn(f"apparmor_parser --replace {self.apparmor_profile}", result.stdout)
+        self.assertEqual(self.apparmor_profiles.read_text().count(f"{self.PROFILE_NAME} "), 0)
+
+    def test_a_check_run_of_a_host_that_has_the_profile_reports_nothing_to_do(self) -> None:
+        self.apparmor_host()
+        self.assertEqual(self.apply().returncode, 0)
+        before = len(self.calls())
+        result = self.apply(check=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual([call for call in self.calls()[before:] if call.startswith("apparmor_parser --replace")], [])
+
+    def test_a_host_without_apparmor_is_left_alone_and_says_so(self) -> None:
+        for enabled in (None, "N"):
+            with self.subTest(enabled=enabled):
+                self.apparmor_host(enabled=enabled)
+                if enabled is None:
+                    self.apparmor_enabled.unlink(missing_ok=True)
+                result = self.apply()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("AppArmor is not enabled in its kernel", re.sub(r"\s+", " ", result.stdout))
+                self.assertEqual(self.changes(), [])
+                self.assertFalse(self.apparmor_profile.exists())
+
+    def test_a_host_that_is_not_linux_is_left_alone(self) -> None:
+        self.apparmor_host()
+        result = self.apply(system="Darwin")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_k3s_with_another_containerd_is_refused_before_anything_is_written(self) -> None:
+        self.apparmor_host(containerd="v2.1.5-k3s1")
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        message = re.sub(r"\s+", " ", result.stdout)
+        self.assertIn(f"k3s {self.RELEASE} on host carries containerd v2.1.5-k3s1", message)
+        self.assertIn(f"taken from containerd {self.CONTAINERD}", message)
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.apparmor_profile.exists())
+
+    def test_a_k3s_with_another_containerd_is_refused_when_the_profile_is_already_installed(self) -> None:
+        self.apparmor_host()
+        self.assertEqual(self.apply().returncode, 0)
+        self.unpack("4567ef01", "v1.34.3+k3s1", "v2.1.5-k3s1", current=True)
+        (self.state / "k3s-release").write_text("v1.34.3+k3s1")
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("carries containerd v2.1.5-k3s1", re.sub(r"\s+", " ", result.stdout))
+
+    def test_the_containerd_is_read_from_the_binary_current_points_at_and_not_from_an_older_one(self) -> None:
+        self.apparmor_host()
+        self.unpack("00old000", "v1.33.0+k3s1", "v2.0.0-k3s1", current=False)
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.apparmor_profile.is_file())
+
+    def test_the_containerd_is_not_checked_against_a_binary_of_another_release_than_the_host_has(self) -> None:
+        # The cluster role has just replaced the k3s binary and k3s has not started at the new release, so the binary it unpacked is the previous release's.
+        self.apparmor_host(release="v1.34.3+k3s1", unpacked_release=self.RELEASE, containerd="v2.1.5-k3s1")
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        message = re.sub(r"\s+", " ", result.stdout)
+        self.assertIn("was not checked", message)
+        self.assertIn("k3s v1.34.3+k3s1 has not started on this host yet", message)
+        self.assertTrue(self.apparmor_profile.is_file())
+
+    def test_a_host_without_k3s_gets_the_profile_and_is_told_the_containerd_was_not_checked(self) -> None:
+        self.apparmor_host(k3s=False, unpacked=False)
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("k3s is not installed yet", re.sub(r"\s+", " ", result.stdout))
+        self.assertTrue(self.apparmor_profile.is_file())
+
+    def test_a_k3s_that_has_not_unpacked_yet_is_not_refused(self) -> None:
+        self.apparmor_host(unpacked=False)
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("has not started on this host yet (the binary it unpacked is missing)", re.sub(r"\s+", " ", result.stdout))
+
+    def test_a_binary_that_does_not_say_its_containerd_is_refused_rather_than_trusted(self) -> None:
+        self.apparmor_host()
+        (self.k3s_data / "data" / "current" / "bin" / "k3s").write_bytes(b"\x7fELF no linker flags in here\n")
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not carry the k3s release or the containerd version", re.sub(r"\s+", " ", result.stdout))
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.apparmor_profile.exists())
+
+    def test_a_host_whose_parser_cannot_be_run_is_refused_before_anything_is_written(self) -> None:
+        self.apparmor_host()
+        (self.state / "no-apparmor-parser").touch()
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("apparmor_parser cannot be run", re.sub(r"\s+", " ", result.stdout))
+        self.assertFalse(self.apparmor_profile.exists())
+
+    def test_a_profile_the_parser_rejects_never_replaces_the_file_or_is_loaded(self) -> None:
+        self.apparmor_host()
+        self.assertEqual(self.apply().returncode, 0)
+        installed = self.apparmor_profile.read_text()
+        self.apparmor_profile.write_text("# changed by hand\n")
+        (self.state / "profile-rejected").touch()
+        before = len(self.replaces())
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.apparmor_profile.read_text(), "# changed by hand\n")
+        self.assertNotEqual(installed, "# changed by hand\n")
+        self.assertEqual(len(self.replaces()), before)
+
+    def test_a_host_without_apparmor_asks_for_no_privilege(self) -> None:
+        self.apparmor_host(enabled="N")
+        result = self.apply(ansible_become=None, ansible_become_exe=str(self.bin / "sudo"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.calls() if call.startswith("sudo ")], [])
 
 class TailscaleUpdateTest(Harness):
     """The Tailscale step: the installed package kept current and its service running, and nothing installed."""
