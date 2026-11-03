@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). native_server  three Docker servers and a native host (a privileged systemd container, tests/mesh/native/Dockerfile, managed over Ansible's docker connection) that joins as an agent, is then made a server by the inventory and promoted in place: it must join etcd as a learner, be promoted to a voter with its mesh address as its peer URL, and keep the cluster writable throughout, and a rerun must not restart it. role_controller  four hosts (three servers and a standby agent, with etcd's data on memory so the machine's disk does not decide): the role controller's probe and controller run in the cluster from the image built from this checkout, with the manifests the ARC role renders; every host is reported fit from a full window of real samples, with the link the cluster role labelled its node with, a voter made slow with tc netem on its mesh interface is reported unfit with the swap named and every unfit verdict attributed to it, a paused voter makes the controller report that it would not act, and the controller changes nothing (not in the default set; needs jq, and takes a window of 100 samples before it can judge). compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
+# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). native_server  three Docker servers and a native host (a privileged systemd container, tests/mesh/native/Dockerfile, managed over Ansible's docker connection) that joins as an agent, is then made a server by the inventory and promoted in place: it must join etcd as a learner, be promoted to a voter with its mesh address as its peer URL, and keep the cluster writable throughout, and a rerun must not restart it. role_controller  four hosts (three servers and a standby agent, with etcd's data on memory so the machine's disk does not decide): the role controller's probe and controller run in the cluster from the image built from this checkout, with the manifests the ARC role renders; every host is reported fit from a full window of real samples, with the link the cluster role labelled its node with, a voter made slow with tc netem on its mesh interface is reported unfit with the swap named and every unfit verdict attributed to it, a paused voter makes the controller report that it would not act, and the controller changes nothing (not in the default set; needs jq, and takes a window of 100 samples before it can judge). rejoin  three Docker servers whose hosts the inventory marks eligible, so the role mounts each one's role directory: the bootstrap server's etcd member is removed through another server, and restarted on its tombstone it idles instead of joining again; with its datastore moved aside and no server to join it refuses to start rather than bootstrap a second cluster; given a join URL naming another server in its role directory it joins the existing cluster as a learner and is promoted, with the same cluster ID before and after; and a role file naming the agent leaves its server container idle with no k3s. compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
 # With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
 #
@@ -244,11 +244,11 @@ EOF
       echo "          github_runner_cluster_container_name: grtest-node${index}-k3s"
       # Used only by a host the topology makes an agent (the role_controller scenario has one); the role refuses one name for both services.
       echo "          github_runner_cluster_agent_container_name: grtest-node${index}-agent"
-      # The role_controller scenario marks every host a candidate for a vote, through the inventory, as an owner would, and pins the first.
-      if [ "${role_controller:-0}" = 1 ]; then
+      # The role_controller scenario marks every host a candidate for a vote, through the inventory, as an owner would, and pins the first; the rejoin scenario marks them without turning the controller on, which is enough for the role to mount each host's role directory.
+      if [ "${role_controller:-0}" = 1 ] || [ "${voters_eligible:-0}" = 1 ]; then
         echo "          github_runner_cluster_voter_eligible: true"
-        if [ "$index" = 1 ]; then echo "          github_runner_cluster_voter_pinned: true"; fi
       fi
+      if [ "${role_controller:-0}" = 1 ] && [ "$index" = 1 ]; then echo "          github_runner_cluster_voter_pinned: true"; fi
     done
     if [ -n "$native_role" ]; then
       echo "        ${native_host}:"
@@ -1009,10 +1009,10 @@ docker_servers_serving() {
 native_node_ready() { [ "$(kubectl_on 1 get node "$native_host" --no-headers 2>/dev/null | awk '{print $2}')" = Ready ]; }
 native_unit_is() { [ "$(native_exec systemctl is-active "$1" </dev/null 2>/dev/null)" = "$2" ]; }
 
-# The etcd member list, as assert_cluster reads it, through node 1.
+# The etcd member list, as assert_cluster reads it, through node 1 or the node given.
 etcd_members() {
   docker rm -f grtest-etcdctl >/dev/null 2>&1 || true
-  docker run --rm --name grtest-etcdctl --network "container:$(container 1)" --volumes-from "$(container 1)" --entrypoint etcdctl "$etcd_image" \
+  docker run --rm --name grtest-etcdctl --network "container:$(container "${1:-1}")" --volumes-from "$(container "${1:-1}")" --entrypoint etcdctl "$etcd_image" \
     --endpoints https://127.0.0.1:2379 --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
     --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key \
     member list -w simple </dev/null
@@ -1168,19 +1168,25 @@ scenario_role_controller() {
   if kubectl_on 1 get node "$(node_name 4)" -o 'jsonpath={.metadata.labels}' | grep -F 'node-role.kubernetes.io/etcd' >/dev/null; then fail "the fourth node is a server"; fi
   ids=$(etcd_member_ids 1)
 
-  log "A check run on hosts that lack the node-labels Compose file, as a host that ran the role before the controller was turned on does, passes and writes nothing"
-  local before_started
+  log "A check run on hosts that lack the Compose files of the role controller, as a host that ran the role before the controller was turned on does, passes and writes nothing"
+  local before_started file
   before_started="$(started_at)"
-  for index in $(seq 1 "$node_count"); do rm -f "${work}/$(node_name "$index")/docker-compose.node-labels.yml"; done
-  run_role --check || fail "the role's check run failed on hosts without docker-compose.node-labels.yml"
   for index in $(seq 1 "$node_count"); do
-    [ ! -e "${work}/$(node_name "$index")/docker-compose.node-labels.yml" ] || fail "the check run wrote docker-compose.node-labels.yml on $(node_name "$index")"
+    for file in docker-compose.node-labels.yml docker-compose.fleet-role.yml; do rm -f "${work}/$(node_name "$index")/${file}"; done
+  done
+  run_role --check || fail "the role's check run failed on hosts without the role controller's Compose files"
+  for index in $(seq 1 "$node_count"); do
+    for file in docker-compose.node-labels.yml docker-compose.fleet-role.yml; do
+      [ ! -e "${work}/$(node_name "$index")/${file}" ] || fail "the check run wrote ${file} on $(node_name "$index")"
+    done
   done
   [ "$before_started" = "$(started_at)" ] || fail "the check run restarted a node"
-  log "The real run after it writes the file first, then names it, and recreates no container"
+  log "The real run after it writes the files first, then names them, and recreates no container"
   run_role
   for index in $(seq 1 "$node_count"); do
-    [ -e "${work}/$(node_name "$index")/docker-compose.node-labels.yml" ] || fail "the real run did not write docker-compose.node-labels.yml on $(node_name "$index")"
+    for file in docker-compose.node-labels.yml docker-compose.fleet-role.yml; do
+      [ -e "${work}/$(node_name "$index")/${file}" ] || fail "the real run did not write ${file} on $(node_name "$index")"
+    done
   done
   [ "$before_started" = "$(started_at)" ] || fail "the real run restarted a node whose configuration it left as it was"
 
@@ -1421,6 +1427,113 @@ EOF
   native_unit_is fleet-regrade inactive || fail "fleet-regrade still runs"
 }
 
+# --- A former member of the cluster (the rejoin scenario) ---
+
+# The etcd cluster ID as node $1's own etcd reports it, in etcdctl's fields output, which prints the 64-bit ID as an integer (a JSON reader would round it to a float).
+etcd_cluster_id() {
+  docker rm -f grtest-etcdctl >/dev/null 2>&1 || true
+  docker run --rm --name grtest-etcdctl --network "container:$(container "$1")" --volumes-from "$(container "$1")" --entrypoint etcdctl "$etcd_image" \
+    --endpoints https://127.0.0.1:2379 --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
+    --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key \
+    endpoint status -w fields </dev/null | sed -n 's/^"ClusterID" : \([0-9]*\)$/\1/p'
+}
+# Whether node $1's log has the line $2 in it; grep without -q reads the whole log, as in assert_cluster.
+container_logged() { docker logs "$(container "$1")" 2>&1 | grep -F "$2" >/dev/null; }
+removed_member_recorded() { [ -n "$(kubectl_on 2 get node "$(node_name 1)" -o 'jsonpath={.metadata.annotations.etcd\.k3s\.cattle\.io/removed-node-name}' 2>/dev/null)" ]; }
+has_tombstone() { docker exec "$(container 1)" test -e /var/lib/rancher/k3s/server/db/etcd/tombstone </dev/null 2>/dev/null; }
+started_members() { etcd_members 2 2>/dev/null | grep -c ', started, ' || true; }
+node1_voter_started() { etcd_members 2 2>/dev/null | grep -F ", $(node_name 1)-" | grep -E ', started, .*, false$' >/dev/null; }
+node1_is_voter() { [ "$(kubectl_on 2 get node "$(node_name 1)" -o 'jsonpath={.status.conditions[?(@.type=="EtcdIsVoter")].status}' 2>/dev/null)" = True ]; }
+# Whether node 1's container has been started again by its restart policy since it was last started by hand.
+node1_restarted() { [ "$(docker inspect --format '{{.RestartCount}}' "$(container 1)")" -gt 0 ]; }
+# The command names of node 1's processes but the ones this read runs, one per line.
+node1_processes() {
+  # shellcheck disable=SC2016 # Expanded by the container's shell, which leaves out itself and the cat it runs.
+  docker exec "$(container 1)" sh -c 'for p in /proc/[0-9]*; do [ "${p#/proc/}" = "$$" ] || cat "$p/comm" 2>/dev/null; done' </dev/null | grep -vx cat
+}
+# Node 1 runs only the entrypoint's shell and its sleep: no k3s, containerd or Tailscale.
+node1_idles() {
+  local processes
+  processes=$(node1_processes)
+  [ "$(sort -u <<< "$processes" | tr '\n' ' ')" = "sh sleep " ]
+}
+
+# A former member never starts a second cluster: the bootstrap Docker server's etcd member is removed through another server, as a demotion removes it, and the server restarted on its tombstone idles instead of joining again; with its datastore moved aside, as finishing a demotion leaves it, it refuses to start with no server to join (its inventory gives it none, being the bootstrap host); given a join URL naming node 2 in its role directory, it joins the cluster that exists as a learner and is promoted, with the same cluster ID before and after; and a role file naming the agent leaves its server container idle, with no k3s, until it is stopped.
+scenario_rejoin() {
+  local cluster_id password started_before refused_since
+  voters_eligible=1
+  reset_environment
+  prepare_nodes hosted
+  write_inventory hosted
+  run_role
+  assert_cluster
+
+  log "Every node mounts its role directory read-only"
+  for index in $(seq 1 "$node_count"); do
+    [ "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/etc/github-runner"}}{{.Source}} {{.RW}}{{end}}{{end}}' "$(container "$index")")" = "${work}/$(node_name "$index")/fleet-role.d false" ] \
+      || fail "$(container "$index") does not mount ${work}/$(node_name "$index")/fleet-role.d read-only at /etc/github-runner"
+  done
+  cluster_id=$(etcd_cluster_id 1)
+  [ -n "$cluster_id" ] || fail "could not read the etcd cluster ID"
+  password=$(node_password_hash 1)
+  log "The cluster ID is ${cluster_id}"
+
+  log "Removing $(node_name 1)'s etcd member through $(node_name 2), as a demotion does"
+  kubectl_on 2 annotate --overwrite node "$(node_name 1)" etcd.k3s.cattle.io/remove=true >/dev/null
+  wait_for "k3s to record the removal of $(node_name 1)'s member" 300 removed_member_recorded
+  wait_for "$(node_name 1)'s k3s to write its tombstone" 120 has_tombstone
+  [ "$(started_members)" = 2 ] || { etcd_members 2; fail "expected two started etcd members after the removal"; }
+
+  log "Restarted, the removed server idles on its tombstone instead of joining again"
+  docker restart "$(container 1)" >/dev/null
+  wait_for "$(node_name 1) to say it idles on its tombstone" 120 container_logged 1 "tombstone says this server's etcd member was removed from the cluster, and k3s started now would join it again as a new member, so k3s is not started"
+  wait_for "$(node_name 1) to run nothing but the idle wait" 60 node1_idles
+  [ "$(started_members)" = 2 ] || { etcd_members 2; fail "the removed server joined etcd again"; }
+  [ "$(etcd_members 2 | wc -l | tr -d ' ')" = 2 ] || { etcd_members 2; fail "the removed server is a member again"; }
+
+  log "With its datastore moved aside and no server to join, it refuses to start rather than bootstrap a second cluster"
+  docker stop "$(container 1)" >/dev/null
+  # The trap in the idle wait ends it on docker stop's SIGTERM; without it Docker would kill the container once its stop timeout ran out.
+  [ "$(docker inspect --format '{{.State.ExitCode}}' "$(container 1)")" = 0 ] || fail "the idle container did not exit 0 on docker stop's SIGTERM"
+  # The annotations the removal left are cleared as a demotion clears them, so the member that joins next is not taken for the one removed.
+  kubectl_on 2 annotate node "$(node_name 1)" etcd.k3s.cattle.io/remove- etcd.k3s.cattle.io/removed-node-name- >/dev/null
+  docker run --rm -v "$(node_name 1)_k3s-data:/data" "$busybox_image" mv /data/server/db /data/server/db.demoted
+  refused_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  docker start "$(container 1)" >/dev/null
+  wait_for "$(node_name 1) to refuse to bootstrap a second cluster" 120 container_logged 1 "has no server to join, so starting k3s would bootstrap a second cluster; not starting it"
+  # The refusal exits, so the restart policy keeps starting the container and each start refuses again; no start may get as far as k3s, whose first line names its version.
+  if docker logs --since "$refused_since" "$(container 1)" 2>&1 | grep -F 'Starting k3s v' >/dev/null; then fail "$(node_name 1) started k3s with no server to join"; fi
+  wait_for "$(node_name 1) to exit on its refusal and be started again by its restart policy" 120 node1_restarted
+  [ "$(etcd_members 2 | wc -l | tr -d ' ')" = 2 ] || { etcd_members 2; fail "the members changed while $(node_name 1) refused to start"; }
+  [ "$(etcd_cluster_id 2)" = "$cluster_id" ] || fail "the cluster ID changed while $(node_name 1) refused to start"
+
+  log "Given a join URL naming $(node_name 2) in its role directory, it joins the cluster that exists"
+  printf 'https://%s.mesh.grtest.internal:6443\n' "$(node_name 2)" > "${work}/$(node_name 1)/fleet-role.d/join-url"
+  docker restart "$(container 1)" >/dev/null
+  wait_for "$(node_name 1) to be a started voting member of etcd again" 600 node1_voter_started
+  wait_for "$(node_name 1)'s Node to report EtcdIsVoter" 300 node1_is_voter
+  local promoted=0 index
+  for index in 2 3; do
+    if container_logged "$index" "Promoted learner $(node_name 1)-"; then promoted=1; fi
+  done
+  [ "$promoted" = 1 ] || fail "no other server's k3s logged promoting $(node_name 1)'s learner"
+  [ "$(started_members)" = 3 ] || { etcd_members 2; fail "expected three started etcd members after the rejoin"; }
+  [ "$(etcd_cluster_id 1)" = "$cluster_id" ] || fail "$(node_name 1) joined a cluster with another ID: $(etcd_cluster_id 1) (was ${cluster_id})"
+  [ "$(node_password_hash 1)" = "$password" ] || fail "$(node_name 1)'s node password changed"
+  docker run --rm -v "$(node_name 1)_k3s-data:/data" "$busybox_image" test -d /data/server/db.demoted || fail "the moved-aside datastore is gone"
+  assert_cluster
+
+  log "A role file naming the agent leaves the server container idle, with no k3s"
+  printf 'agent\n' > "${work}/$(node_name 1)/fleet-role.d/role"
+  docker restart "$(container 1)" >/dev/null
+  wait_for "$(node_name 1) to say its role file names the agent" 120 container_logged 1 "/etc/github-runner/role names 'agent', not server, so k3s is not started"
+  wait_for "$(node_name 1) to run nothing but the idle wait" 60 node1_idles
+  started_before=$(docker inspect --format '{{.State.StartedAt}} {{.RestartCount}}' "$(container 1)")
+  node1_idles || { node1_processes; fail "$(node_name 1) runs more than the idle wait"; }
+  [ "$(docker inspect --format '{{.State.Running}}' "$(container 1)")" = true ] || fail "the idle container is not running"
+  [ "$(docker inspect --format '{{.State.StartedAt}} {{.RestartCount}}' "$(container 1)")" = "$started_before" ] || fail "the idle container restarted"
+}
+
 scenarios=("$@")
 [ "${#scenarios[@]}" -gt 0 ] || scenarios=(existing hosted in_cluster)
 for scenario in "${scenarios[@]}"; do
@@ -1431,6 +1544,7 @@ for scenario in "${scenarios[@]}"; do
     regrade) scenario_regrade ;;
     native_server) scenario_native_server ;;
     role_controller) scenario_role_controller ;;
+    rejoin) scenario_rejoin ;;
     host_network) scenario_host_network ;;
     compose_faulty) scenario_compose_faulty ;;
     context_checks) scenario_context_checks ;;
