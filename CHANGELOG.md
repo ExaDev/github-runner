@@ -1,3 +1,17 @@
+## [2.21.0](https://github.com/ExaDev/github-runner/compare/v2.20.1...v2.21.0) (2026-11-03)
+
+### Features
+
+* **cluster:** start the node's Colima profile from a launchd daemon at boot ([1a961bf](https://github.com/ExaDev/github-runner/commit/1a961bfec306844cf4a4254f206e9a175b81bf21))
+
+### Bug Fixes
+
+* **cluster:** check the boot choice in the runtime tasks, not the native node's argument specs ([38b92d2](https://github.com/ExaDev/github-runner/commit/38b92d264c6b86eec0d04c7ecded2264f8467743))
+
+### Documentation
+
+* **cluster:** say why the boot daemon sets HOME ([a894f2b](https://github.com/ExaDev/github-runner/commit/a894f2bde683f2049fa4350bb542801ea1bef3f6))
+
 ## [2.20.1](https://github.com/ExaDev/github-runner/compare/v2.20.0...v2.20.1) (2026-11-03)
 
 ### Bug Fixes
