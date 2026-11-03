@@ -52,10 +52,13 @@ done
 [ "$target" -le $((max_servers - 1)) ] || fail "FLEET_ROLE_VOTERS (${target}) must leave a swap one place of headroom below FLEET_ROLE_MAX_SERVERS (${max_servers})"
 
 now="$(date +%s)"
-nodes="$(kubectl get nodes -o json)"
+# The inputs go to jq in files, never as arguments: a probe entry holds a window of samples, the entries together can fill a ConfigMap, and one argument is limited to a fraction of the argument space (128 KiB on Linux), which a fleet's nodes and probes pass.
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+kubectl get nodes -o json > "$work/nodes.json"
 # Each node's entry is a JSON document in its own key.
-probes="$(kubectl get configmap "$probe_configmap" -n "$namespace" -o json | jq -c '(.data // {}) | map_values(fromjson)')"
-previous="$(kubectl get configmap "$status_configmap" -n "$namespace" -o json | jq -c '(.data["status.json"] // "") | if . == "" then null else fromjson end')"
+kubectl get configmap "$probe_configmap" -n "$namespace" -o json | jq -c '(.data // {}) | map_values(fromjson)' > "$work/probes.json"
+kubectl get configmap "$status_configmap" -n "$namespace" -o json | jq -c '(.data["status.json"] // "") | if . == "" then null else fromjson end' > "$work/previous.json"
 
 config="$(jq -nc \
   --argjson now "$now" --argjson target "$target" --argjson max_servers "$max_servers" \
@@ -67,14 +70,12 @@ config="$(jq -nc \
     pressure_threshold: $pressure_threshold, available_floor_percent: $available_floor_percent, default_quota_bytes: $default_quota_bytes,
     voter_label: "node-role.kubernetes.io/etcd", eligible_label: $eligible_label, pinned_label: $pinned_label, level_label: $level_label}')"
 
-result="$(jq -n -L "$modules" --argjson config "$config" --argjson nodes "$nodes" --argjson probes "$probes" --argjson previous "$previous" -f "$modules/fleet-role.jq")"
+result="$(jq -n -L "$modules" --argjson config "$config" --slurpfile nodes_file "$work/nodes.json" --slurpfile probes_file "$work/probes.json" --slurpfile previous_file "$work/previous.json" -f "$modules/fleet-role.jq")"
 status="$(jq -c --arg last_run "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson dry_run true '. + {last_run: $last_run, dry_run: $dry_run}' <<< "$result")"
 
 # The patch goes in a file: it is read back as a whole, and an argument has a size limit.
-patch="$(mktemp)"
-trap 'rm -f "$patch"' EXIT
-jq -n --arg status "$status" '{data: {"status.json": $status}}' > "$patch"
-kubectl patch configmap "$status_configmap" -n "$namespace" --type merge --patch-file "$patch" > /dev/null
+jq -n --arg status "$status" '{data: {"status.json": $status}}' > "$work/patch.json"
+kubectl patch configmap "$status_configmap" -n "$namespace" --type merge --patch-file "$work/patch.json" > /dev/null
 
 # What each host's verdict rests on, then the decision, in the log.
 while IFS= read -r line; do log "$line"; done < <(jq -r '

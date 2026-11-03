@@ -12,6 +12,7 @@ from typing import Any
 
 from fleet_role_support import (
     AVAILABLE_FLOOR_PERCENT,
+    ARGUMENT_LIMIT_BYTES,
     AVAILABLE_KB,
     COMMIT_LIMIT_MS,
     CONTROLLER_ENV,
@@ -466,6 +467,24 @@ class GateTest(ControllerCase):
         status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}, b={"eligible": False}, c={"eligible": False}))
         self.assertEqual(status["decision"]["action"], "none")
         self.assertIn(f"2 hosts are eligible, fewer than the target {TARGET}", status["decision"]["because"])
+
+
+class SizeTest(ControllerCase):
+    # The probes' entries together can fill a ConfigMap, a mebibyte, and no one argument to a process may pass 128 KiB on Linux (the stand-in jq of tests/unit/fleet_role_support.py refuses one here).
+    CONFIGMAP_LIMIT_BYTES = 1024 * 1024
+
+    def test_inputs_the_size_of_a_full_configmap_are_read_whole(self) -> None:
+        standbys = [Host(f"standby-with-a-long-node-name-{i:02d}", eligible=True) for i in range(14)]
+        hosts = healthy() + standbys
+        populate(self.cluster, hosts)
+        size = sum(len(json.dumps(entry_)) for entry_ in self.cluster.probes().values())
+        self.assertGreater(size, 3 * ARGUMENT_LIMIT_BYTES)
+        self.assertLessEqual(size, self.CONFIGMAP_LIMIT_BYTES)
+        completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        status = self.cluster.status()
+        self.assertEqual(len(status["hosts"]), len(hosts))
+        self.assertEqual(status["hosts"]["a"]["verdict"], "fit")
 
 
 class MembershipTest(ControllerCase):

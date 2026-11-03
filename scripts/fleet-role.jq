@@ -2,9 +2,9 @@
 #
 # Inputs, as jq named arguments:
 # - $config: the controller's settings (see scripts/fleet-role.sh for each), with `now` the time of the pass in epoch seconds.
-# - $nodes: the output of `kubectl get nodes -o json`.
-# - $probes: each node's probe entry (scripts/fleet-role-probe.sh), by node name.
-# - $previous: the status this program published on the last pass, or null on the first.
+# - $nodes_file: the output of `kubectl get nodes -o json`, as --slurpfile gives it (a one-element array).
+# - $probes_file: each node's probe entry (scripts/fleet-role-probe.sh), by node name, likewise.
+# - $previous_file: the status this program published on the last pass, or null on the first, likewise.
 #
 # Every threshold is derived, and every constant below is a fact about etcd or k3s with its source. The figures are read over a window of tail_window samples per peer pair; a host with fewer is "unknown", never fit or unfit.
 
@@ -46,6 +46,9 @@ def pair($window; $peer; $peer_id):
      ms: ([$tcp_tail, (if $etcd == null then null else $etcd * 1000 end)] | map(select(. != null)) | max)};
 
 $config as $c
+| $nodes_file[0] as $nodes
+| $probes_file[0] as $probes
+| $previous_file[0] as $previous
 | $c.now as $now
 | ($c.sample_seconds * window_samples) as $window_seconds
 | ($c.election_timeout_ms / unfit_rtt_divisor) as $unfit_rtt_ms

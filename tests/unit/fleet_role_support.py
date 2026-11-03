@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -95,6 +96,23 @@ FAKE_KUBECTL = textwrap.dedent(
 )
 
 
+# One argument to a process is limited to 128 KiB on Linux (MAX_ARG_STRLEN, one page short of that for the terminating NUL), whatever the total; macOS allows a mebibyte, so a script that passes a large document as an argument passes here and fails on a Linux runner. This stands in for jq on the PATH and refuses such an argument as the kernel's exec does, before running the real jq.
+ARGUMENT_LIMIT_BYTES = 128 * 1024 - 1
+JQ_SHIM = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    export LC_ALL=C
+    for argument in "$@"; do
+      if [ "${#argument}" -gt %d ]; then
+        echo "jq: Argument list too long" >&2
+        exit 126
+      fi
+    done
+    exec %s "$@"
+    """
+)
+
+
 class Cluster:
     """A scratch directory holding the stand-in kubectl, its store and its call log, with the helpers that run a script against it."""
 
@@ -106,6 +124,9 @@ class Cluster:
         kubectl = self.bin / "kubectl"
         kubectl.write_text(FAKE_KUBECTL)
         kubectl.chmod(0o755)
+        jq = self.bin / "jq"
+        jq.write_text(JQ_SHIM % (ARGUMENT_LIMIT_BYTES, shutil.which("jq")))
+        jq.chmod(0o755)
         self.store_path = self.dir / "store.json"
         self.calls = self.dir / "calls.log"
         self.calls.touch()
