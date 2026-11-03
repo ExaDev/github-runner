@@ -79,9 +79,7 @@ class NativeServerTest(NativeRoleHarness):
         self.assertNotIn("systemctl start k3s", self.calls())
 
     def test_an_agent_is_promoted_in_place_once_its_node_is_empty(self) -> None:
-        self.assertEqual(self.run_three(laptop={"github_runner_cluster_node_role": "agent", "github_runner_cluster_voter_eligible": False}).returncode, 0)
-        # A three-host group with laptop as an agent has one Docker server: the first run is the laptop as an agent of server1, the second makes it the third server.
-        self.assertEqual(self.role_file(), "agent")
+        self.running_as("agent")
         password = self.root / "etc" / "rancher" / "node" / "password"
         password.parent.mkdir(parents=True)
         password.write_text("node-password")
@@ -108,7 +106,7 @@ class NativeServerTest(NativeRoleHarness):
         self.assertNotIn("docker exec github-runner-k3s kubectl uncordon laptop", calls)
 
     def test_a_promotion_whose_runner_pods_do_not_finish_is_abandoned_with_the_node_uncordoned(self) -> None:
-        self.assertEqual(self.run_three(laptop={"github_runner_cluster_node_role": "agent"}).returncode, 0)
+        self.running_as("agent")
         (self.state / "runner-pods").write_text("pod/runner-abc12\n")
         before = len(self.calls())
         result = self.run_three(laptop={"github_runner_cluster_native_runner_wait_timeout": 1})
