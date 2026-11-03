@@ -28,6 +28,7 @@ from fleet_role_support import (
     STALE_AFTER_SAMPLES,
     TARGET,
     TOTAL_KB,
+    controller_config,
     UNFIT_RTT_MS,
     WAL_LIMIT_MS,
     WINDOW_SAMPLES,
@@ -50,6 +51,8 @@ class Host:
 
     name: str
     voter: bool = False
+    # Carries the etcd label without voting: a member k3s has added and the leader has not yet promoted.
+    learner: bool = False
     eligible: bool = False
     pinned: bool = False
     ready: bool = True
@@ -93,7 +96,7 @@ def populate(cluster: Cluster, hosts: list[Host]) -> None:
     """Gives the cluster these Nodes and, for each host, a probe entry of its last `samples` samples ending now (less stale_by)."""
     voters = [h.name for h in hosts if h.voter]
     cluster.nodes = [
-        node(h.name, voter=h.voter, eligible=h.eligible, pinned=h.pinned, ready=h.ready, ready_for=h.ready_for, level=h.level) for h in hosts
+        node(h.name, voter=h.voter, learner=h.learner, eligible=h.eligible, pinned=h.pinned, ready=h.ready, ready_for=h.ready_for, level=h.level) for h in hosts
     ]
     entries = {}
     for h in hosts:
@@ -146,6 +149,20 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.log = completed.stdout
         return self.cluster.status()
+
+    def decide(self, hosts: list[Host], *, expected_voters: int) -> dict[str, Any]:
+        """The decision program alone over these hosts, given the number of voters expected; the controller's own pass expects the target, and a swap that holds a new voter expects one more."""
+        populate(self.cluster, hosts)
+        for name, content in (("nodes", {"items": self.cluster.nodes}), ("probes", self.cluster.probes()), ("previous", None)):
+            (self.cluster.dir / f"{name}.json").write_text(json.dumps(content))
+        completed = subprocess.run(
+            ["jq", "-n", "-L", str(SCRIPTS), "--argjson", "config", json.dumps(controller_config(expected_voters=expected_voters)),
+             "--slurpfile", "nodes_file", str(self.cluster.dir / "nodes.json"), "--slurpfile", "probes_file", str(self.cluster.dir / "probes.json"),
+             "--slurpfile", "previous_file", str(self.cluster.dir / "previous.json"), "-f", str(SCRIPTS / "fleet-role.jq")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)
 
     def verdicts(self, status: dict[str, Any]) -> dict[str, str]:
         return {name: host["verdict"] for name, host in status["hosts"].items()}
@@ -541,6 +558,50 @@ class GateTest(ControllerCase):
         status = self.pass_(hosts)
         self.assertEqual(status["decision"]["action"], "none")
         self.assertIn(f"there are 4 voters, not the target {TARGET}", status["decision"]["because"])
+
+    def test_no_swap_while_a_node_is_labelled_a_voter_and_is_not_one(self) -> None:
+        # k3s labels a member the moment it joins as a learner, so the label alone does not make a vote.
+        hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50})
+        hosts.append(Host("e", learner=True, eligible=True))
+        status = self.pass_(hosts)
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertIn("node e is a member but not a voter: it carries the etcd label without EtcdIsVoter=True", status["decision"]["because"])
+
+    def test_a_learner_by_label_is_not_counted_among_the_voters(self) -> None:
+        hosts = healthy()
+        hosts.append(Host("e", learner=True, eligible=True))
+        status = self.pass_(hosts)
+        self.assertEqual(status["membership"]["voters"], ["a", "b", "c"])
+        self.assertEqual(status["hosts"]["e"]["role"], "standby")
+        self.assertNotIn(f"there are {TARGET + 1} voters, not the target {TARGET}", status["blocks"])
+        self.assertIn("node e is a member but not a voter: it carries the etcd label without EtcdIsVoter=True", status["blocks"])
+
+    def test_a_node_whose_voter_condition_is_not_true_is_not_a_voter(self) -> None:
+        populate(self.cluster, healthy())
+        self.cluster.nodes[0]["status"]["conditions"] = [c for c in self.cluster.nodes[0]["status"]["conditions"] if c["type"] != "EtcdIsVoter"] + [
+            {"type": "EtcdIsVoter", "status": "False"}
+        ]
+        completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        status = self.cluster.status()
+        self.assertEqual(status["membership"]["voters"], ["b", "c"])
+        self.assertIn("node a is a member but not a voter: it carries the etcd label without EtcdIsVoter=True", status["blocks"])
+
+    def test_the_expected_voter_count_is_the_target_unless_a_swap_holds_a_new_voter(self) -> None:
+        four = healthy()
+        four[3].voter = True
+        status = self.decide(four, expected_voters=TARGET)
+        self.assertIn(f"there are {TARGET + 1} voters, not the target {TARGET}", status["blocks"])
+
+    def test_one_more_than_the_target_is_expected_while_a_swap_holds_a_new_voter(self) -> None:
+        four = healthy()
+        four[3].voter = True
+        status = self.decide(four, expected_voters=TARGET + 1)
+        self.assertEqual(status["blocks"], [])
+
+    def test_the_target_alone_is_not_the_expected_count_while_a_swap_holds_a_new_voter(self) -> None:
+        status = self.decide(healthy(), expected_voters=TARGET + 1)
+        self.assertEqual(status["blocks"], [f"there are {TARGET} voters, not the expected {TARGET + 1} (the target {TARGET} and the new voter a swap holds)"])
 
     def test_no_swap_during_the_cooldown_after_a_membership_change_and_a_swap_after_it(self) -> None:
         for since_change, expected in ((COOLDOWN_SECONDS - 60, "none"), (COOLDOWN_SECONDS + 60, "swap")):
