@@ -34,6 +34,8 @@ def kubeconfig_modes(builder: str) -> list[str]:
             'regrade_flags=""',
             'api_port_flags=""',
             'etcd_timing_flags=""',
+            # The bootstrap server's: no join URL.
+            'join_url=""',
             function_source(builder),
             builder,
             'printf "%s\\n" "$server_args"',

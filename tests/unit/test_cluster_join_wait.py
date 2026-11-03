@@ -129,7 +129,8 @@ class EntrypointTest(unittest.TestCase):
 
     def test_a_joining_server_waits_before_k3s_and_starts_k3s_with_the_wrapper_first_on_its_path(self) -> None:
         body = self.case_body("server")
-        self.assertIn('server_join_host=$(join_host_of "${K3S_JOIN_SERVER_URL:-}")', body)
+        # join_url is the role directory's join-url or K3S_JOIN_SERVER_URL (set_join_url, tested in test_node_entrypoint.py).
+        self.assertIn('server_join_host=$(join_host_of "$join_url")', body)
         self.assertLess(body.index('wait_for_mesh_host "$server_join_host"'), body.index("exec /bin/k3s server"))
         self.assertLess(body.index('install_tailscale_up_wait "$server_join_host" "$tailscale_up_wait_dir" /usr/local/bin/tailscale'), body.index("exec /bin/k3s server"))
         self.assertIn('PATH="$tailscale_up_wait_dir:$PATH" exec /bin/k3s server', body)

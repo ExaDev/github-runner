@@ -1,7 +1,7 @@
 #!/bin/sh
 # Entry point for the k3s and k3s-agent services in docker-compose.yml: starts Tailscale inside the node's own container, then k3s with its --vpn-auth integration, so each node joins the mesh as its own device. Bind-mounted from the Compose project directory the role manages (github_runner_cluster_dir) rather than baked into the k3s image, so a host picks up a change to it with the Compose file that uses it, without rebuilding an image Compose would not otherwise rebuild.
 #
-# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST, K3S_DATASTORE, K3S_API_PORT, K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below).
+# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST, K3S_DATASTORE, K3S_API_PORT, K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below); and, when docker-compose.fleet-role.yml mounts it, the role directory's `role` and `join-url` (fleet_role_dir below).
 # No set -e: a failed `tailscale up` falls through to waiting for an address, as it always has, rather than exiting and restarting the container.
 set -u
 
@@ -65,6 +65,58 @@ set_regrade_flags() {
   printf '%s\n' "$regrade_level" > "$regrade_started_file"
 }
 
+# The host's record of the role it runs, server or agent, and of the server a promoted server joins: the directory docker-compose.fleet-role.yml bind-mounts read-only from the Compose project directory (fleet-role.d), holding the files `role` and `join-url`, each absent until something writes it. A directory and not two files, because whatever writes them replaces each in one rename, which gives the file a new inode, and a bind mount of a single file keeps showing the old one. The variables replace the paths only in tests.
+fleet_role_dir=${FLEET_ROLE_DIR:-/etc/github-runner}
+k3s_server_dir=${K3S_SERVER_DIR:-/var/lib/rancher/k3s/server}
+
+# Runs nothing until the container is stopped, after saying why. Never exits by itself, since restart: unless-stopped starts a container that exits again, and with it this check, for ever. The shell stays PID 1 and waits on a sleep in the background, rather than exec'ing sleep, because the kernel delivers PID 1 only the signals it has a handler for: an exec'd sleep would ignore `docker stop`'s SIGTERM and be killed only once Docker's stop timeout ran out. The loop runs the wait again should the sleep ever end, so nothing after a call of this ever runs.
+idle() {
+  echo "github-runner-node: $1, so k3s is not started; the container idles until it is stopped" >&2
+  trap 'exit 0' TERM INT
+  while :; do
+    sleep infinity &
+    wait $!
+  done
+}
+
+# Idles when the host is not to run this service's k3s at all: when the role file names another role than this service's (the two services never run together, and a host whose role changed does not start the old one again by its restart policy), or, for a server, when k3s has marked its datastore with a tombstone. k3s writes server/db/etcd/tombstone when etcd tells it this member was removed from the cluster (pkg/daemons/executor/etcd.go at v1.34.1+k3s1), and at its next start moves the datastore aside and joins again as a new learner (Register in pkg/etcd/etcd.go), so a retired server whose container restarted (by its restart policy, a host reboot, a recreate) would become a member again behind the back of whatever removed it; the tombstone is the only record of the removal a host that was down at the time has. A host with no role file runs the service it was started as, as every host did before the file existed.
+fleet_role_guard() {
+  if [ -e "$fleet_role_dir/role" ]; then
+    recorded_role=$(cat "$fleet_role_dir/role" 2>/dev/null) || recorded_role=""
+    if [ "$recorded_role" != "$1" ]; then
+      idle "$fleet_role_dir/role names '${recorded_role}', not $1"
+    fi
+  fi
+  if [ "$1" = server ] && [ -e "$k3s_server_dir/db/etcd/tombstone" ]; then
+    idle "$k3s_server_dir/db/etcd/tombstone says this server's etcd member was removed from the cluster, and k3s started now would join it again as a new member"
+  fi
+}
+
+# Sets join_url to the URL of the server a server joins: the role directory's join-url when it is not empty, which names a current voter when a promotion has written one, otherwise K3S_JOIN_SERVER_URL from .env, the inventory's bootstrap server, empty on the bootstrap host itself.
+set_join_url() {
+  join_url=$(cat "$fleet_role_dir/join-url" 2>/dev/null) || join_url=""
+  if [ -z "$join_url" ]; then
+    join_url=${K3S_JOIN_SERVER_URL:-}
+  fi
+}
+
+# Exits, without starting k3s, a server that has no server to join and whose datastore a demotion moved aside (server/db.demoted, with no server/db). It was a member of a cluster that still exists, and with nothing to join k3s would bootstrap a second one (--cluster-init, or a fresh SQLite datastore), splitting the fleet. Exits rather than idling, because it can only be wrong: the container restarts and refuses again until a join-url names a current voter. With server/db present k3s reuses the datastore and ignores --cluster-init; with neither, this is a first bootstrap.
+refuse_second_cluster() {
+  if [ -z "$join_url" ] && [ ! -e "$k3s_server_dir/db" ] && [ -e "$k3s_server_dir/db.demoted" ]; then
+    echo "github-runner-node: this host was a member of a cluster ($k3s_server_dir/db.demoted, no $k3s_server_dir/db) and has no server to join, so starting k3s would bootstrap a second cluster; not starting it. Write the URL of a current server (https://<host>:<port>) to join-url in the role directory ($fleet_role_dir on this container, fleet-role.d in the Compose project directory)." >&2
+    exit 1
+  fi
+}
+
+# Before anything else starts, Tailscale included: a host that is not to run this service must not bring this service's Tailscale device up either.
+case "$role" in
+  server | agent) fleet_role_guard "$role" ;;
+esac
+if [ "$role" = server ]; then
+  set_join_url
+  refuse_second_cluster
+fi
+
 # k3s's own vpn-auth integration only runs `tailscale up`; it does not start the daemon itself (without this, k3s fails outright with "tailscale up failed: ... it doesn't appear to be running"). Waits for the control socket before anything talks to it.
 mkdir -p /var/run/tailscale /var/lib/tailscale
 tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
@@ -114,7 +166,7 @@ join_mesh() {
   fi
 }
 
-# The host a joining node dials, from its server URL (https://<host>:<port>): K3S_JOIN_SERVER_URL for a server, K3S_URL for an agent. Empty for the bootstrap server, which joins nothing.
+# The host a joining node dials, from its server URL (https://<host>:<port>): join_url for a server, K3S_URL for an agent. Empty for the bootstrap server, which joins nothing.
 join_host_of() {
   join_host=${1#https://}
   join_host=${join_host%%:*}
@@ -160,7 +212,7 @@ install_tailscale_up_wait() {
 #
 # --node-ip forces etcd's peer-advertise address onto this node's mesh IP. k3s builds etcd's --initial-cluster from config.PrivateIP, which is populated from --node-ip before --vpn-auth's own executor code rebuilds NodeIP from its Tailscale detection (traced through pkg/cli/server/server.go and pkg/executor/embed/embed.go). Without it PrivateIP stays the container's bridge IP, which no other machine can reach, and joining a second server failed with "MemberAdd request timed out". An --etcd-arg override is not a substitute: it also applies to the temporary etcd k3s starts on every restart to reconcile with its datastore, which has no TLS certificates for a 0.0.0.0:2380 listener and failed with "cannot listen on TLS for [::]:2380: KeyFile and CertFile are not presented".
 #
-# --cluster-init (only when K3S_JOIN_SERVER_URL is unset, and K3S_DATASTORE is not sqlite) bootstraps embedded etcd, or converts an existing single-node SQLite datastore to it, the one migration k3s documents; once initialised, k3s ignores it on restart, so it stays in place permanently. A host with K3S_JOIN_SERVER_URL set passes --server <url> instead and joins as another control-plane/etcd member.
+# --cluster-init (only when join_url, set by set_join_url above, is empty, and K3S_DATASTORE is not sqlite) bootstraps embedded etcd, or converts an existing single-node SQLite datastore to it, the one migration k3s documents; once initialised, k3s ignores it on restart, so it stays in place permanently. refuse_second_cluster above has already stopped a former member with no join URL, so here it is a first bootstrap or a datastore k3s reuses. A host with a join URL passes --server <url> instead and joins as another control-plane/etcd member.
 #
 # --https-listen-port is added when K3S_API_PORT is set (set_api_port_flags above), for a second cluster on a Docker host whose default port another cluster already publishes.
 #
@@ -175,8 +227,8 @@ mesh_server_args() {
     --resolv-conf=/etc/k3s-resolv.conf \
     --node-ip="$mesh_ip"
   for flag in $api_port_flags; do set -- "$@" "$flag"; done
-  if [ -n "${K3S_JOIN_SERVER_URL:-}" ]; then
-    set -- "$@" --server "$K3S_JOIN_SERVER_URL"
+  if [ -n "$join_url" ]; then
+    set -- "$@" --server "$join_url"
   elif [ "${K3S_DATASTORE:-etcd}" != sqlite ]; then
     set -- "$@" --cluster-init
   fi
@@ -241,7 +293,7 @@ case "$role" in
       supervise_self_hosted
     fi
     join_mesh
-    server_join_host=$(join_host_of "${K3S_JOIN_SERVER_URL:-}")
+    server_join_host=$(join_host_of "$join_url")
     wait_for_mesh_host "$server_join_host"
     install_tailscale_up_wait "$server_join_host" "$tailscale_up_wait_dir" /usr/local/bin/tailscale
     rm -f /output/kubeconfig.yaml
