@@ -157,11 +157,12 @@ jobs:
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v7
-      - name: Install Ansible
+      - name: Install Ansible and zsh
+        # zsh is one of the two shells the host tools role writes startup lines for, and its tests read those lines back with a real zsh.
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ansible pkg-config
+          sudo apt-get install -y -qq ansible pkg-config zsh
       - name: Unit-test the collection
         # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record. A module is a shard's when its position in the list of modules, largest first, leaves this shard's index modulo the number of shards.
         env:
