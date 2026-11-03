@@ -1,0 +1,76 @@
+---
+# Installs the role controller (templates/fleet-role.yaml.j2, running scripts/fleet-role.sh and scripts/fleet-role-probe.sh) when github_runner_arc_role_controller_enabled is on, and otherwise removes it along with the two ConfigMaps it publishes to. Included from main.yml on any host that installs something.
+
+- name: "Role controller: describe its resources"
+  ansible.builtin.set_fact:
+    github_runner_arc_role_controller_resources: "{{ lookup('ansible.builtin.template', 'fleet-role.yaml.j2') | from_yaml_all | select | list }}"
+
+- name: "Role controller: create the namespace it runs in"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ github_runner_arc_platform_namespace }}"
+  when: github_runner_arc_role_controller_enabled | bool
+
+# Pre-created empty rather than left for the controller and the probes to create: neither is granted `create` on configmaps, only get and patch of the two names. Created only when absent: applying an empty definition again would wipe what they have published.
+- name: "Role controller: check whether its ConfigMaps exist"
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: "{{ github_runner_arc_platform_namespace }}"
+    name: "{{ item }}"
+  loop:
+    - "{{ github_runner_arc_role_controller_probe_configmap }}"
+    - "{{ github_runner_arc_role_controller_status_configmap }}"
+  register: github_runner_arc_role_controller_configmaps
+  when: github_runner_arc_role_controller_enabled | bool
+
+- name: "Role controller: pre-create its ConfigMaps"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ item.item }}"
+        namespace: "{{ github_runner_arc_platform_namespace }}"
+      data: "{{ {'status.json': ''} if item.item == github_runner_arc_role_controller_status_configmap else {} }}"
+  loop: "{{ github_runner_arc_role_controller_configmaps.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - github_runner_arc_role_controller_enabled | bool
+    - item.resources | length == 0
+
+- name: "Role controller: install the controller and the probe"
+  kubernetes.core.k8s:
+    definition: "{{ item }}"
+  loop: "{{ github_runner_arc_role_controller_resources }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+  when: github_runner_arc_role_controller_enabled | bool
+
+# The workloads go before the permissions they run with, so nothing is left running that can no longer reach its ConfigMap; the ConfigMaps go last.
+- name: "Role controller: remove the controller, the probe and their ConfigMaps"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    namespace: "{{ item.metadata.namespace | default(omit) }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ (github_runner_arc_role_controller_resources | reverse | list) + github_runner_arc_role_controller_configmap_definitions }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+  vars:
+    github_runner_arc_role_controller_configmap_definitions:
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: "{{ github_runner_arc_role_controller_probe_configmap }}"
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: "{{ github_runner_arc_role_controller_status_configmap }}"
+          namespace: "{{ github_runner_arc_platform_namespace }}"
+  when: not (github_runner_arc_role_controller_enabled | bool)
