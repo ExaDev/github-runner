@@ -130,6 +130,7 @@ class Harness(unittest.TestCase):
         self.power_supply = self.host / "sys" / "class" / "power_supply"
         self.battery_unit = self.host / "etc" / "systemd" / "system" / "github-runner-battery-charge-limit.service"
         self.sysfs_net = self.host / "sys" / "class" / "net"
+        self.sysfs_devices = self.host / "sys" / "devices"
         self.wifi_unit = self.host / "etc" / "systemd" / "system" / "github-runner-wifi-powersave@.service"
         self.wifi_rule = self.host / "etc" / "udev" / "rules.d" / "90-github-runner-wifi-powersave.rules"
         self.apt_file = self.host / "etc" / "apt" / "apt.conf.d" / "52github-runner-unattended-upgrades"
@@ -143,10 +144,26 @@ class Harness(unittest.TestCase):
         self.add_kernel_wifi_device("wlp2s0")
 
     def add_kernel_wifi_device(self, name: str) -> None:
-        """Gives the stand-in sysfs a wireless network device, as cfg80211 does with its phy80211 link, and a wired one beside it that has none."""
-        (self.sysfs_net / name).mkdir(parents=True, exist_ok=True)
-        (self.sysfs_net / name / "phy80211").touch()
-        (self.sysfs_net / "enp3s0").mkdir(exist_ok=True)
+        """Lays out network devices as a real sysfs does, so the role's probe runs against the same symlink structure with the real shell: /sys/class/net/<name> is a symlink to a directory under devices, which holds a phy80211 link when cfg80211 manages the device and a subsystem link back to the class directory (a loop, to anything that follows links); a wired device beside it has the subsystem link and no phy80211."""
+        self.add_kernel_net_device(name, wireless=True)
+        self.add_kernel_net_device("enp3s0", wireless=False)
+
+    def add_kernel_net_device(self, name: str, *, wireless: bool) -> None:
+        device = self.sysfs_devices / name / "net" / name
+        device.mkdir(parents=True, exist_ok=True)
+        (device / "subsystem").unlink(missing_ok=True)
+        (device / "subsystem").symlink_to(self.sysfs_net)
+        if wireless:
+            phy = self.sysfs_devices / name / "ieee80211" / "phy0"
+            phy.mkdir(parents=True, exist_ok=True)
+            (device / "phy80211").symlink_to(phy)
+        link = self.sysfs_net / name
+        if not link.is_symlink():
+            link.symlink_to(device)
+
+    def remove_kernel_net_device(self, name: str) -> None:
+        (self.sysfs_net / name).unlink()
+        shutil.rmtree(self.sysfs_devices / name)
 
     def make_stand_ins(self) -> None:
         log = 'echo "$(basename "$0") $*" >> "$STUB/calls.log"\n'
@@ -360,7 +377,7 @@ class RoleTest(Harness):
 
     def test_a_host_without_a_wifi_device_is_left_alone(self) -> None:
         (self.state / "devices").write_text("enp3s0:ethernet:connected\nlo:loopback:unmanaged\n")
-        shutil.rmtree(self.sysfs_net / "wlp2s0")
+        self.remove_kernel_net_device("wlp2s0")
         result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.networkmanager.exists())
@@ -380,7 +397,7 @@ class RoleTest(Harness):
 
     def test_a_host_with_no_stack_at_all_is_refused_even_without_a_wifi_device(self) -> None:
         (self.state / "no-networkmanager").touch()
-        shutil.rmtree(self.sysfs_net / "wlp2s0")
+        self.remove_kernel_net_device("wlp2s0")
         result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("neither NetworkManager nor systemd-networkd manages a Wi-Fi device", re.sub(r"\s+", " ", result.stdout))
@@ -405,7 +422,7 @@ class RoleTest(Harness):
         """Makes the host one without NetworkManager that runs systemd-networkd, with its one Wi-Fi interface named as a .link file would."""
         (self.state / "no-networkmanager").touch()
         (self.state / "active-systemd-networkd.service").touch()
-        shutil.rmtree(self.sysfs_net / "wlp2s0")
+        self.remove_kernel_net_device("wlp2s0")
         self.add_kernel_wifi_device(device)
         (self.state / f"power-save-{device}").touch()
 
@@ -476,7 +493,7 @@ class RoleTest(Harness):
 
     def test_a_networkd_host_without_a_wifi_device_is_left_alone(self) -> None:
         self.networkd_host()
-        shutil.rmtree(self.sysfs_net / "wifi0")
+        self.remove_kernel_net_device("wifi0")
         result = self.run_role(github_runner_linux_host_wifi_powersave_off=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.changes(), [])
