@@ -1,5 +1,5 @@
 ---
-# The per-node pressure reporter (scripts/psi-reporter.sh) and what the autoscaler needs to read it, installed when github_runner_arc_autoscaler_node_pressure_enabled is on and a profile is autoscaled, removed otherwise. One DaemonSet pod on each node runner pods may use, with the host's /proc/pressure mounted read-only; each patches its own node's key of one shared ConfigMap. Like the autoscaler's own state ConfigMap, that one is pre-created empty, so no ServiceAccount here is granted `create`, only get/patch scoped by resourceNames.
+# The per-node pressure reporter (scripts/psi-reporter.sh) and what the autoscaler needs to read it, installed when github_runner_arc_autoscaler_node_pressure_enabled is on and a profile is autoscaled, removed otherwise. One DaemonSet pod on each node runner pods may use, reading /proc/pressure of its own procfs, with nothing mounted; each patches its own node's key of one shared ConfigMap. Like the autoscaler's own state ConfigMap, that one is pre-created empty, so no ServiceAccount here is granted `create`, only get/patch scoped by resourceNames.
 
 - name: "Platform: decide whether the node pressure reporter is wanted"
   ansible.builtin.set_fact:
@@ -156,10 +156,6 @@
                         value: "{{ github_runner_arc_node_pressure_configmap }}"
                       - name: REPORT_SECONDS
                         value: "{{ github_runner_arc_psi_reporter_seconds | string }}"
-                    volumeMounts:
-                      - name: pressure
-                        mountPath: /host-pressure
-                        readOnly: true
                     resources:
                       requests:
                         cpu: "10m"
@@ -169,7 +165,3 @@
                         cpu: "50m"
                         memory: "32Mi"
                         ephemeral-storage: "{{ github_runner_arc_platform_ephemeral_storage_limit }}"
-                volumes:
-                  - name: pressure
-                    hostPath:
-                      path: /proc/pressure

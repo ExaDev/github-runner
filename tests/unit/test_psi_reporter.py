@@ -75,6 +75,28 @@ class ReporterTest(unittest.TestCase):
         assert isinstance(data, dict)
         self.assertEqual(sorted(key for key in json.loads(data["node-a"]) if key != "at"), ["io_full_avg10", "io_some_avg10"])
 
+    def test_a_kernel_without_pressure_stall_information_reports_the_time_alone(self) -> None:
+        # No /proc/pressure at all: the reporter must run and publish a report with no figures, which the autoscaler reads as no pressure.
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            (root / "bin").mkdir()
+            kubectl = root / "bin" / "kubectl"
+            kubectl.write_text(FAKE_KUBECTL)
+            kubectl.chmod(0o755)
+            env = {**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "NODE_NAME": "node-a", "NAMESPACE": "platform", "PRESSURE_DIR": str(root / "no-such-dir"), "REPORT_ONCE": "true", "FAKE_PATCH_OUT": str(root / "patch.json"), "FAKE_ARGS_OUT": str(root / "args.txt")}
+            result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+            data = json.loads((root / "patch.json").read_text())["data"]
+            self.assertEqual(list(json.loads(data["node-a"])), ["at"])
+
+    def test_the_pod_reads_the_nodes_own_procfs_and_mounts_nothing_that_a_kernel_without_it_would_fail(self) -> None:
+        # A hostPath volume of /proc/pressure makes the container runtime create the directory when the kernel has none, and the pod then never starts.
+        self.assertIn('PRESSURE_DIR="${PRESSURE_DIR:-/proc/pressure}"', SCRIPT.read_text())
+        task = (SCRIPT.parents[1] / "roles" / "github_runner_arc" / "tasks" / "install_psi_reporter.yml").read_text()
+        self.assertNotIn("hostPath", task)
+        self.assertNotIn("host-pressure", task)
+
     def test_the_configmap_name_and_namespace_are_configurable(self) -> None:
         _, args = self.report({"io": IO}, NODE_PRESSURE_CONFIGMAP="pressure-x", NAMESPACE="other")
         self.assertIn("patch configmap pressure-x -n other", args)
