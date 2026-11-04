@@ -6,6 +6,7 @@
   gather_facts: false
   vars:
     github_runner_cluster_effective_node_role: server
+    github_runner_cluster_docker_role: server
     github_runner_cluster_dir: /srv/github-runner
     github_runner_cluster_docker_cli_context: ""
     github_runner_cluster_docker_cli_environment: {}

@@ -9,6 +9,7 @@
   vars:
     github_runner_cluster_effective_node_name: node2
     github_runner_cluster_effective_node_role: server
+    github_runner_cluster_docker_role: server
     github_runner_cluster_topology:
       servers: [node1, node2, node3]
       hosts:

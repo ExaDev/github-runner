@@ -213,6 +213,8 @@ case "$*" in
   "get node "*removed-node-name*) if [ -e "$state/member-removed" ]; then printf 'laptop-0a1b2c3d,'; else printf ',laptop-0a1b2c3d'; fi ;;
   "annotate --overwrite node "*"etcd.k3s.cattle.io/remove=true"*) [ -e "$state/member-stays" ] || touch "$state/member-removed" ;;
   "get node "*) if [ -e "$state/node-ready" ]; then cat "$state/node-ready"; else printf 'True,True'; fi ;;
+  # The regrade Lease, as JSON, and nothing when there is none; any other Lease is a node's, whose renew time is asked for.
+  "get lease fleet-regrade "*) [ ! -e "$state/fleet-regrade-lease" ] || cat "$state/fleet-regrade-lease" ;;
   "get lease "*) if [ -e "$state/lease" ]; then cat "$state/lease"; else echo 2099-01-01T00:00:00Z; fi ;;
   "get pods "*) [ -e "$state/runner-pods" ] && cat "$state/runner-pods"; exit 0 ;;
   cordon*|uncordon*|drain*|label*|annotate*) ;;

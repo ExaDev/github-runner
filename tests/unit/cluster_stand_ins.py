@@ -54,7 +54,7 @@ def flatten(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return found
 
 
-# Stands in for the docker CLI, with its state in files under $DOCKER_STUB: containers/<name>.state (what docker ps prints), .image, .hash (the Compose configuration hash label), .node/ (the files of the container's /etc/rancher/node), .volume (the volume mounted there) and .cp-fails; volumes/<name>/ and labels/<name>; rendered/<project>.txt (what docker compose config --hash prints); cluster.nodes (what kubectl get nodes prints, "<node> <Ready status>" per line); and containers/<name>.kubectl-fails and never-ready-<node>; leases/<node> counts reads of a node's lease, whose renewal is older than its container's start on the first read and later after that, which is also when the node reports Ready (kubelet confirming itself) unless never-ready-<node> exists. Every call is appended to calls.log with its DOCKER_CONTEXT, and the owner and mode of each file docker cp extracts to owners.log. docker cp moves a real tar stream between processes, so a pipeline that is wired wrongly moves nothing.
+# Stands in for the docker CLI, with its state in files under $DOCKER_STUB: containers/<name>.state (what docker ps prints), .image, .hash (the Compose configuration hash label), .node/ (the files of the container's /etc/rancher/node), .volume (the volume mounted there) and .cp-fails; volumes/<name>/ and labels/<name>; rendered/<project>.txt (what docker compose config --hash prints); cluster.nodes (what kubectl get nodes prints, "<node> <Ready status>" per line); fleet-regrade.lease (what kubectl get lease fleet-regrade prints, nothing when absent); and containers/<name>.kubectl-fails and never-ready-<node>; leases/<node> counts reads of a node's lease, whose renewal is older than its container's start on the first read and later after that, which is also when the node reports Ready (kubelet confirming itself) unless never-ready-<node> exists. Every call is appended to calls.log with its DOCKER_CONTEXT, and the owner and mode of each file docker cp extracts to owners.log. docker cp moves a real tar stream between processes, so a pipeline that is wired wrongly moves nothing.
 DOCKER_STUB = """#!{python}
 import os, re, sys, tarfile
 stub = os.environ["DOCKER_STUB"]
@@ -176,7 +176,9 @@ elif command == "exec":
     if rest[:2] == ["kubectl", "get"]:
         if read("containers", container + ".kubectl-fails") is not None:
             die("The connection to the server 127.0.0.1:6443 was refused")
-        if rest[2] == "nodes":
+        if rest[2:4] == ["lease", "fleet-regrade"]:
+            print(read("fleet-regrade.lease") or "", end="")
+        elif rest[2] == "nodes":
             print(read("cluster.nodes") or "", end="")
         elif rest[2] == "node":
             print(dict(line.split() for line in (read("cluster.nodes") or "").splitlines() if len(line.split()) == 2).get(rest[3], ""), end="")
@@ -288,9 +290,9 @@ class RoleTestCase(unittest.TestCase):
         # Whatever a test did, no real tool was reached.
         self.assertFalse((self.stub / "forbidden.log").exists(), (self.stub / "forbidden.log").read_text() if (self.stub / "forbidden.log").exists() else "")
 
-    def hosts(self, servers: tuple[str, ...], agents: tuple[str, ...] = (), **extra: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-        """The inventory's hosts and the group variables for a cluster whose servers and agents are named, each host's container named for it."""
-        topology = {"servers": list(servers), "hosts": {name: {"role": "server" if name in servers else "agent", "bootstrap": name == servers[0], "node_name": name} for name in (*servers, *agents)}}
+    def hosts(self, servers: tuple[str, ...], agents: tuple[str, ...] = (), eligible: tuple[str, ...] = (), **extra: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The inventory's hosts and the group variables for a cluster whose servers and agents are named, those in ``eligible`` marked github_runner_cluster_voter_eligible, each host's containers named for it."""
+        topology = {"servers": list(servers), "hosts": {name: {"role": "server" if name in servers else "agent", "bootstrap": name == servers[0], "node_name": name, "address": name, "native": False, "eligible": name in eligible} for name in (*servers, *agents)}}
         hosts: dict[str, Any] = {}
         for name in (*servers, *agents):
             server = name in servers
@@ -299,8 +301,11 @@ class RoleTestCase(unittest.TestCase):
             (self.work / "nodes" / name / "docker-compose.yml").write_text("services: {}\n")
             hosts[name] = {
                 "github_runner_cluster_effective_node_role": "server" if server else "agent",
+                # The role tasks/docker_role.yml decides, which a test that runs it sets again.
+                "github_runner_cluster_docker_role": "server" if server else "agent",
                 "github_runner_cluster_effective_node_name": name,
                 "github_runner_cluster_container_name": f"{name}-k3s",
+                "github_runner_cluster_agent_container_name": f"{name}-k3s-agent",
                 "github_runner_cluster_dir": str(self.work / "nodes" / name),
                 "github_runner_cluster_compose_project": name,
                 "github_runner_cluster_compose_file_list": ["docker-compose.yml"],

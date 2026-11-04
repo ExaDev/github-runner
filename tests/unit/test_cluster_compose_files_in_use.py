@@ -142,7 +142,7 @@ class OrderTest(unittest.TestCase):
             self.assertGreater(matching[0], worked_out, later)
 
     def test_no_task_names_the_whole_list_to_a_compose_command_except_where_it_is_defined_or_checked(self) -> None:
-        allowed = {"defaults/main.yml", "tasks/compose_files.yml", "tasks/compose_files_in_use.yml", "templates/env.j2", "templates/env-agent.j2"}
+        allowed = {"defaults/main.yml", "tasks/compose_files.yml", "tasks/compose_files_in_use.yml", "templates/env.j2"}
         offenders = []
         for path in sorted(ROLE.rglob("*")):
             relative = str(path.relative_to(ROLE))

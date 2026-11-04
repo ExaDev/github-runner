@@ -107,26 +107,21 @@ class RoleTest(unittest.TestCase):
         result = self.check(hosts)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def render_env(self, *extra: str) -> tuple[list[str], list[str]]:
-        env, agent = self.work / "env", self.work / "env-agent"
-        args = [ANSIBLE_PLAYBOOK, str(ROOT / "tests" / "cluster_versions" / "render_env.yml"), "-e", f"env_output={env}", "-e", f"env_agent_output={agent}", "-e", "github_runner_cluster_dir=/srv/github-runner", *extra]
+    def render_env(self, *extra: str) -> list[str]:
+        env = self.work / "env"
+        args = [ANSIBLE_PLAYBOOK, str(ROOT / "tests" / "cluster_versions" / "render_env.yml"), "-e", f"env_output={env}", "-e", "github_runner_cluster_dir=/srv/github-runner", *extra]
         result = subprocess.run(args, capture_output=True, text=True, check=False, env=ansible_env(), cwd=self.work)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return env.read_text().splitlines(), agent.read_text().splitlines()
+        return env.read_text().splitlines()
 
-    def test_the_server_env_carries_both_values_when_set(self) -> None:
-        server, _ = self.render_env("-e", f"{HEARTBEAT}=500", "-e", f"{ELECTION}=5000")
-        self.assertIn("K3S_ETCD_HEARTBEAT_INTERVAL=500", server)
-        self.assertIn("K3S_ETCD_ELECTION_TIMEOUT=5000", server)
+    def test_the_env_carries_both_values_when_set(self) -> None:
+        # The agent service takes neither from it: see ComposeFileTest.
+        lines = self.render_env("-e", f"{HEARTBEAT}=500", "-e", f"{ELECTION}=5000")
+        self.assertIn("K3S_ETCD_HEARTBEAT_INTERVAL=500", lines)
+        self.assertIn("K3S_ETCD_ELECTION_TIMEOUT=5000", lines)
 
-    def test_the_server_env_names_neither_by_default(self) -> None:
-        server, agent = self.render_env()
-        for lines in (server, agent):
-            self.assertEqual([line for line in lines if "ETCD" in line], [])
-
-    def test_the_agent_env_never_carries_them(self) -> None:
-        _, agent = self.render_env("-e", f"{HEARTBEAT}=500", "-e", f"{ELECTION}=5000")
-        self.assertEqual([line for line in agent if "ETCD" in line], [])
+    def test_the_env_names_neither_by_default(self) -> None:
+        self.assertEqual([line for line in self.render_env() if "ETCD" in line], [])
 
 
 class ComposeFileTest(unittest.TestCase):

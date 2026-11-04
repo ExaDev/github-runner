@@ -105,6 +105,8 @@ class HostNetworkRoleTest(unittest.TestCase):
             "github_runner_cluster_topology": TOPOLOGY,
             **role_vars,
         }
+        # The role tasks/docker_role.yml would decide: the inventory's, for a host not marked eligible.
+        extra["github_runner_cluster_docker_role"] = extra["github_runner_cluster_effective_node_role"]
         extra_file = self.work / "extra.json"
         extra_file.write_text(json.dumps(extra))
         env = {

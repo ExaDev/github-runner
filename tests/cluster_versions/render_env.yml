@@ -1,6 +1,6 @@
 ---
-# Renders the cluster role's env.j2 and env-agent.j2 with the role's defaults and placeholder values for the settings this test does not look at, writing them to env_output and env_agent_output, and, when compose_files_output is set, the Compose file list the node's project would use, for tests/unit/test_cluster_versions.py, test_cluster_etcd_timing.py and test_cluster_instance.py. Role variables are passed as extra variables, which outrank the defaults loaded here.
-- name: Render the node .env templates
+# Renders the cluster role's env.j2, the one .env a Docker node gets whichever role it runs, with the role's defaults and placeholder values for the settings this test does not look at, writing it to env_output, and, when compose_files_output is set, the Compose file list the node's project would use, for tests/unit/test_cluster_versions.py, test_cluster_etcd_timing.py, test_cluster_instance.py, test_cluster_voters.py and test_docker_role.py. Role variables are passed as extra variables, which outrank the defaults loaded here.
+- name: Render the node .env
   hosts: localhost
   connection: local
   gather_facts: false
@@ -20,12 +20,6 @@
       ansible.builtin.copy:
         content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_cluster/templates/env.j2') }}"
         dest: "{{ env_output }}"
-        mode: "0600"
-
-    - name: Render env-agent.j2
-      ansible.builtin.copy:
-        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_cluster/templates/env-agent.j2') }}"
-        dest: "{{ env_agent_output }}"
         mode: "0600"
 
     - name: Write the Compose files the node's project would use

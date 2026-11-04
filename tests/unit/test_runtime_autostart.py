@@ -145,7 +145,7 @@ class GuardTest(unittest.TestCase):
     def test_the_end_checks_follow_the_compose_start_on_servers_and_agents(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
         for role in ("server", "agent"):
-            [block] = [task for task in tasks if "block" in task and task.get("when") == f'github_runner_cluster_effective_node_role == "{role}"']
+            [block] = [task for task in tasks if "block" in task and task.get("when") == f'github_runner_cluster_docker_role == "{role}"']
             # A server starts through its turn (tasks/start_servers.yml) and an agent through tasks/start_agent.yml, each of which runs the Compose start.
             steps = [("compose" if step.get("ansible.builtin.include_tasks") in ("start_servers.yml", "start_agent.yml") else step.get("ansible.builtin.include_tasks")) or ("compose" if "community.docker.docker_compose_v2" in step else None) for step in block["block"]]
             with self.subTest(role=role):
@@ -433,7 +433,7 @@ class RoleTest(unittest.TestCase):
             "runtime_tasks": tasks,
             "github_runner_cluster_docker_cli_context": context,
             "github_runner_cluster_docker_cli_environment": {"DOCKER_CONTEXT": context} if context else {},
-            "github_runner_cluster_effective_node_role": "server",
+            "github_runner_cluster_docker_role": "server",
             "github_runner_cluster_runtime_path": f"{self.bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
             # The tests are not root, so the daemon's property list is owned by the user running them and sits beside the stand-in daemon directory.
             "runtime_user": "example",
@@ -949,11 +949,11 @@ class RoleTest(unittest.TestCase):
 
     def test_an_agent_host_is_checked_for_the_agent_container(self) -> None:
         self.state("runtime-up")
-        result = self.run_role(github_runner_cluster_runtime_autostart=False, github_runner_cluster_effective_node_role="agent")
+        result = self.run_role(github_runner_cluster_runtime_autostart=False, github_runner_cluster_docker_role="agent")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("The k3s container github-runner-k3s-agent on node1 is", result.stdout)
         (self.stub / "github-runner-k3s-agent.state").write_text("running")
-        self.assertEqual(self.run_role(github_runner_cluster_runtime_autostart=False, github_runner_cluster_effective_node_role="agent").returncode, 0)
+        self.assertEqual(self.run_role(github_runner_cluster_runtime_autostart=False, github_runner_cluster_docker_role="agent").returncode, 0)
 
     def test_a_container_renamed_by_an_extra_compose_file_is_the_one_checked(self) -> None:
         self.state("runtime-up")

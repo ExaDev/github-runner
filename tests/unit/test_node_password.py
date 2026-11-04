@@ -147,7 +147,7 @@ class NodePasswordSeedingTest(RoleTestCase):
 
     def test_an_agent_is_seeded_into_its_own_volume(self) -> None:
         hosts, group_vars = self.hosts(("node1",), ("agent1",))
-        self.container("github-runner-k3s-agent", password=self.SECRET)
+        self.container("agent1-k3s-agent", password=self.SECRET)
         result = self.run_tasks("node_password", hosts, group_vars, limit="agent1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.stub / "volumes" / "agent1_k3s-agent-node" / "password").read_text(), self.SECRET)
