@@ -948,6 +948,17 @@ class RoleSetupTest(NativeRoleHarness):
         self.assertIn("docker exec --interactive github-runner-k3s kubectl apply --filename -", self.calls())
         self.assertIn("docker exec github-runner-k3s kubectl create configmap fleet-role-actuators --namespace github-runner-platform", self.calls())
 
+    def test_the_credential_is_applied_once_the_other_servers_api_serves(self) -> None:
+        # The servers of a first run start together, so the server the role applies the credential through may not serve yet.
+        (self.state / "api-unready-reads").write_text("2")
+        result = self.run_eligible()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        reads = [index for index, call in enumerate(calls) if call == "docker exec github-runner-k3s kubectl get --raw /readyz --request-timeout=30s"]
+        apply = calls.index("docker exec --interactive github-runner-k3s kubectl apply --filename -")
+        self.assertEqual(len(reads), 3, calls)
+        self.assertLess(max(reads), apply)
+
     def test_the_token_stays_out_of_everything_the_role_prints(self) -> None:
         result = self.run_eligible("-vvv")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
