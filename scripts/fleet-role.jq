@@ -1,7 +1,7 @@
 # The role controller's decision (see scripts/fleet-role.sh, which gathers the inputs and publishes the result): which hosts are fit to hold an etcd vote, and the swap the controller would make. Pure: nothing here reads the cluster or the clock.
 #
 # Inputs, as jq named arguments:
-# - $config: the controller's settings (see scripts/fleet-role.sh for each), with `now` the time of the pass in epoch seconds and `expected_voters` the number of voters the cluster should hold at this moment: the target, or one more while a swap holds a new voter beside the old.
+# - $config: the controller's settings (see scripts/fleet-role.sh for each), with `now` the time of the pass in epoch seconds, `expected_voters` the number of voters the cluster should hold at this moment (the target, or one more while a swap holds a new voter beside the old) and `ignored_voters`, optional, the voters a swap in progress is taking out, which the gates do not hold to their health (a voter stepped down to etcd-only, or one that is down), and whose connections the others may lack.
 # - $nodes_file: the output of `kubectl get nodes -o json`, as --slurpfile gives it (a one-element array).
 # - $probes_file: each node's probe entry (scripts/fleet-role-probe.sh), by node name, likewise.
 # - $previous_file: the status this program published on the last pass, or null on the first, likewise.
@@ -19,9 +19,6 @@ def fit_rtt_divisor: 20;
 # etcd's FAQ: a disk is fast enough when the WAL fsync tail is under 10 ms and the backend commit tail under 25 ms.
 def wal_fsync_limit_ms: 10;
 def backend_commit_limit_ms: 25;
-
-# k3s's learnerMaxStallTime (pkg/etcd/etcd.go): a learner that makes no progress for this long is removed, so a membership change has settled this long after it.
-def learner_stall_seconds: 300;
 
 # A probe report older than this many samples counts as no report, as the autoscaler treats a node pressure report older than three of its polls.
 def stale_after_samples: 3;
@@ -70,9 +67,10 @@ $config as $c
       ready: ($ready.status == "True"),
       ready_since: ($ready.lastTransitionTime | fromdateiso8601? // null),
       labelled: $labelled,
-      voter: ($labelled and condition_true(voter_condition)),
+      voter: ($labelled and condition_true(voter_condition) and ((.metadata.annotations // {})[removed_annotation] // "") == ""),
       eligible: ($labels[$c.eligible_label] == "true"),
       pinned: ($labels[$c.pinned_label] == "true"),
+      removed: (((.metadata.annotations // {})[removed_annotation] // "") != ""),
       regrade_level: $labels[$c.level_label]}] as $all
 | ($all | map(select(.voter)) | sort_by(.name)) as $voters
 | ($voters | map(.name)) as $voter_names
@@ -237,22 +235,31 @@ $config as $c
 | ([$hosts[] | select(.eligible)] | length) as $eligible_count
 | ($all | map(select(.voter))) as $voter_nodes
 
-# Why no swap may start now whatever the hosts' fitness: the epic's conditions on the cluster as a whole.
+# Why no swap may start now whatever the hosts' fitness: the epic's conditions on the cluster as a whole, as `gates`, which hold for a swap by command as well as by decision, and the cooldown after a membership change, which only a decision waits out. A voter a swap in progress is taking out (`ignored_voters`) is held to none of the gates on its own health, and its peers may lack their connection to it.
+# How many members each voter's fresh probe report says etcd lists, by voter, null for a voter with no fresh report or no reading: a rollback is settled once every voter lists the target and no more.
+| ($voter_names | map({key: ., value: (if ($probes[.].samples[-1].t // 0) >= ($now - $stale_seconds) then $probes[.].samples[-1].etcd.known_members else null end)}) | from_entries) as $known_members
+| ($c.ignored_voters // []) as $ignored
+| ($voter_names | map(select(. as $v | $ignored | index($v) | not))) as $judged
 | ([
     (if ($voters | length) != $c.expected_voters then "there are \($voters | length) voters, not the \(if $c.expected_voters == $c.target then "target \($c.target)" else "expected \($c.expected_voters) (the target \($c.target) and the new voter a swap holds)" end)" else empty end),
-    ($all[] | select(.labelled and (.voter | not)) | "node \(.name) is a member but not a voter: it carries the etcd label without \(voter_condition)=True"),
-    ($voter_nodes[] | select(.regrade_level != null) | "voter \(.name) is at regrade level \(.regrade_level), below full"),
-    ($voter_nodes[] | select(.ready | not) | "voter \(.name) is not Ready"),
-    ($voter_names[] as $v | $probes[$v].samples[-1] as $last | $last.etcd as $e
+    ($all[] | select(.labelled and (.voter | not)) | if .removed then "node \(.name) is a member k3s has removed: it still carries the etcd label" else "node \(.name) is a member but not a voter: it carries the etcd label without \(voter_condition)=True" end),
+    ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.regrade_level != null) | "voter \(.name) is at regrade level \(.regrade_level), below full"),
+    ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.ready | not) | "voter \(.name) is not Ready"),
+    ($judged[] as $v | $probes[$v].samples[-1] as $last | $last.etcd as $e
+       | ($voters | length) as $members
+       | (if ($ignored | index($v)) == null then ($ignored | map(select(. as $i | $voter_names | index($i))) | length) else 0 end) as $absent
        | if $last == null or $last.t < ($now - $stale_seconds) then "voter \($v) has no probe report in the last \($stale_seconds) s"
          elif $e == null then "etcd's state on voter \($v) is unknown"
          elif ($e.has_leader | not) then "voter \($v) reports no leader"
          elif $e.is_learner then "voter \($v) is a learner"
-         elif $e.known_members != ($voters | length) then "voter \($v) knows \($e.known_members) members, not the \($voters | length) voters: a learner or a member that has not started"
-         elif $e.active_peers != (($voters | length) - 1) then "voter \($v) is connected to \($e.active_peers) of its \(($voters | length) - 1) peers"
-         else empty end),
+         elif $e.known_members != $members then "voter \($v) knows \($e.known_members) members, not the \($members) voters: a learner or a member that has not started"
+         elif $e.active_peers > ($members - 1) or $e.active_peers < ($members - 1 - $absent) then "voter \($v) is connected to \($e.active_peers) of its \($members - 1) peers"
+         else empty end)
+  ]) as $gates
+| ([
     (if $cooldown_until != null and $now < $cooldown_until then "the membership changed at \($changed_at), and the cooldown lasts until \($cooldown_until)" else empty end)
-  ]) as $blocks
+  ]) as $cooldown_blocks
+| ($gates + $cooldown_blocks) as $blocks
 
 # Which hosts' unfit verdicts each node accounts for, by node.
 | ([$hosts[] | .name as $h | .attributed_to[] | {node: ., host: $h}] | group_by(.node) | map({key: .[0].node, value: map(.host)}) | from_entries) as $attribution
@@ -285,10 +292,11 @@ $config as $c
              unfit_rtt_ms: $unfit_rtt_ms, fit_rtt_ms: $fit_rtt_ms, wal_fsync_limit_ms: wal_fsync_limit_ms, backend_commit_limit_ms: backend_commit_limit_ms,
              window_samples: window_samples, sample_seconds: $c.sample_seconds, window_seconds: $window_seconds, cooldown_seconds: $cooldown_seconds,
              quota_bytes: $quota_bytes},
-    membership: {voters: $voter_names, changed_at: $changed_at, cooldown_until: $cooldown_until},
+    membership: {voters: $voter_names, known_members: $known_members, changed_at: $changed_at, cooldown_until: $cooldown_until},
     hosts: ($hosts | map({key: .name, value: del(.name, .rank, .m)}) | from_entries),
     attribution: $attribution,
     ranking: ($hosts | map(select(.verdict == "fit")) | sort_by(.rank) | map(.name)),
+    gates: $gates,
     blocks: $blocks,
     decision: $decision
   }

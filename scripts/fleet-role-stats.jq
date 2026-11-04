@@ -1,4 +1,10 @@
-# Statistics and etcd metrics parsing shared by the role controller's probe (scripts/fleet-role-probe.sh) and the controller itself (scripts/fleet-role.jq), included with `include "fleet-role-stats";` and jq -L naming this directory.
+# Statistics, etcd metrics parsing and the facts about k3s that are shared by the role controller's probe (scripts/fleet-role-probe.sh) and the controller itself (scripts/fleet-role.jq), included with `include "fleet-role-stats";` and jq -L naming this directory.
+
+# k3s's learnerMaxStallTime (pkg/etcd/etcd.go): a learner that makes no progress for this long is removed, so a membership change has settled this long after it, and a candidate that has not become a voter by then has failed.
+def learner_stall_seconds: 300;
+
+# The annotation k3s's member controller sets on a Node once etcd has removed the member named in it (pkg/etcd/member_controller.go). The Node keeps its etcd label and its stale EtcdIsVoter condition until a demotion cleans them up, so a Node carrying this is not a voter whatever else it says.
+def removed_annotation: "etcd.k3s.cattle.io/removed-node-name";
 
 # The tail the controller judges a host by, as a whole percentile.
 def tail_percentile: 99;

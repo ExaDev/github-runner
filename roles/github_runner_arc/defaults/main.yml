@@ -191,7 +191,7 @@ github_runner_arc_node_recovery_level_label: "{{ github_runner_cluster_regrade_l
 # Image the watcher runs. Pulled without a pull Secret, so it must be public.
 github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:2.38.0"
 
-# The role controller (see tasks/install_fleet_role.yml, scripts/fleet-role.sh and scripts/fleet-role-probe.sh): a `fleet-role-probe` DaemonSet that measures, on every node with a kubelet, what decides whether a host is fit to hold an etcd vote, and a `fleet-role` Deployment that reads the measurements and reports which eligible hosts are fit and which swap of an unfit voter for a fit standby it would make. It reports and changes nothing: its only writes are its own two ConfigMaps. Off by default, so a consumer that upgrades changes nothing.
+# The role controller (see tasks/install_fleet_role.yml, scripts/fleet-role.sh and scripts/fleet-role-probe.sh): a `fleet-role-probe` DaemonSet that measures, on every node with a kubelet, what decides whether a host is fit to hold an etcd vote, and a `fleet-role` Deployment that reads the measurements, reports which eligible hosts are fit and which swap of an unfit voter for a fit standby it would make, and carries a swap out (an eligible standby becomes a voter and the unfit voter an agent) when the owner asks for one by command (`fleet-role.sh swap OUT IN`) or, with github_runner_arc_role_controller_dry_run false, when it decides on one. Off by default, so a consumer that upgrades changes nothing.
 # The cluster role's github_runner_cluster_role_controller when it is defined, so one inventory setting turns it on; set this one to turn it on from a host that does not run the cluster role (playbooks/arc.yml against a kubeconfig).
 github_runner_arc_role_controller_enabled: "{{ github_runner_cluster_role_controller | default(false) }}"
 # Image the controller and the probe run, one image whose entrypoint is the controller. Pulled without a pull Secret, so it must be public.
@@ -213,6 +213,18 @@ github_runner_arc_role_controller_pinned_label: "{{ github_runner_cluster_voter_
 github_runner_arc_role_controller_level_label: "{{ github_runner_cluster_regrade_level_label | default('github-runner.exadev.com/regrade-level') }}"
 # The Node label the cluster role publishes the medium of each host's link under (wired, wifi or unknown), which the probe reports for its node in place of what it can see itself: the cluster role's github_runner_cluster_link_label when that is defined.
 github_runner_arc_role_controller_link_label: "{{ github_runner_cluster_link_label | default('github-runner.exadev.com/link') }}"
+# true (the default) carries out only the swaps an owner asks for with `kubectl -n <platform namespace> exec deploy/fleet-role -- /app/scripts/fleet-role.sh swap OUT IN` and reports the ones the controller would decide on; false carries out its own decisions too. A swap already under way is always finished or rolled back. Turn it off only after a swap by command has been watched to its end on the fleet.
+github_runner_arc_role_controller_dry_run: true
+# How long a drain, the wait for a snapshot and each step of a host's role actuator may take, in seconds: the cluster role's github_runner_cluster_regrade_operation_timeout_seconds when it is defined, which the actuators bound their own steps by, else that variable's default (tests/unit/test_fleet_role_arc.py holds the two together).
+github_runner_arc_role_controller_operation_timeout_seconds: "{{ github_runner_cluster_regrade_operation_timeout_seconds | default(300) }}"
+# How long a planned change waits for the runner pods on a node to finish before it is abandoned (the candidate) or goes on (the outgoing voter): the cluster role's github_runner_cluster_native_runner_wait_timeout when it is defined, which the role's own role switch waits, else that variable's default.
+github_runner_arc_role_controller_runner_wait_seconds: "{{ github_runner_cluster_native_runner_wait_timeout | default(600) }}"
+# How long the regrade Lease a swap holds lasts if the controller stops renewing it, which the controller renews on every pass: the cluster role's github_runner_cluster_regrade_lease_duration_seconds when it is defined, else that variable's default, three operation timeouts.
+github_runner_arc_role_controller_lease_seconds: "{{ github_runner_cluster_regrade_lease_duration_seconds | default(3 * (github_runner_arc_role_controller_operation_timeout_seconds | int)) }}"
+# The ConfigMap the role actuators on the hosts report their steps in (the cluster role's github_runner_cluster_role_actuator_configmap when it is defined), which the controller reads, and the namespace and name of the regrade Lease a swap holds (the cluster role's github_runner_cluster_regrade_lease_namespace and github_runner_cluster_regrade_lease_name when defined).
+github_runner_arc_role_controller_actuator_configmap: "{{ github_runner_cluster_role_actuator_configmap | default('fleet-role-actuators') }}"
+github_runner_arc_role_controller_lease_namespace: "{{ github_runner_cluster_regrade_lease_namespace | default('kube-system') }}"
+github_runner_arc_role_controller_lease_name: "{{ github_runner_cluster_regrade_lease_name | default('fleet-regrade') }}"
 # The ConfigMaps in the platform namespace that the probes publish to (a key per node) and that the controller publishes its status to, which the heartbeat republishes beside the autoscaler's.
 github_runner_arc_role_controller_probe_configmap: fleet-role-probe
 github_runner_arc_role_controller_status_configmap: fleet-role-status
