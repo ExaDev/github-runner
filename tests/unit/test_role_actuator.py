@@ -897,6 +897,13 @@ class DockerRoleSetupTest(unittest.TestCase):
         sourced = {name.replace("$FLEET_ROLE_ACTUATOR", "docker") for name in re.findall(r'\. "\$lib/([^"]+)"', actuator)}
         self.assertEqual(placed, sourced | {"fleet-role-actuator.sh", "node-identity.sh", "Dockerfile"})
 
+    def test_the_image_installs_the_flock_the_switch_lock_waits_with(self) -> None:
+        # BusyBox's flock, which Alpine has by default, takes no -w, so every switch of a Docker host failed on its lock before it did anything.
+        self.assertIn("flock -w", (FILES / "role" / "fleet-role-actuator-docker.sh").read_text())
+        installed = re.search(r"^RUN apk add (.+)$", (FILES / "role" / "Dockerfile").read_text(), re.MULTILINE)
+        assert installed is not None
+        self.assertIn("flock", installed.group(1).split())
+
     def test_the_service_mounts_the_socket_the_project_at_its_own_path_and_the_servers_data_where_the_settings_say(self) -> None:
         service = yaml.safe_load(self.render("docker-compose.role-actuator.yml.j2"))["services"]["role-actuator"]
         settings = dict(line.split("=", 1) for line in self.render("role-actuator.env.j2").splitlines() if line and not line.startswith("#"))
