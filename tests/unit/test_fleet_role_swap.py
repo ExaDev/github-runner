@@ -858,7 +858,7 @@ class LeaseTest(SwapCase):
 
     def test_an_action_that_fails_is_repeated_and_leaves_the_swap_where_it_was(self) -> None:
         self.at_candidate_uncordoned()
-        completed = self.run_pass(FAKE_FAIL_CALLS="cordon")
+        completed = self.run_pass(FAKE_FAIL_CALLS=f"cordon {OUT}")
         self.assertNotEqual(completed.returncode, 0)
         self.assertFalse(self.cordoned(OUT))
         self.assertEqual(self.held_by(), "fleet-role")
@@ -896,7 +896,7 @@ class StatusTest(SwapCase):
     def test_the_step_since_is_kept_while_the_step_is_unchanged_and_reset_when_it_changes(self) -> None:
         self.at_step_down_asked()
         self.previous("step-down", since_ago=100)
-        before = self.cluster.status()["swap"]["step_since"]
+        before = json.loads(self.cluster.configmaps[f"{NAMESPACE}/{STATUS_CONFIGMAP}"]["data"]["status.json"])["swap"]["step_since"]
         self.ok_pass()
         self.assertEqual(self.swap()["step_since"], before)
         self.previous("remove", since_ago=100)
