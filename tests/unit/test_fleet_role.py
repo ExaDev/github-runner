@@ -655,7 +655,7 @@ class SizeTest(ControllerCase):
 class MembershipTest(ControllerCase):
     def test_the_first_pass_records_the_voters_and_no_change(self) -> None:
         status = self.pass_(healthy())
-        self.assertEqual(status["membership"], {"voters": ["a", "b", "c"], "changed_at": None, "cooldown_until": None})
+        self.assertEqual(status["membership"], {"voters": ["a", "b", "c"], "known_members": {"a": 3, "b": 3, "c": 3}, "changed_at": None, "cooldown_until": None})
 
     def test_a_pass_that_sees_the_same_voters_keeps_the_time_of_the_last_change(self) -> None:
         self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": 1700000000, "cooldown_until": 1700000000 + COOLDOWN_SECONDS}})
@@ -697,7 +697,7 @@ class ReportingTest(ControllerCase):
         self.assertEqual({name: host["link_source"] for name, host in status["hosts"].items()}, {"a": "label", "b": "interface", "c": "interface", "d": "interface"})
         self.assertIn("a (voter, link wifi): fit", self.log)
 
-    def test_a_pass_writes_only_its_own_status_and_changes_nothing_in_the_cluster(self) -> None:
+    def test_a_dry_run_pass_with_no_swap_writes_only_its_own_status_and_changes_nothing_in_the_cluster(self) -> None:
         self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}))
         calls = [json.loads(line) for line in self.cluster.calls.read_text().splitlines()]
         writes = [call for call in calls if call[0] not in ("get",)]
@@ -727,8 +727,16 @@ class SettingsTest(ControllerCase):
         status = self.pass_(healthy(), FLEET_ROLE_VOTERS="5", FLEET_ROLE_MAX_SERVERS="6")
         self.assertEqual(status["config"]["target"], 5)
 
-    def test_a_pass_that_is_not_a_dry_run_is_refused(self) -> None:
-        self.refuses("FLEET_ROLE_DRY_RUN must be true", FLEET_ROLE_DRY_RUN="false")
+    def test_a_dry_run_setting_that_is_not_true_or_false_is_refused(self) -> None:
+        self.refuses("FLEET_ROLE_DRY_RUN must be true or false", FLEET_ROLE_DRY_RUN="maybe")
+
+    def test_the_swap_settings_are_required_so_that_every_wait_derives_from_the_roles_own(self) -> None:
+        for name in ("FLEET_ROLE_OPERATION_TIMEOUT_SECONDS", "FLEET_ROLE_RUNNER_WAIT_SECONDS", "FLEET_ROLE_LEASE_SECONDS", "FLEET_ROLE_ACTUATOR_CONFIGMAP"):
+            with self.subTest(name=name):
+                populate(self.cluster, healthy())
+                completed = self.cluster.run("fleet-role.sh", **{k: v for k, v in CONTROLLER_ENV.items() if k != name})
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(f"{name} must be set", completed.stderr)
 
     def test_the_election_timeout_is_required_so_that_the_controller_and_the_probe_cannot_disagree_on_a_default(self) -> None:
         populate(self.cluster, healthy())

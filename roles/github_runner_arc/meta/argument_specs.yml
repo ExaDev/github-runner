@@ -381,8 +381,8 @@ argument_specs:
         type: bool
         description:
           - Whether to install the role controller. Defaults to the cluster role's github_runner_cluster_role_controller when that is defined, else false.
-          - Install the role controller, a `fleet-role-probe` DaemonSet that measures on every node with a kubelet what decides whether a host is fit to hold an etcd vote, and a `fleet-role` Deployment that reports which eligible hosts are fit and which swap of an unfit voter for a fit standby it would make.
-          - It only reports. Its writes are its own two ConfigMaps; its ClusterRoles can get and list nodes and nothing else. false removes both, their RBAC and their ConfigMaps.
+          - Install the role controller, a `fleet-role-probe` DaemonSet that measures on every node with a kubelet what decides whether a host is fit to hold an etcd vote, and a `fleet-role` Deployment that reports which eligible hosts are fit and which swap of an unfit voter for a fit standby it would make, and carries a swap out when asked or, with the dry run off, when it decides on one.
+          - The probe's ClusterRole can get and list nodes and nothing else. The controller's can also patch nodes, get and list pods, create evictions, read daemon sets and read k3s's snapshot files, and its Roles let it create Leases and replace the regrade Lease and read the kubelets' Leases and the actuators' reports. false removes both, their RBAC and their ConfigMaps.
       github_runner_arc_role_controller_image:
         type: str
         description: Image the controller and the probe run, pulled without a pull Secret.
@@ -390,6 +390,28 @@ argument_specs:
         type: int
         default: 15
         description: Seconds between probe samples and between controller passes. A figure is read over a window of 100 samples.
+      github_runner_arc_role_controller_dry_run:
+        type: bool
+        default: true
+        description: true carries out only the swaps an owner asks for by command and reports those the controller would decide on; false carries out its own decisions too. A swap under way is always finished or rolled back.
+      github_runner_arc_role_controller_operation_timeout_seconds:
+        type: int
+        description: How long a drain, the wait for a snapshot and each step of a host's role actuator may take, from github_runner_cluster_regrade_operation_timeout_seconds when that is defined, else 300.
+      github_runner_arc_role_controller_runner_wait_seconds:
+        type: int
+        description: How long a planned change waits for the runner pods on a node to finish, from github_runner_cluster_native_runner_wait_timeout when that is defined, else 600.
+      github_runner_arc_role_controller_lease_seconds:
+        type: int
+        description: How long the regrade Lease a swap holds lasts if the controller stops renewing it, from github_runner_cluster_regrade_lease_duration_seconds when that is defined, else three operation timeouts.
+      github_runner_arc_role_controller_actuator_configmap:
+        type: str
+        description: The ConfigMap the hosts' role actuators report their steps in, from github_runner_cluster_role_actuator_configmap when that is defined, else fleet-role-actuators.
+      github_runner_arc_role_controller_lease_namespace:
+        type: str
+        description: The namespace of the regrade Lease a swap holds, from github_runner_cluster_regrade_lease_namespace when that is defined, else kube-system.
+      github_runner_arc_role_controller_lease_name:
+        type: str
+        description: The name of the regrade Lease a swap holds, from github_runner_cluster_regrade_lease_name when that is defined, else fleet-regrade.
       github_runner_arc_role_controller_voters:
         type: int
         description: The number of etcd voters the cluster is held at, from github_runner_cluster_voters when that is defined, else 3. Odd, at least 3, and at most github_runner_arc_role_controller_max_servers minus one.

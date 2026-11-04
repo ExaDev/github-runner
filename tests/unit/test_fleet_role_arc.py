@@ -70,17 +70,57 @@ class ManifestTest(unittest.TestCase):
                 [("ServiceAccount", n) for n in ("fleet-role", "fleet-role-probe")]
                 + [("ClusterRole", n) for n in ("github-runner-fleet-role", "github-runner-fleet-role-probe")]
                 + [("ClusterRoleBinding", n) for n in ("github-runner-fleet-role", "github-runner-fleet-role-probe")]
-                + [("Role", n) for n in ("fleet-role", "fleet-role-probe")]
-                + [("RoleBinding", n) for n in ("fleet-role", "fleet-role-probe")]
+                + [("Role", n) for n in ("fleet-role", "fleet-role-probe", "github-runner-fleet-role-swap-lease", "github-runner-fleet-role-node-lease")]
+                + [("RoleBinding", n) for n in ("fleet-role", "fleet-role-probe", "github-runner-fleet-role-swap-lease", "github-runner-fleet-role-node-lease")]
                 + [("Deployment", "fleet-role"), ("DaemonSet", "fleet-role-probe")]
             ),
         )
 
-    def test_neither_can_write_a_node_and_both_can_only_read_them(self) -> None:
-        for role in of_kind(self.manifests, "ClusterRole"):
-            self.assertEqual(role["rules"], [{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list"]}], role["metadata"]["name"])
+    def test_the_probe_can_only_read_nodes_and_the_controller_writes_only_what_a_swap_needs(self) -> None:
+        probe = of_kind(self.manifests, "ClusterRole", "github-runner-fleet-role-probe")[0]
+        self.assertEqual(probe["rules"], [{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list"]}])
+        controller = of_kind(self.manifests, "ClusterRole", "github-runner-fleet-role")[0]
+        self.assertEqual(
+            controller["rules"],
+            [
+                {"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list", "patch"]},
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+                {"apiGroups": [""], "resources": ["pods/eviction"], "verbs": ["create"]},
+                {"apiGroups": ["apps"], "resources": ["daemonsets"], "verbs": ["get"]},
+                {"apiGroups": ["k3s.cattle.io"], "resources": ["etcdsnapshotfiles"], "verbs": ["get", "list"]},
+            ],
+        )
+        for rule in controller["rules"]:
+            self.assertNotIn("delete", rule["verbs"])
+            self.assertNotIn("update", rule["verbs"])
 
-    def test_their_only_namespaced_permissions_are_on_their_two_configmaps_by_name(self) -> None:
+    def test_the_controller_can_create_a_lease_and_replace_only_the_regrade_lease_and_read_the_kubelets_leases(self) -> None:
+        swap = of_kind(self.manifests, "Role", "github-runner-fleet-role-swap-lease")[0]
+        self.assertEqual(swap["metadata"]["namespace"], "kube-system")
+        self.assertEqual(
+            swap["rules"],
+            [
+                {"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "verbs": ["create"]},
+                {"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "resourceNames": ["fleet-regrade"], "verbs": ["get", "update"]},
+            ],
+        )
+        kubelet = of_kind(self.manifests, "Role", "github-runner-fleet-role-node-lease")[0]
+        self.assertEqual(kubelet["metadata"]["namespace"], "kube-node-lease")
+        self.assertEqual(kubelet["rules"], [{"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "verbs": ["get"]}])
+        for name in ("github-runner-fleet-role-swap-lease", "github-runner-fleet-role-node-lease"):
+            [binding] = of_kind(self.manifests, "RoleBinding", name)
+            self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "fleet-role", "namespace": "github-runner-platform"}])
+            self.assertEqual(binding["roleRef"]["name"], name)
+        for probe_rule in [r for m in self.manifests if m["kind"] in ("Role", "ClusterRole") and "probe" in m["metadata"]["name"] for r in m["rules"]]:
+            self.assertNotIn("leases", probe_rule["resources"])
+
+    def test_the_regrade_lease_the_controller_may_replace_is_the_one_the_cluster_role_names(self) -> None:
+        cluster = yaml.safe_load((CLUSTER_ROLE / "defaults" / "main.yml").read_text())
+        swap = of_kind(self.manifests, "Role", "github-runner-fleet-role-swap-lease")[0]
+        self.assertEqual(swap["metadata"]["namespace"], cluster["github_runner_cluster_regrade_lease_namespace"])
+        self.assertEqual(swap["rules"][1]["resourceNames"], [cluster["github_runner_cluster_regrade_lease_name"]])
+
+    def test_their_namespaced_permissions_in_the_platform_namespace_are_on_configmaps_by_name(self) -> None:
         controller = of_kind(self.manifests, "Role", "fleet-role")[0]["rules"]
         probe = of_kind(self.manifests, "Role", "fleet-role-probe")[0]["rules"]
         self.assertEqual(
@@ -88,6 +128,7 @@ class ManifestTest(unittest.TestCase):
             [
                 {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["fleet-role-probe"], "verbs": ["get"]},
                 {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["fleet-role-status"], "verbs": ["get", "patch"]},
+                {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["fleet-role-actuators"], "verbs": ["get"]},
             ],
         )
         self.assertEqual(probe, [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["fleet-role-probe"], "verbs": ["get", "patch"]}])
@@ -102,10 +143,10 @@ class ManifestTest(unittest.TestCase):
                 [subject] = binding["subjects"]
                 self.assertEqual(subject["kind"], "ServiceAccount")
                 self.assertIn(subject["name"], ("fleet-role", "fleet-role-probe"))
-                self.assertTrue(binding["roleRef"]["name"].endswith(subject["name"]), binding)
+                self.assertTrue(binding["roleRef"]["name"].endswith(subject["name"]) or "fleet-role-" in binding["roleRef"]["name"] and subject["name"] == "fleet-role", binding)
                 self.assertEqual(subject["namespace"], "github-runner-platform")
 
-    def test_the_controller_runs_as_an_unprivileged_user_with_a_read_only_root_and_is_a_dry_run(self) -> None:
+    def test_the_controller_runs_as_an_unprivileged_user_with_a_read_only_root_and_defaults_to_a_dry_run(self) -> None:
         deployment = of_kind(self.manifests, "Deployment")[0]
         pod = deployment["spec"]["template"]["spec"]
         self.assertTrue(pod["securityContext"]["runAsNonRoot"])
@@ -143,7 +184,27 @@ class ManifestTest(unittest.TestCase):
                 "FLEET_ROLE_LEVEL_LABEL": "github-runner.exadev.com/regrade-level",
                 "FLEET_ROLE_PROBE_CONFIGMAP": "fleet-role-probe",
                 "FLEET_ROLE_STATUS_CONFIGMAP": "fleet-role-status",
+                "FLEET_ROLE_ACTUATOR_CONFIGMAP": "fleet-role-actuators",
+                "FLEET_ROLE_OPERATION_TIMEOUT_SECONDS": "300",
+                "FLEET_ROLE_RUNNER_WAIT_SECONDS": "600",
+                "FLEET_ROLE_LEASE_SECONDS": "900",
             },
+        )
+
+    def test_the_dry_run_is_off_only_when_the_owner_says_so(self) -> None:
+        self.assertEqual(env_of(of_kind(render(github_runner_arc_role_controller_dry_run=False), "Deployment")[0])["FLEET_ROLE_DRY_RUN"], "false")
+        self.assertEqual(env_of(of_kind(render(github_runner_arc_role_controller_dry_run=True), "Deployment")[0])["FLEET_ROLE_DRY_RUN"], "true")
+
+    def test_the_cluster_roles_own_waits_reach_the_controller_when_they_are_defined(self) -> None:
+        env = env_of(of_kind(render(
+            github_runner_cluster_regrade_operation_timeout_seconds=120,
+            github_runner_cluster_native_runner_wait_timeout=240,
+            github_runner_cluster_regrade_lease_duration_seconds=360,
+            github_runner_cluster_role_actuator_configmap="example-actuators",
+        ), "Deployment")[0])
+        self.assertEqual(
+            (env["FLEET_ROLE_OPERATION_TIMEOUT_SECONDS"], env["FLEET_ROLE_RUNNER_WAIT_SECONDS"], env["FLEET_ROLE_LEASE_SECONDS"], env["FLEET_ROLE_ACTUATOR_CONFIGMAP"]),
+            ("120", "240", "360", "example-actuators"),
         )
 
     def test_the_cluster_roles_own_settings_reach_the_controller_when_they_are_defined(self) -> None:
@@ -272,12 +333,12 @@ class ManifestTest(unittest.TestCase):
 
     def test_every_jq_module_the_scripts_include_is_copied_beside_them(self) -> None:
         dockerfile = (ROOT / "fleet-role" / "Dockerfile").read_text()
-        for program in ("fleet-role.jq", "fleet-role-stats.jq"):
+        for program in ("fleet-role.jq", "fleet-role-swap.jq", "fleet-role-stats.jq"):
             for module in re.findall(r'^include "([A-Za-z0-9._-]+)";', (ROOT / "scripts" / program).read_text(), re.MULTILINE):
                 with self.subTest(program=program, module=module):
                     self.assertTrue((ROOT / "scripts" / f"{module}.jq").is_file())
                     self.assertRegex(dockerfile, rf"COPY [^\n]*scripts/{re.escape(module)}\.jq[^\n]* /app/scripts/")
-        for program in ("fleet-role.jq", "fleet-role-stats.jq"):
+        for program in ("fleet-role.jq", "fleet-role-swap.jq", "fleet-role-stats.jq"):
             self.assertRegex(dockerfile, rf"COPY [^\n]*scripts/{re.escape(program)}[^\n]* /app/scripts/")
 
     def test_the_probe_reads_the_link_reader_the_image_carries(self) -> None:
@@ -357,6 +418,15 @@ class DefaultsAgreeWithTheClusterRoleTest(unittest.TestCase):
         self.assertEqual(int(self.fallback("voters")), self.cluster["github_runner_cluster_voters"])
         self.assertEqual(self.fallback("eligible_label"), self.cluster["github_runner_cluster_voter_eligible_label"])
         self.assertEqual(self.fallback("pinned_label"), self.cluster["github_runner_cluster_voter_pinned_label"])
+
+    def test_the_swap_waits_and_the_actuators_configmap(self) -> None:
+        self.assertEqual(int(self.fallback("operation_timeout_seconds")), int(self.cluster["github_runner_cluster_regrade_pressure_window_seconds"]))
+        self.assertEqual(int(self.fallback("runner_wait_seconds")), self.cluster["github_runner_cluster_server_ready_timeout"])
+        self.assertEqual(self.fallback("actuator_configmap"), self.cluster["github_runner_cluster_role_actuator_configmap"])
+        self.assertEqual(self.fallback("lease_namespace"), self.cluster["github_runner_cluster_regrade_lease_namespace"])
+        self.assertEqual(self.fallback("lease_name"), self.cluster["github_runner_cluster_regrade_lease_name"])
+        self.assertIn("default(3 * (github_runner_arc_role_controller_operation_timeout_seconds | int))", self.arc)
+        self.assertEqual(self.cluster["github_runner_cluster_regrade_lease_duration_seconds"], "{{ 3 * (github_runner_cluster_regrade_operation_timeout_seconds | int) }}")
 
     def test_the_link_label(self) -> None:
         self.assertEqual(self.fallback("link_label"), self.cluster["github_runner_cluster_link_label"])

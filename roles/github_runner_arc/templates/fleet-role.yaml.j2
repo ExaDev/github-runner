@@ -1,4 +1,4 @@
-{# The role controller (see tasks/install_fleet_role.yml, scripts/fleet-role.sh and scripts/fleet-role-probe.sh): the controller's ServiceAccount, ClusterRole, binding, ConfigMap Role and Deployment, and the probe's own, with its DaemonSet. The namespace is ensured, and the two ConfigMaps are created, separately, since applying an empty ConfigMap again would wipe what the controller and the probes have published. #}
+{# The role controller (see tasks/install_fleet_role.yml, scripts/fleet-role.sh and scripts/fleet-role-probe.sh): the controller's ServiceAccount, ClusterRole, binding, ConfigMap Role, the Roles for the Leases and the Deployment, and the probe's own, with its DaemonSet. The namespace is ensured, and the two ConfigMaps are created, separately, since applying an empty ConfigMap again would wipe what the controller and the probes have published. #}
 {% set controller = 'fleet-role' %}
 {% set probe = 'fleet-role-probe' %}
 {% set labels = {'app.kubernetes.io/part-of': 'github-runner'} %}
@@ -7,8 +7,19 @@
 {% set status_configmap = github_runner_arc_role_controller_status_configmap %}
 {# The label k3s puts, with the value true, on every node that is an etcd member: the controller (scripts/fleet-role.sh) and the probe (scripts/fleet-role-probe.sh) each name it, and tests/unit/test_fleet_role_arc.py holds the three together. #}
 {% set voter_label = 'node-role.kubernetes.io/etcd' %}
-{# A ClusterRole can only name nodes cluster-wide; the controller and the probe both list them to find the voters and the standbys, and neither can write one. #}
-{% set node_rules = [{'apiGroups': [''], 'resources': ['nodes'], 'verbs': ['get', 'list']}] %}
+{% set actuator_configmap = github_runner_arc_role_controller_actuator_configmap %}
+{% set lease_namespace = github_runner_arc_role_controller_lease_namespace %}
+{% set lease_name = github_runner_arc_role_controller_lease_name %}
+{# A ClusterRole can only name nodes cluster-wide; the controller and the probe both list them to find the voters and the standbys, and only the controller writes one (the cordon, the labels and annotations of a swap, the taint). The probe's rules stay read-only. #}
+{% set probe_node_rules = [{'apiGroups': [''], 'resources': ['nodes'], 'verbs': ['get', 'list']}] %}
+{# What a swap does on the API, as the issue lists it: draining the nodes it empties (the pods of every namespace are listed, read while the drain waits for each to go, and evicted, and a drain reads the daemon sets that own pods it leaves), and reading the snapshot files k3s publishes. Creating a Lease and reading kubelet leases are in the namespaces' own Roles below. #}
+{% set controller_node_rules = [
+  {'apiGroups': [''], 'resources': ['nodes'], 'verbs': ['get', 'list', 'patch']},
+  {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list']},
+  {'apiGroups': [''], 'resources': ['pods/eviction'], 'verbs': ['create']},
+  {'apiGroups': ['apps'], 'resources': ['daemonsets'], 'verbs': ['get']},
+  {'apiGroups': ['k3s.cattle.io'], 'resources': ['etcdsnapshotfiles'], 'verbs': ['get', 'list']},
+] %}
 {% for name in [controller, probe] %}
 {% set own_labels = labels | combine({'app.kubernetes.io/name': name}) %}
 apiVersion: v1
@@ -23,7 +34,7 @@ kind: ClusterRole
 metadata:
   name: {{ ('github-runner-' ~ name) | to_json }}
   labels: {{ own_labels | to_json }}
-rules: {{ node_rules | to_json }}
+rules: {{ (controller_node_rules if name == controller else probe_node_rules) | to_json }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -56,6 +67,10 @@ rules:
     resources: ["configmaps"]
     resourceNames: {{ [status_configmap] | to_json }}
     verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: {{ [actuator_configmap] | to_json }}
+    verbs: ["get"]
 {% else %}
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -77,6 +92,40 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ name | to_json }}
+---
+{% endfor %}
+{# The regrade Lease a swap holds lives in another namespace than the controller, and the kubelets' own Leases in a third, so each gets a Role there. Create cannot be limited to a name, so the controller can make a Lease, and can read and replace only the regrade Lease; the kubelet Leases are read to tell that a restarted node's kubelet is running. #}
+{% for scope in [
+  {'namespace': lease_namespace, 'name': 'github-runner-fleet-role-swap-lease', 'rules': [
+    {'apiGroups': ['coordination.k8s.io'], 'resources': ['leases'], 'verbs': ['create']},
+    {'apiGroups': ['coordination.k8s.io'], 'resources': ['leases'], 'resourceNames': [lease_name], 'verbs': ['get', 'update']},
+  ]},
+  {'namespace': 'kube-node-lease', 'name': 'github-runner-fleet-role-node-lease', 'rules': [
+    {'apiGroups': ['coordination.k8s.io'], 'resources': ['leases'], 'verbs': ['get']},
+  ]},
+] %}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ scope.name | to_json }}
+  namespace: {{ scope.namespace | to_json }}
+  labels: {{ (labels | combine({'app.kubernetes.io/name': controller})) | to_json }}
+rules: {{ scope.rules | to_json }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ scope.name | to_json }}
+  namespace: {{ scope.namespace | to_json }}
+  labels: {{ (labels | combine({'app.kubernetes.io/name': controller})) | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ controller | to_json }}
+    namespace: {{ namespace | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ scope.name | to_json }}
 ---
 {% endfor %}
 apiVersion: apps/v1
@@ -105,9 +154,9 @@ spec:
         - name: {{ controller | to_json }}
           image: {{ github_runner_arc_role_controller_image | to_json }}
           env:
-            # The controller reports and changes nothing; the script refuses any other value.
+            # true carries out a swap an owner asks for by command (scripts/fleet-role.sh swap) and only reports the ones it would decide on; false carries out those too. A swap already under way is finished either way.
             - name: FLEET_ROLE_DRY_RUN
-              value: "true"
+              value: {{ github_runner_arc_role_controller_dry_run | bool | lower | to_json }}
             - name: FLEET_ROLE_VOTERS
               value: {{ github_runner_arc_role_controller_voters | string | to_json }}
             - name: FLEET_ROLE_MAX_SERVERS
@@ -126,6 +175,14 @@ spec:
               value: {{ github_runner_arc_role_controller_pinned_label | to_json }}
             - name: FLEET_ROLE_LEVEL_LABEL
               value: {{ github_runner_arc_role_controller_level_label | to_json }}
+            - name: FLEET_ROLE_OPERATION_TIMEOUT_SECONDS
+              value: {{ github_runner_arc_role_controller_operation_timeout_seconds | string | to_json }}
+            - name: FLEET_ROLE_RUNNER_WAIT_SECONDS
+              value: {{ github_runner_arc_role_controller_runner_wait_seconds | string | to_json }}
+            - name: FLEET_ROLE_LEASE_SECONDS
+              value: {{ github_runner_arc_role_controller_lease_seconds | string | to_json }}
+            - name: FLEET_ROLE_ACTUATOR_CONFIGMAP
+              value: {{ actuator_configmap | to_json }}
             - name: FLEET_ROLE_STATE_NAMESPACE
               value: {{ namespace | to_json }}
             - name: FLEET_ROLE_PROBE_CONFIGMAP
