@@ -959,6 +959,19 @@ class RoleSetupTest(NativeRoleHarness):
         self.assertEqual(len(reads), 3, calls)
         self.assertLess(max(reads), apply)
 
+    def test_a_report_configmap_another_host_created_first_is_taken_as_it_is(self) -> None:
+        # Every host whose watcher runs creates it in the same play, so all but one find it there.
+        (self.state / "configmap-created").touch()
+        result = self.run_eligible()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("docker exec github-runner-k3s kubectl create configmap fleet-role-actuators --namespace github-runner-platform", self.calls())
+
+    def test_any_other_failure_to_create_the_report_configmap_fails_the_run(self) -> None:
+        (self.state / "configmap-create-fails").touch()
+        result = self.run_eligible()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('namespaces \\"github-runner-platform\\" not found', result.stdout)
+
     def test_the_token_stays_out_of_everything_the_role_prints(self) -> None:
         result = self.run_eligible("-vvv")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

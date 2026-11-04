@@ -235,7 +235,9 @@ case "$*" in
     # As kubectl refuses a manifest with no objects in it.
     if ! grep -q '[^[:space:]]' "$state/applied"; then echo "error: no objects passed to apply" >&2; exit 1; fi ;;
   "create configmap "*)
-    if [ -e "$state/configmap-created" ]; then echo "Error from server (AlreadyExists): configmaps \"$3\" already exists" >&2; exit 1; fi
+    # In kubectl create configmap's own words, which do not name the API's AlreadyExists reason.
+    if [ -e "$state/configmap-created" ]; then echo "error: failed to create configmap: configmaps \"$3\" already exists" >&2; exit 1; fi
+    if [ -e "$state/configmap-create-fails" ]; then echo "error: failed to create configmap: namespaces \"$5\" not found" >&2; exit 1; fi
     touch "$state/configmap-created" ;;
   "get secret "*) printf '%s %s' "$(printf '%s' "{ACTUATOR_TOKEN}" | base64)" "$(printf 'cluster-ca' | base64)" ;;
   *) echo "kubectl stand-in: unexpected $*" >&2; exit 1 ;;
