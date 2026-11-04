@@ -5,7 +5,7 @@
 
 SHARD is the zero-based index of the shard asked for and SHARDS how many there are. The modules (``test_*.py`` directly in DIRECTORY, which defaults to ``tests/unit`` of this repository) are printed one path per line in the order they should run. The shards partition the modules: every module is in exactly one, and the same tree always gives the same assignment.
 
-The work of a module is counted from its tests, not stored, in units of one Ansible task. A test's time is spent in the processes it starts, chiefly ``ansible-playbook`` runs, so a module's work is that of the process launches (``subprocess.run`` and its siblings) that each of its tests reaches, plus the one that runs the module: through the test's own body, the helpers, base-class methods and ``super()`` calls it makes, and ``setUp``, ``tearDown`` and, once per class, ``setUpClass``. Every launch costs ``TASKS_PER_PROCESS_START``, and a launch of a playbook costs in addition the tasks that playbook reaches: its own, those of each role it includes (one task file where the include names it, the average task file of a role where the name is a variable, the whole role where it names none) and those of each task file it includes by a literal name. A launch site counts once however many times a loop runs it, and of the two branches of a conditional the dearer counts. A skipped test or class does no work.
+The work of a module is counted from its tests, not stored, in units of one Ansible task. A test's time is spent in the processes it starts, chiefly ``ansible-playbook`` runs, so a module's work is that of the process launches (``subprocess.run`` and its siblings) that each of its tests reaches, plus the one that runs the module: through the test's own body, the helpers, base-class methods and ``super()`` calls it makes, and ``setUp``, ``tearDown`` and, once per class, ``setUpClass``. Every launch costs ``TASKS_PER_PROCESS_START``, and a launch of a playbook costs in addition the tasks that playbook reaches: its own, those of each role it includes (the task file the include names, each file of a literal loop over ``item``, the average task file of the role where the name is any other variable, and ``main.yml`` where it names none) and those of each task file it includes by a literal name, every task file counted with the task files and roles it includes in turn, as Ansible would run them. A launch site counts once however many times a loop runs it, and of the two branches of a conditional the dearer counts. A skipped test or class does no work.
 
 The modules are then dealt by longest-processing-time first: the heaviest module goes to whichever shard has the least work so far, ties going to the lower shard index, and equal modules in path order. Dealing to the lightest shard keeps the heaviest shard within ``mean + (1 - 1/SHARDS) * heaviest module`` of the mean (Graham's list-scheduling bound), which a dealing by position in a list cannot promise.
 """
@@ -58,37 +58,61 @@ class PlaybookTasks:
     def __init__(self, repository: Path) -> None:
         self.repository = repository
         self.playbooks: dict[Path, int] = {}
+        self.task_files: dict[Path, int] = {}
+        self.reading: set[Path] = set()
 
-    def task_file(self, path: Path) -> int:
-        return count_tasks(yaml.safe_load(path.read_text()))
+    def task_file(self, path: Path, role_tasks: Path | None = None) -> int:
+        """The tasks of a task file and of the task files and roles it includes by a literal name, which Ansible looks for beside the file and then in its role's tasks directory."""
+        path = path.resolve()
+        if path in self.task_files:
+            return self.task_files[path]
+        if path in self.reading:
+            # A file that includes itself, however indirectly, adds its own tasks once, not once per level.
+            return 0
+        self.reading.add(path)
+        tasks = yaml.safe_load(path.read_text())
+        total = count_tasks(tasks) + self.includes(tasks, path.parent, role_tasks)
+        self.reading.discard(path)
+        self.task_files[path] = total
+        return total
 
-    def role(self, name: str, tasks_from: object) -> int:
-        """The tasks of a role as an include of it reaches them: one task file when ``tasks_from`` names it, the average task file when it is a variable, every task file when there is none."""
+    def role(self, name: str, tasks_from: object, loop: object = None) -> int:
+        """The tasks of a role as an include of it reaches them: the task file ``tasks_from`` names (each of a literal ``loop``'s items when it names ``item``), the average task file of the role when it is any other variable, and ``main.yml`` when there is none, each with what it includes."""
         directory = self.repository / "roles" / name.rsplit(".", 1)[-1] / "tasks"
-        if isinstance(tasks_from, str) and "{{" not in tasks_from:
-            return self.task_file(directory / f"{tasks_from.removesuffix('.yml')}.yml")
-        total = sum(self.task_file(file) for file in directory.rglob("*.yml"))
-        if tasks_from is None:
-            return total
-        return -(-total // len(list(directory.rglob("*.yml"))))
 
-    def includes(self, tasks: object, playbook: Path) -> int:
-        """The tasks that the includes among a task list reach, without those of the list itself."""
+        def named(file: str) -> int:
+            return self.task_file(directory / f"{file.removesuffix('.yml')}.yml", directory)
+
+        if tasks_from is None:
+            return named("main")
+        if isinstance(tasks_from, str) and "{{" not in tasks_from:
+            return named(tasks_from)
+        if isinstance(tasks_from, str) and tasks_from.replace(" ", "") == "{{item}}" and isinstance(loop, list) and all(isinstance(item, str) for item in loop):
+            return sum(named(item) for item in loop)
+        files = list(directory.rglob("*.yml"))
+        return -(-sum(self.task_file(file, directory) for file in files) // len(files))
+
+    def includes(self, tasks: object, base: Path, role_tasks: Path | None) -> int:
+        """The tasks that the includes among a task list reach, without those of the list itself: a task file named by a literal path is looked for under ``base``, then under ``role_tasks``."""
         if not isinstance(tasks, list):
             return 0
         total = 0
         for task in tasks:
             if not isinstance(task, dict):
                 continue
-            total += sum(self.includes(task.get(section), playbook) for section in ("block", "rescue", "always"))
+            total += sum(self.includes(task.get(section), base, role_tasks) for section in ("block", "rescue", "always"))
             for key in INCLUDE_ROLE:
                 if key in task:
-                    total += self.role(task[key]["name"], task[key].get("tasks_from"))
+                    total += self.role(task[key]["name"], task[key].get("tasks_from"), task.get("loop"))
             for key in INCLUDE_TASKS:
                 if key in task:
                     target = task[key] if isinstance(task[key], str) else task[key]["file"]
-                    if "{{" not in target:
-                        total += self.task_file((playbook.parent / target).resolve())
+                    if "{{" in target:
+                        continue
+                    candidates = [base / target] + ([role_tasks / target] if role_tasks is not None else [])
+                    found = next((candidate for candidate in candidates if candidate.is_file()), None)
+                    if found is not None:
+                        total += self.task_file(found, role_tasks)
         return total
 
     def playbook(self, path: Path) -> int:
@@ -97,7 +121,7 @@ class PlaybookTasks:
             total = 0
             for play in yaml.safe_load(path.read_text()):
                 for section in ("pre_tasks", "tasks", "post_tasks"):
-                    total += count_tasks(play.get(section)) + self.includes(play.get(section), path)
+                    total += count_tasks(play.get(section)) + self.includes(play.get(section), path.parent, None)
                 for role in play.get("roles", []):
                     total += self.role(role if isinstance(role, str) else role["role"], None)
             self.playbooks[path] = total
