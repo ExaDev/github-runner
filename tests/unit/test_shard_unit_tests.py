@@ -292,16 +292,21 @@ class WorkTest(unittest.TestCase):
         )
         self.assertEqual(self.work(module), START * (1 + 1))
 
-    def test_a_playbook_launch_costs_the_tasks_the_playbook_and_the_roles_it_includes_reach(self) -> None:
+    def test_a_playbook_launch_costs_the_tasks_the_playbook_the_roles_and_the_task_files_they_include_reach(self) -> None:
         roles = self.repository / "roles" / "demo" / "tasks"
         roles.mkdir(parents=True)
         (roles / "main.yml").write_text("- name: a\n  ansible.builtin.debug: {}\n- name: b\n  block:\n    - name: c\n      ansible.builtin.debug: {}\n")
         (roles / "other.yml").write_text("- name: d\n  ansible.builtin.debug: {}\n- name: e\n  ansible.builtin.debug: {}\n")
-        # Tasks of main.yml: a, b and c (inside b's block), 3; of other.yml, 2; of the role, 5, in two files.
+        (roles / "outer.yml").write_text("- name: f\n  ansible.builtin.include_tasks: other.yml\n- name: g\n  ansible.builtin.include_tasks: \"{{ name }}.yml\"\n")
+        (roles / "nested").mkdir()
+        (roles / "nested" / "inner.yml").write_text("- name: h\n  ansible.builtin.include_tasks: outer.yml\n")
+        # Tasks of main.yml: a, b and c (inside b's block), 3; of other.yml, 2; of outer.yml, its own 2 and the 2 of other.yml it includes by name (the include by a variable reaches nothing countable), 4; of nested/inner.yml, its own 1 and outer.yml's 4, found in the role's tasks directory, 5. The average of the four files, 14 / 4, rounds up to 4.
         for name, include, reached in (
             ("named", "name: exadev.demo.demo\n          tasks_from: other", 2),
-            ("variable", "name: exadev.demo.demo\n          tasks_from: \"{{ item }}\"", 3),
-            ("whole", "name: exadev.demo.demo", 5),
+            ("nested", "name: exadev.demo.demo\n          tasks_from: nested/inner", 5),
+            ("variable", "name: exadev.demo.demo\n          tasks_from: \"{{ item }}\"", 4),
+            ("looped", "name: exadev.demo.demo\n          tasks_from: \"{{ item }}\"\n      loop: [main, outer]", 7),
+            ("whole", "name: exadev.demo.demo", 3),
         ):
             playbook = self.repository / "tests" / f"{name}.yml"
             playbook.write_text(
