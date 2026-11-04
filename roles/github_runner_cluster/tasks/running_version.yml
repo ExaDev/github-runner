@@ -30,7 +30,7 @@
   timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
   when:
     - not github_runner_cluster_allow_k3s_version_jump | bool
-    - github_runner_cluster_effective_node_role == 'agent'
+    - github_runner_cluster_docker_role == 'agent'
 
 - name: Read every node's k3s version through each server of the inventory
   ansible.builtin.include_tasks: cluster_nodes_read.yml
@@ -41,7 +41,7 @@
     github_runner_cluster_version_change_blockers: >-
       {{ github_runner_cluster_k3s_version | exadev.github_runner.cluster_k3s_version_change_blockers(
            github_runner_cluster_effective_node_name, github_runner_cluster_running_own.stdout,
-           github_runner_cluster_running_reads.results | default([]), github_runner_cluster_effective_node_role,
+           github_runner_cluster_running_reads.results | default([]), github_runner_cluster_docker_role,
            github_runner_cluster_running_agent_image.stdout | default('') | trim | length == 0) }}
   ansible.builtin.fail:
     msg: >-

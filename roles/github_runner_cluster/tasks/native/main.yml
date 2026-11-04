@@ -61,6 +61,10 @@
 - name: Decide this host's part in the cluster
   ansible.builtin.include_tasks: topology.yml
 
+- name: Refuse the run while the role controller holds the regrade Lease for a voter swap
+  # Before anything on the host is changed. See tasks/role_lease_guard.yml.
+  ansible.builtin.include_tasks: role_lease_guard.yml
+
 - name: Check etcd's heartbeat interval and election timeout, which a native server passes to its etcd as every server does
   ansible.builtin.include_tasks: etcd_timing.yml
 

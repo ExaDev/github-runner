@@ -21,7 +21,7 @@
     argv: >-
       {{ ['docker', 'compose', '--project-name', github_runner_cluster_compose_project, '--project-directory', github_runner_cluster_dir]
          + (github_runner_cluster_compose_files_in_use | map('regex_replace', '^(?!/)', github_runner_cluster_dir ~ '/') | map('regex_replace', '^', '--file=') | list)
-         + ['--profile', github_runner_cluster_effective_node_role, 'config', '--hash', '*'] }}
+         + ['--profile', github_runner_cluster_docker_role, 'config', '--hash', '*'] }}
   environment: "{{ github_runner_cluster_docker_cli_environment }}"
   register: github_runner_cluster_recreate_rendered
   changed_when: false

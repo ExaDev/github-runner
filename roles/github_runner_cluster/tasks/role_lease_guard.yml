@@ -1,0 +1,82 @@
+---
+# Refuses the run, before it changes anything, while the role controller holds the regrade Lease (github_runner_cluster_role_lease_namespace/github_runner_cluster_role_lease_name held by github_runner_cluster_role_lease_holder, unexpired), which it holds for the whole of a voter swap: a run that recreated a container, restarted a unit or rewrote a node's configuration in the middle of a swap could undo it or take a second vote away. A Lease held by regrading, or one that has run out, does not stop the run. The Lease is read through every server of the inventory and every host marked eligible, since any one may be stopped or being rebuilt and the servers can change at run time, a Docker server's through its container and a native server's through `k3s kubectl` on its host; one answer decides (plugins/filter/cluster_role.py's cluster_role_lease_guard), and the run is refused too when no server answered and one could not be read, since the run cannot tell. Every task only reads, and runs under --check too, which so reports the refusal a real run would make. Needs topology.yml; each read is bounded by github_runner_cluster_cluster_read_timeout, as a whole and as the API call's --request-timeout.
+
+- name: Work out which hosts of the inventory to read the Lease through
+  ansible.builtin.set_fact:
+    github_runner_cluster_role_lease_servers: >-
+      {{ ((github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server') | map(attribute='key') | list)
+          + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.eligible') | map(attribute='key') | list)) | unique }}
+    github_runner_cluster_role_lease_native: >-
+      {{ github_runner_cluster_topology.hosts | dict2items | selectattr('value.native') | map(attribute='key') | list }}
+
+- name: Read the Lease through each Docker server of the inventory
+  # Each on its own host with its own pinned Docker context, through the image's kubectl inside the server's container, which reads that server's kubeconfig. Prints "stopped" when the container does not run, or "running", the host's clock as epoch seconds (the clock the Lease's expiry is judged by) and the Lease, nothing when there is none. A read that fails is recorded rather than failing here, so the filter can say which servers could not be read.
+  ansible.builtin.shell: |
+    set -eu
+    state=$(docker ps --all --filter "name=^/${container}\$" --format '{{ '{{' }}.State{{ '}}' }}')
+    if [ "$state" != running ]; then
+      echo stopped
+      exit 0
+    fi
+    echo running
+    date +%s
+    docker exec "$container" kubectl get lease "$name" --namespace "$namespace" --ignore-not-found --output json --request-timeout="${timeout}s"
+  environment: >-
+    {{ ({'DOCKER_CONTEXT': github_runner_cluster_role_lease_context} if github_runner_cluster_role_lease_context | length > 0 else {})
+       | combine({'container': github_runner_cluster_role_lease_container, 'name': github_runner_cluster_role_lease_name,
+                  'namespace': github_runner_cluster_role_lease_namespace, 'timeout': github_runner_cluster_cluster_read_timeout | string}) }}
+  delegate_to: "{{ item }}"
+  loop: "{{ github_runner_cluster_role_lease_servers | reject('in', github_runner_cluster_role_lease_native) | list }}"
+  vars:
+    github_runner_cluster_role_lease_container: >-
+      {{ github_runner_cluster_container_name if item == inventory_hostname
+         else hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s') }}
+    github_runner_cluster_role_lease_context: >-
+      {{ (github_runner_cluster_docker_context if item == inventory_hostname
+          else hostvars[item].github_runner_cluster_docker_context | default('')) | trim }}
+  register: github_runner_cluster_role_lease_reads_docker
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+
+- name: Read the Lease through each native server of the inventory
+  # The same read, through `k3s kubectl` on a native server's host, which reads the admin kubeconfig k3s writes there for root only (hence become), and "stopped" when the server unit is not active. The unit's name and the binary's place are the role's constants, read from the inventory where a host sets them (the tests do).
+  become: true
+  ansible.builtin.shell: |
+    set -eu
+    if ! systemctl is-active --quiet "$service"; then
+      echo stopped
+      exit 0
+    fi
+    echo running
+    date +%s
+    "$k3s" kubectl get lease "$name" --namespace "$namespace" --ignore-not-found --output json --request-timeout="${timeout}s"
+  environment:
+    service: "{{ github_runner_cluster_native_server_service }}"
+    k3s: "{{ hostvars[item].github_runner_cluster_native_bin_dir | default(github_runner_cluster_native_bin_dir) }}/k3s"
+    name: "{{ github_runner_cluster_role_lease_name }}"
+    namespace: "{{ github_runner_cluster_role_lease_namespace }}"
+    timeout: "{{ github_runner_cluster_cluster_read_timeout | string }}"
+  delegate_to: "{{ item }}"
+  loop: "{{ github_runner_cluster_role_lease_servers | select('in', github_runner_cluster_role_lease_native) | list }}"
+  register: github_runner_cluster_role_lease_reads_native
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+
+- name: Fail while the role controller holds the Lease for a voter swap, or when whether it does cannot be told
+  vars:
+    github_runner_cluster_role_lease_verdict: >-
+      {{ (github_runner_cluster_role_lease_reads_docker.results + github_runner_cluster_role_lease_reads_native.results)
+         | exadev.github_runner.cluster_role_lease_guard(github_runner_cluster_role_lease_holder, github_runner_cluster_role_lease_swap_id_annotation) }}
+  ansible.builtin.fail:
+    msg: >-
+      Not changing {{ inventory_hostname }}: {{ github_runner_cluster_role_lease_verdict.message }}.
+      {% if github_runner_cluster_role_lease_verdict.state == 'held' %}A run of the role during a voter swap could undo it or take a second vote
+      away. Run again once the swap has ended and the controller has released the Lease (the role controller's status ConfigMap reports the swap).{% else %}Bring
+      a server back within reach and run again.{% endif %} Nothing was changed.
+  when: github_runner_cluster_role_lease_verdict.state != 'free'

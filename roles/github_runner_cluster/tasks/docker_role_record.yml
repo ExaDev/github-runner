@@ -1,0 +1,10 @@
+---
+# Records the role an eligible Docker host runs in its role directory (github_runner_cluster_docker_role_file), only when nothing is recorded there yet: once a role is recorded, changing it is a role switch, which the role controller makes at run time, never a run's side effect. A host that is not marked github_runner_cluster_voter_eligible gets no record, since the inventory decides its role and the entrypoint runs the service it was started as. Needs tasks/docker_role.yml, and the role directory, which tasks/main.yml creates first.
+
+- name: Record the role this eligible host runs, when nothing is recorded yet
+  ansible.builtin.copy:
+    content: "{{ github_runner_cluster_docker_role }}\n"
+    dest: "{{ github_runner_cluster_docker_role_file }}"
+    mode: "0644"
+    force: false
+  when: github_runner_cluster_topology.hosts[inventory_hostname].eligible | bool
