@@ -1,0 +1,14 @@
+---
+# Chooses the other server of the inventory through whose API the role sets up the role actuator's credential (native/api.yml, which reaches a Docker server through its container as it does a native one through its k3s), since this host's own may be the one a swap stops, and fails, before anything is changed, when the inventory names none. For tasks/role_actuator_watcher.yml and tasks/role_actuator_docker.yml, which run it first; read-only, so it runs under --check too.
+
+- name: Reach the cluster through another server, since this host's own may be the one a swap stops
+  ansible.builtin.include_tasks: native/api.yml
+  vars:
+    github_runner_cluster_native_api_self: false
+
+- name: Fail if no other server of the inventory can apply the watcher's credential
+  ansible.builtin.fail:
+    msg: >-
+      github_runner_cluster_role_controller is true, but the inventory names no server other than {{ inventory_hostname }} to apply the
+      role actuator's credential through. Nothing was changed.
+  when: github_runner_cluster_native_api_host | length == 0
