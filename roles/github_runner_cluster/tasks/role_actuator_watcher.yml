@@ -94,7 +94,11 @@
     - name: Apply the watcher's ServiceAccount, its rules and its token Secret
       become: "{{ github_runner_cluster_native_api_become }}"
       ansible.builtin.command:
-        argv: "{{ github_runner_cluster_native_api_argv + ['apply', '--filename', '-'] }}"
+        # docker exec passes its standard input to kubectl only with --interactive, as tasks/colima_size_turn.yml gives it; k3s kubectl reads its own.
+        argv: >-
+          {{ ((github_runner_cluster_native_api_argv[:2] + ['--interactive'] + github_runner_cluster_native_api_argv[2:])
+              if github_runner_cluster_native_api_argv[0] == 'docker' else github_runner_cluster_native_api_argv)
+             + ['apply', '--filename', '-'] }}
         stdin: "{{ lookup('ansible.builtin.template', 'role-actuator-rbac.yaml.j2') }}"
       environment: "{{ github_runner_cluster_native_api_environment }}"
       delegate_to: "{{ github_runner_cluster_native_api_host }}"
