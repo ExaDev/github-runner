@@ -181,15 +181,18 @@ micro_time() {
   jq -nr --argjson t "$1" '$t | todate | sub("Z$"; ".000000Z")'
 }
 
-# The Lease as the API server stores it: held by $1, acquired at epoch $2, last renewed at epoch $3, for LEASE_DURATION_SECONDS. A fourth argument is the resourceVersion of the Lease being replaced, which makes the replacement fail if anyone else has changed it since it was read.
+# The Lease as the API server stores it: held by $1, acquired at epoch $2, last renewed at epoch $3, for LEASE_DURATION_SECONDS. A fourth argument is the resourceVersion of the Lease being replaced, which makes the replacement fail if anyone else has changed it since it was read, and a fifth the annotations the Lease carries, as a JSON object (none when omitted).
 build_lease() {
+  local annotations=${5:-}
   jq -n --arg name "$LEASE_NAME" --arg namespace "$LEASE_NAMESPACE" --arg holder "$1" \
     --arg acquired "$(micro_time "$2")" --arg renewed "$(micro_time "$3")" \
-    --argjson duration "$LEASE_DURATION_SECONDS" --arg version "${4:-}" '
+    --argjson duration "$LEASE_DURATION_SECONDS" --arg version "${4:-}" --argjson annotations "${annotations:-null}" '
     {
       apiVersion: "coordination.k8s.io/v1",
       kind: "Lease",
-      metadata: ({ name: $name, namespace: $namespace } + (if $version == "" then {} else { resourceVersion: $version } end)),
+      metadata: ({ name: $name, namespace: $namespace }
+        + (if $version == "" then {} else { resourceVersion: $version } end)
+        + (if $annotations == null then {} else { annotations: $annotations } end)),
       spec: { holderIdentity: $holder, leaseDurationSeconds: $duration, acquireTime: $acquired, renewTime: $renewed }
     }'
 }
@@ -207,15 +210,15 @@ lease_state() {
       else "held" end' <<< "$1"
 }
 
-# Takes the Lease, or fails. Created when there is none, replaced when it is free, expired or already this node's, refused when another holds it, and refused when the API server cannot be asked, since a step must not start on a guess. Both writes fail if someone else got there first.
+# Takes the Lease for the holder $1 (this node by default), or fails; the annotations $2, a JSON object, are written with it (none by default). Created when there is none, replaced when it is free, expired or already the holder's, refused when another holds it, and refused when the API server cannot be asked, since a step must not start on a guess. Both writes fail if someone else got there first.
 acquire_lease() {
   : "${LEASE_DURATION_SECONDS:?LEASE_DURATION_SECONDS must be set}"
-  local current now state holder version
+  local holder=${1:-$NODE_NAME} annotations=${2:-} current now state other version
   now=$(now_epoch)
   if ! current=$(kubectl_ get lease "$LEASE_NAME" --namespace "$LEASE_NAMESPACE" --output json 2>&1); then
     case $current in
       *"(NotFound)"*)
-        if build_lease "$NODE_NAME" "$now" "$now" | kubectl_ create -f - > /dev/null; then
+        if build_lease "$holder" "$now" "$now" "" "$annotations" | kubectl_ create -f - > /dev/null; then
           return 0
         fi
         log "cannot step: another node created the lease first"
@@ -227,26 +230,26 @@ acquire_lease() {
         ;;
     esac
   fi
-  state=$(lease_state "$current" "$NODE_NAME" "$now")
+  state=$(lease_state "$current" "$holder" "$now")
   if [ "$state" = held ]; then
-    holder=$(jq -r '.spec.holderIdentity' <<< "$current")
-    log "cannot step: the lease is held by $holder"
+    other=$(jq -r '.spec.holderIdentity' <<< "$current")
+    log "cannot step: the lease is held by $other"
     return 1
   fi
   version=$(jq -r '.metadata.resourceVersion' <<< "$current")
-  if build_lease "$NODE_NAME" "$now" "$now" "$version" | kubectl_ replace -f - > /dev/null; then
+  if build_lease "$holder" "$now" "$now" "$version" "$annotations" | kubectl_ replace -f - > /dev/null; then
     return 0
   fi
   log "cannot step: the lease changed while it was being taken"
   return 1
 }
 
-# Gives the Lease back, if it is still this node's: the holder is cleared, so the next node does not wait for it to expire. If it has meanwhile passed to another node it is left alone.
+# Gives the Lease back, if it is still the holder's ($1, this node by default): the holder and the annotations are cleared, so the next node does not wait for it to expire. If it has meanwhile passed to another node it is left alone.
 release_lease() {
-  local current
+  local holder=${1:-$NODE_NAME} current
   current=$(kubectl_ get lease "$LEASE_NAME" --namespace "$LEASE_NAMESPACE" --output json) || return 1
-  [ "$(jq -r '.spec.holderIdentity // ""' <<< "$current")" = "$NODE_NAME" ] || return 0
-  jq '.spec.holderIdentity = ""' <<< "$current" | kubectl_ replace -f - > /dev/null
+  [ "$(jq -r '.spec.holderIdentity // ""' <<< "$current")" = "$holder" ] || return 0
+  jq '.spec.holderIdentity = "" | del(.metadata.annotations)' <<< "$current" | kubectl_ replace -f - > /dev/null
 }
 
 # Extends the Lease its holder $1 already has, or fails. The holder, acquire time, duration and annotations are kept and the renew time becomes now, and the replacement fails if anyone has changed the Lease since it was read, so a Lease that has passed to another holder, been released or never existed is refused and left as it was. A holder whose Lease has run out but that nobody has taken since may still renew it. Used by a holder that works for longer than one duration, such as the role controller; a step of the regrade core keeps its sized duration and never renews.
