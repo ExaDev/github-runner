@@ -1,5 +1,5 @@
 ---
-# Runs the role actuator's watcher on a native host the role controller may switch, for tasks/role_actuator.yml, which includes this file only on such a host: an include skipped by its condition loads none of its tasks, whereas a task in a block skipped by its condition still has its delegate_to templated (ansible-core resolves delegate_to before when, _calculate_delegate_to in TaskExecutor._execute), and the delegated tasks here name github_runner_cluster_native_api_host, which only native/api.yml below sets. Installs the commands the watcher needs, applies its credential through another server's API, writes its kubeconfig, join URLs and unit, and starts or restarts it. Under --check nothing is changed and each change a real run would make is reported.
+# Runs the role actuator's watcher on a native host the role controller may switch, for tasks/role_actuator.yml, which includes this file only on such a host: an include skipped by its condition loads none of its tasks, whereas a task in a block skipped by its condition still has its delegate_to templated (ansible-core resolves delegate_to before when, _calculate_delegate_to in TaskExecutor._execute), and the delegated tasks of role_actuator_credential.yml name github_runner_cluster_native_api_host, which only role_actuator_api.yml sets. Installs the commands the watcher needs, applies its credential through another server's API, writes its kubeconfig, join URLs and unit, and starts or restarts it. Under --check nothing is changed and each change a real run would make is reported.
 
 - name: Read which of the commands the watcher needs are installed
   # Read-only, so it runs under --check too.
@@ -50,17 +50,8 @@
         DEBIAN_FRONTEND: noninteractive
       changed_when: true
 
-- name: Reach the cluster through another server, since this host's own may be the one a swap stops
-  ansible.builtin.include_tasks: native/api.yml
-  vars:
-    github_runner_cluster_native_api_self: false
-
-- name: Fail if no other server of the inventory can apply the watcher's credential
-  ansible.builtin.fail:
-    msg: >-
-      github_runner_cluster_role_controller is true, but the inventory names no server other than {{ inventory_hostname }} to apply the
-      role actuator's credential through. Nothing was changed.
-  when: github_runner_cluster_native_api_host | length == 0
+- name: Choose the server whose API sets up the watcher's credential
+  ansible.builtin.include_tasks: role_actuator_api.yml
 
 - name: Write the watcher's unit
   # Under --check too, as the regrade unit is (native/regrade_service.yml), so a check run reports a changed unit.
@@ -91,82 +82,8 @@
 - name: Set up the watcher's credential and run it
   when: not ansible_check_mode
   block:
-    - name: Apply the watcher's ServiceAccount, its rules and its token Secret
-      become: "{{ github_runner_cluster_native_api_become }}"
-      ansible.builtin.command:
-        # docker exec passes its standard input to kubectl only with --interactive, as tasks/colima_size_turn.yml gives it; k3s kubectl reads its own.
-        argv: >-
-          {{ ((github_runner_cluster_native_api_argv[:2] + ['--interactive'] + github_runner_cluster_native_api_argv[2:])
-              if github_runner_cluster_native_api_argv[0] == 'docker' else github_runner_cluster_native_api_argv)
-             + ['apply', '--filename', '-'] }}
-        stdin: "{{ lookup('ansible.builtin.template', 'role-actuator-rbac.yaml.j2') }}"
-      environment: "{{ github_runner_cluster_native_api_environment }}"
-      delegate_to: "{{ github_runner_cluster_native_api_host }}"
-      register: github_runner_cluster_role_actuator_applied
-      changed_when: github_runner_cluster_role_actuator_applied.stdout_lines | reject('search', ' unchanged$') | list | length > 0
-
-    - name: Create the report ConfigMap the controller reads, when there is none
-      # Created rather than applied, since applying an empty one again would wipe the reports.
-      become: "{{ github_runner_cluster_native_api_become }}"
-      ansible.builtin.command:
-        argv: >-
-          {{ github_runner_cluster_native_api_argv + ['create', 'configmap', github_runner_cluster_role_actuator_configmap,
-             '--namespace', github_runner_cluster_role_actuator_namespace] }}
-      environment: "{{ github_runner_cluster_native_api_environment }}"
-      delegate_to: "{{ github_runner_cluster_native_api_host }}"
-      register: github_runner_cluster_role_actuator_configmap_created
-      changed_when: github_runner_cluster_role_actuator_configmap_created.rc == 0
-      failed_when:
-        - github_runner_cluster_role_actuator_configmap_created.rc != 0
-        - "'AlreadyExists' not in github_runner_cluster_role_actuator_configmap_created.stderr"
-
-    - name: Read the watcher's token and the cluster's CA, once the token controller has filled them
-      # Both base64, as the Secret holds them; the token is a secret, so nothing of this task is logged.
-      become: "{{ github_runner_cluster_native_api_become }}"
-      ansible.builtin.command:
-        argv: >-
-          {{ github_runner_cluster_native_api_argv + ['get', 'secret', github_runner_cluster_role_actuator_name ~ '-token',
-             '--namespace', github_runner_cluster_role_actuator_namespace, '--request-timeout=' ~ github_runner_cluster_cluster_read_timeout ~ 's',
-             '--output', 'jsonpath={.data.token} {.data.ca\.crt}'] }}
-      environment: "{{ github_runner_cluster_native_api_environment }}"
-      delegate_to: "{{ github_runner_cluster_native_api_host }}"
-      register: github_runner_cluster_role_actuator_secret
-      until:
-        - github_runner_cluster_role_actuator_secret.rc == 0
-        - github_runner_cluster_role_actuator_secret.stdout | trim | split(' ') | length == 2
-      retries: "{{ ((github_runner_cluster_cluster_read_timeout | int) / github_runner_cluster_native_poll) | round(0, 'ceil') | int }}"
-      delay: "{{ github_runner_cluster_native_poll }}"
-      vars:
-        # Seconds between reads, the pace every native wait polls at (tasks/native/server_ready.yml).
-        github_runner_cluster_native_poll: 5
-      changed_when: false
-      no_log: true
-
-    - name: Write the watcher's kubeconfig
-      # Its server is the first API candidate; the watcher passes the one that answers (KUBE_SERVERS in its settings) on every call.
-      become: true
-      ansible.builtin.copy:
-        content: >-
-          {{ {'apiVersion': 'v1', 'kind': 'Config', 'current-context': 'fleet',
-              'clusters': [{'name': 'fleet', 'cluster': {'server': 'https://' ~ (github_runner_cluster_api_candidates | first).value.address ~ ':' ~ github_runner_cluster_api_port,
-                                                         'certificate-authority-data': (github_runner_cluster_role_actuator_secret.stdout | trim | split(' '))[1]}}],
-              'users': [{'name': github_runner_cluster_role_actuator_name, 'user': {'token': (github_runner_cluster_role_actuator_secret.stdout | trim | split(' '))[0] | b64decode}}],
-              'contexts': [{'name': 'fleet', 'context': {'cluster': 'fleet', 'user': github_runner_cluster_role_actuator_name}}]} | to_nice_yaml }}
-        dest: "{{ github_runner_cluster_role_actuator_kubeconfig }}"
-        mode: "0600"
-      no_log: true
-      register: github_runner_cluster_role_actuator_kubeconfig_file
-
-    - name: Write the URL a promotion joins each other server and eligible host at
-      become: true
-      ansible.builtin.copy:
-        content: |
-          {% for candidate in github_runner_cluster_api_candidates %}
-          {{ candidate.value.node_name }} https://{{ candidate.value.address }}:{{ github_runner_cluster_api_port }}
-          {% endfor %}
-        dest: "{{ github_runner_cluster_role_actuator_dir }}/join-urls"
-        mode: "0644"
-      register: github_runner_cluster_role_actuator_join_urls
+    - name: Give the watcher its credential and the URLs a promotion joins
+      ansible.builtin.include_tasks: role_actuator_credential.yml
 
     - name: Read whether the watcher is enabled and running
       ansible.builtin.command:
