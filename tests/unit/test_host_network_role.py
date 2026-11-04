@@ -105,8 +105,8 @@ class HostNetworkRoleTest(unittest.TestCase):
             "github_runner_cluster_topology": TOPOLOGY,
             **role_vars,
         }
-        # The role tasks/docker_role.yml would decide: the inventory's, for a host not marked eligible.
-        extra["github_runner_cluster_docker_role"] = extra["github_runner_cluster_effective_node_role"]
+        # The role tasks/docker_role.yml would decide: the inventory's, for a host not marked eligible, unless a test gives the role an eligible host records.
+        extra.setdefault("github_runner_cluster_docker_role", extra["github_runner_cluster_effective_node_role"])
         extra_file = self.work / "extra.json"
         extra_file.write_text(json.dumps(extra))
         env = {
@@ -189,6 +189,14 @@ class HostNetworkRoleTest(unittest.TestCase):
         result = self.run_tasks(limit="node2", github_runner_cluster_effective_node_role="agent", github_runner_cluster_effective_node_name="node2", github_runner_cluster_topology=topology)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("docker - exec node1-k3s kubectl get nodes --request-timeout=30s -o json", self.calls())
+
+    def test_an_eligible_host_recorded_as_an_agent_is_read_through_the_other_servers_and_not_itself(self) -> None:
+        result = self.run_tasks(github_runner_cluster_docker_role="agent")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertNotIn("docker - exec github-runner-k3s kubectl get nodes --request-timeout=30s -o json", calls)
+        self.assertIn("docker ctx2 exec node2-k3s kubectl get nodes --request-timeout=30s -o json", calls)
+        self.assertFalse([call for call in calls if call.endswith("--raw /readyz/etcd")], "an agent has no etcd vote for the others to keep")
 
     def test_an_agent_whose_servers_are_outside_the_inventory_says_why_it_cannot_move(self) -> None:
         topology = {"hosts": {"node2": {"role": "agent", "bootstrap": False, "node_name": "node2"}}}

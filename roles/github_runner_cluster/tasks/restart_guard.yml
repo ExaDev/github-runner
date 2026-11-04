@@ -64,13 +64,16 @@
   vars:
     github_runner_cluster_guard: "{{ (github_runner_cluster_guard_reads.results | exadev.github_runner.cluster_guard_state).state }}"
     # A step that cordons the node and waits for its runner pods itself checks the cluster before it does, with the pods left out, and again once they have gone.
+    # The servers are the inventory's, with this host counted by the role it runs (tasks/docker_role.yml), which for an eligible host is the one recorded on it: one recorded as an agent has no etcd vote to keep. Another host's recorded role is not read here, so a server the inventory does not name counts against the restart, as the filter says.
+    github_runner_cluster_guard_servers: >-
+      {{ (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
+          | rejectattr('key', 'equalto', inventory_hostname) | map(attribute='value.node_name') | list)
+         + ([github_runner_cluster_effective_node_name] if github_runner_cluster_docker_role == 'server' else []) }}
     github_runner_cluster_guard_blockers: >-
       {{ github_runner_cluster_guard.nodes
          | exadev.github_runner.cluster_restart_blockers(github_runner_cluster_guard.pods if github_runner_cluster_restart_guard_runners | bool else [],
                                                          github_runner_cluster_effective_node_name,
-                                                         github_runner_cluster_topology.hosts | dict2items
-                                                         | selectattr('value.role', 'equalto', 'server')
-                                                         | map(attribute='value.node_name') | list,
+                                                         github_runner_cluster_guard_servers,
                                                          github_runner_cluster_guard_etcd.results | default([])) }}
   ansible.builtin.fail:
     msg: >-
