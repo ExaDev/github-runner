@@ -867,7 +867,7 @@ class DockerRoleSetupTest(unittest.TestCase):
         "github_runner_cluster_dir": "/home/runner/github-runner",
         "github_runner_cluster_role_actuator_dir": "/home/runner/github-runner/role",
         "github_runner_cluster_compose_project": "github-runner",
-        "github_runner_cluster_compose_file_list": ["docker-compose.yml", "docker-compose.fleet-role.yml"],
+        "github_runner_cluster_compose_files_in_use": ["docker-compose.yml", "docker-compose.fleet-role.yml"],
         "github_runner_cluster_container_name": "github-runner-k3s",
         "github_runner_cluster_agent_container_name": "github-runner-k3s-agent",
         "github_runner_cluster_effective_node_name": NODE,

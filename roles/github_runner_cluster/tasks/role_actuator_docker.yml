@@ -63,7 +63,7 @@
         profiles: ["role-actuator"]
         services: ["role-actuator"]
         cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
-        files: "{{ github_runner_cluster_compose_file_list + ['docker-compose.role-actuator.yml'] }}"
+        files: "{{ github_runner_cluster_compose_files_in_use + ['docker-compose.role-actuator.yml'] }}"
         recreate: >-
           {{ 'always' if (github_runner_cluster_role_actuator_scripts is changed or github_runner_cluster_role_actuator_settings is changed
                           or github_runner_cluster_role_actuator_kubeconfig_file is changed or github_runner_cluster_role_actuator_join_urls is changed)
