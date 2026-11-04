@@ -81,6 +81,13 @@ diagnose() {
       docker_on "$index" inspect --format 'restarts={{.RestartCount}} started={{.State.StartedAt}} status={{.State.Status}} exit={{.State.ExitCode}}' "grtest-node${index}-role-actuator-1" || true
       docker_on "$index" logs --tail 60 "grtest-node${index}-role-actuator-1" 2>&1 | cut -c1-400 || true
     fi
+    # The agent container a server's host runs once it has been demoted, which the node's own container above is not: whether it runs, whether it reached the mesh, and why it is not Ready.
+    if [ "$index" -lt "$agent_from" ] && docker_on "$index" inspect "grtest-node${index}-agent" >/dev/null 2>&1; then
+      echo "----- grtest-node${index}-agent: state, tailscale and last log lines"
+      docker_on "$index" inspect --format 'restarts={{.RestartCount}} started={{.State.StartedAt}} status={{.State.Status}} exit={{.State.ExitCode}}' "grtest-node${index}-agent" || true
+      docker_on "$index" exec "grtest-node${index}-agent" tailscale status </dev/null 2>&1 | head -n 20 || true
+      docker_on "$index" logs --tail 80 "grtest-node${index}-agent" 2>&1 | cut -c1-400 || true
+    fi
   done
   # The reports every actuator made (JSON of swap, step, phase, role, times and message, no secret), through the first node that answers.
   if [ -n "${platform_namespace:-}" ]; then
