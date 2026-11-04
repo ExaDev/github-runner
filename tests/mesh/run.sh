@@ -55,7 +55,7 @@ fail() {
 
 # What a failed run needs to be understood without the environment, which is removed on exit: each node's own view of the mesh and the tail of its log.
 diagnose() {
-  local index
+  local index reports
   for index in $(seq 1 "$node_count"); do
     docker_on "$index" inspect "$(container "$index")" >/dev/null 2>&1 || continue
     echo "----- $(container "$index"): tailscale status"
@@ -69,7 +69,24 @@ diagnose() {
     docker_on "$index" exec "$(container "$index")" sh -c 'echo "started: $(cat /run/regrade-level 2>&1)"; echo "requested: $(cat /var/lib/rancher/k3s/regrade-level 2>&1)"; ls /etc/rancher/k3s /var/lib/rancher/k3s/server/cred 2>&1' </dev/null 2>&1 | head -n 40 || true
     docker_on "$index" exec "grtest-node${index}-regrade-1" fleet-regrade status </dev/null 2>&1 | head -n 5 || true
     docker_on "$index" logs --tail 40 "grtest-node${index}-regrade-1" 2>&1 | cut -c1-400 || true
+    # The role actuator service of a Docker host the role controller may switch: whether it runs (or restarts in a loop) and what its watch logged.
+    if docker_on "$index" inspect "grtest-node${index}-role-actuator-1" >/dev/null 2>&1; then
+      echo "----- grtest-node${index}-role-actuator-1: state and last log lines"
+      docker_on "$index" inspect --format 'restarts={{.RestartCount}} started={{.State.StartedAt}} status={{.State.Status}} exit={{.State.ExitCode}}' "grtest-node${index}-role-actuator-1" || true
+      docker_on "$index" logs --tail 60 "grtest-node${index}-role-actuator-1" 2>&1 | cut -c1-400 || true
+    fi
   done
+  # The reports every actuator made (JSON of swap, step, phase, role, times and message, no secret), through the first node that answers.
+  if [ -n "${platform_namespace:-}" ]; then
+    echo "----- the role actuators' reports"
+    for index in $(seq 1 "$node_count"); do
+      docker_on "$index" inspect "$(container "$index")" >/dev/null 2>&1 || continue
+      if reports=$(kubectl_on "$index" --namespace "$platform_namespace" get configmap fleet-role-actuators -o 'jsonpath={.data}' </dev/null 2>&1); then
+        echo "$reports" | cut -c1-2000
+        break
+      fi
+    done
+  fi
   if docker inspect "$native_host" >/dev/null 2>&1; then
     echo "----- ${native_host}: units, role file, Tailscale and the last journal lines"
     docker exec "$native_host" sh -c 'systemctl is-active k3s k3s-agent tailscaled; cat /var/lib/rancher/k3s/fleet-role; tailscale status | head -n 20' </dev/null 2>&1 || true
