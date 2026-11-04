@@ -1,3 +1,9 @@
+## [2.35.1](https://github.com/ExaDev/github-runner/compare/v2.35.0...v2.35.1) (2026-11-04)
+
+### Bug Fixes
+
+* **role:** keep a Colima VM's set memory within what its host can spare ([03eff7e](https://github.com/ExaDev/github-runner/commit/03eff7ea95788ed72f8e3fb917935df194bbde09)), closes [#208](https://github.com/ExaDev/github-runner/issues/208)
+
 ## [2.35.0](https://github.com/ExaDev/github-runner/compare/v2.34.0...v2.35.0) (2026-11-03)
 
 ### Features
