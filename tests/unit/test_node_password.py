@@ -88,8 +88,8 @@ class NodePasswordSeedingTest(RoleTestCase):
         self.container("node1-k3s", password=self.SECRET, image="sha256:feed")
         self.assertEqual(self.seed().returncode, 0)
         creates = [call for call in self.calls() if call.startswith("- create ")]
-        self.assertEqual(creates, [f"- create --name node1-k3s-password-seed --volume {self.VOLUME}:/etc/rancher/node sha256:feed"])
-        self.assertFalse((self.stub / "containers" / "node1-k3s-password-seed.state").exists())
+        self.assertEqual(creates, [f"- create --name {self.VOLUME}-identity-copy --volume {self.VOLUME}:/etc/rancher/node sha256:feed"])
+        self.assertFalse((self.stub / "containers" / f"{self.VOLUME}-identity-copy.state").exists())
 
     def test_a_second_run_changes_nothing(self) -> None:
         self.container("node1-k3s", password=self.SECRET)
@@ -163,7 +163,7 @@ class NodePasswordSeedingTest(RoleTestCase):
         self.assertIn("Error response from daemon: Could not find the file /etc/rancher/node in container node1-k3s", result.stdout)
         self.assertIn("docker volume create", result.stdout)
         self.assertFalse((self.stub / "volumes" / self.VOLUME).exists(), "a half-seeded volume would stop every later run from seeding")
-        self.assertFalse((self.stub / "containers" / "node1-k3s-password-seed.state").exists())
+        self.assertFalse((self.stub / "containers" / f"{self.VOLUME}-identity-copy.state").exists())
         self.nothing_on_the_host_holds_the_secret(result)
 
     def test_the_run_after_a_failed_copy_seeds_again(self) -> None:
@@ -176,7 +176,7 @@ class NodePasswordSeedingTest(RoleTestCase):
 
     def test_a_throwaway_container_left_by_an_earlier_run_is_replaced(self) -> None:
         self.container("node1-k3s", password=self.SECRET)
-        self.write("containers", "node1-k3s-password-seed.state", text="created")
+        self.write("containers", f"{self.VOLUME}-identity-copy.state", text="created")
         result = self.seed()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.stub / "volumes" / self.VOLUME / "password").read_text(), self.SECRET)
@@ -207,9 +207,11 @@ class TaskStructureTest(unittest.TestCase):
         seed = next(task for task in role_tasks("node_password.yml") if task.get("name") == "Seed the password volume from the running container")
         self.assertIs(seed["no_log"], True)
         self.assertIn("ansible_check_mode", " ".join(seed["when"]))
-        script = seed["ansible.builtin.shell"]
-        self.assertNotIn(">", re.sub(r">/dev/null( 2>&1)?", "", script).replace("2>&1", ""), "the copy must not be redirected to a file")
-        self.assertIn("set -o pipefail", script)
+        self.assertTrue(seed["ansible.builtin.script"]["cmd"].startswith("node-identity.sh "))
+        # The script the task runs: its only redirections throw output away, so the copy is never written to a file, and a failed docker cp on either side of the pipe fails it.
+        script = (ROLE / "files" / "node-identity.sh").read_text()
+        self.assertNotIn(">", re.sub(r"> /dev/null( 2>&1)?", "", script).replace(">&2", "").replace("2>&1", ""), "the copy must not be redirected to a file")
+        self.assertIn("set -euo pipefail", script)
 
 
 if __name__ == "__main__":
