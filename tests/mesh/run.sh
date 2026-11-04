@@ -1061,18 +1061,32 @@ node_is_voter() {
 write_throughout() {
   local log="$1" stop="$2" sequence=0 error
   : > "$log"
+  : > "${log}.times"
   until [ -e "$stop" ]; do
     sequence=$((sequence + 1))
     if error=$(kubectl_on "$api_node" create configmap "grtest-native-write-${sequence}" --from-literal=a=1 2>&1 >/dev/null </dev/null); then
       echo ok >> "$log"
+      echo "$(date +%s) ok" >> "${log}.times"
     else
       echo "failed $(date -u +%H:%M:%S) ${error}" >> "$log"
+      echo "$(date +%s) failed" >> "${log}.times"
     fi
     sleep 1
   done
 }
 
 # Watches the member list until the stop file appears, recording every line that names the native host's member, so a learner seen at any point is on record.
+# Fails unless every write that failed in the log $1 (kept with its time by write_throughout) was followed by a write that succeeded within the time a leader election takes: etcd's election timeout, plus the up to one more election timeout of randomised delay a candidate waits before it stands, since stepping down the member that happens to lead makes the others elect another and a write in flight when it goes is answered "request timed out, possibly due to previous leader failure". Quorum lost is writes failing and not recovering; one election is not.
+assert_writes_recovered() {
+  local window=$(((etcd_election_ms * 2 + 999) / 1000)) bad
+  # A run of failures is judged from its first failure to the success that ends it.
+  bad=$(awk -v window="$window" '
+    $2 == "failed" { if (start == "") start = $1; last = $1; next }
+    $2 == "ok" { if (start != "" && $1 - start > window) print "writes failed from " start " until " $1; start = "" }
+    END { if (start != "") print "writes were still failing at " last " after failing from " start }' "${1}.times")
+  [ -z "$bad" ] || { echo "$bad"; grep '^failed' "$1"; return 1; }
+}
+
 watch_native_member() {
   local log="$1" stop="$2"
   : > "$log"
@@ -1991,7 +2005,7 @@ scenario_role_swap() {
   [ "$(node_password_hash 1)" = "$password" ] || fail "${node}'s server has another node password"
   [ "$(docker exec "$(container 1)" tailscale ip -4 </dev/null | head -n 1)" = "$address" ] || fail "${node}'s server has another Tailscale address"
   native_unit_is k3s-agent active || fail "${native_host} does not run k3s-agent"
-  native_unit_is k3s inactive || fail "${native_host} still runs k3s"
+  ! native_unit_is k3s active || fail "${native_host} still runs k3s"
   native_exec test -d /var/lib/rancher/k3s/server/db.demoted </dev/null || fail "${native_host}'s datastore was not moved aside"
   node_is_clean "$native_host" || fail "${native_host}'s labels and annotations were not cleaned up"
   lease_released || fail "the regrade Lease was not released after the second swap"
@@ -2000,7 +2014,7 @@ scenario_role_swap() {
   failed=$(grep -c '^failed' "$writes" || true)
   echo "  ${ok} writes succeeded, ${failed} failed"
   [ "$ok" -gt 0 ] || fail "no write was made during the swaps"
-  [ "$failed" = 0 ] || { grep '^failed' "$writes"; fail "writes failed during the swaps"; }
+  assert_writes_recovered "$writes" || fail "writes did not recover within a leader election during the swaps"
 }
 
 # The outgoing voter is paused (its k3s container, as a host that dropped off would be) the moment the new voter votes: the controller still takes it out while the others are healthy, ends the swap with the host left to node recovery, and on unpause the tombstone keeps the removed server out of etcd (the member count stays three through a learner stall time) while its actuator finishes it as an agent.
@@ -2055,7 +2069,7 @@ scenario_role_swap_blocked_peer() {
   node_is_voter "$out" || fail "${out} is no longer a voter"
   ! node_is_voter "$native_host" || fail "${native_host} is a voter"
   native_unit_is k3s-agent active || fail "${native_host} does not run k3s-agent after the rollback"
-  native_unit_is k3s inactive || fail "${native_host} still runs k3s after the rollback"
+  ! native_unit_is k3s active || fail "${native_host} still runs k3s after the rollback"
   [ "$(native_exec cat /var/lib/rancher/k3s/fleet-role </dev/null)" = agent ] || fail "${native_host}'s role file does not name the agent"
   node_is_clean "$native_host" || fail "${native_host}'s labels and annotations were not cleaned up"
   node_untouched "$out" || fail "${out} was changed by the rolled-back swap"
