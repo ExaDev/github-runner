@@ -1,0 +1,7 @@
+---
+# A macOS Actions runner is a host process, not an ARC runner pod: Xcode and macOS archive jobs cannot run in a Linux container. The role registers it with a short-lived GitHub App token and supervises its persistent process through launchd.
+- name: Install managed macOS Actions runners
+  hosts: "{{ github_runner_macos_actions_runner_hosts | default(github_runner_cluster_group | default('github_runner_cluster')) }}"
+  gather_facts: true
+  roles:
+    - exadev.github_runner.github_runner_macos_actions_runner
