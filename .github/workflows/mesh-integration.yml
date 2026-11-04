@@ -32,8 +32,8 @@ jobs:
   mesh:
     name: Mesh (${{ matrix.scenario }}, Compose ${{ matrix.compose }}${{ matrix.pin && ', context pinned' || '' }})
     runs-on: ubuntu-latest
-    # The swap scenarios take two or three membership changes, each bounded by the controller's own waits.
-    timeout-minutes: 75
+    # role_controller_swap first fills 100 samples at the default 15-second period (25 minutes), waits up to 15 minutes for the induced unfitness and then allows the controller's own swap budget: seven 5-minute operations, a 10-minute runner wait and a 5-minute learner stall (50 minutes). Those bounds total 90 minutes before cluster setup, so CI allows the 15-minute setup and teardown budget as well.
+    timeout-minutes: 105
     strategy:
       fail-fast: false
       matrix:
