@@ -1,4 +1,4 @@
-"""Tests for how the cluster role records a Docker host's role on the host and keeps it across runs: the filters (plugins/filter/cluster_role.py), the decision and its refusals (tasks/docker_role.yml), the record (tasks/docker_role_record.yml), the servers' turns and the regrade service following the recorded role (tasks/start_servers.yml, tasks/regrade_service.yml), the refusal of every run while the role controller holds the regrade Lease (tasks/role_lease_guard.yml), and the one .env both services read (templates/env.j2), run through the role (tests/node_password/run.yml, tests/regrade/service.yml, tests/cluster_versions/render_env.yml) against the stand-ins for docker and the Compose module, so that no real Docker daemon or cluster is reached."""
+"""Tests for how the cluster role records a Docker host's role on the host and keeps it across runs: the filters (plugins/filter/cluster_role.py's cluster_host_role and plugins/filter/cluster_guard.py's cluster_role_lease_guard), the decision and its refusals (tasks/docker_role.yml), the record (tasks/docker_role_record.yml), the servers' turns and the regrade service following the recorded role (tasks/start_servers.yml, tasks/regrade_service.yml), the refusal of every run while the role controller holds the regrade Lease (tasks/role_lease_guard.yml), and the one .env both services read (templates/env.j2), run through the role (tests/node_password/run.yml, tests/regrade/service.yml, tests/cluster_versions/render_env.yml) against the stand-ins for docker and the Compose module, so that no real Docker daemon or cluster is reached."""
 
 from __future__ import annotations
 
@@ -18,16 +18,23 @@ import yaml
 
 from cluster_stand_ins import ANSIBLE_PLAYBOOK, HASH_NEW, ROLE, ROOT, RoleTestCase, ansible_env, flatten, has_compose, recap, role_tasks
 
-PLUGIN = ROOT / "plugins" / "filter" / "cluster_role.py"
-_spec = importlib.util.spec_from_file_location("cluster_role", PLUGIN)
-assert _spec is not None and _spec.loader is not None
-cluster_role = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cluster_role)
+
+def _filters(name: str) -> Any:
+    """The filter plugin plugins/filter/<name>.py, loaded from its file."""
+    spec = importlib.util.spec_from_file_location(name, ROOT / "plugins" / "filter" / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+cluster_role = _filters("cluster_role")
+cluster_guard = _filters("cluster_guard")
 
 DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
 HOLDER = DEFAULTS["github_runner_cluster_role_lease_holder"]
-LEASE_NAME = DEFAULTS["github_runner_cluster_role_lease_name"]
-LEASE_NAMESPACE = DEFAULTS["github_runner_cluster_role_lease_namespace"]
+LEASE_NAME = DEFAULTS["github_runner_cluster_regrade_lease_name"]
+LEASE_NAMESPACE = DEFAULTS["github_runner_cluster_regrade_lease_namespace"]
 SWAP_ID = DEFAULTS["github_runner_cluster_role_lease_swap_id_annotation"]
 COMPOSE = ROLE / "files" / "docker-compose.yml"
 # Long enough that a Lease renewed this long ago is still unexpired however slowly a test runs, and the time it has run out by.
@@ -52,7 +59,7 @@ def running(host: str, text: str = "", now: float | None = None) -> dict[str, An
 class LeaseGuardFilterTest(unittest.TestCase):
     @staticmethod
     def guard(reads: Any, holder: str) -> dict[str, str]:
-        verdict: dict[str, str] = cluster_role.cluster_role_lease_guard(reads, holder, SWAP_ID)
+        verdict: dict[str, str] = cluster_guard.cluster_role_lease_guard(reads, holder, SWAP_ID)
         return verdict
 
     def test_a_lease_the_controller_holds_and_has_renewed_in_time_is_held(self) -> None:
@@ -92,11 +99,12 @@ class LeaseGuardFilterTest(unittest.TestCase):
 
     def test_an_answer_that_is_not_a_lease_is_an_error(self) -> None:
         for stdout in ("running\nnot-a-time\n", "running\n0\nnot json", "running\n0\n[]", "something else"):
-            with self.subTest(stdout=stdout), self.assertRaises(cluster_role.AnsibleFilterError):
+            with self.subTest(stdout=stdout), self.assertRaises(cluster_guard.AnsibleFilterError):
                 self.guard([read("server1", stdout)], HOLDER)
 
     def test_the_filters_are_registered(self) -> None:
-        self.assertEqual(sorted(cluster_role.FilterModule().filters()), ["cluster_host_role", "cluster_role_lease_guard"])
+        self.assertEqual(sorted(cluster_role.FilterModule().filters()), ["cluster_host_role"])
+        self.assertIn("cluster_role_lease_guard", cluster_guard.FilterModule().filters())
 
 
 class DockerRoleTest(RoleTestCase):
