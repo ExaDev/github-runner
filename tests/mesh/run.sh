@@ -38,8 +38,10 @@ api_node=1
 pin_first=1
 # Where tc comes from for the role_controller scenario: a throwaway container in a node's network namespace, since the node's own image has none.
 tc_image=alpine:3.20
-# The probe's period in the role_controller scenario: long enough that a sample's own work (a few kubectl calls) is a small part of it, since a probe that has not reported for three periods counts as silent.
+# The probe's period in the role_controller scenario while it fills a window of samples: long enough that a sample's own work (a few kubectl calls) is a small part of it, since a probe that has not reported for three periods counts as silent.
 role_controller_sample_seconds=5
+# The probe's period once a swap is under way, and in the swap scenarios throughout: the ARC role's own default. A swap holds its steps while any voter's probe is silent, and a probe on a runner with this many k3s nodes under way misses three periods of 5 seconds, which only stalls the swap; the default keeps a silent probe a fault and not a flutter.
+swap_sample_seconds=15
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
 # etcd's timing for every server, in milliseconds: a heartbeat interval and an election timeout of ten times it, above k3s's own defaults and so told apart from them, and above etcd's required five times.
@@ -1207,9 +1209,9 @@ keep_role_image_loaded() {
   done
 }
 
-# Runs the role controller's probe and controller in the cluster: the image built from this checkout is loaded into every node (the native host's containerd too, when the scenario has one), the ARC role renders its manifests, and they are applied and rolled out.
+# Runs the role controller's probe and controller in the cluster, the probes at $1 seconds (role_controller_sample_seconds by default): the image built from this checkout is loaded into every node (the native host's containerd too, when the scenario has one), the ARC role renders its manifests, and they are applied and rolled out.
 deploy_role_controller() {
-  local index image_file manifests
+  local index image_file manifests sample_seconds=${1:-$role_controller_sample_seconds}
   log "Building the role controller image from this checkout and loading it into every node"
   docker build --quiet --file "${repo_root}/fleet-role/Dockerfile" --tag "$role_controller_image" "$repo_root" >/dev/null
   image_file="${work}/fleet-role-image.tar"
@@ -1226,7 +1228,7 @@ deploy_role_controller() {
   manifests="${work}/fleet-role.yaml"
   ANSIBLE_COLLECTIONS_PATH="${repo_root}/playbooks/collections" ANSIBLE_LOCALHOST_WARNING=false ANSIBLE_INVENTORY_UNPARSED_WARNING=false \
     "$ansible_playbook" "${repo_root}/tests/fleet_role/render.yml" -e "fleet_role_output=${manifests}" \
-    -e "github_runner_arc_role_controller_image=${role_controller_image}" -e "github_runner_arc_role_controller_sample_seconds=${role_controller_sample_seconds}" \
+    -e "github_runner_arc_role_controller_image=${role_controller_image}" -e "github_runner_arc_role_controller_sample_seconds=${sample_seconds}" \
     -e "github_runner_arc_role_controller_election_timeout_ms=${etcd_election_ms}" >/dev/null
   # Applied rather than created: the cluster role makes the namespace too, for the role actuators' credential, which it sets up while the controller is on.
   kubectl_on "$api_node" apply -f - >/dev/null <<MANIFESTS
@@ -1365,9 +1367,11 @@ scenario_role_controller() {
   if kubectl_on 1 get nodes -o json | jq -e '[.items[] | select(.metadata.annotations["etcd.k3s.cattle.io/remove"] != null)] | length > 0' >/dev/null; then fail "a node was annotated for removal"; fi
   [ -z "$(kubectl_on 1 get lease fleet-regrade --namespace kube-system -o 'jsonpath={.metadata.name}' 2>/dev/null </dev/null || true)" ] || fail "a dry run took the regrade Lease"
 
-  log "With the dry run turned off the controller carries out the swap it reported, bringing the standby agent, a Docker host that was never a server, in for the slow voter, which stays slow"
-  kubectl_on 1 --namespace "$platform_namespace" set env deployment/fleet-role FLEET_ROLE_DRY_RUN=false >/dev/null
+  log "With the dry run turned off, and the probes' period the ARC role's default, the controller carries out the swap it reported, bringing the standby agent, a Docker host that was never a server, in for the slow voter, which stays slow"
+  kubectl_on 1 --namespace "$platform_namespace" set env deployment/fleet-role FLEET_ROLE_DRY_RUN=false FLEET_ROLE_SAMPLE_SECONDS="$swap_sample_seconds" >/dev/null
+  kubectl_on 1 --namespace "$platform_namespace" set env daemonset/fleet-role-probe REPORT_SECONDS="$swap_sample_seconds" >/dev/null
   kubectl_on 1 --namespace "$platform_namespace" rollout status deployment/fleet-role --timeout=300s
+  kubectl_on 1 --namespace "$platform_namespace" rollout status daemonset/fleet-role-probe --timeout=300s
   wait_for_swap "$(node_name "$slow")" "$(node_name 4)" completed
   role_status | jq -e '.dry_run == false and .request == null' >/dev/null || fail "the swap was not the controller's own decision: $(role_status | jq -c '{dry_run, request, last_swap}')"
   [ "$(node_is_voter "$(node_name 4)" && echo yes)" = yes ] || fail "$(node_name 4) is not a voter after the swap"
@@ -1630,10 +1634,12 @@ scenario_rejoin() {
 
 # --- The role controller carrying out a voter swap (the role_swap scenarios) ---
 
-# The most seconds a swap is waited for: every step is bounded by the operation timeout, the runner wait and the learner stall time the controller derives from the cluster role's own settings, a few of each.
-swap_wait_seconds=2700
-# k3s's learnerMaxStallTime, which the controller's rollback deadline and the paused scenario's wait for a rejoin are made of.
+# The controller's own waits, as the cluster role's defaults give them: github_runner_cluster_regrade_operation_timeout_seconds (the regrade pressure window), github_runner_cluster_native_runner_wait_timeout (its server ready timeout) and k3s's learnerMaxStallTime.
+operation_timeout_seconds=300
+runner_wait_seconds=600
 learner_stall_seconds=300
+# The most seconds a swap is waited for: the sum of every step's own bound (scripts/fleet-role-swap.jq's budget): the snapshot, the candidate's drain (the runner wait and an operation), the promotion (the learner stall time and an operation), the step-down, the removal, the finish and the clean-up of the outgoing host, an operation each.
+swap_wait_seconds=$((7 * operation_timeout_seconds + runner_wait_seconds + learner_stall_seconds))
 
 # Waits until the controller's status says no swap is under way and the last one that ended, from node $1 for node $2, ended as $3 (completed by default), saying the step the swap is at and what it waits for as they change.
 wait_for_swap() {
@@ -1701,7 +1707,7 @@ setup_swap_cluster() {
   wait_for "${native_host}'s role actuator to run" 120 native_unit_is fleet-role-actuator active
   local index
   for index in 1 2 3; do wait_for "$(node_name "$index")'s role actuator service to run" 120 container_is "$(node_name "$index")-role-actuator-1" running; done
-  deploy_role_controller
+  deploy_role_controller "$swap_sample_seconds"
   log "Waiting for the controller to see three voters and every gate holding"
   wait_for "the gates to hold with three voters" 900 role_status_is '(.gates | length == 0) and (.membership.voters | length == 3)'
   role_status | jq '{membership, gates, blocks}'
