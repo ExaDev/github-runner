@@ -220,6 +220,14 @@ case "$*" in
   "get lease fleet-regrade "*) [ ! -e "$state/fleet-regrade-lease" ] || cat "$state/fleet-regrade-lease" ;;
   "get lease "*) if [ -e "$state/lease" ]; then cat "$state/lease"; else echo 2099-01-01T00:00:00Z; fi ;;
   "get pods "*) [ -e "$state/runner-pods" ] && cat "$state/runner-pods"; exit 0 ;;
+  # The API's readiness: not ready for as many reads as the file api-unready-reads says, then ok.
+  "get --raw /readyz "*)
+    if [ -e "$state/api-unready-reads" ] && [ "$(cat "$state/api-unready-reads")" -gt 0 ]; then
+      echo $(( $(cat "$state/api-unready-reads") - 1 )) > "$state/api-unready-reads"
+      echo "error: You must be logged in to the server (the server has asked for the client to provide credentials)" >&2
+      exit 1
+    fi
+    echo ok ;;
   cordon*|uncordon*|drain*|label*|annotate*) ;;
   # The role actuator's credential: what is applied is kept for the test to read, the report ConfigMap exists once created, and its token Secret, filled as the token controller fills one, holds ACTUATOR_TOKEN.
   "apply --filename -"*)
