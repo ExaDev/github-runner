@@ -1,3 +1,30 @@
+## [2.38.0](https://github.com/ExaDev/github-runner/compare/v2.37.0...v2.38.0) (2026-11-04)
+
+### Features
+
+* **cluster:** switch a Docker host's role from the same actuator ([5f00a46](https://github.com/ExaDev/github-runner/commit/5f00a46c44e3f30987fc87ed9de3e0083b5f9afb))
+* **tool-images:** build the runner image with other runner ids ([f63fbfe](https://github.com/ExaDev/github-runner/commit/f63fbfe6ffe1fe9682eafc941aba6d3751786f8d))
+
+### Bug Fixes
+
+* **cluster:** apply the role actuator's credential once the other server's API serves ([e94e54b](https://github.com/ExaDev/github-runner/commit/e94e54ba2770635f00dc168e806955b18ab98502))
+* **cluster:** apply the role actuator's credential server-side ([a901230](https://github.com/ExaDev/github-runner/commit/a9012307af9b360212cf99f4c757588f9562e0d5))
+* **cluster:** install util-linux flock in the role actuator's image ([0498b5e](https://github.com/ExaDev/github-runner/commit/0498b5e0197f1f9b97650ffb20e511a7ed37af36))
+* **cluster:** make the role actuator's watch report a finished demotion again when the API lost it ([9c0a694](https://github.com/ExaDev/github-runner/commit/9c0a6944cf8b5ef780c8392cb2bdad4fffe20681))
+* **cluster:** run the role actuator's Compose commands with the files in use ([3735321](https://github.com/ExaDev/github-runner/commit/3735321c083380cfab1162837d900b9b8d870bf1))
+* **cluster:** take the role actuator's report ConfigMap as it is when another host created it ([d892857](https://github.com/ExaDev/github-runner/commit/d892857c717e81666636ad2082ab473e324cf8e1))
+
+### Code Refactoring
+
+* **cluster:** copy a node's identity between containers and volumes with one script ([8fba6fb](https://github.com/ExaDev/github-runner/commit/8fba6fb6102bf75ff7cce08a9f7d5d257dde97f0))
+* **cluster:** set up the role actuator's credential from task files any platform can include ([f6e88f0](https://github.com/ExaDev/github-runner/commit/f6e88f02fbb531491b27dc7cdb4c0520b114c344))
+
+### Tests
+
+* **mesh:** apply the platform namespace in the role_controller scenario ([bb68591](https://github.com/ExaDev/github-runner/commit/bb68591a881468fa61e9388a05549670a0836694))
+* **mesh:** demote a Docker server through its role actuator and promote it again ([d4a480b](https://github.com/ExaDev/github-runner/commit/d4a480b88e46510a901adad7f7ff07cd36cdd69f))
+* **mesh:** dump the role actuator's state, logs and reports when a scenario fails ([ffb8b56](https://github.com/ExaDev/github-runner/commit/ffb8b56141115b9d4ddde9f2c1628a728dd84a39))
+
 ## [2.37.0](https://github.com/ExaDev/github-runner/compare/v2.36.1...v2.37.0) (2026-11-04)
 
 ### Features
