@@ -1,5 +1,5 @@
 ---
-# Switches a native server to the agent unit, keeping its node name, node password and Tailscale device. Make-before-break: the server's etcd member is removed only while at least three other voters, every one Ready, remain to hold quorum without it (etcd calls a two-member cluster unsafe, https://etcd.io/docs/v3.6/op-guide/runtime-configuration/), so a cluster grows a voter before it loses one. In order: the node is emptied (drain.yml); the role file is switched to agent, so that neither Restart=always nor a reboot can start the server unit again (k3s marks a removed member's datastore with a tombstone and, started again, would rejoin it as a learner; Register in pkg/etcd/etcd.go at v1.34.1+k3s1); the member is removed through k3s's own controller, which acts on the etcd.k3s.cattle.io/remove annotation and records etcd.k3s.cattle.io/removed-node-name once etcd has removed it (pkg/etcd/member_controller.go); the server unit is stopped and disabled; the server's datastore is moved aside, because k3s reuses any datastore it finds and would otherwise start the old member's etcd again on a later promotion (https://docs.k3s.io/datastore/ha-embedded); the server role labels and k3s's etcd annotations are taken off the Node, which k3s does not do for a server that runs as an agent, so the cluster reads the host's live role right; and the agent unit is enabled and started, the node waited for and uncordoned. Needs service.yml's unit state. Under --check every read runs, the refusal included, and the switch is reported, not made.
+# Switches a native server to the agent unit, keeping its node name, node password and Tailscale device. Make-before-break: the server's etcd member is removed only while at least three other voters, every one Ready, remain to hold quorum without it (etcd calls a two-member cluster unsafe, https://etcd.io/docs/v3.6/op-guide/runtime-configuration/), so a cluster grows a voter before it loses one. In order: the node is emptied (drain.yml); the role file is switched to agent, so that neither Restart=always nor a reboot can start the server unit again (k3s marks a removed member's datastore with a tombstone and, started again, would rejoin it as a learner; Register in pkg/etcd/etcd.go at v1.34.1+k3s1); the member is removed through k3s's own controller, which acts on the etcd.k3s.cattle.io/remove annotation and records etcd.k3s.cattle.io/removed-node-name once etcd has removed it (pkg/etcd/member_controller.go); the role actuator's host-local demotion (files/role/fleet-role-actuator.sh demote-local) stops and disables the server unit, moves the server's datastore aside, because k3s reuses any datastore it finds and would otherwise start the old member's etcd again on a later promotion (https://docs.k3s.io/datastore/ha-embedded), and enables and starts the agent unit; the server role labels and k3s's etcd annotations are taken off the Node, which k3s does not do for a server that runs as an agent, so the cluster reads the host's live role right; and the node is waited for and uncordoned. Needs service.yml's unit state. Under --check every read runs, the refusal included, and the switch is reported, not made.
 
 - name: Reach the cluster through another server, since this one is to stop
   ansible.builtin.include_tasks: native/api.yml
@@ -92,33 +92,27 @@
       delay: "{{ github_runner_cluster_native_poll }}"
       changed_when: false
 
-    - name: Stop and disable the server unit
+    - name: Read the time on the host, before the agent is started
+      ansible.builtin.command:
+        argv: [date, -u, "+%Y-%m-%dT%H:%M:%SZ"]
+      register: github_runner_cluster_native_started
+      changed_when: false
+
+    - name: Switch the host to the agent unit
+      # The role actuator's host-local demotion (files/role/fleet-role-actuator.sh), which finishing a swap's demotion takes too: the server unit is stopped and disabled; its regrading level is forgotten, since the level is a server's and a later promotion must start the server whole; its datastore is moved aside, keeping only the newest copy, because k3s reuses any datastore it finds and would otherwise start the old member's etcd again on a later promotion, and a copy rather than a deletion since it holds the snapshots this server took; any join drop-ins a swap left are removed; and the agent unit is enabled and started.
       become: true
       ansible.builtin.command:
-        argv: [systemctl, disable, --now, "{{ github_runner_cluster_native_server_service }}"]
+        argv: ["{{ github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.sh", demote-local]
       changed_when: true
 
-    - name: Forget the regrading level the server was left at
-      # The level is a server's, and the agent unit never reads it; a later promotion must start the server whole, not at a level it was stepped to in an earlier term as a server.
+    - name: Clear the agent's waiting restart, since it has started on its files
       become: true
       ansible.builtin.file:
-        path: "{{ github_runner_cluster_native_regrade_level_file }}"
+        path: "{{ github_runner_cluster_native_restart_marker }}-{{ github_runner_cluster_native_agent_service }}"
         state: absent
 
-    - name: Move the server's datastore aside, keeping only the newest copy
-      # A copy, not a deletion: it holds the snapshots this server took (server/db/snapshots). One copy only, the one from this demotion, so repeated switches do not fill the disk.
-      become: true
-      ansible.builtin.shell: |
-        set -eu
-        rm -rf "$server/db.demoted"
-        mv "$server/db" "$server/db.demoted"
-      environment:
-        server: "{{ github_runner_cluster_native_data_dir }}/server"
-      changed_when: true
-      when: github_runner_cluster_native_has_datastore | bool
-
     - name: Take the server role labels and k3s's etcd annotations off the Node
-      # A trailing "-" removes a key; one that is not there is left alone.
+      # A trailing "-" removes a key; one that is not there is left alone. After the agent has started, as the role controller's swap takes them off: the agent's k3s puts none of them back.
       become: "{{ github_runner_cluster_native_api_become }}"
       ansible.builtin.command:
         argv: "{{ github_runner_cluster_native_api_argv + [item, 'node', github_runner_cluster_effective_node_name] + github_runner_cluster_native_keys[item] }}"
@@ -130,24 +124,6 @@
       environment: "{{ github_runner_cluster_native_api_environment }}"
       delegate_to: "{{ github_runner_cluster_native_api_host }}"
       changed_when: true
-
-    - name: Read the time on the host, before the agent is started
-      ansible.builtin.command:
-        argv: [date, -u, "+%Y-%m-%dT%H:%M:%SZ"]
-      register: github_runner_cluster_native_started
-      changed_when: false
-
-    - name: Enable and start the agent unit
-      become: true
-      ansible.builtin.command:
-        argv: [systemctl, enable, --now, "{{ github_runner_cluster_native_agent_service }}"]
-      changed_when: true
-
-    - name: Clear the agent's waiting restart, since it has started on its files
-      become: true
-      ansible.builtin.file:
-        path: "{{ github_runner_cluster_native_restart_marker }}-{{ github_runner_cluster_native_agent_service }}"
-        state: absent
 
     - name: Wait for a server to see this node Ready on a heartbeat from the agent just started
       ansible.builtin.include_tasks: native/server_ready.yml

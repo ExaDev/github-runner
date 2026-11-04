@@ -1,0 +1,81 @@
+{# The role actuator's credential (tasks/role_actuator.yml applies it): its ServiceAccount, which can read Nodes (a ClusterRole, since a Node is cluster-wide), read the regrade Lease (a Role in its namespace, by name) and read and patch its report ConfigMap (a Role in the platform namespace, by name), and the token Secret the token controller fills for it. Nothing here can write a Node or take the Lease: the controller does every write on the API. The namespace is the ARC role's platform namespace, applied here too since a cluster can run the actuators before the ARC role has run. The ConfigMap is created separately, since applying an empty one again would wipe the reports. #}
+{% set name = github_runner_cluster_role_actuator_name %}
+{% set namespace = github_runner_cluster_role_actuator_namespace %}
+{% set labels = {'app.kubernetes.io/part-of': 'github-runner', 'app.kubernetes.io/name': name} %}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ namespace | to_json }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ name | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
+metadata:
+  name: {{ (name ~ '-token') | to_json }}
+  namespace: {{ namespace | to_json }}
+  labels: {{ labels | to_json }}
+  annotations:
+    kubernetes.io/service-account.name: {{ name | to_json }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ ('github-runner-' ~ name) | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ ('github-runner-' ~ name) | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ namespace | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ ('github-runner-' ~ name) | to_json }}
+{% for scope in [
+    {'namespace': namespace, 'group': '', 'resource': 'configmaps', 'object': github_runner_cluster_role_actuator_configmap, 'verbs': ['get', 'patch']},
+    {'namespace': github_runner_cluster_regrade_lease_namespace, 'group': 'coordination.k8s.io', 'resource': 'leases', 'object': github_runner_cluster_regrade_lease_name, 'verbs': ['get']},
+  ] %}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ ('github-runner-' ~ name) | to_json }}
+  namespace: {{ scope.namespace | to_json }}
+  labels: {{ labels | to_json }}
+rules:
+  - apiGroups: {{ [scope.group] | to_json }}
+    resources: {{ [scope.resource] | to_json }}
+    resourceNames: {{ [scope.object] | to_json }}
+    verbs: {{ scope.verbs | to_json }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ ('github-runner-' ~ name) | to_json }}
+  namespace: {{ scope.namespace | to_json }}
+  labels: {{ labels | to_json }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ name | to_json }}
+    namespace: {{ namespace | to_json }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ ('github-runner-' ~ name) | to_json }}
+{% endfor %}

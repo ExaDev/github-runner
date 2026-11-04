@@ -1,0 +1,22 @@
+# Managed by the exadev.github_runner collection's github_runner_cluster role (node mode native, github_runner_cluster_role_controller: true). Do not edit by hand: change this host's variables and run the role again.
+# Switches this host between the {{ github_runner_cluster_native_server_service }} and {{ github_runner_cluster_native_agent_service }} units when the role controller asks through the host's Node, for a voter swap; see the role README's Role actuator. It runs fleet-role-actuator with the systemd platform (files/role/fleet-role-actuator.sh and fleet-role-actuator-systemd.sh), which starts and stops those units and writes the role file their conditions read, so it runs as root, as they do.
+[Unit]
+Description=fleet-role-actuator: switches this native k3s node between server and agent for the role controller
+Documentation=https://github.com/ExaDev/github-runner/tree/main/roles/github_runner_cluster#role-actuator
+# Ordered after the network and the Tailscale client it reaches the cluster's API through, and bound to neither k3s unit: it stops and starts them itself, and must keep running while it does.
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+
+[Service]
+Type=exec
+User=root
+Environment="FLEET_ROLE_ACTUATOR_ENV={{ github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.env"
+# k3s, for `k3s kubectl` and `k3s etcd-snapshot`, is in the role's binary directory.
+Environment="PATH={{ github_runner_cluster_native_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart={{ github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.sh watch
+# The watcher keeps nothing in memory that its report and the host do not hold, so a restart takes up a step where it was: a step it had not reported is taken again, and every step can be.
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
