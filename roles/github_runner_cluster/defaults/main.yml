@@ -213,11 +213,13 @@ github_runner_cluster_api_candidates: >-
      + (github_runner_cluster_topology.hosts | dict2items | rejectattr('key', 'equalto', inventory_hostname) | rejectattr('value.role', 'equalto', 'server')
         | selectattr('value.eligible') | list) }}
 # Derived, never set directly: the role actuator (files/role/fleet-role-actuator.sh), which switches a native host between its server and agent units for the role controller's voter swap, as the host's Node asks, and holds the host-local part of the role's own promotion and demotion. Its scripts and settings go in github_runner_cluster_role_actuator_dir on every native host; its watcher, the github_runner_cluster_role_actuator_service unit, runs on every server and every eligible host while github_runner_cluster_role_controller is true (tasks/role_actuator.yml), with a credential of its own (the ServiceAccount github_runner_cluster_role_actuator_name, which can read Nodes and the regrade Lease and patch its report, the ConfigMap github_runner_cluster_role_actuator_configmap in github_runner_cluster_role_actuator_namespace) in a kubeconfig only root reads.
-github_runner_cluster_role_actuator_dir: "{{ github_runner_cluster_native_lib_dir }}/role"
+# On a Docker host (node mode compose) the scripts, settings and kubeconfig go in the Compose project's role directory instead, and the watcher is the project's role-actuator service (tasks/role_actuator_docker.yml), whose container mounts the project directory.
+github_runner_cluster_role_actuator_dir: "{{ github_runner_cluster_native_lib_dir ~ '/role' if github_runner_cluster_node_mode == 'native' else github_runner_cluster_dir ~ '/role' }}"
 github_runner_cluster_role_actuator_service: fleet-role-actuator
 github_runner_cluster_role_actuator_name: fleet-role-actuator
 github_runner_cluster_role_actuator_configmap: fleet-role-actuators
-github_runner_cluster_role_actuator_kubeconfig: "{{ github_runner_cluster_native_config_dir }}/fleet-role-actuator.kubeconfig"
+github_runner_cluster_role_actuator_kubeconfig: >-
+  {{ github_runner_cluster_native_config_dir if github_runner_cluster_node_mode == 'native' else github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.kubeconfig
 # The ARC role's platform namespace, where the role controller runs and reads the actuators' reports: its github_runner_arc_platform_namespace where the inventory sets that, and that variable's default otherwise (tests/unit/test_role_actuator.py holds the two together).
 github_runner_cluster_role_actuator_namespace: "{{ github_runner_arc_platform_namespace | default('github-runner-platform') }}"
 # Not a setting: the commands the actuator's watcher runs that a minimal host may lack, each with the Debian package that installs it. jq reads the cluster's answers, ps finds the pods left at etcd-only (as the regrade service does) and flock holds the host's switch lock.

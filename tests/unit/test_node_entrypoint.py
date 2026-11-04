@@ -203,7 +203,8 @@ class RoleDirectoryTest(unittest.TestCase):
 
     def test_the_override_mounts_the_directory_read_only_into_both_services_and_nothing_else(self) -> None:
         services = yaml.safe_load(FLEET_ROLE_COMPOSE.read_text())["services"]
-        self.assertEqual(services, {"k3s": {"volumes": [MOUNT]}, "k3s-agent": {"volumes": [MOUNT]}})
+        # The regrade service reads the role file too, to idle on a host it no longer names a server (regrade/fleet-regrade.sh).
+        self.assertEqual(services, {"k3s": {"volumes": [MOUNT]}, "k3s-agent": {"volumes": [MOUNT]}, "regrade": {"volumes": [MOUNT]}})
         self.assertEqual(assignment("fleet_role_dir"), "fleet_role_dir=${FLEET_ROLE_DIR:-/etc/github-runner}")
         # The base file does not mount it, so a host the controller never moves is not recreated by an upgrade.
         self.assertNotIn("fleet-role.d", (ROLE / "files" / "docker-compose.yml").read_text())

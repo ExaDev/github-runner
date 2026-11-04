@@ -1,0 +1,71 @@
+---
+# Runs the role actuator's watcher on a Docker host the role controller may switch, for tasks/role_actuator.yml, which includes this file only on such a host (see role_actuator_watcher.yml for why an include): the role-actuator service of the host's Compose project, built from files/role/Dockerfile and running files/role/fleet-role-actuator.sh watch with the docker platform. Places the scripts beside its settings in the project's role directory (github_runner_cluster_role_actuator_dir), with regrading's core and Docker actuator, which it runs on, and files/node-identity.sh, which it moves the node's identity between the services with; gives it its credential; and starts the service, or creates it again when something it reads at its start changed. Run after the host's node has been started. Under --check nothing is changed and each change a real run would make is reported.
+
+- name: Choose the server whose API sets up the watcher's credential
+  ansible.builtin.include_tasks: role_actuator_api.yml
+
+- name: Report the watcher a real run would set up
+  ansible.builtin.debug:
+    msg: >-
+      place the role actuator in {{ github_runner_cluster_role_actuator_dir }}, apply its credential ({{ github_runner_cluster_role_actuator_name }} in
+      {{ github_runner_cluster_role_actuator_namespace }}) and run the role-actuator service of {{ github_runner_cluster_compose_project }}
+  changed_when: true
+  when: ansible_check_mode
+
+- name: Set up the watcher and run it
+  when: not ansible_check_mode
+  block:
+    - name: Create the role actuator's directory
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_role_actuator_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Place the role actuator's image build context and scripts
+      # Copied on every run, so a collection upgrade reaches the host; the service runs them from the mounted project directory, so a change takes effect when the service is created again, below.
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ github_runner_cluster_role_actuator_dir }}/{{ item.src | basename }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {src: role/Dockerfile, mode: "0644"}
+        - {src: role/fleet-role-actuator.sh, mode: "0755"}
+        - {src: role/fleet-role-actuator-docker.sh, mode: "0644"}
+        - {src: regrade/fleet-regrade-core.sh, mode: "0644"}
+        - {src: regrade/fleet-regrade-k3s.sh, mode: "0644"}
+        - {src: regrade/fleet-regrade-docker.sh, mode: "0644"}
+        - {src: node-identity.sh, mode: "0755"}
+      loop_control:
+        label: "{{ item.src }}"
+      register: github_runner_cluster_role_actuator_scripts
+
+    - name: Template the role actuator's settings
+      ansible.builtin.template:
+        src: role-actuator.env.j2
+        dest: "{{ github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.env"
+        mode: "0644"
+      register: github_runner_cluster_role_actuator_settings
+
+    - name: Template the role actuator's Compose file
+      ansible.builtin.template:
+        src: docker-compose.role-actuator.yml.j2
+        dest: "{{ github_runner_cluster_dir }}/docker-compose.role-actuator.yml"
+        mode: "0644"
+
+    - name: Give the watcher its credential and the URLs a promotion joins
+      ansible.builtin.include_tasks: role_actuator_credential.yml
+
+    - name: Start the role actuator's service
+      # recreate: always when something the watcher reads once, at its start, changed, since Compose sees no change in a mounted directory's contents; a service nothing changed for is left running. Its own Compose file goes last, after every file the k3s services are run with.
+      community.docker.docker_compose_v2:
+        project_src: "{{ github_runner_cluster_dir }}"
+        project_name: "{{ github_runner_cluster_compose_project }}"
+        profiles: ["role-actuator"]
+        services: ["role-actuator"]
+        cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
+        files: "{{ github_runner_cluster_compose_file_list + ['docker-compose.role-actuator.yml'] }}"
+        recreate: >-
+          {{ 'always' if (github_runner_cluster_role_actuator_scripts is changed or github_runner_cluster_role_actuator_settings is changed
+                          or github_runner_cluster_role_actuator_kubeconfig_file is changed or github_runner_cluster_role_actuator_join_urls is changed)
+             else 'auto' }}
+        state: present

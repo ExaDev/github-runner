@@ -1,17 +1,23 @@
 ---
-# Runs the role actuator's watcher (files/role/fleet-role-actuator.sh watch, as the github_runner_cluster_role_actuator_service unit) on a native host the role controller may switch or take a snapshot on, a server or a host marked eligible, while github_runner_cluster_role_controller is true, and removes it otherwise; native/config.yml has placed its scripts and settings on every native host. The watcher gets a credential of its own: the role applies its ServiceAccount, its scoped rules and its token Secret (templates/role-actuator-rbac.yaml.j2) through another server's API, creates the report ConfigMap the controller reads when there is none, and writes a kubeconfig holding the token, mode 0600, by a task that logs nothing. A file maps every other server and eligible host's node name to the URL a promotion joins it at. Run after native/service.yml has run the host's unit. While github_runner_cluster_native_start is false the unit is left as it is found, running or not, as the k3s units are, and only its files are written. Under --check nothing is changed and each change a real run would make is reported.
+# Runs the role actuator's watcher (files/role/fleet-role-actuator.sh watch) on a host the role controller may switch or take a snapshot on, a server or a host marked eligible, while github_runner_cluster_role_controller is true, and removes it otherwise: on a native host as the github_runner_cluster_role_actuator_service unit (role_actuator_watcher.yml; native/config.yml has placed its scripts and settings on every native host), on a Docker host as the role-actuator service of its Compose project (role_actuator_docker.yml). The watcher gets a credential of its own (role_actuator_credential.yml). Run after the host's node has been started: on a native host after native/service.yml, where while github_runner_cluster_native_start is false the unit is left as it is found, running or not, as the k3s units are, and only its files are written. Under --check nothing is changed and each change a real run would make is reported.
 
 - name: Work out whether the role actuator's watcher runs on this host
   ansible.builtin.set_fact:
-    github_runner_cluster_role_actuator_on: "{{ github_runner_cluster_role_controller | bool and github_runner_cluster_native_stage_server | bool }}"
+    github_runner_cluster_role_actuator_on: >-
+      {{ github_runner_cluster_role_controller | bool
+         and (github_runner_cluster_native_stage_server | bool if github_runner_cluster_node_mode == 'native'
+              else (github_runner_cluster_docker_role == 'server' or github_runner_cluster_topology.hosts[inventory_hostname].eligible)) }}
 
 - name: Run the role actuator's watcher
-  ansible.builtin.include_tasks: role_actuator_watcher.yml
+  ansible.builtin.include_tasks:
+    file: "{{ 'role_actuator_watcher.yml' if github_runner_cluster_node_mode == 'native' else 'role_actuator_docker.yml' }}"
   when: github_runner_cluster_role_actuator_on | bool
 
-- name: Remove the role actuator's watcher, its credential and its join URLs from the host
+- name: Remove the role actuator's watcher, its credential and its join URLs from a native host
   # The scripts and settings stay: the role's own promotion and demotion run them. What the role applied to the cluster stays too, shared by every host's watcher, and grants nothing to anyone without its token.
-  when: not github_runner_cluster_role_actuator_on | bool
+  when:
+    - not github_runner_cluster_role_actuator_on | bool
+    - github_runner_cluster_node_mode == 'native'
   block:
     - name: Read whether the watcher is installed
       ansible.builtin.stat:
@@ -42,3 +48,36 @@
           ansible.builtin.command:
             argv: [systemctl, daemon-reload]
           changed_when: true
+
+- name: Remove the role actuator's service, its credential and its join URLs from a Docker host
+  # What the role applied to the cluster stays, as on a native host. The kubeconfig says whether the role ever set the watcher up here, so a host that never ran it is not asked for its container.
+  when:
+    - not github_runner_cluster_role_actuator_on | bool
+    - github_runner_cluster_node_mode != 'native'
+  block:
+    - name: Read whether the watcher was set up
+      ansible.builtin.stat:
+        path: "{{ github_runner_cluster_role_actuator_kubeconfig }}"
+      register: github_runner_cluster_role_actuator_installed
+
+    - name: Remove the watcher
+      when: github_runner_cluster_role_actuator_installed.stat.exists
+      block:
+        - name: Remove the role actuator's container
+          ansible.builtin.command:
+            argv: [docker, rm, --force, "{{ github_runner_cluster_compose_project }}-role-actuator-1"]
+          environment: "{{ github_runner_cluster_docker_cli_environment }}"
+          register: github_runner_cluster_role_actuator_removed
+          changed_when: github_runner_cluster_role_actuator_removed.rc == 0
+          failed_when:
+            - github_runner_cluster_role_actuator_removed.rc != 0
+            - "'No such container' not in github_runner_cluster_role_actuator_removed.stderr"
+
+        - name: Remove the watcher's kubeconfig, join URLs and Compose file
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ github_runner_cluster_role_actuator_kubeconfig }}"
+            - "{{ github_runner_cluster_role_actuator_dir }}/join-urls"
+            - "{{ github_runner_cluster_dir }}/docker-compose.role-actuator.yml"

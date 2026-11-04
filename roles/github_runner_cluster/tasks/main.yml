@@ -177,6 +177,9 @@
     - name: Run the regrade service beside this server, or remove it
       ansible.builtin.include_tasks: regrade_service.yml
 
+    - name: Run the role actuator's service, which switches this host for the role controller, or remove it
+      ansible.builtin.include_tasks: role_actuator.yml
+
     - name: Check the runtime and this node's container are up
       ansible.builtin.include_tasks: end_checks.yml
       when: ansible_facts['system'] == 'Darwin'
@@ -201,6 +204,9 @@
     - name: Check the runtime and this node's container are up
       ansible.builtin.include_tasks: end_checks.yml
       when: ansible_facts['system'] == 'Darwin'
+
+    - name: Run the role actuator's service on an eligible agent, which the role controller may promote, or remove it
+      ansible.builtin.include_tasks: role_actuator.yml
 
     - name: End the role here, since an agent host has no API of its own to wait on
       ansible.builtin.meta: end_role
