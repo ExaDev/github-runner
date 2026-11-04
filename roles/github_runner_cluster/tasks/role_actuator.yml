@@ -69,6 +69,24 @@
           role actuator's credential through. Nothing was changed.
       when: github_runner_cluster_native_api_host | length == 0
 
+    - name: Write the watcher's unit
+      # Under --check too, as the regrade unit is (native/regrade_service.yml), so a check run reports a changed unit.
+      become: true
+      ansible.builtin.template:
+        src: native/fleet-role-actuator.service.j2
+        dest: "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_role_actuator_service }}.service"
+        mode: "0644"
+      register: github_runner_cluster_role_actuator_unit
+
+    - name: Reload systemd when the unit changed
+      become: true
+      ansible.builtin.command:
+        argv: [systemctl, daemon-reload]
+      changed_when: true
+      when:
+        - github_runner_cluster_role_actuator_unit is changed
+        - not ansible_check_mode
+
     - name: Report the credential and the watcher a real run would set up
       ansible.builtin.debug:
         msg: >-
@@ -152,21 +170,6 @@
             dest: "{{ github_runner_cluster_role_actuator_dir }}/join-urls"
             mode: "0644"
           register: github_runner_cluster_role_actuator_join_urls
-
-        - name: Write the watcher's unit
-          become: true
-          ansible.builtin.template:
-            src: native/fleet-role-actuator.service.j2
-            dest: "{{ github_runner_cluster_native_unit_dir }}/{{ github_runner_cluster_role_actuator_service }}.service"
-            mode: "0644"
-          register: github_runner_cluster_role_actuator_unit
-
-        - name: Reload systemd when the unit changed
-          become: true
-          ansible.builtin.command:
-            argv: [systemctl, daemon-reload]
-          changed_when: true
-          when: github_runner_cluster_role_actuator_unit is changed
 
         - name: Read whether the watcher is enabled and running
           ansible.builtin.command:
