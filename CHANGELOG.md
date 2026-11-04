@@ -1,3 +1,24 @@
+## [2.36.0](https://github.com/ExaDev/github-runner/compare/v2.35.1...v2.36.0) (2026-11-04)
+
+### Features
+
+* **cluster:** record a Docker host's role on the host and keep it across runs ([5f6d2bf](https://github.com/ExaDev/github-runner/commit/5f6d2bf4b9c1de865b456ae105349ebeddff1fa2))
+
+### Bug Fixes
+
+* **cluster:** count a host by its recorded role in the restart guard's quorum ([e07b614](https://github.com/ExaDev/github-runner/commit/e07b614ee357cbfcbd88c359e8fe7fabe44edbce))
+* **cluster:** follow the recorded role in the restart guard and a Colima resize ([62dcdaf](https://github.com/ExaDev/github-runner/commit/62dcdaff79eca05d2efbd3e492f13fdf5978d60f))
+
+### Code Refactoring
+
+* **cluster:** judge the role controller's Lease with the regrade guard's expiry rule ([e05b247](https://github.com/ExaDev/github-runner/commit/e05b247f027ab0b0f67dc9726785e163c6aa31fe))
+
+### Tests
+
+* **cluster:** cover the recorded Docker role and its Lease guard ([693a9bf](https://github.com/ExaDev/github-runner/commit/693a9bfd027c3734a3eceb8abf71c2ce197b5666))
+* **cluster:** tell a recorded role written over from one left alone ([3ef8937](https://github.com/ExaDev/github-runner/commit/3ef8937d45a3f45d7e8f2ef7cbd6842c90ecf1ff))
+* **mesh:** decide each host's role before the recreate report reads its container ([8746be2](https://github.com/ExaDev/github-runner/commit/8746be23e0c333fd8bf18e0a25b91f4f1440ebf3))
+
 ## [2.35.1](https://github.com/ExaDev/github-runner/compare/v2.35.0...v2.35.1) (2026-11-04)
 
 ### Bug Fixes
