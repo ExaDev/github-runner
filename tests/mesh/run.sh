@@ -1208,8 +1208,12 @@ scenario_role_controller() {
     "$ansible_playbook" "${repo_root}/tests/fleet_role/render.yml" -e "fleet_role_output=${manifests}" \
     -e "github_runner_arc_role_controller_image=${role_controller_image}" -e "github_runner_arc_role_controller_sample_seconds=${role_controller_sample_seconds}" \
     -e "github_runner_arc_role_controller_election_timeout_ms=${etcd_election_ms}" >/dev/null
-  kubectl_on 1 create namespace "$platform_namespace" >/dev/null
+  # Applied rather than created: the cluster role makes the namespace too, for the role actuators' credential, which it sets up while the controller is on.
   kubectl_on 1 apply -f - >/dev/null <<MANIFESTS
+apiVersion: v1
+kind: Namespace
+metadata: {name: ${platform_namespace}}
+---
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata: {name: github-runner-platform}
