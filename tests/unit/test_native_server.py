@@ -98,12 +98,13 @@ class NativeServerTest(NativeRoleHarness):
             next(call for call in calls if call.startswith("kubectl get pods --all-namespaces --selector actions-ephemeral-runner=True --field-selector spec.nodeName=laptop,status.phase!=Succeeded,status.phase!=Failed")),
             next(call for call in calls if call.startswith("kubectl drain laptop --ignore-daemonsets --delete-emptydir-data")),
             "systemctl disable --now k3s-agent",
-            "systemctl start k3s",
+            # The actuator's promote-local starts the server unit, as a swap's promotion does.
+            "systemctl enable --now k3s",
             "kubectl uncordon laptop",
         ]
         self.assertEqual([call for call in calls if call in order], order)
         self.assertEqual(self.role_file(), "server")
-        self.assertEqual(self.starts()[-1], "start k3s server")
+        self.assertEqual(self.starts()[-1], "enable k3s server")
         self.assertFalse((self.state / "active-k3s-agent").exists())
         self.assertFalse((self.state / "enabled-k3s-agent").exists())
         self.assertEqual(password.read_text(), "node-password")
@@ -179,9 +180,10 @@ class NativeServerTest(NativeRoleHarness):
             "kubectl cordon laptop",
             "kubectl annotate --overwrite node laptop etcd.k3s.cattle.io/remove=true",
             "systemctl disable --now k3s",
+            # The actuator's demote-local starts the agent before the Node is cleaned, as a swap's controller cleans it after the finish; the agent's k3s puts none of the keys back.
+            "systemctl enable --now k3s-agent",
             "kubectl label node laptop node-role.kubernetes.io/control-plane- node-role.kubernetes.io/etcd- node-role.kubernetes.io/master-",
             "kubectl annotate node laptop etcd.k3s.cattle.io/remove- etcd.k3s.cattle.io/removed-node-name- etcd.k3s.cattle.io/node-name- etcd.k3s.cattle.io/node-address-",
-            "systemctl enable --now k3s-agent",
             "kubectl uncordon laptop",
         ]
         self.assertEqual([call for call in calls if call in order], order)
