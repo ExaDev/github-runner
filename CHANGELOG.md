@@ -1,3 +1,27 @@
+## [2.37.0](https://github.com/ExaDev/github-runner/compare/v2.36.1...v2.37.0) (2026-11-04)
+
+### Features
+
+* **cluster:** switch a native host's role from a host-side actuator driven by its Node ([103d9b3](https://github.com/ExaDev/github-runner/commit/103d9b38792cfd50f017bc7313dbf164b77b3691))
+
+### Bug Fixes
+
+* **cluster:** load the role actuator's watcher tasks only on a host that runs it ([e62d5af](https://github.com/ExaDev/github-runner/commit/e62d5af3822a4c34d5e64ae7be47e44366c86d1f))
+* **cluster:** pass the role actuator's credential to kubectl through docker exec --interactive ([ceca161](https://github.com/ExaDev/github-runner/commit/ceca161682562801c54dfa0b63da7322b2445a3b))
+* **cluster:** write the role actuator's unit under --check, as the regrade unit is ([257fdb8](https://github.com/ExaDev/github-runner/commit/257fdb8a9aaa8b0679916033e1530e5204c66c3c))
+
+### Code Refactoring
+
+* **cluster:** derive the API servers a host's helpers reach the cluster through once ([2eb4f14](https://github.com/ExaDev/github-runner/commit/2eb4f143a80ddc9f69ffb662f63cfe5b1180e9bf))
+
+### Tests
+
+* **cluster:** check the role actuator leaves a refused step to the controller ([c4a64ba](https://github.com/ExaDev/github-runner/commit/c4a64ba3e8bafe029c8a589ac8bd011c9048e981))
+* **cluster:** count the role actuator's unit among the native templates ([0e1a8b8](https://github.com/ExaDev/github-runner/commit/0e1a8b811f95c690301837c13a6b4387fb2b8411))
+* **cluster:** expect the native switch to start each unit through the role actuator ([4c40236](https://github.com/ExaDev/github-runner/commit/4c40236a5b2d9ddc68bdecf48b93007c034601da))
+* **mesh:** switch a native standby through its role actuator with real k3s ([33f9f18](https://github.com/ExaDev/github-runner/commit/33f9f18eba488c9930855692b7fecbcd86dd939e))
+* **mesh:** wait for the demoted agent by its Ready condition and a fresh node lease ([f0b7e9c](https://github.com/ExaDev/github-runner/commit/f0b7e9c463dcdfe281920485d2100287742f9792))
+
 ## [2.36.1](https://github.com/ExaDev/github-runner/compare/v2.36.0...v2.36.1) (2026-11-04)
 
 ### Bug Fixes
