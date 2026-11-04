@@ -1,7 +1,7 @@
 ---
 # One native server's turn (see service.yml, which gives each native server of the play its turn, one at a time, as tasks/start_servers.yml does for the Docker servers): works out what the server unit needs, refuses when that would take quorum away or add a member beside an unhealthy one, does it, and waits for the node to be Ready on a heartbeat from the k3s just started and a voting member of etcd. What a turn does:
 #
-# - promote: the host runs the agent unit and is to be a server. Its node is emptied (drain.yml), the role file is switched to server, the agent unit is stopped and disabled and the server unit enabled and started. k3s joins it as an etcd learner (MemberAddAsLearner in join, pkg/etcd/etcd.go), which the etcd leader promotes once it has caught up; a learner does not count towards quorum, so the add costs none. Same node name, node password (/etc/rancher/node/password, which neither unit's k3s is told to change) and Tailscale device, so the cluster's node-password Secret stays valid.
+# - promote: the host runs the agent unit and is to be a server. Its node is emptied (drain.yml), then the role actuator's host-local promotion (files/role/fleet-role-actuator.sh promote-local) switches the role file to server, stops and disables the agent unit and enables and starts the server unit. k3s joins it as an etcd learner (MemberAddAsLearner in join, pkg/etcd/etcd.go), which the etcd leader promotes once it has caught up; a learner does not count towards quorum, so the add costs none. Same node name, node password (/etc/rancher/node/password, which neither unit's k3s is told to change) and Tailscale device, so the cluster's node-password Secret stays valid.
 # - first start: nothing runs on the host yet; the server unit is enabled and started, bootstrapping a new cluster or joining one as 10-join.yaml says.
 # - restart: the server runs and something it reads changed. Its etcd member is away while k3s restarts.
 # - start: the server unit is installed and stopped; it is started, and rejoins with its own datastore.
@@ -71,22 +71,6 @@
       ansible.builtin.include_tasks: native/drain.yml
       when: github_runner_cluster_native_turn == 'promote'
 
-    - name: Record that the host is now a server
-      # Before the agent unit stops, so that Restart=always cannot start it again: from here on only the server unit's condition holds.
-      become: true
-      ansible.builtin.copy:
-        content: server
-        dest: "{{ github_runner_cluster_native_role_file }}"
-        mode: "0644"
-      when: github_runner_cluster_native_turn == 'promote'
-
-    - name: Stop and disable the agent unit
-      become: true
-      ansible.builtin.command:
-        argv: [systemctl, disable, --now, "{{ github_runner_cluster_native_agent_service }}"]
-      changed_when: true
-      when: github_runner_cluster_native_turn == 'promote'
-
     - name: Read the time on the host, before the server is started or restarted
       # The node's Ready condition outlives a stopped k3s for a while, so the wait below is for a heartbeat later than this. The host's own clock, which the kubelet's heartbeat is stamped with.
       ansible.builtin.command:
@@ -94,12 +78,22 @@
       register: github_runner_cluster_native_started
       changed_when: false
 
+    - name: Switch the host to the server unit
+      # The role actuator's host-local promotion (files/role/fleet-role-actuator.sh), which the role controller's swaps take too: the role file is switched to server before the agent unit stops, so that Restart=always cannot start the agent again, any join drop-ins a swap left are removed, so that 10-join.yaml decides, and the agent unit is stopped and disabled and the server unit enabled and started.
+      become: true
+      ansible.builtin.command:
+        argv: ["{{ github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.sh", promote-local]
+      changed_when: true
+      when: github_runner_cluster_native_turn == 'promote'
+
     - name: Enable the server unit
       become: true
       ansible.builtin.command:
         argv: [systemctl, enable, "{{ github_runner_cluster_native_server_service }}"]
       changed_when: true
-      when: not github_runner_cluster_native_server_enabled | bool
+      when:
+        - github_runner_cluster_native_turn != 'promote'
+        - not github_runner_cluster_native_server_enabled | bool
 
     - name: Start or restart the server unit
       # A restart leaves the pods running: the unit's KillMode=process leaves their containerd shims alone.
@@ -107,6 +101,7 @@
       ansible.builtin.command:
         argv: [systemctl, "{{ 'restart' if github_runner_cluster_native_turn == 'restart' else 'start' }}", "{{ github_runner_cluster_native_server_service }}"]
       changed_when: true
+      when: github_runner_cluster_native_turn != 'promote'
 
     - name: Clear the server's waiting restart, since it has started on its files
       become: true

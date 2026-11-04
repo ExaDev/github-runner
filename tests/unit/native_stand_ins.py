@@ -30,6 +30,8 @@ DOMAIN = "example.ts.net"
 K3S_TAG = "v1.34.1-k3s1"
 K3S_RELEASE = "v1.34.1+k3s1"
 TAILSCALE_VERSION = "1.102.4"
+# The token the role actuator's token Secret holds, which nothing the role prints may show.
+ACTUATOR_TOKEN = "fleet-role-actuator-token-example-0123456789"
 FACTS = {"system": "Linux", "architecture": "x86_64", "os_family": "Debian", "distribution": "Ubuntu", "distribution_release": "plucky", "service_mgr": "systemd"}
 
 
@@ -218,9 +220,15 @@ case "$*" in
   "get lease "*) if [ -e "$state/lease" ]; then cat "$state/lease"; else echo 2099-01-01T00:00:00Z; fi ;;
   "get pods "*) [ -e "$state/runner-pods" ] && cat "$state/runner-pods"; exit 0 ;;
   cordon*|uncordon*|drain*|label*|annotate*) ;;
+  # The role actuator's credential: what is applied is kept for the test to read, the report ConfigMap exists once created, and its token Secret, filled as the token controller fills one, holds ACTUATOR_TOKEN.
+  "apply --filename -"*) cat > "$state/applied" ;;
+  "create configmap "*)
+    if [ -e "$state/configmap-created" ]; then echo "Error from server (AlreadyExists): configmaps \"$3\" already exists" >&2; exit 1; fi
+    touch "$state/configmap-created" ;;
+  "get secret "*) printf '%s %s' "$(printf '%s' "{ACTUATOR_TOKEN}" | base64)" "$(printf 'cluster-ca' | base64)" ;;
   *) echo "kubectl stand-in: unexpected $*" >&2; exit 1 ;;
 esac
-""")
+""".replace("{ACTUATOR_TOKEN}", ACTUATOR_TOKEN))
 
     def set_tailscale(self, backend: str | None, domain: str | None) -> None:
         path = self.state / "tailscale.json"
@@ -241,7 +249,7 @@ esac
             (self.state / "enabled-tailscaled").touch()
             (self.state / "active-tailscaled").touch()
 
-    def inventory(self, only_the_node: bool = False, second_server: bool = False, **host_vars: Any) -> Path:
+    def inventory(self, only_the_node: bool = False, second_server: bool = False, group_vars: dict[str, Any] | None = None, **host_vars: Any) -> Path:
         shared = {
             "ansible_connection": "local",
             "ansible_become": False,
@@ -254,6 +262,7 @@ esac
             "github_runner_cluster_native_tailscale_cli": str(self.stubs / "bin" / "tailscale"),
             "github_runner_cluster_native_ready_timeout": 20,
             **{name: str(path) for name, path in self.paths.items()},
+            **(group_vars or {}),
         }
         node = {**shared, "github_runner_cluster_node_mode": "native", **host_vars}
         hosts = {"laptop": node} if only_the_node else {"server1": dict(shared), **({"server2": dict(shared)} if second_server else {}), "laptop": node}
@@ -262,7 +271,7 @@ esac
         path.write_text(yaml.safe_dump(inventory))
         return path
 
-    def run_role(self, *args: str, host_vars: dict[str, Any] | None = None, check: bool = False, only_the_node: bool = False, second_server: bool = False, **extra: Any) -> subprocess.CompletedProcess[str]:
+    def run_role(self, *args: str, host_vars: dict[str, Any] | None = None, check: bool = False, only_the_node: bool = False, second_server: bool = False, group_vars: dict[str, Any] | None = None, **extra: Any) -> subprocess.CompletedProcess[str]:
         env = {
             **os.environ,
             "PATH": f"{self.stubs / 'bin'}:{os.environ['PATH']}",
@@ -277,7 +286,7 @@ esac
             "ANSIBLE_RETRY_FILES_ENABLED": "false",
             **self.network,
         }
-        command = [ANSIBLE_PLAYBOOK, "-i", str(self.inventory(only_the_node, second_server, **(host_vars or {}))), str(RUN), "-e", json.dumps({"host_facts": self.facts, **extra}), *args]
+        command = [ANSIBLE_PLAYBOOK, "-i", str(self.inventory(only_the_node, second_server, group_vars, **(host_vars or {}))), str(RUN), "-e", json.dumps({"host_facts": self.facts, **extra}), *args]
         if check:
             command.append("--check")
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=300, check=False, cwd=ROOT / "ansible")

@@ -32,6 +32,47 @@
     label: "{{ item.dest }}"
   register: github_runner_cluster_native_helpers
 
+- name: Create the directory the role actuator's scripts and settings go in
+  become: true
+  ansible.builtin.file:
+    path: "{{ github_runner_cluster_role_actuator_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Place the role actuator's scripts
+  # On every native host, whether or not its watcher runs: the role's own promotion and demotion (server_turn.yml, demote.yml) switch the host through its promote-local and demote-local, so that the role and the actuator switch a host one way. It runs on regrading's core and systemd actuator, copied beside it. Copied on every run, so a collection upgrade reaches the host; none of the k3s units reads them, so a change restarts only the actuator's own unit (tasks/role_actuator.yml).
+  become: true
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ github_runner_cluster_role_actuator_dir }}/{{ item.src | basename }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {src: role/fleet-role-actuator.sh, mode: "0755"}
+    - {src: role/fleet-role-actuator-systemd.sh, mode: "0644"}
+    - {src: regrade/fleet-regrade-core.sh, mode: "0644"}
+    - {src: regrade/fleet-regrade-k3s.sh, mode: "0644"}
+    - {src: regrade/fleet-regrade-systemd.sh, mode: "0644"}
+  loop_control:
+    label: "{{ item.src | basename }}"
+  register: github_runner_cluster_role_actuator_scripts
+
+- name: Template the role actuator's settings
+  become: true
+  ansible.builtin.template:
+    src: role-actuator.env.j2
+    dest: "{{ github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.env"
+    mode: "0644"
+  register: github_runner_cluster_role_actuator_settings
+
+- name: Put fleet-role-actuator on the PATH, for a switch or a status by hand
+  become: true
+  ansible.builtin.file:
+    src: "{{ github_runner_cluster_role_actuator_dir }}/fleet-role-actuator.sh"
+    dest: "{{ github_runner_cluster_native_bin_dir }}/fleet-role-actuator"
+    state: link
+    # Under --check the script above has not been placed, so the link's target may not exist yet.
+    force: true
+
 - name: Record the role a host set up before the role file existed runs
   # Before either unit is written: the new units start only while this file names their role, so a host that runs the agent unit from an earlier release keeps running it across the restart below. A host that has the file keeps it; changing it is a role switch (service.yml), never a run's side effect. A first install records the role it is to run, which nothing runs yet.
   become: true

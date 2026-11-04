@@ -12,6 +12,8 @@ User=root
 Environment="FLEET_REGRADE_ENV={{ github_runner_cluster_native_regrade_dir }}/fleet-regrade.env"
 # k3s, for `k3s kubectl`, is in the role's binary directory.
 Environment="PATH={{ github_runner_cluster_native_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Starts only while the role file names this host a server and k3s has not marked its datastore with a tombstone, the server unit's own condition (files/native/fleet-role-is.sh): a host the role actuator has stepped down for a voter swap names the agent from then on, and Restart=always must not start a watcher that would step its server back up.
+ExecCondition={{ github_runner_cluster_native_lib_dir }}/fleet-role-is server {{ github_runner_cluster_native_role_file }} {{ github_runner_cluster_native_data_dir }}/server
 ExecStart={{ github_runner_cluster_native_regrade_dir }}/fleet-regrade.sh watch
 # The watcher keeps its streaks in memory, so a restart only starts them again; a kernel without memory pressure stops it at once, with the reason in the journal, and the role refuses to turn regrading on there in the first place. It is restarted after one sample period, the pace it reads at in any case.
 Restart=always
