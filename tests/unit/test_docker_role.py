@@ -273,6 +273,15 @@ class EnvTest(unittest.TestCase):
         for line in ("K3S_JOIN_SERVER_URL=https://node1.example.internal:6443", "K3S_AGENT_SERVER_URL=https://node1.example.internal:6443", "K3S_CONTAINER_NAME=github-runner-k3s", "K3S_AGENT_CONTAINER_NAME=github-runner-k3s-agent"):
             self.assertIn(line, lines)
 
+    def test_the_bootstrap_hosts_agent_joins_the_first_other_server_since_it_has_no_bootstrap_host_to_dial(self) -> None:
+        # A bootstrap host has no server URL of its own, and a role switch makes it an agent that must join the cluster it left.
+        peers = ["https://node2.example.internal:6443", "https://node3.example.internal:6443"]
+        extra = ["-e", json.dumps({"github_runner_cluster_effective_server_url": "", "github_runner_cluster_topology": {"hosts": {"localhost": {"peer_server_urls": peers}}}})]
+        with tempfile.TemporaryDirectory() as work:
+            lines = self.render(Path(work), *extra).splitlines()
+        self.assertIn("K3S_JOIN_SERVER_URL=", lines, "the bootstrap server itself still joins nothing")
+        self.assertIn(f"K3S_AGENT_SERVER_URL={peers[0]}", lines)
+
     @unittest.skipUnless(has_compose(), "docker compose is not installed")
     def test_each_service_renders_as_it_did_from_the_env_its_role_got_before(self) -> None:
         # Each service's configuration hash, which Compose compares with the running container's to decide whether to recreate it, is the same from the one .env as from the .env a host of its role got before there was one: a server's held every variable but the agent's own, and an agent's held its own (its server URL and node name, from the same settings as the server's) beside the shared ones and the variables Compose requires of every service whichever profile is active. So an upgrade recreates no running node.

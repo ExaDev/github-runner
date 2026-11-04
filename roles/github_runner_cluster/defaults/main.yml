@@ -331,8 +331,10 @@ github_runner_cluster_native_tailscale_leave_other_tailnet: false
 github_runner_cluster_native_agent_service: k3s-agent
 github_runner_cluster_native_server_service: k3s
 github_runner_cluster_native_service: "{{ github_runner_cluster_native_server_service if github_runner_cluster_native_role == 'server' else github_runner_cluster_native_agent_service }}"
-# Derived, never set directly: the server this host's k3s joins, as https://<address>:<port>. A node that joins the bootstrap host dials it; the bootstrap host itself, when it runs as an agent or rejoins a cluster that already exists, dials the first other server of the inventory. Empty for a host with nothing to dial.
-github_runner_cluster_native_join_url: "{{ github_runner_cluster_effective_server_url if github_runner_cluster_effective_server_url | length > 0 else (github_runner_cluster_topology.hosts[inventory_hostname].peer_server_urls | first | default('')) }}"
+# Derived, never set directly: the server an agent of this host joins, as https://<address>:<port>, on a Docker host (the agent service's K3S_AGENT_SERVER_URL) and a native one alike. A node that joins the bootstrap host dials it; the bootstrap host itself, once it runs as an agent (a role switch) or rejoins a cluster that already exists, dials the first other server of the inventory, since it has no bootstrap host to dial. Empty for a host with nothing to dial.
+github_runner_cluster_agent_server_url: "{{ github_runner_cluster_effective_server_url if github_runner_cluster_effective_server_url | length > 0 else (github_runner_cluster_topology.hosts[inventory_hostname].peer_server_urls | first | default('')) }}"
+# Derived, never set directly: the server this native host's k3s joins, which is the one above unless native/role.yml found a running server to join instead.
+github_runner_cluster_native_join_url: "{{ github_runner_cluster_agent_server_url }}"
 # Derived, never set directly: the host name in that URL, which the Tailscale wrapper waits for.
 github_runner_cluster_native_join_host: "{{ github_runner_cluster_native_join_url | urlsplit('hostname') if github_runner_cluster_native_join_url | length > 0 else '' }}"
 # Derived, never set directly: the file that names the role the host runs, server or agent, which each unit's ExecCondition reads (files/native/fleet-role-is.sh), so the host's role outlives a restart, a reboot and a run of the role.
