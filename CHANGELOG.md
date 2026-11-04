@@ -1,3 +1,9 @@
+## [2.36.1](https://github.com/ExaDev/github-runner/compare/v2.36.0...v2.36.1) (2026-11-04)
+
+### Bug Fixes
+
+* **ci:** count the task files a role's task file includes when dealing unit shards ([7be9572](https://github.com/ExaDev/github-runner/commit/7be9572741ce486fb19983c3e9f3c729332d1ede))
+
 ## [2.36.0](https://github.com/ExaDev/github-runner/compare/v2.35.1...v2.36.0) (2026-11-04)
 
 ### Features
