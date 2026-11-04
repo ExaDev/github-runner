@@ -204,9 +204,7 @@ github_runner_cluster_container_name: github-runner-k3s
 github_runner_cluster_agent_container_name: github-runner-k3s-agent
 # Derived, never set directly: the file in the Compose project directory's role directory (fleet-role.d, which docker-compose.fleet-role.yml mounts into both services) that records the role a Docker host marked github_runner_cluster_voter_eligible runs, server or agent, so that the role outlives a run of the role. tasks/docker_role.yml reads it and tasks/docker_role_record.yml writes it only when it is absent; k3s/node-entrypoint.sh idles the service of the other role.
 github_runner_cluster_docker_role_file: "{{ github_runner_cluster_dir }}/fleet-role.d/role"
-# Derived, never set directly: the regrade Lease, as the regrade core (files/regrade/fleet-regrade-core.sh, LEASE_NAMESPACE and LEASE_NAME) and node-recovery name it, the holderIdentity the role controller takes it as for the whole of a voter swap, and the annotation that names the swap. While the controller holds it unexpired, every run of the role refuses before it changes a node (tasks/role_lease_guard.yml).
-github_runner_cluster_role_lease_namespace: kube-system
-github_runner_cluster_role_lease_name: fleet-regrade
+# Derived, never set directly: the holderIdentity the role controller takes the regrade Lease (github_runner_cluster_regrade_lease_namespace and github_runner_cluster_regrade_lease_name) as for the whole of a voter swap, and the annotation on it that names the swap. While the controller holds it unexpired, every run of the role refuses before it changes a node (tasks/role_lease_guard.yml).
 github_runner_cluster_role_lease_holder: fleet-role
 github_runner_cluster_role_lease_swap_id_annotation: github-runner.exadev.com/swap-id
 # The node's k3s container as this host runs it: the server's, or the agent's, by the role tasks/docker_role.yml decided this host runs. Derived, never set directly.

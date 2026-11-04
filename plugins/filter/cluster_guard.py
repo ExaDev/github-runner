@@ -1,4 +1,4 @@
-"""Filters the github_runner_cluster role uses before it restarts a node (moving its container between networks, resizing its Colima VM): whether the restart would be safe for the cluster, whether the fleet-regrade Lease that serialises such steps may be taken and how it is given back, and whether the Docker host has an address on the LAN."""
+"""Filters the github_runner_cluster role uses before it restarts a node (moving its container between networks, resizing its Colima VM): whether the restart would be safe for the cluster, whether the fleet-regrade Lease that serialises such steps may be taken and how it is given back, whether the role controller holds it for a voter swap, during which no run of the role may change a node, and whether the Docker host has an address on the LAN."""
 
 from __future__ import annotations
 
@@ -39,6 +39,12 @@ def _etcd_healthy(result: Any) -> bool:
     if not isinstance(result, Mapping) or result.get("unreachable") or result.get("skipped"):
         return False
     return result.get("rc") == 0 and str(result.get("stdout", "")).strip() == "ok"
+
+
+def _reason(result: Mapping[str, Any]) -> str:
+    """The last line of what a failed command or task said, or its exit status when it said nothing."""
+    lines = [line.strip() for line in str(result.get("stderr", "") or result.get("msg", "") or "").splitlines() if line.strip()]
+    return lines[-1] if lines else f"exit status {result.get('rc')}"
 
 
 def cluster_restart_blockers(nodes: Any, pods: Any, node_name: Any, servers: Any, etcd_results: Any) -> list[str]:
@@ -133,8 +139,7 @@ def cluster_guard_state(results: Any) -> dict[str, Any]:
             reasons.append(f"{host} did not answer within github_runner_cluster_cluster_read_timeout")
             continue
         if result.get("rc") != 0:
-            lines = [line.strip() for line in str(result.get("stderr", "") or message).splitlines() if line.strip()]
-            reasons.append(f"{host} could not be read ({lines[-1] if lines else 'exit status ' + str(result.get('rc'))})")
+            reasons.append(f"{host} could not be read ({_reason(result)})")
             continue
         try:
             state = json.loads(str(result.get("stdout", "")))
@@ -181,6 +186,14 @@ def _epoch(stamp: str) -> float:
     return datetime.strptime(re.sub(r"\.[0-9]+Z$", "Z", stamp), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
 
 
+def _lease_expires(spec: Mapping[str, Any]) -> float | None:
+    """When a Lease's holder's time runs out, as epoch seconds: its renew time (its acquire time when it was never renewed) plus its duration, the rule lease_state applies in files/regrade/fleet-regrade-core.sh; None when it records neither time."""
+    renewed = spec.get("renewTime") or spec.get("acquireTime")
+    if not renewed:
+        return None
+    return _epoch(str(renewed)) + int(spec.get("leaseDurationSeconds") or 0)
+
+
 def _lease_read(read: Any) -> dict[str, Any] | None | str:
     """The Lease a `kubectl get lease --output json` result holds, None when the API server answered that there is none, or the reason the read failed."""
     if not isinstance(read, Mapping):
@@ -219,10 +232,10 @@ def cluster_lease_claim(read: Any, holder: Any, now: Any, duration: Any, name: A
         return {"state": "absent", "holder": "", "verb": "create", "manifest": manifest, "problem": ""}
     spec = current.get("spec") or {}
     current_holder = str(spec.get("holderIdentity") or "")
-    renewed = spec.get("renewTime") or spec.get("acquireTime")
+    expires = _lease_expires(spec)
     if not current_holder:
         state = "free"
-    elif not renewed or _epoch(str(renewed)) + int(spec.get("leaseDurationSeconds") or 0) <= float(now):
+    elif expires is None or expires <= float(now):
         state = "expired"
     elif current_holder == holder:
         state = "mine"
@@ -245,6 +258,53 @@ def cluster_lease_release(read: Any, holder: Any) -> dict[str, Any]:
     return {"verb": "replace", "manifest": released}
 
 
+def cluster_role_lease_guard(reads: Any, holder: Any, swap_id_annotation: Any) -> dict[str, str]:
+    """Say whether the role controller holds the regrade Lease, which it holds for the whole of a voter swap: while it does, a run of the role must change no node, so that it never undoes or races the swap.
+
+    :param reads: the loop results of reading the Lease through each server of the inventory (tasks/role_lease_guard.yml), each with its host as ``item`` and ``stdout`` either "stopped" or "running", the reading host's clock as epoch seconds, then the Lease as ``kubectl get lease -o json`` prints it (nothing when there is none). :param holder: the holderIdentity the role controller takes the Lease as. :param swap_id_annotation: the annotation on the Lease that names the swap. :returns: ``state``, one of ``held`` (by the controller, and unexpired), ``free`` (no server runs, or the Lease is absent, has run out, is unheld or held by anything else, such as a regrading step) and ``unknown`` (no server answered and one could not be read), with ``message``, a sentence saying why. :raises AnsibleFilterError: if a server answered with something that is not a Lease.
+
+    One answer decides, since every server's API reads the same Lease. Its expiry (_lease_expires, as cluster_lease_claim judges it) is compared with the clock of the host that read it, the clock the controller renews by.
+    """
+    if not isinstance(reads, Sequence) or isinstance(reads, str):
+        raise AnsibleFilterError("The reads must be a list of loop results.")
+    unread: list[str] = []
+    for result in reads:
+        if not isinstance(result, Mapping):
+            raise AnsibleFilterError(f"{result!r} is not a loop result.")
+        host = str(result.get("item", "?"))
+        if result.get("unreachable") or result.get("rc") != 0:
+            unread.append(f"{host} could not be read ({_reason(result)})")
+            continue
+        state, _, rest = str(result.get("stdout", "")).partition("\n")
+        if state.strip() == "stopped":
+            continue
+        clock, _, text = rest.partition("\n")
+        if state.strip() != "running" or not clock.strip().isdigit():
+            raise AnsibleFilterError(f"{host} gave an answer that is not a read of the Lease: {result.get('stdout')!r}")
+        if not text.strip():
+            return {"state": "free", "message": f"there is no Lease (read through {host})"}
+        try:
+            lease = json.loads(text)
+        except ValueError as exc:
+            raise AnsibleFilterError(f"{host} gave a Lease that is not JSON: {exc}") from exc
+        if not isinstance(lease, dict):
+            raise AnsibleFilterError(f"{host} gave a Lease that is not an object: {text!r}")
+        metadata = lease.get("metadata") or {}
+        spec = lease.get("spec") or {}
+        name = f"{metadata.get('namespace', '?')}/{metadata.get('name', '?')}"
+        expires = _lease_expires(spec)
+        if str(spec.get("holderIdentity") or "") != str(holder) or expires is None:
+            return {"state": "free", "message": f"the Lease {name} is not held by {holder} (read through {host})"}
+        if expires <= int(clock):
+            return {"state": "free", "message": f"the Lease {name} that {holder} held has run out (read through {host})"}
+        swap = str((metadata.get("annotations") or {}).get(str(swap_id_annotation)) or "")
+        until = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat(timespec="seconds")
+        return {"state": "held", "message": f"the role controller ({holder}) holds the Lease {name} for the voter swap {swap or '(unnamed)'}, read through {host}, until {until} unless it renews it first"}
+    if unread:
+        return {"state": "unknown", "message": "whether the role controller holds the Lease cannot be told: " + "; ".join(unread)}
+    return {"state": "free", "message": "no server of the inventory runs, so there is no Lease"}
+
+
 class FilterModule:
     """Registers the cluster guard filters with Ansible."""
 
@@ -256,4 +316,5 @@ class FilterModule:
             "addresses_in_network": addresses_in_network,
             "cluster_lease_claim": cluster_lease_claim,
             "cluster_lease_release": cluster_lease_release,
+            "cluster_role_lease_guard": cluster_role_lease_guard,
         }

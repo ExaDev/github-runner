@@ -1,5 +1,5 @@
 ---
-# Refuses the run, before it changes anything, while the role controller holds the regrade Lease (github_runner_cluster_role_lease_namespace/github_runner_cluster_role_lease_name held by github_runner_cluster_role_lease_holder, unexpired), which it holds for the whole of a voter swap: a run that recreated a container, restarted a unit or rewrote a node's configuration in the middle of a swap could undo it or take a second vote away. A Lease held by regrading, or one that has run out, does not stop the run. The Lease is read through every server of the inventory and every host marked eligible, since any one may be stopped or being rebuilt and the servers can change at run time, a Docker server's through its container and a native server's through `k3s kubectl` on its host; one answer decides (plugins/filter/cluster_role.py's cluster_role_lease_guard), and the run is refused too when no server answered and one could not be read, since the run cannot tell. Every task only reads, and runs under --check too, which so reports the refusal a real run would make. Needs topology.yml; each read is bounded by github_runner_cluster_cluster_read_timeout, as a whole and as the API call's --request-timeout.
+# Refuses the run, before it changes anything, while the role controller holds the regrade Lease (github_runner_cluster_regrade_lease_namespace/github_runner_cluster_regrade_lease_name held by github_runner_cluster_role_lease_holder, unexpired), which it holds for the whole of a voter swap: a run that recreated a container, restarted a unit or rewrote a node's configuration in the middle of a swap could undo it or take a second vote away. A Lease held by regrading, or one that has run out, does not stop the run. The Lease is read through every server of the inventory and every host marked eligible, since any one may be stopped or being rebuilt and the servers can change at run time, a Docker server's through its container and a native server's through `k3s kubectl` on its host; one answer decides (plugins/filter/cluster_guard.py's cluster_role_lease_guard), and the run is refused too when no server answered and one could not be read, since the run cannot tell. Every task only reads, and runs under --check too, which so reports the refusal a real run would make. Needs topology.yml; each read is bounded by github_runner_cluster_cluster_read_timeout, as a whole and as the API call's --request-timeout.
 
 - name: Work out which hosts of the inventory to read the Lease through
   ansible.builtin.set_fact:
@@ -23,8 +23,8 @@
     docker exec "$container" kubectl get lease "$name" --namespace "$namespace" --ignore-not-found --output json --request-timeout="${timeout}s"
   environment: >-
     {{ ({'DOCKER_CONTEXT': github_runner_cluster_role_lease_context} if github_runner_cluster_role_lease_context | length > 0 else {})
-       | combine({'container': github_runner_cluster_role_lease_container, 'name': github_runner_cluster_role_lease_name,
-                  'namespace': github_runner_cluster_role_lease_namespace, 'timeout': github_runner_cluster_cluster_read_timeout | string}) }}
+       | combine({'container': github_runner_cluster_role_lease_container, 'name': github_runner_cluster_regrade_lease_name,
+                  'namespace': github_runner_cluster_regrade_lease_namespace, 'timeout': github_runner_cluster_cluster_read_timeout | string}) }}
   delegate_to: "{{ item }}"
   loop: "{{ github_runner_cluster_role_lease_servers | reject('in', github_runner_cluster_role_lease_native) | list }}"
   vars:
@@ -56,8 +56,8 @@
   environment:
     service: "{{ github_runner_cluster_native_server_service }}"
     k3s: "{{ hostvars[item].github_runner_cluster_native_bin_dir | default(github_runner_cluster_native_bin_dir) }}/k3s"
-    name: "{{ github_runner_cluster_role_lease_name }}"
-    namespace: "{{ github_runner_cluster_role_lease_namespace }}"
+    name: "{{ github_runner_cluster_regrade_lease_name }}"
+    namespace: "{{ github_runner_cluster_regrade_lease_namespace }}"
     timeout: "{{ github_runner_cluster_cluster_read_timeout | string }}"
   delegate_to: "{{ item }}"
   loop: "{{ github_runner_cluster_role_lease_servers | select('in', github_runner_cluster_role_lease_native) | list }}"
