@@ -1,0 +1,52 @@
+---
+argument_specs:
+  main:
+    short_description: Registers a macOS runner as a launchd-managed ephemeral GitHub Actions runner.
+    options:
+      github_runner_macos_actions_runner_enabled:
+        type: bool
+        default: false
+      github_runner_macos_actions_runner_organization:
+        type: str
+        default: ""
+      github_runner_macos_actions_runner_app_id:
+        type: str
+        default: ""
+      github_runner_macos_actions_runner_installation_id:
+        type: str
+        default: ""
+      github_runner_macos_actions_runner_private_key:
+        type: str
+        default: ""
+        no_log: true
+      github_runner_macos_actions_runner_private_key_op_reference:
+        type: str
+        default: ""
+        no_log: true
+      github_runner_macos_actions_runner_label:
+        type: str
+        default: exadev-macos
+      github_runner_macos_actions_runner_name:
+        type: str
+        default: ""
+      github_runner_macos_actions_runner_version:
+        type: str
+        default: "2.338.2"
+      github_runner_macos_actions_runner_sha256:
+        type: str
+        default: 25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388
+      github_runner_macos_actions_runner_root:
+        type: path
+        default: ""
+      github_runner_macos_actions_runner_work_dir:
+        type: path
+        default: ""
+      github_runner_macos_actions_runner_plist:
+        type: path
+        default: ""
+      github_runner_macos_actions_runner_launchd_label:
+        type: str
+        default: ""
+      github_runner_macos_actions_runner_path:
+        type: str
+        default: /opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin

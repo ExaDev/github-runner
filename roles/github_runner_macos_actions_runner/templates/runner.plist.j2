@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ github_runner_macos_actions_runner_launchd_label }}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{ github_runner_macos_actions_runner_root }}/run.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>{{ github_runner_macos_actions_runner_root }}</string>
+  <key>UserName</key>
+  <string>{{ ansible_facts['user_id'] }}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{{ github_runner_macos_actions_runner_path }}</string>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{{ github_runner_macos_actions_runner_root }}/runner.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{ github_runner_macos_actions_runner_root }}/runner.stderr.log</string>
+</dict>
+</plist>

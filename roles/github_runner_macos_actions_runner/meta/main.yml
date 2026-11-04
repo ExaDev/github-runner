@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: ExaDev
+  description: Registers a managed macOS GitHub Actions runner through launchd.
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: MacOSX
+      versions: [all]
+dependencies: []
