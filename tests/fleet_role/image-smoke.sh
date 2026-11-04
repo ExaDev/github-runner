@@ -14,7 +14,7 @@ docker run --rm --entrypoint bash "$image" -c '
   set -euo pipefail
   for tool in jq kubectl curl fio; do command -v "$tool" > /dev/null; done
   test -x /app/loop.sh -a -x /app/scripts/fleet-role.sh -a -x /app/scripts/fleet-role-probe.sh
-  test -f /app/fleet-regrade-core.sh -a -f /app/node-link.sh -a -f /app/scripts/fleet-role.jq -a -f /app/scripts/fleet-role-stats.jq'
+  test -f /app/fleet-regrade-core.sh -a -f /app/node-link.sh -a -f /app/scripts/fleet-role.jq -a -f /app/scripts/fleet-role-swap.jq -a -f /app/scripts/fleet-role-stats.jq'
 
 docker run --rm --entrypoint jq "$image" -en -L /app/scripts 'include "fleet-role-stats"; {window: window_samples, tail: tail_percentile} | select(.window == 100 and .tail == 99)' > /dev/null
 
@@ -23,6 +23,9 @@ printf 'some avg10=0.00 avg60=0.00 avg300=1.50 total=0\nfull avg10=0.00 avg60=0.
 chmod 644 "$work/meminfo" "$work/pressure"
 docker run --rm -v "$work/meminfo:/meminfo:ro" -v "$work/pressure:/pressure:ro" -e MEMINFO_FILE=/meminfo -e PSI_FILE=/pressure \
   --entrypoint /app/scripts/fleet-role-probe.sh "$image" check memory | jq -e '.psi_avg300 == 1.5 and .mem_available_kb == 400' > /dev/null
+
+# The swap module compiles under the image's jq and holds the Lease under the name the actuators expect.
+docker run --rm --entrypoint jq "$image" -en -L /app/scripts 'include "fleet-role-swap"; interface | select(.lease_holder == "fleet-role" and .desired_role_label == "github-runner.exadev.com/desired-role")' > /dev/null
 
 # With no file named, the probe reads the pod's own /proc/pressure/memory, which is the node's, so the DaemonSet mounts nothing for it: the container sees pressure exactly when this host's kernel has it (a mounted /proc/pressure would stop a pod on a kernel without it from starting) and the reading is then absent, never an error.
 host_has_psi=false
@@ -33,13 +36,15 @@ docker run --rm --entrypoint /app/scripts/fleet-role-probe.sh "$image" check mem
 # The link reader the image carries reads the container's own interface: a veth, whose link it cannot see.
 docker run --rm --entrypoint /app/scripts/fleet-role-probe.sh "$image" check link | jq -e '.link == "unknown" and (.interface | length > 0)' > /dev/null
 
-# A kubectl that answers an empty cluster and keeps the patch it is given, in place of the image's own on the PATH.
+# A kubectl that answers an empty cluster (no Lease, no actuator reports) and keeps the patch it is given, in place of the image's own on the PATH. The controller reaches it through the regrade core's kubectl_, which passes --kubeconfig first.
 mkdir "$work/out"
 chmod 777 "$work/out"
 cat > "$work/kubectl" << 'STUB'
 #!/bin/sh
+[ "$1" = --kubeconfig ] && shift 2
 case "$1 $2" in
   "get nodes") echo '{"items":[]}' ;;
+  "get lease") echo 'Error from server (NotFound): leases.coordination.k8s.io "fleet-regrade" not found' >&2; exit 1 ;;
   "get configmap") case "$3" in fleet-role-probe) echo '{"data":{}}' ;; *) echo '{"data":{"status.json":""}}' ;; esac ;;
   "patch configmap")
     previous=''
@@ -55,6 +60,7 @@ output="$(docker run --rm -v "$work/kubectl:/usr/local/bin/kubectl:ro" -v "$work
   -e FLEET_ROLE_DRY_RUN=true -e FLEET_ROLE_VOTERS=3 -e FLEET_ROLE_MAX_SERVERS=5 -e FLEET_ROLE_ELECTION_TIMEOUT_MS=1000 -e FLEET_ROLE_SAMPLE_SECONDS=15 \
   -e FLEET_ROLE_PRESSURE_THRESHOLD=10 -e FLEET_ROLE_AVAILABLE_FLOOR_PERCENT=15 -e FLEET_ROLE_ELIGIBLE_LABEL=example.com/eligible \
   -e FLEET_ROLE_PINNED_LABEL=example.com/pinned -e FLEET_ROLE_LEVEL_LABEL=example.com/level \
+  -e FLEET_ROLE_OPERATION_TIMEOUT_SECONDS=300 -e FLEET_ROLE_RUNNER_WAIT_SECONDS=600 -e FLEET_ROLE_LEASE_SECONDS=900 -e FLEET_ROLE_ACTUATOR_CONFIGMAP=fleet-role-actuators \
   --entrypoint /app/scripts/fleet-role.sh "$image")"
 grep -q 'no host is marked eligible' <<< "$output"
 jq -e '.data["status.json"] | fromjson | .dry_run == true and .decision.action == "none"' "$work/out/patch.json" > /dev/null
