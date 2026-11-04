@@ -1,5 +1,5 @@
 ---
-# Brings this host up as a k3s node, natively under systemd (github_runner_cluster_node_mode: native, tasks/native/main.yml) or, by default, under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, as tasks/topology.yml decides from the cluster group. Safe to rerun: the .env is templated and docker compose converges to it.
+# Brings this host up as a k3s node, natively under systemd (github_runner_cluster_node_mode: native, tasks/native/main.yml) or, by default, under Docker Compose: a server (bootstrapping the cluster or joining it) or an agent, as tasks/topology.yml decides from the cluster group, or, for a host marked eligible, as its role directory records (tasks/docker_role.yml). Safe to rerun: the .env is templated and docker compose converges to it.
 
 - name: Bring this host up as a native k3s server or agent, with no Docker
   # github_runner_cluster_node_mode: native. Everything below drives Docker, which a native node does not have, so the role ends after this; see tasks/native/main.yml.
@@ -52,6 +52,14 @@
 - name: Decide this host's part in the cluster
   ansible.builtin.include_tasks: topology.yml
 
+- name: Decide which role this host runs, from its role directory when it is eligible
+  # Right after the topology, so that every check and task below follows the role the host runs, which for an eligible host is the one recorded on it rather than the inventory's. See tasks/docker_role.yml.
+  ansible.builtin.include_tasks: docker_role.yml
+
+- name: Refuse the run while the role controller holds the regrade Lease for a voter swap
+  # Before anything is written to the host or any container is touched. See tasks/role_lease_guard.yml.
+  ansible.builtin.include_tasks: role_lease_guard.yml
+
 - name: Check the versions the node's image is built from
   ansible.builtin.include_tasks: versions.yml
 
@@ -103,6 +111,10 @@
   loop_control:
     label: "{{ item.path }}"
 
+- name: Record the role an eligible host runs in its role directory
+  # Right after the directory exists, so that the role is on the host before any Compose command starts a node that reads it.
+  ansible.builtin.include_tasks: docker_role_record.yml
+
 - name: Place the collection's Compose file and k3s build context in it
   # Before the mesh step, since the headscale_in_cluster provider starts the bootstrap server's Compose project itself. Copied on every run, so a collection upgrade reaches the host. The entrypoint is bind-mounted read-only and run through /bin/sh, so its mode only matters to someone running it by hand.
   ansible.builtin.copy:
@@ -127,7 +139,7 @@
   ansible.builtin.include_tasks: node_password.yml
 
 - name: Set up the mesh the nodes join, and publish its join key and control server
-  # Must complete before either branch below templates .env, since both env.j2 and env-agent.j2 read the mesh facts it publishes. See tasks/mesh/main.yml for the provider interface.
+  # Must complete before either branch below templates .env, since env.j2 reads the mesh facts it publishes. See tasks/mesh/main.yml for the provider interface.
   ansible.builtin.include_tasks: mesh/main.yml
 
 - name: Resolve this host's Docker context again for the Compose tasks below
@@ -135,7 +147,8 @@
   ansible.builtin.include_tasks: docker_context.yml
 
 - name: Set up and start this host as a k3s server, bootstrapping or joining
-  when: github_runner_cluster_effective_node_role == "server"
+  # By the role tasks/docker_role.yml decided, which for an eligible host is the one recorded on the host.
+  when: github_runner_cluster_docker_role == "server"
   block:
     - name: Fail if this host isn't included in the fleet's own TLS SAN list
       # Only an overridden list can miss it, since the automatic one names every server. Checks the EFFECTIVE node name (github_runner_cluster_node_name if set, else inventory_hostname), not raw inventory_hostname: a host may deliberately override its own node name, and checking the wrong string here would incorrectly fail that host.
@@ -149,7 +162,8 @@
           automatic list.
       when: github_runner_cluster_effective_node_name not in (github_runner_cluster_effective_tls_sans | join(' '))
 
-    - name: Template .env for this k3s server
+    - name: Template .env for this node
+      # One .env for either role, holding both services' variables, so that a host whose role changes at run time has what the other service reads already; each service reads only its own, so the other's never changes its configuration.
       ansible.builtin.template:
         src: env.j2
         dest: "{{ github_runner_cluster_dir }}/.env"
@@ -168,17 +182,21 @@
       when: ansible_facts['system'] == 'Darwin'
 
 - name: Join as a k3s agent
-  when: github_runner_cluster_effective_node_role == "agent"
+  when: github_runner_cluster_docker_role == "agent"
   block:
-    - name: Template .env for the k3s agent
+    - name: Template .env for this node
       ansible.builtin.template:
-        src: env-agent.j2
+        src: env.j2
         dest: "{{ github_runner_cluster_dir }}/.env"
         mode: "0600"
       no_log: true
 
     - name: Start this agent with Docker Compose
       ansible.builtin.include_tasks: start_agent.yml
+
+    - name: Remove the regrade service, which runs beside a server only
+      # A host whose recorded role became agent may still run the service it ran as a server.
+      ansible.builtin.include_tasks: regrade_service.yml
 
     - name: Check the runtime and this node's container are up
       ansible.builtin.include_tasks: end_checks.yml

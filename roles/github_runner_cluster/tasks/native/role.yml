@@ -1,5 +1,5 @@
 ---
-# Decides which role this native host runs, server or agent, and, for a server, whether it bootstraps a new cluster or joins one. Publishes github_runner_cluster_native_current_role (what the host runs now: its role file, or agent for a host set up before the file existed, or empty on a first install), github_runner_cluster_native_role (what it is to run after this run; plugins/filter/cluster_native.py's cluster_native_role says how the two are decided), github_runner_cluster_native_stage_server (whether the server's files are written: a server, or a host marked eligible, staged as a standby) and github_runner_cluster_native_cluster_init. Needs topology.yml. Every task only reads, and runs under --check too.
+# Decides which role this native host runs, server or agent, and, for a server, whether it bootstraps a new cluster or joins one. Publishes github_runner_cluster_native_current_role (what the host runs now: its role file, or agent for a host set up before the file existed, or empty on a first install), github_runner_cluster_native_role (what it is to run after this run; plugins/filter/cluster_role.py's cluster_host_role says how the two are decided), github_runner_cluster_native_stage_server (whether the server's files are written: a server, or a host marked eligible, staged as a standby) and github_runner_cluster_native_cluster_init. Needs topology.yml. Every task only reads, and runs under --check too.
 
 - name: Read the role file, the agent unit and the datastores on the host
   # The server's directory under k3s's data directory is root's alone (k3s makes it 0700), so the reads take become.
@@ -35,7 +35,7 @@
   vars:
     github_runner_cluster_native_roles: >-
       {{ (github_runner_cluster_native_role_recorded.content | b64decode if github_runner_cluster_native_role_recorded is not skipped else '')
-         | exadev.github_runner.cluster_native_role(github_runner_cluster_native_role_paths.results[1].stat.exists,
+         | exadev.github_runner.cluster_host_role(github_runner_cluster_native_role_paths.results[1].stat.exists,
                                                     github_runner_cluster_topology.hosts[inventory_hostname].eligible,
                                                     github_runner_cluster_effective_node_role,
                                                     (['server'] if github_runner_cluster_native_role_units.results[0].rc == 0 else [])

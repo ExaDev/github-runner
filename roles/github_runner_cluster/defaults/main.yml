@@ -202,11 +202,18 @@ github_runner_cluster_docker_context: ""
 # The names of this host's k3s server container and k3s agent container, which docker-compose.yml takes from .env. Container names are unique on a Docker daemon, so a second cluster on the same Docker hosts needs both set to names of its own (see github_runner_cluster_api_port); the defaults are the names every existing node runs under, so leaving them unset changes nothing. Changing one on a running host makes Compose recreate that container under the new name, on the same volumes, which a server's turn treats as any other recreate.
 github_runner_cluster_container_name: github-runner-k3s
 github_runner_cluster_agent_container_name: github-runner-k3s-agent
-# The node's k3s container as this host runs it: the server's, or the agent's. Derived, never set directly.
-github_runner_cluster_node_container: "{{ github_runner_cluster_container_name if github_runner_cluster_effective_node_role == 'server' else github_runner_cluster_agent_container_name }}"
+# Derived, never set directly: the file in the Compose project directory's role directory (fleet-role.d, which docker-compose.fleet-role.yml mounts into both services) that records the role a Docker host marked github_runner_cluster_voter_eligible runs, server or agent, so that the role outlives a run of the role. tasks/docker_role.yml reads it and tasks/docker_role_record.yml writes it only when it is absent; k3s/node-entrypoint.sh idles the service of the other role.
+github_runner_cluster_docker_role_file: "{{ github_runner_cluster_dir }}/fleet-role.d/role"
+# Derived, never set directly: the regrade Lease, as the regrade core (files/regrade/fleet-regrade-core.sh, LEASE_NAMESPACE and LEASE_NAME) and node-recovery name it, the holderIdentity the role controller takes it as for the whole of a voter swap, and the annotation that names the swap. While the controller holds it unexpired, every run of the role refuses before it changes a node (tasks/role_lease_guard.yml).
+github_runner_cluster_role_lease_namespace: kube-system
+github_runner_cluster_role_lease_name: fleet-regrade
+github_runner_cluster_role_lease_holder: fleet-role
+github_runner_cluster_role_lease_swap_id_annotation: github-runner.exadev.com/swap-id
+# The node's k3s container as this host runs it: the server's, or the agent's, by the role tasks/docker_role.yml decided this host runs. Derived, never set directly.
+github_runner_cluster_node_container: "{{ github_runner_cluster_container_name if github_runner_cluster_docker_role == 'server' else github_runner_cluster_agent_container_name }}"
 # Derived, never set directly: the Compose service and the named volume that holds /etc/rancher/node (the node's password) for this host's role, as docker-compose.yml names them, and the volume's name in Docker, which Compose forms from the project and the volume's key. The role seeds the volume from the running container before the first recreate that mounts it (tasks/node_password.yml).
-github_runner_cluster_node_service: "{{ 'k3s' if github_runner_cluster_effective_node_role == 'server' else 'k3s-agent' }}"
-github_runner_cluster_node_password_volume_key: "{{ 'k3s-node' if github_runner_cluster_effective_node_role == 'server' else 'k3s-agent-node' }}"
+github_runner_cluster_node_service: "{{ 'k3s' if github_runner_cluster_docker_role == 'server' else 'k3s-agent' }}"
+github_runner_cluster_node_password_volume_key: "{{ 'k3s-node' if github_runner_cluster_docker_role == 'server' else 'k3s-agent-node' }}"
 github_runner_cluster_node_password_volume: "{{ github_runner_cluster_compose_project }}_{{ github_runner_cluster_node_password_volume_key }}"
 # The most seconds the role waits, after it has recreated a server's container, for that server's node to report Ready again before it recreates the next server's. A recreated server restarts k3s, rejoins etcd, and registers its node and starts its kubelet, which can take minutes on a busy host; the wait ends as soon as the node is Ready on a heartbeat from the new container, so this only bounds a server that does not come back, which then fails the run with the other servers still untouched.
 github_runner_cluster_server_ready_timeout: 600

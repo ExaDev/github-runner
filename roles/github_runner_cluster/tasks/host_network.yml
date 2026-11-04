@@ -64,7 +64,7 @@
   environment: "{{ github_runner_cluster_docker_cli_environment }}"
   vars:
     github_runner_cluster_network_container: >-
-      {{ github_runner_cluster_container_name if github_runner_cluster_effective_node_role == 'server' else 'github-runner-k3s-agent' }}
+      {{ github_runner_cluster_container_name if github_runner_cluster_docker_role == 'server' else github_runner_cluster_agent_container_name }}
   register: github_runner_cluster_network_node_container
   changed_when: false
   check_mode: false

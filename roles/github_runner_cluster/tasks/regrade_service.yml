@@ -1,8 +1,8 @@
 ---
-# Runs the regrade service beside this server's k3s container when github_runner_cluster_regrade is true, and removes it when it is not. Run for a server host, after the servers have been started; tasks/regrade.yml has already checked the settings.
+# Runs the regrade service beside this server's k3s container when github_runner_cluster_regrade is true and the role this host runs (tasks/docker_role.yml) is server, and removes it otherwise. Run for every Docker host, after its node has been started: an agent has no control plane to shed and no etcd vote to keep, so a host marked eligible that runs as an agent keeps its regrading setting for when it runs as a server again, and has no service meanwhile. tasks/regrade.yml has already checked the settings.
 
 - name: Run the regrade service
-  when: github_runner_cluster_regrade | bool
+  when: github_runner_cluster_regrade | bool and github_runner_cluster_docker_role == 'server'
   block:
     - name: Create the regrade service's directory
       ansible.builtin.file:
@@ -44,7 +44,7 @@
         state: present
 
 - name: Stop regrading
-  when: not (github_runner_cluster_regrade | bool)
+  when: not (github_runner_cluster_regrade | bool and github_runner_cluster_docker_role == 'server')
   block:
     - name: Read the level this server's k3s started at
       # Read-only, so it runs under --check too. Absent while the container is not running, or has never been regraded and so has an older entrypoint.
@@ -55,6 +55,8 @@
       changed_when: false
       failed_when: false
       check_mode: false
+      # An agent's container has no level: only a server is ever stepped down.
+      when: github_runner_cluster_docker_role == 'server'
 
     - name: Fail if the server is stepped down
       # Without the service nothing steps it back up, and the entrypoint would keep starting it at the level it was left at. Fatal for the whole play, so that no other host removes its service while one server is still stepped down: the refusal is then the same on every host.
@@ -66,6 +68,7 @@
           `docker compose --profile regrade exec regrade fleet-regrade up` in {{ github_runner_cluster_dir }} until it reports full (status shows the
           level), then run again. Nothing was changed.
       when:
+        - github_runner_cluster_regrade_level is not skipped
         - github_runner_cluster_regrade_level.rc == 0
         - github_runner_cluster_regrade_level.stdout | trim != 'full'
 

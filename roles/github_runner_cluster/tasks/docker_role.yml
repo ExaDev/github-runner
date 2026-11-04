@@ -1,0 +1,83 @@
+---
+# Decides which role this Docker host runs, server or agent, and publishes it as github_runner_cluster_docker_role (the profile, the container, the server turns and the regrade service follow it), with github_runner_cluster_docker_current_role (what the host runs now, or empty when nothing runs and nothing is recorded). plugins/filter/cluster_role.py's cluster_host_role decides, as it does for a native host: a host marked github_runner_cluster_voter_eligible keeps the role its role file records (github_runner_cluster_docker_role_file), since the role controller changes it at run time, and starts from the inventory's while it has none; any other host runs the inventory's role. Refuses, before anything is changed, a host whose node containers run in another role than the one it is to run, or both at once, since starting the other profile beside a running node would register a second node under the same name: switching a Docker host's role is not something a run of the role does. Needs topology.yml. Every task only reads, and runs under --check too.
+
+- name: Read the role this host's role file records
+  ansible.builtin.slurp:
+    src: "{{ github_runner_cluster_docker_role_file }}"
+  register: github_runner_cluster_docker_role_recorded
+  failed_when:
+    - github_runner_cluster_docker_role_recorded is failed
+    - "'not found' not in github_runner_cluster_docker_role_recorded.msg | default('')"
+
+- name: Read which of this host's node containers run
+  # docker ps rather than docker inspect, so that a container that does not exist reads as absent while a daemon that cannot be reached fails the run. A container that runs is counted whatever its k3s does: one that idles because the role file names the other role (k3s/node-entrypoint.sh) still holds the node's name and volumes until it is removed.
+  ansible.builtin.shell: |
+    set -eu
+    for role in server agent; do
+      if [ "$role" = server ]; then container=$server; else container=$agent; fi
+      state=$(docker ps --all --filter "name=^/${container}\$" --format '{{ '{{' }}.State{{ '}}' }}')
+      echo "${role}=${state:-absent}"
+    done
+  environment: >-
+    {{ github_runner_cluster_docker_cli_environment
+       | combine({'server': github_runner_cluster_container_name, 'agent': github_runner_cluster_agent_container_name}) }}
+  register: github_runner_cluster_docker_role_containers
+  changed_when: false
+  check_mode: false
+
+- name: Work out the role this host runs now and the role it is to run
+  vars:
+    github_runner_cluster_docker_role_running: >-
+      {{ github_runner_cluster_docker_role_containers.stdout_lines | select('match', '^(server|agent)=running$')
+         | map('regex_replace', '=running$', '') | list }}
+    github_runner_cluster_docker_roles: >-
+      {{ (github_runner_cluster_docker_role_recorded.content | b64decode if github_runner_cluster_docker_role_recorded.content is defined else '')
+         | exadev.github_runner.cluster_host_role(false, github_runner_cluster_topology.hosts[inventory_hostname].eligible,
+                                                  github_runner_cluster_effective_node_role, github_runner_cluster_docker_role_running) }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_docker_role: "{{ github_runner_cluster_docker_roles.desired }}"
+    github_runner_cluster_docker_current_role: "{{ github_runner_cluster_docker_roles.current }}"
+    github_runner_cluster_docker_role_running: "{{ github_runner_cluster_docker_role_running }}"
+    github_runner_cluster_docker_role_file_text: >-
+      {{ github_runner_cluster_docker_role_recorded.content | b64decode | trim if github_runner_cluster_docker_role_recorded.content is defined else '' }}
+
+- name: Say which role this host runs
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} is to run as {{ github_runner_cluster_docker_role }}
+      ({{ 'recorded in ' ~ github_runner_cluster_docker_role_file if github_runner_cluster_docker_role_file_text | length > 0 and github_runner_cluster_topology.hosts[inventory_hostname].eligible else 'from the inventory' }}).
+
+- name: Fail if both of this host's node containers run
+  ansible.builtin.fail:
+    msg: >-
+      Not running the role on {{ inventory_hostname }}: both of its node containers run ({{ github_runner_cluster_container_name }} and
+      {{ github_runner_cluster_agent_container_name }}), which register the same node twice. Stop the one whose role the host is not to run
+      ({{ github_runner_cluster_docker_role }}) with `docker stop` and run again. Nothing was changed.
+  when: github_runner_cluster_docker_role_running | length > 1
+
+- name: Fail if this host runs, or records, another role than the one it is to run
+  # The role this host runs now is its running container's, or, with none running, the role its role file records. It differs from the role it is to run when the inventory changed a host that is not eligible, when an eligible host's container no longer matches its record, or when a role file is left on a host that is no longer eligible, whose record the entrypoint would still obey once the role directory is mounted.
+  vars:
+    github_runner_cluster_docker_role_now: >-
+      {{ ('its ' ~ github_runner_cluster_docker_current_role ~ ' container ('
+          ~ (github_runner_cluster_container_name if github_runner_cluster_docker_current_role == 'server' else github_runner_cluster_agent_container_name)
+          ~ ') runs')
+         if github_runner_cluster_docker_role_running | length == 1
+         else ('its role directory records ' ~ github_runner_cluster_docker_current_role ~ ' (' ~ github_runner_cluster_docker_role_file ~ ')') }}
+    github_runner_cluster_docker_role_source: >-
+      {{ ('its role directory records ' ~ github_runner_cluster_docker_role ~ ' (' ~ github_runner_cluster_docker_role_file ~ ')')
+         if github_runner_cluster_topology.hosts[inventory_hostname].eligible and github_runner_cluster_docker_role_file_text | length > 0
+         else 'the inventory gives it the role ' ~ github_runner_cluster_docker_role }}
+  ansible.builtin.fail:
+    msg: >-
+      Not running the role on {{ inventory_hostname }}: {{ github_runner_cluster_docker_role_now }}, but {{ github_runner_cluster_docker_role_source }}.
+      {% if github_runner_cluster_topology.hosts[inventory_hostname].eligible %}The host is marked github_runner_cluster_voter_eligible, so its
+      role is the one its role directory records, and a run of the role does not switch a running node to another role: finish or undo the switch
+      (stop the container of the role it is not to run, or write the role it runs into {{ github_runner_cluster_docker_role_file }}) and run
+      again.{% else %}The host is not marked github_runner_cluster_voter_eligible, so the inventory decides its role and nothing may record one
+      of its own: set github_runner_cluster_node_role to the role it runs, or stop its container and remove {{ github_runner_cluster_docker_role_file }}
+      to move it, and run again.{% endif %} Nothing was changed.
+  when:
+    - github_runner_cluster_docker_role_running | length <= 1
+    - github_runner_cluster_docker_current_role | length > 0
+    - github_runner_cluster_docker_current_role != github_runner_cluster_docker_role
