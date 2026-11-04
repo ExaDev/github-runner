@@ -516,6 +516,66 @@ class WatchTest(ActuatorHarness):
         units = (self.host / "units").read_text().splitlines()
         self.assertEqual([line for line in units if line.endswith(" started")], ["k3s started", "k3s started", "k3s-agent started"])
 
+    def seed_report(self, **fields: str) -> None:
+        entry = {"swap": SWAP, "step": "", "phase": "", "role": "agent", "started_at": "", "at": "2026-01-01T00:00:00Z", "message": "", "snapshot": "", **fields}
+        (self.cluster / "configmap.json").write_text(json.dumps({"metadata": {"name": CONFIGMAP}, "data": {NODE: json.dumps(entry)}}))
+
+    def stay_at(self, step: str, phase: str) -> None:
+        """Fail unless the report stays at ``step`` and ``phase`` for several looks of the watcher, with no report made."""
+        patches = self.patches()
+        time.sleep(3 * WATCH_POLL_SECONDS)
+        self.assertEqual({key: self.report()[key] for key in ("step", "phase")}, {"step": step, "phase": phase})
+        self.assertEqual(self.patches(), patches)
+
+    def test_a_finish_whose_report_the_api_did_not_take_is_reported_again_though_nothing_of_the_server_is_left(self) -> None:
+        # The finish completed (the server stopped, its datastore moved aside, the agent started), and the report of it was lost: the Node, still carrying the swap's step-down, is what says the controller is waiting.
+        self.running_agent()
+        (self.data / "server" / "db.demoted").mkdir(parents=True)
+        self.set_node({"github-runner.exadev.com/desired-role": "agent"}, {"github-runner.exadev.com/role-swap": SWAP, "github-runner.exadev.com/role-step": "step-down"})
+        self.seed_report(step="finish-demote", phase="running")
+        self.watch()
+        report = self.wait_for_report("finish-demote", "done")
+        self.assertEqual(report["swap"], SWAP)
+        self.stay_at("finish-demote", "done")
+        self.assertTrue(self.active("k3s-agent"))
+        self.assert_never_both_running()
+
+    def test_a_finish_reported_in_every_phase_is_not_replaced_by_the_step_down_it_follows(self) -> None:
+        # The finish's own report replaces the step-down's, so a step-down the watch thought unreported would report done over the finish and be followed by the finish again, for ever.
+        self.running_agent()
+        (self.data / "server" / "db.demoted").mkdir(parents=True)
+        self.set_node({"github-runner.exadev.com/desired-role": "agent"}, {"github-runner.exadev.com/role-swap": SWAP, "github-runner.exadev.com/role-step": "step-down"})
+        self.seed_report(step="finish-demote", phase="done")
+        self.watch()
+        self.stay_at("finish-demote", "done")
+
+    def test_a_report_the_api_refused_to_take_is_made_again_once_it_takes_it_and_the_entry_ends_at_the_finish(self) -> None:
+        self.running_agent()
+        self.hold_lease()
+        (self.data / "server" / "db").mkdir(parents=True)
+        (self.data / "server" / "db" / "etcd").mkdir()
+        (self.data / "server" / "db" / "etcd" / "tombstone").write_text("")
+        self.set_node({"github-runner.exadev.com/desired-role": "agent"}, {"github-runner.exadev.com/role-swap": SWAP, "github-runner.exadev.com/role-step": "step-down"})
+        self.seed_report(step="step-down", phase="done")
+        # The API takes the finish's first report and then none, as a Docker host's node container does while its agent has no Tailscale yet.
+        (self.cluster / "patch-fails").touch()
+        self.watch()
+        deadline = time.monotonic() + 60
+        while not (self.data / "server" / "db.demoted").is_dir():
+            self.assertLess(time.monotonic(), deadline, "the finish never ran")
+            time.sleep(0.2)
+        self.assertEqual(self.report()["step"], "step-down")
+        (self.cluster / "patch-fails").unlink()
+        self.wait_for_report("finish-demote", "done")
+        self.stay_at("finish-demote", "done")
+
+    def test_a_step_that_is_not_a_demotion_gets_no_finish_from_the_watcher(self) -> None:
+        self.running_agent()
+        self.set_node({"github-runner.exadev.com/desired-role": "agent"}, {"github-runner.exadev.com/role-swap": SWAP, "github-runner.exadev.com/role-step": "rollback"})
+        self.seed_report(step="rollback", phase="done")
+        self.watch()
+        self.stay_at("rollback", "done")
+
     def test_the_watcher_leaves_a_refused_step_to_the_controller_once_its_reason_is_gone(self) -> None:
         self.running_agent()
         self.watch()

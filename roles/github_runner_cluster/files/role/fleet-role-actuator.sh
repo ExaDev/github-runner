@@ -335,7 +335,23 @@ role_for_step() {
   esac
 }
 
-# One look at the Node: a snapshot it asks for, the step it asks for, then the finish of a demotion whose role file names the agent while something of the server is left. A step reported done, failed or refused for the swap is not taken again (the controller decides what follows a failure); a finish is taken until it is done, since it can never cost quorum.
+# Succeeds when the step $3 of swap $2 needs no taking by the watch, given this node's report $1: it reported done, failed or refused, or it is a step-down and the finish of that demotion is reported, in any phase (the finish only follows a step-down, and its own report replaces the step-down's, so without this a finish that has begun would send the watch back to the step-down, which reports done over the finish and is then followed by the finish again, for ever).
+step_taken() {
+  local entry=$1 swap=$2 step=$3
+  settled "$entry" "$swap" "$step" "done" failed refused && return 0
+  [ "$step" = step-down ] && settled "$entry" "$swap" finish-demote running "done" failed
+}
+
+# Succeeds when the watch is to take (or retake) the finish of the demotion whose swap is $2, given this node's report $1: the role file names the agent, the finish is not reported done, and something of the server is left, or the Node still carries this swap's step-down (so the controller is waiting for the finish and has not seen it reported). A finish whose report the API did not take leaves nothing of the server behind, so only the report is made again; the finish is idempotent, and member_gone still decides whether the member is gone.
+finish_due() {
+  local entry=$1 swap=$2
+  [ "$(read_role)" = agent ] || return 1
+  settled "$entry" "$swap" finish-demote "done" && return 1
+  if server_active || datastore_present; then return 0; fi
+  [ -n "$swap" ] && [ "$(node_annotation "$STEP_ANNOTATION")" = step-down ]
+}
+
+# One look at the Node: a snapshot it asks for, the step it asks for, then the finish of a demotion whose role file names the agent while something of the server is left or the finish is unreported. A step reported done, failed or refused for the swap is not taken again (the controller decides what follows a failure), except that a step whose report the API did not take is taken again, every step being idempotent and the report being made again when it ends; a finish is taken until it is reported done, since it can never cost quorum.
 watch_pass() {
   local entry request swap step desired
   if ! select_api_server; then
@@ -352,7 +368,7 @@ watch_pass() {
   fi
   swap=$(node_annotation "$SWAP_ANNOTATION")
   step=$(node_annotation "$STEP_ANNOTATION")
-  if [ -n "$swap" ] && [ -n "$step" ] && ! settled "$entry" "$swap" "$step" "done" failed refused; then
+  if [ -n "$swap" ] && [ -n "$step" ] && ! step_taken "$entry" "$swap" "$step"; then
     desired=$(node_label "$DESIRED_ROLE_LABEL")
     if [ -n "$(role_for_step "$step")" ] && [ "$desired" != "$(role_for_step "$step")" ]; then
       CURRENT_STEP=$step CURRENT_SWAP=$swap STARTED_AT='' SNAPSHOT=''
@@ -363,7 +379,7 @@ watch_pass() {
     fi
     entry=$(own_entry) || return 1
   fi
-  if [ "$(read_role)" = agent ] && { server_active || datastore_present; } && ! settled "$entry" "$swap" finish-demote "done"; then
+  if finish_due "$entry" "$swap"; then
     run_step finish-demote "$swap" || true
   fi
 }
