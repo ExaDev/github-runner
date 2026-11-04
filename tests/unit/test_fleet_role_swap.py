@@ -357,6 +357,13 @@ class SnapshotTest(SwapCase):
         self.assertEqual(self.annotations("a")[SNAPSHOT_ANNOTATION], self.id)
         self.assertEqual(self.swap()["step"], "snapshot")
 
+    def test_a_snapshot_is_never_asked_of_the_outgoing_voter_even_when_it_sorts_first(self) -> None:
+        self.id = swap_id("a", IN)
+        self.hold(nodes=f"a,{IN}")
+        self.previous("snapshot", out="a")
+        self.ok_pass()
+        self.assertEqual([name for name in "abcd" if SNAPSHOT_ANNOTATION in self.annotations(name)], ["b"])
+
     def test_the_swap_waits_while_the_snapshot_is_not_ready_even_when_the_actuator_says_done(self) -> None:
         self.at_snapshot_taken()
         self.cluster.snapshots = [{"spec": {"snapshotName": SNAPSHOT_FILE}, "status": {"readyToUse": False}}]
@@ -620,6 +627,21 @@ class OutgoingTest(SwapCase):
         self.hosts[2].level = "etcd-only"
         self.ok_pass()
         self.assertEqual(self.annotations(OUT)[REMOVE], "true")
+
+    def test_a_stepped_down_member_whose_node_no_longer_says_it_votes_is_still_counted_as_a_member_and_removed(self) -> None:
+        # A server at etcd-only runs no kubelet, so its Node stops saying EtcdIsVoter while etcd still lists the member: the gates count it, ignore its health and let the removal go on.
+        self.at_step_down_asked()
+        self.report(OUT, self.id, "step-down")
+        self.hosts[2].voter = False
+        self.hosts[2].learner = True
+        self.hosts[2].level = "etcd-only"
+        self.hosts[2].ready = False
+        self.hosts[2].stale_by = 10 * SAMPLE_SECONDS
+        for host in self.hosts[:2] + self.hosts[3:]:
+            host.etcd = {"known_members": TARGET + 1, "active_peers": TARGET - 1}
+        self.ok_pass()
+        self.assertEqual(self.annotations(OUT)[REMOVE], "true")
+        self.assertEqual(self.cluster.status()["gates"], [])
 
     def test_the_removal_waits_for_the_step_down_while_the_outgoing_voter_is_ready_and_has_not_reported(self) -> None:
         self.at_step_down_asked()

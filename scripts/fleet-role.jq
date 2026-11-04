@@ -235,25 +235,26 @@ $config as $c
 | ([$hosts[] | select(.eligible)] | length) as $eligible_count
 | ($all | map(select(.voter))) as $voter_nodes
 
-# Why no swap may start now whatever the hosts' fitness: the epic's conditions on the cluster as a whole, as `gates`, which hold for a swap by command as well as by decision, and the cooldown after a membership change, which only a decision waits out. A voter a swap in progress is taking out (`ignored_voters`) is held to none of the gates on its own health, and its peers may lack their connection to it.
+# Why no swap may start now whatever the hosts' fitness: the epic's conditions on the cluster as a whole, as `gates`, which hold for a swap by command as well as by decision, and the cooldown after a membership change, which only a decision waits out. A voter a swap in progress is taking out (`ignored_voters`) is held to none of the gates on its own health, and its peers may lack their connection to it. It is still an etcd member until k3s removes it, whether or not its Node still says EtcdIsVoter (a server stepped down to etcd-only runs no kubelet), so the members etcd lists include it.
 # How many members each voter's fresh probe report says etcd lists, by voter, null for a voter with no fresh report or no reading: a rollback is settled once every voter lists the target and no more.
 | ($voter_names | map({key: ., value: (if ($probes[.].samples[-1].t // 0) >= ($now - $stale_seconds) then $probes[.].samples[-1].etcd.known_members else null end)}) | from_entries) as $known_members
 | ($c.ignored_voters // []) as $ignored
 | ($voter_names | map(select(. as $v | $ignored | index($v) | not))) as $judged
+| ([$all[] | select(.name as $n | $ignored | index($n)) | select(.labelled and (.removed | not))]) as $ignored_members
+| ($ignored_members | map(select(.voter | not)) | length) as $held_members
+| (($voters | length) + $held_members) as $members_expected
 | ([
-    (if ($voters | length) != $c.expected_voters then "there are \($voters | length) voters, not the \(if $c.expected_voters == $c.target then "target \($c.target)" else "expected \($c.expected_voters) (the target \($c.target) and the new voter a swap holds)" end)" else empty end),
-    ($all[] | select(.labelled and (.voter | not)) | if .removed then "node \(.name) is a member k3s has removed: it still carries the etcd label" else "node \(.name) is a member but not a voter: it carries the etcd label without \(voter_condition)=True" end),
+    (if $members_expected != $c.expected_voters then "there are \($members_expected) voters, not the \(if $c.expected_voters == $c.target then "target \($c.target)" else "expected \($c.expected_voters) (the target \($c.target) and the new voter a swap holds)" end)" else empty end),
+    ($all[] | select(.name as $n | $ignored | index($n) | not) | select(.labelled and (.voter | not)) | if .removed then "node \(.name) is a member k3s has removed: it still carries the etcd label" else "node \(.name) is a member but not a voter: it carries the etcd label without \(voter_condition)=True" end),
     ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.regrade_level != null) | "voter \(.name) is at regrade level \(.regrade_level), below full"),
     ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.ready | not) | "voter \(.name) is not Ready"),
     ($judged[] as $v | $probes[$v].samples[-1] as $last | $last.etcd as $e
-       | ($voters | length) as $members
-       | (if ($ignored | index($v)) == null then ($ignored | map(select(. as $i | $voter_names | index($i))) | length) else 0 end) as $absent
        | if $last == null or $last.t < ($now - $stale_seconds) then "voter \($v) has no probe report in the last \($stale_seconds) s"
          elif $e == null then "etcd's state on voter \($v) is unknown"
          elif ($e.has_leader | not) then "voter \($v) reports no leader"
          elif $e.is_learner then "voter \($v) is a learner"
-         elif $e.known_members != $members then "voter \($v) knows \($e.known_members) members, not the \($members) voters: a learner or a member that has not started"
-         elif $e.active_peers > ($members - 1) or $e.active_peers < ($members - 1 - $absent) then "voter \($v) is connected to \($e.active_peers) of its \($members - 1) peers"
+         elif $e.known_members != $members_expected then "voter \($v) knows \($e.known_members) members, not the \($members_expected) voters: a learner or a member that has not started"
+         elif $e.active_peers > ($members_expected - 1) or $e.active_peers < ($members_expected - 1 - ($ignored_members | length)) then "voter \($v) is connected to \($e.active_peers) of its \($members_expected - 1) peers"
          else empty end)
   ]) as $gates
 | ([
