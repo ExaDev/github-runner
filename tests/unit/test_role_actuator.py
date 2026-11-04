@@ -1,4 +1,4 @@
-"""Tests the role actuator (roles/github_runner_cluster/files/role): its commands with the systemd platform against stand-ins that keep a native host's units and a cluster in directories (tests/role_actuator, over tests/regrade's), and the role's setup of it on a native host (tasks/role_actuator.yml) against the stand-ins in native_stand_ins.py. The role's own promotion and demotion, which run the actuator's promote-local and demote-local, are tested in test_native_server.py and test_native_regrade.py."""
+"""Tests the role actuator (roles/github_runner_cluster/files/role): its commands with the systemd platform against stand-ins that keep a native host's units and a cluster in directories (tests/role_actuator, over tests/regrade's), its commands with the docker platform against a stand-in for docker that keeps a Docker host's containers and volumes (tests/role_actuator/fake-docker.py), with files/node-identity.sh and the regrade service's idling, and the role's setup of it on a native host (tasks/role_actuator.yml) against the stand-ins in native_stand_ins.py and on a Docker host from its tasks and templates. The role's own promotion and demotion, which run the actuator's promote-local and demote-local, are tested in test_native_server.py and test_native_regrade.py."""
 
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
+import jinja2
 import yaml
 from native_stand_ins import ACTUATOR_TOKEN, DOMAIN, ROLE, ROOT, NativeRoleHarness
 
@@ -537,6 +538,377 @@ class WatchTest(ActuatorHarness):
         self.assertIn("desired-role is 'agent', which a promote does not go with", report["message"])
         self.assertTrue(self.active("k3s-agent"))
         self.assertEqual(self.role_file.read_text(), "agent")
+
+
+PROJECT = "proj"
+SERVER_CONTAINER = "proj-k3s"
+AGENT_CONTAINER = "proj-agent"
+# Stand-ins for what the node's identity holds, so a test can tell where each went and that neither reached the output.
+NODE_PASSWORD = "made-up-node-password-for-tests"
+TAILSCALE_STATE = '{"_machinekey":"privkey:made-up-machine-key-for-tests"}'
+
+
+class DockerActuatorHarness(ActuatorHarness):
+    """Runs the actuator's commands on a stand-in Docker host (tests/role_actuator/fake-docker.py) under a Compose project, with the same stand-in cluster as the native tests. Holds no tests of its own."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="role-actuator-docker-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.project = self.tmp / "project"
+        self.lib = self.project / "role"
+        self.bin = self.tmp / "bin"
+        self.host = self.tmp / "host"
+        self.cluster = self.tmp / "cluster"
+        self.docker = self.tmp / "docker"
+        for path in (self.lib, self.bin, self.host, self.cluster, self.docker / "containers", self.docker / "volumes", self.project / "fleet-role.d"):
+            path.mkdir(parents=True)
+        # The scripts as tasks/role_actuator_docker.yml places them, side by side in the project's role directory.
+        for source in ("role/fleet-role-actuator.sh", "role/fleet-role-actuator-docker.sh", "regrade/fleet-regrade-core.sh", "regrade/fleet-regrade-k3s.sh", "regrade/fleet-regrade-docker.sh", "node-identity.sh"):
+            shutil.copy(FILES / source, self.lib / Path(source).name)
+        for name, source in {"docker": FAKES / "fake-docker.py", "kubectl": FAKES / "fake-kubectl.sh", "k3s": FAKES / "fake-k3s.sh", "date": REGRADE_FAKES / "fake-date.sh"}.items():
+            shutil.copy(source, self.bin / name)
+            (self.bin / name).chmod(0o755)
+        # The server's k3s data volume, which the actuator's container mounts where the server's does.
+        self.data = self.docker / "volumes" / f"{PROJECT}_k3s-data"
+        self.data.mkdir()
+        (self.docker / "volumes" / f"{PROJECT}_k3s-data.labels").write_text(f"com.docker.compose.project={PROJECT}\ncom.docker.compose.volume=k3s-data\n")
+        self.level_file = self.data / "regrade-level"
+        self.started_file = self.tmp / "run" / "regrade-level"
+        self.role_file = self.project / "fleet-role.d" / "role"
+        self.kubeconfig = self.lib / "fleet-role-actuator.kubeconfig"
+        self.kubeconfig.write_text(f"users: [{{name: fleet-role-actuator, user: {{token: {ACTUATOR_TOKEN}}}}}]\n")
+        settings = {
+            "FLEET_ROLE_ACTUATOR": "docker",
+            "PROJECT_DIR": self.project,
+            "COMPOSE_PROJECT": PROJECT,
+            "COMPOSE_FILES": '"docker-compose.yml docker-compose.fleet-role.yml"',
+            "ROLE_DIR": self.project / "fleet-role.d",
+            "STATE_DIR": self.lib,
+            "SERVER_CONTAINER": SERVER_CONTAINER,
+            "AGENT_CONTAINER": AGENT_CONTAINER,
+            "NODE_CONTAINER": SERVER_CONTAINER,
+            "REGRADE_CONTAINER": f"{PROJECT}-regrade-1",
+            "K3S_DATA_DIR": self.data,
+            "LEVEL_FILE": self.level_file,
+            "STARTED_FILE": self.started_file,
+            "NODE_NAME": NODE,
+            "OPERATION_TIMEOUT_SECONDS": 2,
+            "API_PORT": 6443,
+            "LEASE_NAMESPACE": "kube-system",
+            "LEASE_NAME": "fleet-regrade",
+            "ROLE_LEASE_HOLDER": HOLDER,
+            "SWAP_ID_ANNOTATION": SWAP_ID_ANNOTATION,
+            "ACTUATOR_NAMESPACE": NAMESPACE,
+            "ACTUATOR_CONFIGMAP": CONFIGMAP,
+            "JOIN_URLS_FILE": self.lib / "join-urls",
+            "KUBECTL": "node_kubectl",
+            "KUBECONFIG_PATH": self.kubeconfig,
+            "KUBE_SERVERS": f'"https://server1.{DOMAIN}:6443 https://server2.{DOMAIN}:6443"',
+        }
+        (self.lib / "fleet-role-actuator.env").write_text("".join(f"{key}={value}\n" for key, value in settings.items()))
+        (self.lib / "join-urls").write_text(f"server1 {JOIN_URL}\nserver2 https://server2.{DOMAIN}:6443\n")
+        (self.project / ".env").write_text("K3S_TOKEN=made-up-token\nK3S_TLS_SAN_LIST=server1 testnode\n")
+        self.env = {
+            **os.environ,
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "FAKE_DOCKER": str(self.docker),
+            "FAKE_PROJECT": PROJECT,
+            "FAKE_SERVER_CONTAINER": SERVER_CONTAINER,
+            "FAKE_AGENT_CONTAINER": AGENT_CONTAINER,
+            "FAKE_ROLE_FILE": str(self.role_file),
+            "LEVEL_FILE": str(self.level_file),
+            "STARTED_FILE": str(self.started_file),
+            "FAKE_HOST": str(self.host),
+            "FAKE_DIR": str(self.cluster),
+            "FAKE_REGRADE_KUBECTL": str(REGRADE_FAKES / "fake-kubectl.sh"),
+        }
+        (self.cluster / "configmap.json").write_text(json.dumps({"metadata": {"name": CONFIGMAP}, "data": {}}))
+        self.set_node()
+
+    def docker_call(self, *args: str) -> None:
+        subprocess.run([str(self.bin / "docker"), *args], env=self.env, check=True, capture_output=True)
+
+    def compose_up(self, service: str) -> None:
+        self.docker_call("compose", "--project-name", PROJECT, "--profile", "server" if service == "k3s" else "agent", "up", "--detach", "--no-deps", service)
+
+    def identity_volumes(self, role: str) -> tuple[Path, Path]:
+        prefix = "k3s" if role == "server" else "k3s-agent"
+        return self.docker / "volumes" / f"{PROJECT}_{prefix}-node", self.docker / "volumes" / f"{PROJECT}_{prefix}-tailscale-data"
+
+    def running_as(self, role: str, level: str = "full") -> None:
+        """The host running ``role``'s container with the node's identity in that role's volumes, and for a server a datastore whose member is named, as k3s leaves one."""
+        self.role_file.write_text(role)
+        if role == "server":
+            self.level_file.write_text(level + "\n")
+            (self.data / "server" / "db" / "etcd").mkdir(parents=True)
+            (self.data / "server" / "db" / "etcd" / "name").write_text(f"{NODE}-0a1b2c3d")
+        self.compose_up("k3s" if role == "server" else "k3s-agent")
+        node, tailscale = self.identity_volumes(role)
+        (node / "password").write_text(NODE_PASSWORD)
+        (tailscale / "tailscaled.state").write_text(TAILSCALE_STATE)
+
+    def container_state(self, name: str) -> str:
+        path = self.docker / "containers" / name / "state"
+        return path.read_text() if path.exists() else ""
+
+    def assert_identity_in(self, role: str) -> None:
+        node, tailscale = self.identity_volumes(role)
+        self.assertEqual((node / "password").read_text(), NODE_PASSWORD)
+        self.assertEqual((tailscale / "tailscaled.state").read_text(), TAILSCALE_STATE)
+
+    def assert_clean_switch(self, result: subprocess.CompletedProcess[str]) -> None:
+        for name in ("both-running", "copied-while-running"):
+            path = self.docker / name
+            self.assertFalse(path.exists(), path.read_text() if path.exists() else "")
+        calls = (self.docker / "calls").read_text()
+        for secret in (NODE_PASSWORD, TAILSCALE_STATE, ACTUATOR_TOKEN):
+            for text in (result.stdout, result.stderr, calls, (self.cluster / "calls").read_text() if (self.cluster / "calls").exists() else ""):
+                self.assertNotIn(secret, text)
+
+
+class DockerPromoteTest(DockerActuatorHarness):
+    def test_a_promotion_moves_the_identity_to_the_server_and_starts_it_in_place_of_the_agent(self) -> None:
+        self.running_as("agent")
+        self.hold_lease()
+        self.set_node({"github-runner.exadev.com/desired-role": "server"}, {"github-runner.exadev.com/role-join-node": "server1"})
+        before = len((self.docker / "calls").read_text().splitlines())
+        result = self.actuator("promote", SWAP)
+        self.assert_status(result, DONE)
+        self.assertEqual(self.role_file.read_text(), "server")
+        self.assertEqual((self.project / "fleet-role.d" / "join-url").read_text(), JOIN_URL + "\n")
+        self.assertEqual(self.container_state(SERVER_CONTAINER), "running")
+        self.assertEqual(self.container_state(AGENT_CONTAINER), "exited")
+        self.assertTrue((self.docker / "containers" / SERVER_CONTAINER / "tailscale").exists(), "the server's k3s idled instead of starting")
+        self.assert_identity_in("server")
+        self.assert_clean_switch(result)
+        calls = (self.docker / "calls").read_text().splitlines()[before:]
+        # The agent stops before anything is copied, and the copy ends before the server starts.
+        stop = next(index for index, call in enumerate(calls) if call.startswith("compose") and call.endswith("stop k3s-agent"))
+        copies = [index for index, call in enumerate(calls) if call.startswith("cp ")]
+        up = next(index for index, call in enumerate(calls) if call.startswith("compose") and call.endswith("up --detach --no-deps k3s"))
+        self.assertTrue(copies and stop < min(copies) and max(copies) < up, calls)
+        # Every Compose call is on the host's project, with the files the role runs it with.
+        for call in calls:
+            if call.startswith("compose"):
+                self.assertIn(f"--project-directory {self.project} --project-name {PROJECT} --file docker-compose.yml --file docker-compose.fleet-role.yml", call)
+        self.assertEqual(self.report()["phase"], "done")
+
+    def test_the_identity_volumes_a_promotion_creates_are_named_and_labelled_for_the_project(self) -> None:
+        self.running_as("agent")
+        self.hold_lease()
+        self.set_node({"github-runner.exadev.com/desired-role": "server"}, {"github-runner.exadev.com/role-join-node": "server1"})
+        self.assert_status(self.actuator("promote", SWAP), DONE)
+        for key in ("k3s-node", "k3s-tailscale-data"):
+            with self.subTest(volume=key):
+                self.assertEqual((self.docker / "volumes" / f"{PROJECT}_{key}.labels").read_text().splitlines(), [f"com.docker.compose.project={PROJECT}", f"com.docker.compose.volume={key}"])
+        creates = [call for call in (self.docker / "calls").read_text().splitlines() if call.startswith("create ")]
+        self.assertEqual(creates, [f"create --name {PROJECT}_k3s-node-identity-copy --volume {PROJECT}_k3s-node:/etc/rancher/node sha256:k3s-agent-image", f"create --name {PROJECT}_k3s-tailscale-data-identity-copy --volume {PROJECT}_k3s-tailscale-data:/var/lib/tailscale sha256:k3s-agent-image"])
+        self.assertFalse(any(path.name.endswith("-identity-copy") for path in (self.docker / "containers").iterdir()), "a throwaway container was left behind")
+
+    def test_a_promotion_whose_server_does_not_come_up_brings_the_agent_back_with_its_identity(self) -> None:
+        # With neither container up the host could not reach the API to be rolled back, so the agent comes back at once and the failure is reported through it.
+        self.running_as("agent")
+        self.hold_lease()
+        self.set_node({"github-runner.exadev.com/desired-role": "server"}, {"github-runner.exadev.com/role-join-node": "server1"})
+        result = self.actuator("promote", SWAP, FAKE_UP_FAILS="k3s")
+        self.assert_status(result, FAILED)
+        self.assertEqual({key: self.report()[key] for key in ("phase", "role")}, {"phase": "failed", "role": "agent"})
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertEqual(self.container_state(AGENT_CONTAINER), "running")
+        self.assertTrue((self.docker / "containers" / AGENT_CONTAINER / "tailscale").exists(), "the agent's k3s idled instead of starting")
+        self.assertFalse((self.project / "fleet-role.d" / "join-url").exists())
+        self.assert_identity_in("agent")
+        self.assert_clean_switch(result)
+        # The controller's rollback then finds the agent running and has nothing to change.
+        self.assert_status(self.actuator("rollback", SWAP), DONE)
+        self.assertEqual(self.container_state(AGENT_CONTAINER), "running")
+
+
+class DockerStepDownAndFinishTest(DockerActuatorHarness):
+    def test_a_step_down_restarts_the_server_at_etcd_only_then_names_the_agent_and_stops_regrading(self) -> None:
+        self.running_as("server")
+        (self.docker / "containers" / f"{PROJECT}-regrade-1").mkdir()
+        (self.docker / "containers" / f"{PROJECT}-regrade-1" / "state").write_text("running")
+        self.hold_lease()
+        result = self.actuator("step-down", SWAP)
+        self.assert_status(result, DONE)
+        self.assertEqual(self.level_file.read_text(), "etcd-only\n")
+        self.assertEqual(self.started_file.read_text(), "etcd-only\n")
+        self.assertIn(f"restart --time 2 {SERVER_CONTAINER}", (self.docker / "calls").read_text().splitlines())
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertEqual(self.container_state(SERVER_CONTAINER), "running")
+        self.assertEqual(self.container_state(f"{PROJECT}-regrade-1"), "exited")
+
+    def test_a_demotion_is_finished_by_moving_the_identity_back_and_starting_the_agent(self) -> None:
+        self.running_as("server", level="etcd-only")
+        self.role_file.write_text("agent")
+        (self.data / "server" / "db" / "etcd" / "tombstone").write_text("")
+        (self.project / "fleet-role.d" / "join-url").write_text(JOIN_URL + "\n")
+        result = self.actuator("finish-demote")
+        self.assert_status(result, DONE)
+        self.assertEqual(self.container_state(SERVER_CONTAINER), "exited")
+        self.assertEqual(self.container_state(AGENT_CONTAINER), "running")
+        self.assertTrue((self.docker / "containers" / AGENT_CONTAINER / "tailscale").exists(), "the agent's k3s idled instead of starting")
+        self.assertFalse((self.data / "server" / "db").exists())
+        self.assertTrue((self.data / "server" / "db.demoted" / "etcd" / "name").is_file())
+        self.assertFalse(self.level_file.exists())
+        self.assertFalse((self.project / "fleet-role.d" / "join-url").exists())
+        self.assert_identity_in("agent")
+        self.assert_clean_switch(result)
+        self.assertEqual({key: self.report()[key] for key in ("step", "phase", "role")}, {"step": "finish-demote", "phase": "done", "role": "agent"})
+
+    def test_a_demotion_is_not_finished_while_the_member_stays(self) -> None:
+        self.running_as("server", level="etcd-only")
+        self.role_file.write_text("agent")
+        self.set_node({"node-role.kubernetes.io/etcd": "true"})
+        self.assert_status(self.actuator("finish-demote"), NOT_YET)
+        self.assertEqual(self.container_state(SERVER_CONTAINER), "running")
+        self.assertTrue((self.data / "server" / "db").is_dir())
+
+
+class DockerApiAndSnapshotTest(DockerActuatorHarness):
+    def test_kubectl_runs_in_the_node_container_with_tailscale_up_and_takes_the_kubeconfig_on_its_standard_input(self) -> None:
+        self.running_as("agent")
+        self.hold_lease()
+        result = self.actuator("status")
+        self.assert_status(result, DONE)
+        calls = (self.docker / "calls").read_text().splitlines()
+        self.assertIn(f"exec {AGENT_CONTAINER} test -S /var/run/tailscale/tailscaled.sock", calls)
+        kubectl = [call for call in calls if " kubectl " in call]
+        self.assertTrue(kubectl and all(call.startswith(f"exec -i {AGENT_CONTAINER} kubectl --kubeconfig /dev/stdin ") for call in kubectl), kubectl)
+        self.assertEqual((self.docker / "kubeconfigs").read_text(), self.kubeconfig.read_text())
+        self.assert_clean_switch(result)
+
+    def test_with_no_node_container_up_the_api_is_not_reached_and_nothing_is_taken(self) -> None:
+        self.running_as("agent")
+        self.docker_call("stop", AGENT_CONTAINER)
+        self.hold_lease()
+        self.set_node({"github-runner.exadev.com/desired-role": "server"}, {"github-runner.exadev.com/role-join-node": "server1"})
+        result = self.actuator("promote", SWAP)
+        self.assert_status(result, REFUSED)
+        self.assertIn("no API server answers", result.stdout + result.stderr)
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertFalse(any(" kubectl " in call for call in (self.docker / "calls").read_text().splitlines()))
+
+    def test_a_voter_takes_the_snapshot_in_its_server_container(self) -> None:
+        self.running_as("server")
+        self.hold_lease()
+        self.assert_status(self.actuator("snapshot", SWAP), DONE)
+        self.assertEqual(self.report()["snapshot"], f"fleet-role-{SWAP}-testnode-1767225600")
+        self.assertIn(f"exec {SERVER_CONTAINER} k3s etcd-snapshot save --etcd-server https://127.0.0.1:6443 --name fleet-role-{SWAP}", (self.docker / "calls").read_text().splitlines())
+
+
+class NodeIdentityTest(DockerActuatorHarness):
+    def identity(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(FILES / "node-identity.sh"), *args], env=self.env, capture_output=True, text=True, check=False)
+
+    def test_a_copy_out_of_a_running_container_is_refused_with_nothing_changed(self) -> None:
+        self.running_as("agent")
+        result = self.identity("--stopped", AGENT_CONTAINER, "/etc/rancher/node", f"{PROJECT}_k3s-node", PROJECT, "k3s-node")
+        self.assertEqual(result.returncode, REFUSED, result.stderr)
+        self.assertIn(f"{AGENT_CONTAINER} is running", result.stderr)
+        self.assertFalse((self.docker / "volumes" / f"{PROJECT}_k3s-node").exists())
+
+    def test_a_copy_into_a_volume_a_running_container_mounts_is_refused(self) -> None:
+        self.running_as("server")
+        self.compose_up("k3s-agent")
+        self.docker_call("stop", SERVER_CONTAINER)
+        result = self.identity("--stopped", SERVER_CONTAINER, "/etc/rancher/node", f"{PROJECT}_k3s-agent-node", PROJECT, "k3s-agent-node")
+        self.assertEqual(result.returncode, REFUSED, result.stderr)
+        self.assertIn(f"{PROJECT}_k3s-agent-node is mounted by the running container {AGENT_CONTAINER}", result.stderr)
+
+    def test_a_failed_copy_removes_the_volume_it_created_and_its_throwaway_container(self) -> None:
+        self.running_as("agent")
+        self.docker_call("stop", AGENT_CONTAINER)
+        (self.docker / "containers" / AGENT_CONTAINER / "mounts").write_text(f"{PROJECT}_k3s-agent-data /var/lib/rancher/k3s\n")
+        result = self.identity("--stopped", AGENT_CONTAINER, "/etc/rancher/node", f"{PROJECT}_k3s-node", PROJECT, "k3s-node")
+        self.assertEqual(result.returncode, FAILED, result.stderr)
+        self.assertFalse((self.docker / "volumes" / f"{PROJECT}_k3s-node").exists())
+        self.assertFalse((self.docker / "containers" / f"{PROJECT}_k3s-node-identity-copy").exists())
+
+
+class DockerRegradeIdleTest(DockerActuatorHarness):
+    def regrade(self, *args: str) -> subprocess.CompletedProcess[str]:
+        lib = self.tmp / "regrade"
+        lib.mkdir(exist_ok=True)
+        for name in ("fleet-regrade.sh", "fleet-regrade-core.sh", "fleet-regrade-k3s.sh", "fleet-regrade-docker.sh"):
+            shutil.copy(FILES / "regrade" / name, lib / name)
+        (lib / "fleet-regrade.env").write_text(f"FLEET_REGRADE_ACTUATOR=docker\nNODE_CONTAINER={SERVER_CONTAINER}\n")
+        # Stands in for sleep: records that it was called, then stops the shell that started it as `docker stop` would.
+        (self.bin / "sleep").write_text('#!/bin/sh\necho "$*" >> "$FAKE_DOCKER/sleep"\nkill -TERM "$PPID"\n')
+        (self.bin / "sleep").chmod(0o755)
+        return subprocess.run(["bash", str(lib / "fleet-regrade.sh"), *args], env={**self.env, "FLEET_ROLE_FILE": str(self.role_file), "PSI_FILE": str(self.tmp / "no-psi")}, capture_output=True, text=True, timeout=60, check=False)
+
+    def test_the_watcher_idles_on_a_host_whose_role_file_names_the_agent(self) -> None:
+        self.role_file.write_text("agent")
+        result = self.regrade("watch")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("names 'agent', not server", result.stdout)
+        self.assertEqual((self.docker / "sleep").read_text(), "infinity\n")
+        self.assertFalse((self.docker / "calls").exists(), "an idle watcher must not reach the server's container")
+
+    def test_a_command_by_hand_on_such_a_host_is_refused_and_a_server_runs_as_before(self) -> None:
+        self.role_file.write_text("agent")
+        result = self.regrade("down")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("names 'agent', not server", result.stderr)
+        self.role_file.write_text("server")
+        result = self.regrade("watch")
+        self.assertIn("exposes no memory pressure", result.stderr)
+        self.assertFalse((self.docker / "sleep").exists())
+
+
+
+class DockerRoleSetupTest(unittest.TestCase):
+    """Reads how the role sets the actuator up on a Docker host (tasks/role_actuator_docker.yml and its templates); the mesh scenario role_actuator runs it."""
+
+    VALUES: ClassVar[dict[str, Any]] = {
+        "github_runner_cluster_node_mode": "compose",
+        "github_runner_cluster_dir": "/home/runner/github-runner",
+        "github_runner_cluster_role_actuator_dir": "/home/runner/github-runner/role",
+        "github_runner_cluster_compose_project": "github-runner",
+        "github_runner_cluster_compose_file_list": ["docker-compose.yml", "docker-compose.fleet-role.yml"],
+        "github_runner_cluster_container_name": "github-runner-k3s",
+        "github_runner_cluster_agent_container_name": "github-runner-k3s-agent",
+        "github_runner_cluster_effective_node_name": NODE,
+        "github_runner_cluster_regrade_operation_timeout_seconds": 300,
+        "github_runner_cluster_api_port": 6443,
+        "github_runner_cluster_regrade_lease_namespace": "kube-system",
+        "github_runner_cluster_regrade_lease_name": "fleet-regrade",
+        "github_runner_cluster_role_lease_holder": HOLDER,
+        "github_runner_cluster_role_lease_swap_id_annotation": SWAP_ID_ANNOTATION,
+        "github_runner_cluster_role_actuator_namespace": NAMESPACE,
+        "github_runner_cluster_role_actuator_configmap": CONFIGMAP,
+        "github_runner_cluster_role_actuator_kubeconfig": "/home/runner/github-runner/role/fleet-role-actuator.kubeconfig",
+        "github_runner_cluster_native_bin_dir": "/usr/local/bin",
+        "github_runner_cluster_api_candidates": [],
+    }
+
+    def render(self, template: str) -> str:
+        environment = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ROLE / "templates")), undefined=jinja2.StrictUndefined, keep_trailing_newline=True)
+        environment.filters["to_json"] = json.dumps
+        return environment.get_template(template).render(**self.VALUES)
+
+    def test_the_role_places_every_script_the_docker_actuator_runs(self) -> None:
+        tasks = yaml.safe_load((ROLE / "tasks" / "role_actuator_docker.yml").read_text())
+        place = next(task for task in tasks[-1]["block"] if task["name"] == "Place the role actuator's image build context and scripts")
+        placed = {Path(item["src"]).name for item in place["loop"]}
+        actuator = (FILES / "role" / "fleet-role-actuator.sh").read_text() + (FILES / "role" / "fleet-role-actuator-docker.sh").read_text()
+        sourced = {name.replace("$FLEET_ROLE_ACTUATOR", "docker") for name in re.findall(r'\. "\$lib/([^"]+)"', actuator)}
+        self.assertEqual(placed, sourced | {"fleet-role-actuator.sh", "node-identity.sh", "Dockerfile"})
+
+    def test_the_service_mounts_the_socket_the_project_at_its_own_path_and_the_servers_data_where_the_settings_say(self) -> None:
+        service = yaml.safe_load(self.render("docker-compose.role-actuator.yml.j2"))["services"]["role-actuator"]
+        settings = dict(line.split("=", 1) for line in self.render("role-actuator.env.j2").splitlines() if line and not line.startswith("#"))
+        project = self.VALUES["github_runner_cluster_dir"]
+        self.assertEqual(service["volumes"], ["/var/run/docker.sock:/var/run/docker.sock", f"{project}:{project}", f"k3s-data:{settings['K3S_DATA_DIR']}"])
+        self.assertEqual(service["profiles"], ["role-actuator"])
+        self.assertEqual(service["entrypoint"], [f"{settings['STATE_DIR']}/fleet-role-actuator.sh"])
+        self.assertEqual(service["environment"], [f"FLEET_ROLE_ACTUATOR_ENV={settings['STATE_DIR']}/fleet-role-actuator.env"])
+        self.assertEqual((settings["FLEET_ROLE_ACTUATOR"], settings["KUBECTL"], settings["ROLE_DIR"]), ("docker", "node_kubectl", f"{project}/fleet-role.d"))
+        self.assertEqual(settings["COMPOSE_FILES"], '"docker-compose.yml docker-compose.fleet-role.yml"')
+        # The Compose file the k3s services are run with never names this service, so a host the controller never moves keeps its configuration.
+        self.assertNotIn("role-actuator", (FILES / "docker-compose.yml").read_text())
 
 
 class RoleSetupTest(NativeRoleHarness):

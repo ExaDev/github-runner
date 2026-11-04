@@ -11,7 +11,7 @@
 #
 # EXIT STATUS. 0: done. 1: failed; the host is left with at most one role's unit running and a role file naming that role. 2: refused, with nothing changed: the Lease is not held by ROLE_LEASE_HOLDER for this swap (or cannot be read), the host is not provisioned to be a server, the role file names something that is not a role, the step is not one this actuator takes, or the step's own precondition does not hold (each says which). 3: not yet (finish-demote before the member is gone).
 #
-# The platform's file, fleet-role-actuator-$FLEET_ROLE_ACTUATOR.sh, says how each part is done on the host (its header lists the functions), after fleet-regrade-core.sh (kubectl_, select_api_server, lease_state, now_epoch, log), fleet-regrade-k3s.sh (write_level, restart_into, current_level, POLL_SECONDS) and the regrading actuator of the same platform, all from this script's directory. The settings are in fleet-role-actuator.env beside it, which the role templates (templates/role-actuator.env.j2). It needs bash, jq and kubectl besides what the platform needs.
+# The platform's file, fleet-role-actuator-$FLEET_ROLE_ACTUATOR.sh (systemd for a native host, docker for a host under the role's Compose project), says how each part is done on the host (fleet-role-actuator-systemd.sh's header lists the functions), after fleet-regrade-core.sh (kubectl_, select_api_server, lease_state, now_epoch, log), fleet-regrade-k3s.sh (write_level, restart_into, current_level, POLL_SECONDS) and the regrading actuator of the same platform, all from this script's directory. The settings are in fleet-role-actuator.env beside it, which the role templates (templates/role-actuator.env.j2). It needs bash, jq and kubectl besides what the platform needs.
 set -euo pipefail
 
 lib=$(dirname "$(readlink -f "$0")")
@@ -26,9 +26,9 @@ EXIT_NOT_YET=3
 # shellcheck source=/dev/null
 . "$lib/fleet-regrade-core.sh"
 case ${FLEET_ROLE_ACTUATOR:-} in
-  systemd) ;;
+  systemd | docker) ;;
   *)
-    echo "FLEET_ROLE_ACTUATOR is '${FLEET_ROLE_ACTUATOR:-}' in $FLEET_REGRADE_ENV; it must be systemd." >&2
+    echo "FLEET_ROLE_ACTUATOR is '${FLEET_ROLE_ACTUATOR:-}' in $FLEET_REGRADE_ENV; it must be systemd or docker." >&2
     exit "$EXIT_REFUSED"
     ;;
 esac
