@@ -14,7 +14,7 @@
                   'timeout': github_runner_cluster_cluster_read_timeout | string}) }}
   delegate_to: "{{ item }}"
   loop: >-
-    {{ ([inventory_hostname] if github_runner_cluster_effective_node_role == 'server' else [])
+    {{ ([inventory_hostname] if github_runner_cluster_docker_role == 'server' else [])
        + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
           | map(attribute='key') | reject('equalto', inventory_hostname) | list) }}
   vars:
@@ -58,7 +58,7 @@
   ignore_unreachable: true
   check_mode: false
   timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
-  when: github_runner_cluster_effective_node_role == 'server'
+  when: github_runner_cluster_docker_role == 'server'
 
 - name: Refuse to restart the node while the cluster needs it
   vars:

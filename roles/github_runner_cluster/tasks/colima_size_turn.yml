@@ -37,7 +37,7 @@
   # This host's own when it is a server, since its API answers until the VM stops and again before the node is uncordoned; otherwise another server of the inventory's. Worked out whether or not the node runs, though only a running one is read through it, since Ansible templates a task's delegate_to before its condition, and api.yml reads nothing.
   ansible.builtin.include_tasks: native/api.yml
   vars:
-    github_runner_cluster_native_api_self: "{{ github_runner_cluster_effective_node_role == 'server' }}"
+    github_runner_cluster_native_api_self: "{{ github_runner_cluster_docker_role == 'server' }}"
 
 - name: Read the fleet-regrade Lease
   # A read that fails is recorded rather than failing here, so the refusal below says why. Bounded by github_runner_cluster_cluster_read_timeout, as the API call's --request-timeout.
@@ -143,7 +143,7 @@
     - name: Wait for the node to come back
       ansible.builtin.include_tasks: native/server_ready.yml
       vars:
-        github_runner_cluster_native_role: "{{ github_runner_cluster_effective_node_role }}"
+        github_runner_cluster_native_role: "{{ github_runner_cluster_docker_role }}"
         github_runner_cluster_native_started: "{{ github_runner_cluster_colima_size_stopped }}"
       when: github_runner_cluster_colima_size_live | bool
 
