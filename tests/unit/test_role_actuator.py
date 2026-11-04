@@ -34,6 +34,11 @@ JOIN_URL = f"https://server1.{DOMAIN}:6443"
 DONE, FAILED, REFUSED, NOT_YET = 0, 1, 2, 3
 # Long enough that the Lease a test holds never runs out during it.
 LEASE_SECONDS = 600
+# How often the watcher reads its Node: POLL_SECONDS in fleet-regrade-k3s.sh, which the actuator sources.
+_POLL = re.search(r"^POLL_SECONDS=(\d+)$", (FILES / "regrade" / "fleet-regrade-k3s.sh").read_text(), re.MULTILINE)
+if _POLL is None:
+    raise AssertionError("fleet-regrade-k3s.sh sets no POLL_SECONDS")
+WATCH_POLL_SECONDS = int(_POLL.group(1))
 
 
 class ActuatorHarness(unittest.TestCase):
@@ -509,6 +514,19 @@ class WatchTest(ActuatorHarness):
         self.assert_never_both_running()
         units = (self.host / "units").read_text().splitlines()
         self.assertEqual([line for line in units if line.endswith(" started")], ["k3s started", "k3s started", "k3s-agent started"])
+
+    def test_the_watcher_leaves_a_refused_step_to_the_controller_once_its_reason_is_gone(self) -> None:
+        self.running_agent()
+        self.watch()
+        self.set_node({"github-runner.exadev.com/desired-role": "server"}, {"github-runner.exadev.com/role-swap": SWAP, "github-runner.exadev.com/role-step": "promote", "github-runner.exadev.com/role-join-node": "server1"})
+        self.wait_for_report("promote", "refused")
+        # The Lease the step lacked is now held, but what follows a refusal is the controller's to decide: a new swap or step, never the watcher taking the old one again.
+        self.hold_lease()
+        time.sleep(3 * WATCH_POLL_SECONDS)
+        self.assertEqual(self.report()["phase"], "refused")
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertTrue(self.active("k3s-agent"))
+        self.assertFalse(self.active("k3s"))
 
     def test_the_watcher_refuses_a_step_its_desired_role_does_not_go_with(self) -> None:
         self.running_agent()
