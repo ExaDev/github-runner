@@ -1020,8 +1020,9 @@ etcd_members() {
     member list -w simple </dev/null
 }
 
-native_is_voter() {
-  [ "$(kubectl_on 1 get node "$native_host" -o 'jsonpath={.status.conditions[?(@.type=="EtcdIsVoter")].status}' 2>/dev/null)" = True ]
+# Whether the Node $1 (the native host's by default) reports itself a voting member of etcd.
+node_is_voter() {
+  [ "$(kubectl_on 1 get node "${1:-$native_host}" -o 'jsonpath={.status.conditions[?(@.type=="EtcdIsVoter")].status}' 2>/dev/null)" = True ]
 }
 
 # Writes to the cluster through node 1 once a second until the stop file appears, recording each write as ok, or as failed with the time and what kubectl said. Each write is a ConfigMap named by its sequence number, so no two writes share a name: write_marker's random suffix repeats often enough over a promotion's worth of writes that a refusal for a name already taken would read as a lost write.
@@ -1081,7 +1082,7 @@ scenario_native_server() {
   watch_native_member "$members" "$stop" &
   local watcher=$!
   run_role --limit "$native_host" || { touch "$stop"; wait "$writer" "$watcher" || true; fail "the role did not promote ${native_host}"; }
-  wait_for "${native_host} to be a voting member of etcd" 300 native_is_voter
+  wait_for "${native_host} to be a voting member of etcd" 300 node_is_voter
   touch "$stop"
   wait "$writer" "$watcher"
 
@@ -1543,20 +1544,22 @@ actuator_wait_seconds=600
 actuator_lease_seconds=$((5 * actuator_wait_seconds))
 actuator_prefix=github-runner.exadev.com
 
-# The native host's last report in the actuators' ConfigMap, or {}.
+# The last report of the node $1 (the native host's by default) in the actuators' ConfigMap, or {}.
 actuator_report() {
-  kubectl_on 1 --namespace "$platform_namespace" get configmap fleet-role-actuators -o json 2>/dev/null </dev/null | jq -c --arg node "$native_host" '.data[$node] // "{}" | fromjson'
+  kubectl_on 1 --namespace "$platform_namespace" get configmap fleet-role-actuators -o json 2>/dev/null </dev/null | jq -c --arg node "${1:-$native_host}" '.data[$node] // "{}" | fromjson'
 }
-actuator_reported() { [ "$(actuator_report | jq -r '.step + " " + .phase' 2>/dev/null)" = "$1 $2" ]; }
-# Whether the native host's Node reports the Ready condition True and its kubelet has renewed the node's Lease (kube-node-lease/<node>) at or after the time $1 (RFC 3339, UTC), as tasks/native/server_ready.yml judges a restart: the API keeps a stopped kubelet's Ready condition until the node controller's grace period runs out, so the condition alone could be the server's from before its step-down. Read from the condition, not the STATUS column, which says Ready,SchedulingDisabled while the node is cordoned. Both times are cut to whole seconds before they are compared, as strings, since RFC 3339 in UTC sorts as it reads.
-native_node_ready_since() {
-  local renewed
-  [ "$(kubectl_on 1 get node "$native_host" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null </dev/null)" = True ] || return 1
-  renewed=$(kubectl_on 1 --namespace kube-node-lease get lease "$native_host" -o 'jsonpath={.spec.renewTime}' 2>/dev/null </dev/null) || return 1
+# Whether the last report of the node $3 (the native host's by default) is for the step $1 in the phase $2.
+actuator_reported() { [ "$(actuator_report "${3:-}" | jq -r '.step + " " + .phase' 2>/dev/null)" = "$1 $2" ]; }
+# Whether the Node $2 (the native host's by default) reports the Ready condition True and its kubelet has renewed the node's Lease (kube-node-lease/<node>) at or after the time $1 (RFC 3339, UTC), as tasks/native/server_ready.yml judges a restart: the API keeps a stopped kubelet's Ready condition until the node controller's grace period runs out, so the condition alone could be the server's from before its step-down. Read from the condition, not the STATUS column, which says Ready,SchedulingDisabled while the node is cordoned. Both times are cut to whole seconds before they are compared, as strings, since RFC 3339 in UTC sorts as it reads.
+node_ready_since() {
+  local renewed node=${2:-$native_host}
+  [ "$(kubectl_on 1 get node "$node" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null </dev/null)" = True ] || return 1
+  renewed=$(kubectl_on 1 --namespace kube-node-lease get lease "$node" -o 'jsonpath={.spec.renewTime}' 2>/dev/null </dev/null) || return 1
   [ -n "$renewed" ] || return 1
   [[ ! "${renewed:0:19}" < "${1:0:19}" ]]
 }
-native_member_removed() { [ -n "$(kubectl_on 1 get node "$native_host" -o 'jsonpath={.metadata.annotations.etcd\.k3s\.cattle\.io/removed-node-name}' 2>/dev/null </dev/null)" ]; }
+# Whether k3s has recorded the removal of the etcd member of the Node $1 (the native host's by default).
+member_removed() { [ -n "$(kubectl_on 1 get node "${1:-$native_host}" -o 'jsonpath={.metadata.annotations.etcd\.k3s\.cattle\.io/removed-node-name}' 2>/dev/null </dev/null)" ]; }
 started_member_count() { etcd_members 2>/dev/null | grep -c ', started, ' || true; }
 
 # Holds the regrade Lease as the role controller does for the whole of the swap $1 of the nodes $2.
@@ -1590,7 +1593,7 @@ watch_native_units() {
   done
 }
 
-# The role actuator's native part: three Docker servers and a native standby, every host eligible with the role controller on, and the test acting as the controller, holding the Lease and writing the Node's label and annotations by hand. The actuator promotes the standby (a learner, then a voter, with writes succeeding throughout), steps it down (its etcd serving at etcd-only and no pod's shim left), it is removed through k3s's annotation, and the actuator finishes it as an agent, keeping its node password and Tailscale address and moving its datastore aside, with the two units never running together.
+# The role actuator's native part: three Docker servers and a native standby, every host eligible with the role controller on, and the test acting as the controller, holding the Lease and writing the Node's label and annotations by hand. The actuator promotes the standby (a learner, then a voter, with writes succeeding throughout), steps it down (its etcd serving at etcd-only and no pod's shim left), it is removed through k3s's annotation, and the actuator finishes it as an agent, keeping its node password and Tailscale address and moving its datastore aside, with the two units never running together. role_actuator_docker then does the same to a Docker server and promotes it again.
 scenario_role_actuator() {
   local swap password address writes members stop units writer watcher unit_watcher list ok failed
   role_controller=1
@@ -1631,7 +1634,7 @@ scenario_role_actuator() {
   kubectl_on 1 label --overwrite node "$native_host" "${actuator_prefix}/desired-role=server" >/dev/null
   kubectl_on 1 annotate --overwrite node "$native_host" "${actuator_prefix}/role-swap=${swap}" "${actuator_prefix}/role-step=promote" "${actuator_prefix}/role-join-node=$(node_name 1)" >/dev/null
   wait_for "${native_host}'s actuator to report the promotion done" "$actuator_wait_seconds" actuator_reported promote "done"
-  wait_for "${native_host} to be a voting member of etcd" "$actuator_wait_seconds" native_is_voter
+  wait_for "${native_host} to be a voting member of etcd" "$actuator_wait_seconds" node_is_voter
   touch "$stop"
   wait "$writer" "$watcher"
   actuator_report
@@ -1672,7 +1675,7 @@ scenario_role_actuator() {
 
   log "Removing ${native_host}'s member through k3s's annotation, after which its actuator finishes it as an agent"
   kubectl_on 1 annotate --overwrite node "$native_host" etcd.k3s.cattle.io/remove=true >/dev/null
-  wait_for "k3s to record the removal of ${native_host}'s member" "$actuator_wait_seconds" native_member_removed
+  wait_for "k3s to record the removal of ${native_host}'s member" "$actuator_wait_seconds" member_removed
   wait_for "${native_host}'s actuator to report the demotion finished" "$actuator_wait_seconds" actuator_reported finish-demote "done"
   actuator_report
   [ "$(started_member_count)" = 3 ] || { etcd_members; fail "expected three started etcd members after the removal"; }
@@ -1690,13 +1693,92 @@ scenario_role_actuator() {
   kubectl_on 1 annotate node "$native_host" etcd.k3s.cattle.io/remove- etcd.k3s.cattle.io/removed-node-name- etcd.k3s.cattle.io/node-name- etcd.k3s.cattle.io/node-address- \
     "${actuator_prefix}/role-swap-" "${actuator_prefix}/role-step-" "${actuator_prefix}/role-join-node-" >/dev/null
   kubectl_on 1 taint node "$native_host" node-role.kubernetes.io/control-plane=true:NoSchedule- >/dev/null
-  wait_for "${native_host} to be Ready as an agent again" "$actuator_wait_seconds" native_node_ready_since "$(actuator_report | jq -r .started_at)"
+  wait_for "${native_host} to be Ready as an agent again" "$actuator_wait_seconds" node_ready_since "$(actuator_report | jq -r .started_at)"
   kubectl_on 1 uncordon "$native_host" >/dev/null
   kubectl_on 1 delete lease fleet-regrade --namespace kube-system >/dev/null
   touch "$stop"
   wait "$unit_watcher"
   [ ! -s "$units" ] || { cat "$units"; fail "${native_host} ran both k3s units at once"; }
   [ "$(kubectl_on 1 get nodes --no-headers | grep -c "^${native_host} ")" = 1 ] || fail "${native_host} is not exactly one Node"
+
+  role_actuator_docker
+}
+
+# A Docker host's container state, or nothing for one that does not exist.
+docker_state() { docker ps --all --filter "name=^/$1\$" --format '{{.State}}'; }
+container_is() { [ "$(docker_state "$1")" = "$2" ]; }
+# Whether the node container $1's Tailscale client has a mesh address.
+has_mesh_address() { [ -n "$(docker exec "$1" tailscale ip -4 </dev/null 2>/dev/null)" ]; }
+# Runs a shell command against the named volume, mounted at /volume, in a throwaway container.
+in_volume() { docker run --rm --volume "$1:/volume" "$busybox_image" sh -c "$2" </dev/null; }
+
+# The role actuator's Docker part, after the native part: the third Docker server, whose role-actuator service the role runs since the controller is on, is demoted by the Node's annotations set by hand, as the controller sets them, and then promoted again. Its agent must keep the server's node password and Tailscale address as one Node, with the server's datastore moved aside in its k3s-data volume, and the promoted server must join the cluster it left, with the same etcd cluster ID.
+role_actuator_docker() {
+  local node server agent actuator project cluster_id password address swap
+  node=$(node_name 3)
+  server=$(container 3)
+  agent="grtest-node3-agent"
+  project="$node"
+  actuator="${project}-role-actuator-1"
+  wait_for "${node}'s role actuator service to run" 120 container_is "$actuator" running
+  cluster_id=$(etcd_cluster_id 1)
+  [ -n "$cluster_id" ] || fail "could not read the etcd cluster ID"
+  password=$(docker exec "$server" sha256sum /etc/rancher/node/password </dev/null | cut -d' ' -f1)
+  address=$(docker exec "$server" tailscale ip -4 </dev/null | head -n 1)
+  swap="$(date -u +%Y%m%dT%H%M%SZ)-${node}-${native_host}"
+  hold_swap_lease "$swap" "$node"
+
+  log "Stepping ${node}, a Docker server, down through its role actuator service, as the controller asks"
+  kubectl_on 1 cordon "$node" >/dev/null
+  kubectl_on 1 taint --overwrite node "$node" node-role.kubernetes.io/control-plane=true:NoSchedule >/dev/null
+  kubectl_on 1 drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout="${actuator_wait_seconds}s" >/dev/null
+  kubectl_on 1 label --overwrite node "$node" "${actuator_prefix}/regrade-level=etcd-only" "${actuator_prefix}/desired-role=agent" >/dev/null
+  kubectl_on 1 annotate --overwrite node "$node" "${actuator_prefix}/role-swap=${swap}" "${actuator_prefix}/role-step=step-down" >/dev/null
+  wait_for "${node}'s actuator to report the step-down done" "$actuator_wait_seconds" actuator_reported step-down "done" "$node"
+  actuator_report "$node"
+  [ "$(docker exec "$server" cat /run/regrade-level </dev/null)" = etcd-only ] || fail "${node}'s server did not start at etcd-only"
+  [ "$(cat "${work}/${node}/fleet-role.d/role")" = agent ] || fail "${node}'s role file does not name the agent after the step-down"
+
+  log "Removing ${node}'s member through k3s's annotation, after which its actuator finishes it as an agent"
+  kubectl_on 1 annotate --overwrite node "$node" etcd.k3s.cattle.io/remove=true >/dev/null
+  wait_for "k3s to record the removal of ${node}'s member" "$actuator_wait_seconds" member_removed "$node"
+  wait_for "${node}'s actuator to report the demotion finished" "$actuator_wait_seconds" actuator_reported finish-demote "done" "$node"
+  actuator_report "$node"
+  [ "$(docker_state "$server")" = exited ] || fail "${node}'s server container is $(docker_state "$server"), not stopped"
+  [ "$(docker_state "$agent")" = running ] || fail "${node}'s agent container is not running"
+  in_volume "${project}_k3s-data" 'test -d /volume/server/db.demoted && test ! -e /volume/server/db' || fail "${node}'s datastore was not moved aside in its k3s-data volume"
+  [ "$(docker exec "$agent" sha256sum /etc/rancher/node/password </dev/null | cut -d' ' -f1)" = "$password" ] || fail "${node}'s agent has another node password"
+  wait_for "${node}'s agent to be on the mesh" 120 has_mesh_address "$agent"
+  [ "$(docker exec "$agent" tailscale ip -4 </dev/null | head -n 1)" = "$address" ] || fail "${node}'s agent has another Tailscale address"
+
+  log "Cleaning ${node}'s Node up as the controller does, and waiting for its agent"
+  kubectl_on 1 label node "$node" node-role.kubernetes.io/control-plane- node-role.kubernetes.io/etcd- node-role.kubernetes.io/master- \
+    "${actuator_prefix}/regrade-level-" "${actuator_prefix}/desired-role-" >/dev/null
+  kubectl_on 1 annotate node "$node" etcd.k3s.cattle.io/remove- etcd.k3s.cattle.io/removed-node-name- etcd.k3s.cattle.io/node-name- etcd.k3s.cattle.io/node-address- \
+    "${actuator_prefix}/role-swap-" "${actuator_prefix}/role-step-" >/dev/null
+  kubectl_on 1 taint node "$node" node-role.kubernetes.io/control-plane=true:NoSchedule- >/dev/null
+  wait_for "${node} to be Ready as an agent" "$actuator_wait_seconds" node_ready_since "$(actuator_report "$node" | jq -r .started_at)" "$node"
+  kubectl_on 1 uncordon "$node" >/dev/null
+  [ "$(kubectl_on 1 get nodes --no-headers | grep -c "^${node} ")" = 1 ] || fail "${node} is not exactly one Node"
+
+  log "Promoting ${node} again through its role actuator service: it must join the cluster it left"
+  swap="$(date -u +%Y%m%dT%H%M%SZ)-${native_host}-${node}"
+  hold_swap_lease "$swap" "$node"
+  kubectl_on 1 cordon "$node" >/dev/null
+  kubectl_on 1 drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout="${actuator_wait_seconds}s" >/dev/null
+  kubectl_on 1 label --overwrite node "$node" "${actuator_prefix}/desired-role=server" >/dev/null
+  kubectl_on 1 annotate --overwrite node "$node" "${actuator_prefix}/role-swap=${swap}" "${actuator_prefix}/role-step=promote" "${actuator_prefix}/role-join-node=$(node_name 1)" >/dev/null
+  wait_for "${node}'s actuator to report the promotion done" "$actuator_wait_seconds" actuator_reported promote "done" "$node"
+  wait_for "${node} to be a voting member of etcd" "$actuator_wait_seconds" node_is_voter "$node"
+  actuator_report "$node"
+  [ "$(docker_state "$agent")" = exited ] || fail "${node}'s agent container is $(docker_state "$agent"), not stopped"
+  [ "$(docker exec "$server" sha256sum /etc/rancher/node/password </dev/null | cut -d' ' -f1)" = "$password" ] || fail "${node}'s server has another node password"
+  [ "$(docker exec "$server" tailscale ip -4 </dev/null | head -n 1)" = "$address" ] || fail "${node}'s server has another Tailscale address"
+  [ "$(etcd_cluster_id 3)" = "$cluster_id" ] || fail "${node} joined a cluster with another ID: $(etcd_cluster_id 3) (was ${cluster_id})"
+  [ "$(started_member_count)" = 3 ] || { etcd_members; fail "expected three started etcd members after ${node}'s promotion"; }
+  kubectl_on 1 uncordon "$node" >/dev/null
+  kubectl_on 1 delete lease fleet-regrade --namespace kube-system >/dev/null
+  [ "$(kubectl_on 1 get nodes --no-headers | grep -c "^${node} ")" = 1 ] || fail "${node} is not exactly one Node"
 }
 
 scenarios=("$@")
