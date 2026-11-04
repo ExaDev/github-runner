@@ -230,7 +230,7 @@ case "$*" in
     echo ok ;;
   cordon*|uncordon*|drain*|label*|annotate*) ;;
   # The role actuator's credential: what is applied is kept for the test to read, the report ConfigMap exists once created, and its token Secret, filled as the token controller fills one, holds ACTUATOR_TOKEN.
-  "apply --filename -"*)
+  "apply --server-side --field-manager=fleet-role-actuator --filename -"*)
     cat > "$state/applied"
     # As kubectl refuses a manifest with no objects in it.
     if ! grep -q '[^[:space:]]' "$state/applied"; then echo "error: no objects passed to apply" >&2; exit 1; fi ;;
