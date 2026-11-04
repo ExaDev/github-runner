@@ -371,7 +371,7 @@ class TemplateTest(unittest.TestCase):
 
     def test_the_units_and_configurations_are_templates_the_role_has(self) -> None:
         templates = sorted(path.name for path in (ROLE / "templates" / "native").iterdir())
-        self.assertEqual(templates, ["agent.yaml.j2", "fleet-regrade.service.j2", "join.yaml.j2", "k3s-agent.service.j2", "k3s.service.j2", "server.yaml.j2"])
+        self.assertEqual(templates, ["agent.yaml.j2", "fleet-regrade.service.j2", "fleet-role-actuator.service.j2", "join.yaml.j2", "k3s-agent.service.j2", "k3s.service.j2", "server.yaml.j2"])
         config = (ROLE / "tasks" / "native" / "config.yml").read_text()
         for name in ("agent.yaml.j2", "server.yaml.j2", "join.yaml.j2", "native/{{ item }}.service.j2"):
             self.assertIn(name, config)
