@@ -144,11 +144,12 @@ class DockerRoleTest(RoleTestCase):
         self.assertEqual(self.roles_reported(result), {"node1": "server", "node2": "server", "node3": "server", "node4": "agent"})
 
     def test_the_role_is_recorded_for_an_eligible_host_only_and_only_when_absent(self) -> None:
-        self.record("node4", "server")
+        # Written as the role controller may write it, without the newline a run of the role ends its own record with, so that writing over it would change its bytes.
+        self.role_file("node4").write_text("server")
         result = self.tasks("docker_role,docker_role_record")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.role_file("node3").read_text(), "server\n")
-        self.assertEqual(self.role_file("node4").read_text(), "server\n", "a recorded role is never written over")
+        self.assertEqual(self.role_file("node4").read_text(), "server", "a recorded role is never written over")
         for host in ("node1", "node2"):
             self.assertFalse(self.role_file(host).exists(), host)
         self.assertEqual((recap(result.stdout, "node3")["changed"], recap(result.stdout, "node4")["changed"]), (1, 0))
