@@ -104,6 +104,25 @@ write_lease other-node "$((NOW - 10))"
 release_lease
 check "release leaves a lease that has passed to another node alone" test "$(holder)" = other-node
 
+# A holder other than the node, with annotations, as the role controller takes the Lease for a swap.
+reset_cluster
+acquire_lease fleet-role '{"example.test/id":"swap-1","example.test/nodes":"a,b"}' > /dev/null
+check "a named holder takes the lease in its own name" test "$(holder)" = fleet-role
+check "the annotations are written with the lease" test "$(jq -c '.metadata.annotations' "$lease")" = '{"example.test/id":"swap-1","example.test/nodes":"a,b"}'
+acquires_for() { acquire_lease "$1" > /dev/null 2>&1; }
+check_not "another holder is refused while the named holder has it" acquires_for testnode
+check "the named holder takes its own lease again" acquires_for fleet-role
+check "taking it again with no annotations leaves the lease as that call wrote it" test "$(jq -c '.metadata.annotations' "$lease")" = null
+release_lease fleet-role
+check "the named holder's release clears the holder" test "$(holder)" = ""
+check "and the annotations" test "$(jq -c '.metadata.annotations' "$lease")" = null
+
+reset_cluster
+acquire_lease fleet-role '{"example.test/id":"swap-1"}' > /dev/null
+release_lease
+check "a release for this node leaves another holder's lease alone" test "$(holder)" = fleet-role
+check "and its annotations" test "$(jq -c '.metadata.annotations' "$lease")" = '{"example.test/id":"swap-1"}'
+
 # Renewing: the holder keeps the Lease past its duration by writing a later renew time, and nobody else may.
 renews() { renew_lease "$1" > /dev/null 2>&1; }
 # Writes a Lease held by $1, acquired at epoch $2, last renewed at epoch $3, carrying an annotation.
