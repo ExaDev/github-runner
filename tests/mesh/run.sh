@@ -40,7 +40,7 @@ pin_first=1
 tc_image=alpine:3.20
 # The probe's period in the role_controller scenario while it fills a window of samples: long enough that a sample's own work (a few kubectl calls) is a small part of it, since a probe that has not reported for three periods counts as silent.
 role_controller_sample_seconds=5
-# The probe's period once a swap is under way, and in the swap scenarios throughout: the ARC role's own default. A swap holds its steps while any voter's probe is silent, and a probe on a runner with this many k3s nodes under way misses three periods of 5 seconds, which only stalls the swap; the default keeps a silent probe a fault and not a flutter.
+# The probe's period in the role_controller_swap scenario and the role_swap ones: the ARC role's own default. A swap holds its steps while any voter's probe is silent, and a probe on a runner with this many k3s nodes under way misses three periods of 5 seconds, which only stalls the swap; the default keeps a silent probe a fault and not a flutter.
 swap_sample_seconds=15
 # Tries per pod pair, 5 seconds apart plus each try's own timeout: about two minutes for the mesh to converge after a restart.
 reach_attempts=8
@@ -1257,9 +1257,9 @@ MANIFESTS
   kubectl_on "$api_node" --namespace "$platform_namespace" get pods -o wide
 }
 
-# Brings up three servers and a standby agent, runs the role controller's probe and controller in the cluster (the pods from the image built from this checkout, the manifests the ARC role renders), and checks that the controller reports what it sees on real k3s and real etcd: all hosts fit, then one voter made slow with tc netem on its mesh interface reported unfit with the swap named, then a voter paused and the controller reporting that it would not act, and throughout that it has changed nothing.
-scenario_role_controller() {
-  local index ids image_file manifests slow paused paused_name controller_node deadline account verb expected link
+# Brings up three servers and a standby agent with the role controller on and waits for every node to be Ready: the start of both role_controller scenarios. Sets `ids`, the etcd members at the start, in the caller's variable of that name.
+role_controller_cluster_up() {
+  local deadline
   node_count=4
   agent_from=4
   etcd_on_memory=1
@@ -1278,6 +1278,12 @@ scenario_role_controller() {
   [ "$(kubectl_on 1 get nodes -l node-role.kubernetes.io/etcd=true --no-headers | wc -l | tr -d ' ')" = 3 ] || fail "expected three etcd nodes"
   if kubectl_on 1 get node "$(node_name 4)" -o 'jsonpath={.metadata.labels}' | grep -F 'node-role.kubernetes.io/etcd' >/dev/null; then fail "the fourth node is a server"; fi
   ids=$(etcd_member_ids 1)
+}
+
+# Brings up three servers and a standby agent, runs the role controller's probe and controller in the cluster (the pods from the image built from this checkout, the manifests the ARC role renders), and checks that the controller reports what it sees on real k3s and real etcd: all hosts fit, then one voter made slow with tc netem on its mesh interface reported unfit with the swap named, then a voter paused and the controller reporting that it would not act, and throughout that it has changed nothing.
+scenario_role_controller() {
+  local index ids image_file manifests slow paused paused_name controller_node deadline account verb expected link
+  role_controller_cluster_up
 
   log "A check run on hosts that lack the Compose files of the role controller, as a host that ran the role before the controller was turned on does, passes and writes nothing"
   local before_started file
@@ -1336,17 +1342,7 @@ scenario_role_controller() {
   # A node in a container sees only its veth, so what each probe reports is the label the role published.
   role_status | jq -e --arg link "$link" '[.hosts[] | .link == $link and .link_source == "label"] | all' >/dev/null || fail "the probes did not report the link the role labelled the nodes with (${link}): $(role_status | jq -c '[.hosts[] | {link, link_source}]')"
 
-  log "A voter is made slow with tc netem on its mesh interface (${role_controller_delay_ms} ms each way): the controller reports it unfit and names the swap"
-  slow=3
-  mesh_delay "$slow" add "$role_controller_delay_ms"
-  wait_for "$(node_name "$slow") to be reported unfit and the swap named" 900 role_status_is \
-    ".hosts[\"$(node_name "$slow")\"].verdict == \"unfit\" and .decision.action == \"swap\" and .decision.swap == {out: \"$(node_name "$slow")\", in: \"$(node_name 4)\"}"
-  role_status | jq .
-  role_status | jq -r '.decision.because[]'
-  role_status | jq -e ".hosts[\"$(node_name "$slow")\"].reasons | any(test(\"round trip p99\"))" >/dev/null || fail "the reason does not name the round trip"
-  role_status | jq -e --arg slow "$(node_name "$slow")" '([.hosts[] | select(.verdict == "unfit") | .attributed_to | index($slow) != null] | all) and (.attribution[$slow] | index($slow) != null)' >/dev/null \
-    || fail "the unfit verdicts are not attributed to $(node_name "$slow"): $(role_status | jq -c '.attribution')"
-  kubectl_on 1 --namespace "$platform_namespace" logs deployment/fleet-role --tail 20 | grep -F "DRY RUN: would swap out $(node_name "$slow") for $(node_name 4)" >/dev/null || fail "the controller did not log the swap it would make"
+  role_controller_slow_voter_named
 
   log "A voter is paused: the controller reports that it would not act"
   controller_node=$(role_pod_node fleet-role)
@@ -1366,12 +1362,41 @@ scenario_role_controller() {
   kubectl_on 1 get nodes -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.spec.unschedulable}{" "}{.spec.taints}{"\n"}{end}'
   if kubectl_on 1 get nodes -o json | jq -e '[.items[] | select(.metadata.annotations["etcd.k3s.cattle.io/remove"] != null)] | length > 0' >/dev/null; then fail "a node was annotated for removal"; fi
   [ -z "$(kubectl_on 1 get lease fleet-regrade --namespace kube-system -o 'jsonpath={.metadata.name}' 2>/dev/null </dev/null || true)" ] || fail "a dry run took the regrade Lease"
+}
 
-  log "With the dry run turned off, and the probes' period the ARC role's default, the controller carries out the swap it reported, bringing the standby agent, a Docker host that was never a server, in for the slow voter, which stays slow"
-  kubectl_on 1 --namespace "$platform_namespace" set env deployment/fleet-role FLEET_ROLE_DRY_RUN=false FLEET_ROLE_SAMPLE_SECONDS="$swap_sample_seconds" >/dev/null
-  kubectl_on 1 --namespace "$platform_namespace" set env daemonset/fleet-role-probe REPORT_SECONDS="$swap_sample_seconds" >/dev/null
+# Makes the voter $slow (node 3, set here in the caller's variable of that name) slow with tc netem and waits until the controller, which is in dry run, reports it unfit and names the swap for the standby.
+role_controller_slow_voter_named() {
+  log "A voter is made slow with tc netem on its mesh interface (${role_controller_delay_ms} ms each way): the controller reports it unfit and names the swap"
+  slow=3
+  mesh_delay "$slow" add "$role_controller_delay_ms"
+  wait_for "$(node_name "$slow") to be reported unfit and the swap named" 900 role_status_is \
+    ".hosts[\"$(node_name "$slow")\"].verdict == \"unfit\" and .decision.action == \"swap\" and .decision.swap == {out: \"$(node_name "$slow")\", in: \"$(node_name 4)\"}"
+  role_status | jq .
+  role_status | jq -r '.decision.because[]'
+  role_status | jq -e ".hosts[\"$(node_name "$slow")\"].reasons | any(test(\"round trip p99\"))" >/dev/null || fail "the reason does not name the round trip"
+  role_status | jq -e --arg slow "$(node_name "$slow")" '([.hosts[] | select(.verdict == "unfit") | .attributed_to | index($slow) != null] | all) and (.attribution[$slow] | index($slow) != null)' >/dev/null \
+    || fail "the unfit verdicts are not attributed to $(node_name "$slow"): $(role_status | jq -c '.attribution')"
+  kubectl_on 1 --namespace "$platform_namespace" logs deployment/fleet-role --tail 20 | grep -F "DRY RUN: would swap out $(node_name "$slow") for $(node_name 4)" >/dev/null || fail "the controller did not log the swap it would make"
+}
+
+# The window of samples the controller reads each figure over, in seconds, at the probes' period $1: the count is the controller's own, read from the module it takes it from.
+role_controller_window_seconds() { echo $(($1 * $(jq -nr -L "${repo_root}/scripts" 'include "fleet-role-stats"; window_samples'))); }
+
+# The role controller at the ARC role's default period carrying out the swap it reported: a voter is made slow, the controller (in dry run) names the swap, and with the dry run turned off it makes it. It is a scenario of its own because a window of samples at the default period takes as long to fill as the controller says (role_controller_window_seconds), and a swap has its own bounds (swap_wait_seconds), which together do not fit beside role_controller's other checks in one job.
+scenario_role_controller_swap() {
+  local ids slow window_seconds
+  window_seconds=$(role_controller_window_seconds "$swap_sample_seconds")
+  role_controller_cluster_up
+  deploy_role_controller "$swap_sample_seconds"
+
+  log "Every host is fit, from a window of real samples at the default period, and the controller would not act"
+  wait_for "every host to be reported fit and no swap wanted" $((window_seconds + 900)) role_status_is '(.hosts | length == 4) and ([.hosts[].verdict] | all(. == "fit")) and .decision.action == "none" and (.blocks | length == 0)'
+
+  role_controller_slow_voter_named
+
+  log "With the dry run turned off, the controller carries out the swap it reported, bringing the standby agent, a Docker host that was never a server, in for the slow voter, which stays slow"
+  kubectl_on 1 --namespace "$platform_namespace" set env deployment/fleet-role FLEET_ROLE_DRY_RUN=false >/dev/null
   kubectl_on 1 --namespace "$platform_namespace" rollout status deployment/fleet-role --timeout=300s
-  kubectl_on 1 --namespace "$platform_namespace" rollout status daemonset/fleet-role-probe --timeout=300s
   wait_for_swap "$(node_name "$slow")" "$(node_name 4)" completed
   role_status | jq -e '.dry_run == false and .request == null' >/dev/null || fail "the swap was not the controller's own decision: $(role_status | jq -c '{dry_run, request, last_swap}')"
   [ "$(node_is_voter "$(node_name 4)" && echo yes)" = yes ] || fail "$(node_name 4) is not a voter after the swap"
@@ -1381,6 +1406,7 @@ scenario_role_controller() {
   [ "$(docker_state grtest-node3-k3s)" = exited ] || fail "$(node_name "$slow") still runs its server"
   [ "$(docker_state grtest-node4-k3s)" = running ] || fail "$(node_name 4) does not run a server container"
   [ "$(started_member_count)" = 3 ] || { etcd_members; fail "expected three started etcd members after the swap"; }
+  [ "$(etcd_member_ids 1)" != "$ids" ] || fail "the etcd members are the ones the swap started from"
   lease_released || fail "the regrade Lease was not released"
 }
 
@@ -2118,6 +2144,7 @@ for scenario in "${scenarios[@]}"; do
     regrade) scenario_regrade ;;
     native_server) scenario_native_server ;;
     role_controller) scenario_role_controller ;;
+    role_controller_swap) scenario_role_controller_swap ;;
     rejoin) scenario_rejoin ;;
     role_actuator) scenario_role_actuator ;;
     role_swap) scenario_role_swap ;;
