@@ -1654,6 +1654,14 @@ node_is_clean() {
     and ([(.spec.taints // [])[] | select(.key == "node-role.kubernetes.io/control-plane")] | length) == 0' >/dev/null
 }
 
+# Whether node $1 carries no swap annotation, regrade level or cordon: a voter, or an agent, that no swap has touched.
+node_untouched() {
+  kubectl_on "$api_node" get node "$1" -o json </dev/null | jq -e '
+    ([.metadata.labels | keys[] | select(. == "github-runner.exadev.com/regrade-level")] | length) == 0
+    and ([.metadata.annotations | keys[] | select(startswith("github-runner.exadev.com/role-") or . == "github-runner.exadev.com/snapshot-request" or . == "etcd.k3s.cattle.io/remove")] | length) == 0
+    and ((.spec.unschedulable // false) | not)' >/dev/null
+}
+
 # Whether the regrade Lease is free or gone: nobody holds it.
 lease_released() { [ -z "$(kubectl_on "$api_node" get lease fleet-regrade --namespace kube-system -o 'jsonpath={.spec.holderIdentity}' 2>/dev/null </dev/null || true)" ]; }
 
@@ -2050,7 +2058,7 @@ scenario_role_swap_blocked_peer() {
   native_unit_is k3s inactive || fail "${native_host} still runs k3s after the rollback"
   [ "$(native_exec cat /var/lib/rancher/k3s/fleet-role </dev/null)" = agent ] || fail "${native_host}'s role file does not name the agent"
   node_is_clean "$native_host" || fail "${native_host}'s labels and annotations were not cleaned up"
-  node_is_clean "$out" || fail "${out} was changed by the rolled-back swap"
+  node_untouched "$out" || fail "${out} was changed by the rolled-back swap"
   lease_released || fail "the regrade Lease was not released"
   wait_for "${native_host} to be Ready as an agent" 300 native_node_ready
   [ "$(started_member_count)" = 3 ] || { etcd_members; fail "expected three started etcd members after the rollback"; }
@@ -2074,7 +2082,7 @@ scenario_role_swap_refused() {
   grep -F "$(node_name "$paused")" <<< "$output" >/dev/null || fail "the refusal does not name $(node_name "$paused")"
   docker unpause "$(container "$paused")" >/dev/null
   if kubectl_on "$api_node" get node "$native_host" -o json </dev/null | jq -e '(.metadata.labels | has("github-runner.exadev.com/desired-role")) or ([.metadata.annotations | keys[] | select(startswith("github-runner.exadev.com/role-") or . == "github-runner.exadev.com/snapshot-request")] | length > 0)' >/dev/null; then fail "a label or annotation was set on ${native_host}"; fi
-  node_is_clean "$out" || fail "${out} was changed by a refused request"
+  node_untouched "$out" || fail "${out} was changed by a refused request"
   lease_released || fail "the regrade Lease was taken by a refused request"
   sleep 30
   role_status | jq -e '.swap == null and .request == null and .last_swap == null' >/dev/null || fail "a refused request left a swap or a request: $(role_status | jq -c '{swap, request, last_swap}')"
