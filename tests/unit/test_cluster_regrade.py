@@ -131,6 +131,12 @@ class ChecksTest(unittest.TestCase):
         result = self.refused("node4 is an agent", {name: {} for name in ("node1", "node2", "node3", "node4")}, **{ENABLED: True})
         self.assertEqual(re.findall(r"fatal: \[(node\d)\]", result.stdout), ["node4"])
 
+    def test_a_docker_agent_that_may_become_a_server_may_regrade(self) -> None:
+        # The service runs on such a host only while the role it records is server (tasks/regrade_service.yml), so the setting it keeps across a swap is not a mistake.
+        hosts = {name: {ENABLED: True} for name in ("node1", "node2", "node3")} | {"node4": {ENABLED: True, "github_runner_cluster_voter_eligible": True}}
+        result = self.check(hosts)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_regrading_only_the_servers_of_a_group_with_an_agent_passes(self) -> None:
         hosts = {"node1": {ENABLED: True}, "node2": {ENABLED: True}, "node3": {ENABLED: True}, "node4": {}}
         result = self.check(hosts)
@@ -466,14 +472,16 @@ class RoleTasksTest(unittest.TestCase):
         self.assertLess(order.index("topology.yml"), order.index("regrade.yml"))
         self.assertLess(order.index("regrade.yml"), order.index("Create this host's Compose project directory"))
 
-    def test_the_service_runs_on_servers_after_the_node_is_started(self) -> None:
+    def test_the_service_runs_on_servers_after_the_node_is_started_and_is_removed_from_agents(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
-        [block] = [task for task in tasks if "block" in task and task.get("when") == 'github_runner_cluster_effective_node_role == "server"']
+        [block] = [task for task in tasks if "block" in task and task.get("when") == 'github_runner_cluster_docker_role == "server"']
         steps = [step.get("ansible.builtin.include_tasks") for step in block["block"]]
         self.assertLess(steps.index("start_servers.yml"), steps.index("regrade_service.yml"))
         self.assertLess(steps.index("regrade_service.yml"), steps.index("end_checks.yml"))
-        [agent] = [task for task in tasks if "block" in task and task.get("when") == 'github_runner_cluster_effective_node_role == "agent"']
-        self.assertNotIn("regrade_service.yml", [step.get("ansible.builtin.include_tasks") for step in agent["block"]])
+        # On an agent it only removes the service, which a host that ran as a server before its recorded role changed may still run.
+        [agent] = [task for task in tasks if "block" in task and task.get("when") == 'github_runner_cluster_docker_role == "agent"']
+        agent_steps = [step.get("ansible.builtin.include_tasks") for step in agent["block"]]
+        self.assertLess(agent_steps.index("start_agent.yml"), agent_steps.index("regrade_service.yml"))
 
     def test_the_wait_for_ready_leaves_out_a_server_regrading_has_stepped_down(self) -> None:
         text = (ROLE / "tasks" / "wait_for_ready.yml").read_text()

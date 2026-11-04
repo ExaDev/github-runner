@@ -378,6 +378,8 @@ class RoleTest(unittest.TestCase):
         hosts = {
             name: {
                 "github_runner_cluster_effective_node_role": role,
+                # The role tasks/docker_role.yml would decide: the inventory's, for a host not marked eligible.
+                "github_runner_cluster_docker_role": role,
                 "github_runner_cluster_effective_node_name": name,
                 "github_runner_cluster_container_name": f"{name}-k3s",
                 "github_runner_cluster_docker_context": f"ctx-{name}",
@@ -584,6 +586,8 @@ class RoleTest(unittest.TestCase):
             "github_runner_cluster_server_url": "https://server.example.internal:6443",
             "github_runner_cluster_tls_sans": [],
             "github_runner_cluster_docker_cli_environment": {},
+            # The role tasks/docker_role.yml decides for a host not marked eligible: the inventory's.
+            "github_runner_cluster_docker_role": role,
             "check_tasks": "topology,running_version",
             "check_hosts": "all",
         }))
@@ -620,28 +624,28 @@ class RoleTest(unittest.TestCase):
         result = self.run_checks({"node1": {"github_runner_cluster_dir": "/srv/node1"}}, "-e", '{"github_runner_cluster_compose_files": ["/srv/extra.yml"]}', check_tasks="compose_files")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def render_env(self, *extra: str) -> tuple[list[str], list[str]]:
-        env, agent = self.work / "env", self.work / "env-agent"
-        args = [ANSIBLE_PLAYBOOK, str(ROOT / "tests" / "cluster_versions" / "render_env.yml"), "-e", f"env_output={env}", "-e", f"env_agent_output={agent}", "-e", "github_runner_cluster_dir=/srv/github-runner", *extra]
+    def render_env(self, *extra: str) -> list[str]:
+        env = self.work / "env"
+        args = [ANSIBLE_PLAYBOOK, str(ROOT / "tests" / "cluster_versions" / "render_env.yml"), "-e", f"env_output={env}", "-e", "github_runner_cluster_dir=/srv/github-runner", *extra]
         result = subprocess.run(args, capture_output=True, text=True, check=False, env=ansible_env(), cwd=self.work)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return env.read_text().splitlines(), agent.read_text().splitlines()
+        return env.read_text().splitlines()
 
-    def test_the_env_files_carry_both_versions(self) -> None:
-        for lines in self.render_env("-e", "github_runner_cluster_tailscale_version=v1.90.0"):
-            self.assertIn(f"K3S_VERSION={TESTED}", lines)
-            self.assertIn("TAILSCALE_VERSION=v1.90.0", lines)
+    def test_the_env_file_carries_both_versions(self) -> None:
+        lines = self.render_env("-e", "github_runner_cluster_tailscale_version=v1.90.0")
+        self.assertIn(f"K3S_VERSION={TESTED}", lines)
+        self.assertIn("TAILSCALE_VERSION=v1.90.0", lines)
 
-    def test_the_env_files_name_the_compose_files_and_project(self) -> None:
-        for lines in self.render_env("-e", '{"github_runner_cluster_compose_files": ["compose.extra.yml", "/elsewhere/absolute.yml"], "github_runner_cluster_compose_project": "example"}'):
-            self.assertIn("COMPOSE_FILE=/srv/github-runner/docker-compose.yml:/srv/github-runner/compose.extra.yml:/elsewhere/absolute.yml", lines)
-            self.assertIn("COMPOSE_PROJECT_NAME=example", lines)
+    def test_the_env_file_names_the_compose_files_and_project(self) -> None:
+        lines = self.render_env("-e", '{"github_runner_cluster_compose_files": ["compose.extra.yml", "/elsewhere/absolute.yml"], "github_runner_cluster_compose_project": "example"}')
+        self.assertIn("COMPOSE_FILE=/srv/github-runner/docker-compose.yml:/srv/github-runner/compose.extra.yml:/elsewhere/absolute.yml", lines)
+        self.assertIn("COMPOSE_PROJECT_NAME=example", lines)
 
     @unittest.skipUnless(has_compose(), "docker compose is not installed")
     def test_a_compose_command_run_by_hand_uses_the_role_s_files_and_project(self) -> None:
         project = self.work / "project"
         project.mkdir()
-        server_env, _ = self.render_env("-e", json.dumps({"github_runner_cluster_compose_files": ["compose.extra.yml"], "github_runner_cluster_compose_project": "example", "github_runner_cluster_dir": str(project)}))
+        server_env = self.render_env("-e", json.dumps({"github_runner_cluster_compose_files": ["compose.extra.yml"], "github_runner_cluster_compose_project": "example", "github_runner_cluster_dir": str(project)}))
         shutil.copy(COMPOSE, project / "docker-compose.yml")
         (project / "compose.extra.yml").write_text("services:\n  k3s:\n    labels:\n      example.extra: applied\n")
         (project / ".env").write_text("\n".join(server_env) + "\n")

@@ -140,34 +140,32 @@ class RenderTest(unittest.TestCase):
         self.work = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.work)
 
-    def render(self, *extra: str) -> tuple[list[str], list[str], list[str]]:
-        env, agent, files = self.work / "env", self.work / "env-agent", self.work / "files.json"
-        args = [ANSIBLE_PLAYBOOK, str(ROOT / "tests" / "cluster_versions" / "render_env.yml"), "-e", f"env_output={env}", "-e", f"env_agent_output={agent}", "-e", f"compose_files_output={files}", "-e", "github_runner_cluster_dir=/srv/github-runner", *extra]
+    def render(self, *extra: str) -> tuple[list[str], list[str]]:
+        env, files = self.work / "env", self.work / "files.json"
+        args = [ANSIBLE_PLAYBOOK, str(ROOT / "tests" / "cluster_versions" / "render_env.yml"), "-e", f"env_output={env}", "-e", f"compose_files_output={files}", "-e", "github_runner_cluster_dir=/srv/github-runner", *extra]
         result = subprocess.run(args, capture_output=True, text=True, check=False, env=ansible_env(), cwd=self.work)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         compose_files: list[str] = json.loads(files.read_text())
-        return env.read_text().splitlines(), agent.read_text().splitlines(), compose_files
+        return env.read_text().splitlines(), compose_files
 
     def test_the_defaults_write_the_existing_names_and_port_and_add_no_compose_file(self) -> None:
-        server, agent, files = self.render()
-        self.assertIn(f"K3S_CONTAINER_NAME={SERVER_CONTAINER}", server)
-        self.assertIn(f"K3S_API_PORT={K3S_PORT}", server)
-        self.assertIn(f"K3S_AGENT_CONTAINER_NAME={AGENT_CONTAINER}", agent)
-        self.assertIn(f"K3S_CONTAINER_NAME={SERVER_CONTAINER}", agent)
-        self.assertIn(f"K3S_API_PORT={K3S_PORT}", agent)
+        lines, files = self.render()
+        self.assertIn(f"K3S_CONTAINER_NAME={SERVER_CONTAINER}", lines)
+        self.assertIn(f"K3S_AGENT_CONTAINER_NAME={AGENT_CONTAINER}", lines)
+        self.assertIn(f"K3S_API_PORT={K3S_PORT}", lines)
         self.assertEqual(files, ["docker-compose.yml"])
-        self.assertIn("COMPOSE_FILE=/srv/github-runner/docker-compose.yml", server)
+        self.assertIn("COMPOSE_FILE=/srv/github-runner/docker-compose.yml", lines)
 
-    def test_a_second_cluster_s_values_reach_both_templates_and_the_port_adds_the_override(self) -> None:
-        server, agent, files = self.render("-e", "github_runner_cluster_container_name=second-k3s", "-e", "github_runner_cluster_agent_container_name=second-k3s-agent", "-e", "github_runner_cluster_api_port=6543")
-        self.assertIn("K3S_CONTAINER_NAME=second-k3s", server)
-        self.assertIn("K3S_API_PORT=6543", server)
-        self.assertIn("K3S_AGENT_CONTAINER_NAME=second-k3s-agent", agent)
+    def test_a_second_cluster_s_values_reach_the_env_and_the_port_adds_the_override(self) -> None:
+        lines, files = self.render("-e", "github_runner_cluster_container_name=second-k3s", "-e", "github_runner_cluster_agent_container_name=second-k3s-agent", "-e", "github_runner_cluster_api_port=6543")
+        self.assertIn("K3S_CONTAINER_NAME=second-k3s", lines)
+        self.assertIn("K3S_API_PORT=6543", lines)
+        self.assertIn("K3S_AGENT_CONTAINER_NAME=second-k3s-agent", lines)
         self.assertEqual(files, ["docker-compose.yml", "docker-compose.api-port.yml"])
-        self.assertIn("COMPOSE_FILE=/srv/github-runner/docker-compose.yml:/srv/github-runner/docker-compose.api-port.yml", server)
+        self.assertIn("COMPOSE_FILE=/srv/github-runner/docker-compose.yml:/srv/github-runner/docker-compose.api-port.yml", lines)
 
     def test_the_default_port_written_as_a_string_adds_no_override(self) -> None:
-        _, _, files = self.render("-e", '{"github_runner_cluster_api_port": "6443"}')
+        _, files = self.render("-e", '{"github_runner_cluster_api_port": "6443"}')
         self.assertEqual(files, ["docker-compose.yml"])
 
 
@@ -319,7 +317,8 @@ class RoleTest(unittest.TestCase):
         (self.stub / "containers").write_text("\n".join(lines) + "\n")
 
     def run_check(self, *extra: str, role: str = "server", group_vars: dict[str, Any] | None = None, hosts: dict[str, dict[str, Any]] | None = None) -> subprocess.CompletedProcess[str]:
-        node = {"github_runner_cluster_effective_node_role": role, "github_runner_cluster_docker_cli_environment": {}, "github_runner_cluster_dir": "/srv/second"}
+        # The role tasks/docker_role.yml would decide is the inventory's, for a host not marked eligible.
+        node = {"github_runner_cluster_effective_node_role": role, "github_runner_cluster_docker_role": role, "github_runner_cluster_docker_cli_environment": {}, "github_runner_cluster_dir": "/srv/second"}
         group = {"vars": {"github_runner_cluster_compose_project": "second", **(group_vars or {})}, "hosts": {name: node | values for name, values in (hosts or {"node1": {}}).items()}}
         inventory = self.work / "inventory.yml"
         inventory.write_text(yaml.safe_dump({"all": {"children": {"github_runner_cluster": group}}}))

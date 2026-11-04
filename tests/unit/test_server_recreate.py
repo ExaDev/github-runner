@@ -505,7 +505,9 @@ class TaskStructureTest(unittest.TestCase):
     def test_the_turns_loop_over_the_servers_in_the_play_and_run_for_one_host_each(self) -> None:
         (task,) = role_tasks("start_servers.yml")
         self.assertEqual(task["ansible.builtin.include_tasks"], "start_server.yml")
-        self.assertIn("topology.servers", task["loop"])
+        # The hosts that run as servers are those whose recorded role is server (tasks/docker_role.yml), which the inventory's list of servers does not say.
+        self.assertNotIn("topology", task["loop"])
+        self.assertIn("github_runner_cluster_docker_role", task["loop"])
         self.assertIn("ansible_play_hosts_all", task["loop"])
         self.assertEqual(task["when"], f"{task['loop_control']['loop_var']} == inventory_hostname")
 

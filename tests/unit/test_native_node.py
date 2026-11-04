@@ -10,7 +10,9 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,10 @@ _spec = importlib.util.spec_from_file_location("cluster_native", PLUGIN)
 assert _spec is not None and _spec.loader is not None
 cluster_native = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cluster_native)
+_role_spec = importlib.util.spec_from_file_location("cluster_role", ROOT / "plugins" / "filter" / "cluster_role.py")
+assert _role_spec is not None and _role_spec.loader is not None
+cluster_role = importlib.util.module_from_spec(_role_spec)
+_role_spec.loader.exec_module(cluster_role)
 
 
 class FilterTest(unittest.TestCase):
@@ -87,21 +93,21 @@ class FilterTest(unittest.TestCase):
             cluster_native.cluster_native_tailnet_login(tailscale_status("Running", DOMAIN), "")
 
     def test_a_role_file_names_the_role_now_and_a_legacy_agent_counts_as_one(self) -> None:
-        role = cluster_native.cluster_native_role
+        role = cluster_role.cluster_host_role
         self.assertEqual(role("", False, False, "server"), {"current": "", "desired": "server"})
         self.assertEqual(role("", True, False, "agent"), {"current": "agent", "desired": "agent"})
         self.assertEqual(role("agent\n", True, False, "server"), {"current": "agent", "desired": "server"})
         self.assertEqual(role("server", False, False, "agent"), {"current": "server", "desired": "agent"})
 
     def test_an_eligible_host_keeps_the_role_its_file_names(self) -> None:
-        role = cluster_native.cluster_native_role
+        role = cluster_role.cluster_host_role
         self.assertEqual(role("agent", True, True, "server"), {"current": "agent", "desired": "agent"})
         self.assertEqual(role("server", False, True, "agent"), {"current": "server", "desired": "server"})
         # The inventory gives an eligible host the role it starts with.
         self.assertEqual(role("", False, True, "server"), {"current": "", "desired": "server"})
 
     def test_while_exactly_one_unit_runs_its_role_is_the_role_now(self) -> None:
-        role = cluster_native.cluster_native_role
+        role = cluster_role.cluster_host_role
         # A demotion that stopped after the role file and before the server unit: the next run takes it up again.
         self.assertEqual(role("agent", True, False, "agent", ["server"]), {"current": "server", "desired": "agent"})
         # A promotion that stopped after the role file and before the agent unit.
@@ -113,7 +119,7 @@ class FilterTest(unittest.TestCase):
 
     def test_a_role_file_holding_anything_else_is_refused(self) -> None:
         with self.assertRaisesRegex(Exception, "must be 'server' or 'agent'"):
-            cluster_native.cluster_native_role("controller", False, False, "agent")
+            cluster_role.cluster_host_role("controller", False, False, "agent")
 
     def test_a_cluster_is_started_only_when_no_other_server_runs_one(self) -> None:
         init = cluster_native.cluster_native_cluster_init
@@ -665,6 +671,18 @@ class NativeRoleTest(NativeRoleHarness):
         self.assertEqual(self.mutations(), [])
         self.assertIn("v1.35.0", installed.read_text())
 
+    def test_a_run_is_refused_before_anything_is_changed_while_the_role_controller_holds_the_lease(self) -> None:
+        renewed = datetime.fromtimestamp(time.time() - 60, UTC).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+        held = {"metadata": {"name": "fleet-regrade", "namespace": "kube-system", "annotations": {"github-runner.exadev.com/swap-id": "20990101T000000Z-server1-laptop"}}, "spec": {"holderIdentity": "fleet-role", "leaseDurationSeconds": 3600, "renewTime": renewed}}
+        (self.state / "fleet-regrade-lease").write_text(json.dumps(held))
+        for check in (False, True):
+            with self.subTest(check=check):
+                result = self.run_role(check=check)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("holds the Lease kube-system/fleet-regrade for the voter swap 20990101T000000Z-server1-laptop", re.sub(r"\s+", " ", result.stdout))
+                self.assertEqual(self.mutations(), [])
+                self.assertFalse(self.file("github_runner_cluster_native_bin_dir", "k3s").exists())
+
     def test_a_deliberate_jump_is_allowed_when_asked_for(self) -> None:
         installed = self.file("github_runner_cluster_native_bin_dir", "k3s")
         installed.write_text('#!/bin/sh\necho "k3s version v1.35.0+k3s1 (stand-in)"\n')
@@ -675,7 +693,8 @@ class NativeRoleTest(NativeRoleHarness):
 
     def test_the_run_ends_with_a_node_that_a_server_sees_ready_and_a_node_that_is_not_is_reported(self) -> None:
         self.assertEqual(self.run_role().returncode, 0)
-        reads = [call for call in self.calls() if call.startswith("docker exec") and (" kubectl get node " in call or " kubectl get lease " in call)]
+        # The node's own reads, not the regrade Lease's, which the run reads once before it changes anything (tasks/role_lease_guard.yml).
+        reads = [call for call in self.calls() if call.startswith("docker exec") and (" kubectl get node " in call or " kubectl get lease " in call) and " lease fleet-regrade " not in call]
         self.assertEqual(len(reads), 2)
         (self.state / "node-ready").write_text("False,")
         (self.state / "lease").write_text("2000-01-01T00:00:00Z")
