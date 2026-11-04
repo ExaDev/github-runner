@@ -391,6 +391,7 @@ class ColimaSizeRoleTest(unittest.TestCase):
         hosts = {
             name: {
                 "github_runner_cluster_effective_node_role": "server" if name in self.SERVERS else "agent",
+                "github_runner_cluster_docker_role": "server" if name in self.SERVERS else "agent",
                 "github_runner_cluster_effective_node_name": name,
                 "github_runner_cluster_container_name": f"{name}-k3s",
                 "github_runner_cluster_agent_container_name": f"{name}-k3s",
