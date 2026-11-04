@@ -374,12 +374,24 @@ class FinishDemoteTest(ActuatorHarness):
         self.assertEqual(older.read_text(), f"{NODE}-0a1b2c3d")
         self.assertEqual(sorted(path.name for path in (self.data / "server").iterdir()), ["db.demoted"])
 
-    def test_finishing_a_host_whose_role_file_names_the_server_is_refused(self) -> None:
+    def test_finishing_a_host_whose_role_file_names_the_server_and_whose_datastore_has_no_tombstone_is_refused(self) -> None:
         self.running_server()
-        (self.data / "server" / "db" / "etcd" / "tombstone").write_text("")
         result = self.actuator("finish-demote")
         self.assert_status(result, REFUSED)
+        self.assertIn("holds no tombstone", result.stdout)
         self.assertTrue((self.data / "server" / "db").is_dir())
+        self.assertTrue(self.active("k3s"))
+
+    def test_a_server_host_that_was_down_while_removed_and_holds_the_tombstone_is_finished_as_an_agent_on_its_return(self) -> None:
+        self.running_server()
+        (self.data / "server" / "db" / "etcd" / "tombstone").write_text("")
+        self.assert_status(self.actuator("finish-demote"), DONE)
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertFalse(self.active("k3s"))
+        self.assertTrue(self.active("k3s-agent"))
+        self.assertTrue((self.data / "server" / "db.demoted").is_dir())
+        self.assertFalse((self.data / "server" / "db").exists())
+        self.assert_never_both_running()
 
 
 class RollbackAndSnapshotTest(ActuatorHarness):
@@ -568,6 +580,19 @@ class WatchTest(ActuatorHarness):
         (self.cluster / "patch-fails").unlink()
         self.wait_for_report("finish-demote", "done")
         self.stay_at("finish-demote", "done")
+
+    def test_the_watcher_finishes_a_server_whose_role_file_still_names_the_server_once_its_datastore_holds_the_tombstone(self) -> None:
+        # A host that was down while it was stepped down and removed: its role file was never written, no swap is on its Node any more and k3s's tombstone is all it has.
+        self.running_server()
+        self.watch()
+        time.sleep(3 * WATCH_POLL_SECONDS)
+        self.assertTrue(self.active("k3s"), "a running server with no tombstone is left alone")
+        (self.data / "server" / "db" / "etcd" / "tombstone").write_text("")
+        self.wait_for_report("finish-demote", "done")
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertTrue(self.active("k3s-agent"))
+        self.assertFalse(self.active("k3s"))
+        self.assertTrue((self.data / "server" / "db.demoted").is_dir())
 
     def test_a_step_that_is_not_a_demotion_gets_no_finish_from_the_watcher(self) -> None:
         self.running_agent()

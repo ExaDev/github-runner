@@ -5,7 +5,7 @@
 #
 # THE REPORT. Each step's outcome goes to the ConfigMap ACTUATOR_CONFIGMAP in ACTUATOR_NAMESPACE, under this node's name, as JSON: {swap, step, phase, role, started_at, at, message, snapshot}, phase being running, done, failed or refused, role what the role file names afterwards, started_at the host's time just before a unit was started (what the controller waits for a later heartbeat than), at the time of the report and snapshot the names of the files a snapshot created. A report the API does not take is made again by the watch, which runs a step again until its outcome is reported; every step can be run again.
 #
-# AUTHORITY. Every step that could add a member (promote), and every other step a swap asks for (step-down, rollback, snapshot), is taken only while the regrade Lease (LEASE_NAMESPACE/LEASE_NAME) is held, unexpired, by ROLE_LEASE_HOLDER with the swap's id in its SWAP_ID_ANNOTATION: the controller holds it for the whole swap, and a regrade step or a run of the role cannot hold it meanwhile. finish-demote needs no Lease: it runs only once the role file names the agent and the server's etcd member is gone (a tombstone in the datastore, the Node's etcd.k3s.cattle.io/removed-node-name naming the datastore's member, or no etcd label on the Node), and completing the demotion of a member that is no longer one can never cost quorum, so a host that was down while it was removed finishes on its return.
+# AUTHORITY. Every step that could add a member (promote), and every other step a swap asks for (step-down, rollback, snapshot), is taken only while the regrade Lease (LEASE_NAMESPACE/LEASE_NAME) is held, unexpired, by ROLE_LEASE_HOLDER with the swap's id in its SWAP_ID_ANNOTATION: the controller holds it for the whole swap, and a regrade step or a run of the role cannot hold it meanwhile. finish-demote needs no Lease: it runs only once the role file names the agent (or the datastore holds k3s's tombstone, which a host down during its step-down and removal has in place of the role file) and the server's etcd member is gone (a tombstone in the datastore, the Node's etcd.k3s.cattle.io/removed-node-name naming the datastore's member, or no etcd label on the Node), and completing the demotion of a member that is no longer one can never cost quorum, so a host that was down while it was removed finishes on its return.
 #
 # COMMANDS. watch runs for ever, reading this host's Node every POLL_SECONDS and taking the step it asks for, a snapshot it asks for, and the finish of a demotion whose member is gone. status prints the host's role, units and datastore and its last report. promote ID, step-down ID, rollback ID, snapshot ID and finish-demote take one step by hand and report it as the watch does. promote-local [JOIN_URL] and demote-local are the host-local part of a switch with no Lease and no report, for the role's own promotion and demotion (tasks/native/server_turn.yml and demote.yml), so that Ansible and the actuator switch a host the same way.
 #
@@ -256,10 +256,14 @@ member_gone() {
   return 1
 }
 
+# A server whose datastore holds k3s's tombstone was removed from etcd whatever its role file says: a host that was down while it was stepped down and removed never wrote the agent's role, and cannot run as a server again (its units idle on the tombstone), so it is finished as an agent like any other.
 cmd_finish_demote() {
   local role
   role=$(read_role)
-  [ "$role" = agent ] || { MESSAGE="the role file names '${role}', not agent, so no demotion of this host is under way"; return "$EXIT_REFUSED"; }
+  if [ "$role" != agent ] && ! { [ "$role" = server ] && datastore_tombstoned; }; then
+    MESSAGE="the role file names '${role}', not agent, and the datastore holds no tombstone, so no demotion of this host is under way"
+    return "$EXIT_REFUSED"
+  fi
   member_gone || return "$EXIT_NOT_YET"
   report running
   locked demote_local
@@ -342,10 +346,10 @@ step_taken() {
   [ "$step" = step-down ] && settled "$entry" "$swap" finish-demote running "done" failed
 }
 
-# Succeeds when the watch is to take (or retake) the finish of the demotion whose swap is $2, given this node's report $1: the role file names the agent, the finish is not reported done, and something of the server is left, or the Node still carries this swap's step-down (so the controller is waiting for the finish and has not seen it reported). A finish whose report the API did not take leaves nothing of the server behind, so only the report is made again; the finish is idempotent, and member_gone still decides whether the member is gone.
+# Succeeds when the watch is to take (or retake) the finish of the demotion whose swap is $2, given this node's report $1: the role file names the agent or the datastore holds k3s's tombstone, the finish is not reported done, and something of the server is left, or the Node still carries this swap's step-down (so the controller is waiting for the finish and has not seen it reported). A finish whose report the API did not take leaves nothing of the server behind, so only the report is made again; the finish is idempotent, and member_gone still decides whether the member is gone.
 finish_due() {
   local entry=$1 swap=$2
-  [ "$(read_role)" = agent ] || return 1
+  [ "$(read_role)" = agent ] || datastore_tombstoned || return 1
   settled "$entry" "$swap" finish-demote "done" && return 1
   if server_active || datastore_present; then return 0; fi
   [ -n "$swap" ] && [ "$(node_annotation "$STEP_ANNOTATION")" = step-down ]
