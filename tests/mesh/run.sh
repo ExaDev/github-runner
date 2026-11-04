@@ -1548,6 +1548,14 @@ actuator_report() {
   kubectl_on 1 --namespace "$platform_namespace" get configmap fleet-role-actuators -o json 2>/dev/null </dev/null | jq -c --arg node "$native_host" '.data[$node] // "{}" | fromjson'
 }
 actuator_reported() { [ "$(actuator_report | jq -r '.step + " " + .phase' 2>/dev/null)" = "$1 $2" ]; }
+# Whether the native host's Node reports the Ready condition True and its kubelet has renewed the node's Lease (kube-node-lease/<node>) at or after the time $1 (RFC 3339, UTC), as tasks/native/server_ready.yml judges a restart: the API keeps a stopped kubelet's Ready condition until the node controller's grace period runs out, so the condition alone could be the server's from before its step-down. Read from the condition, not the STATUS column, which says Ready,SchedulingDisabled while the node is cordoned. Both times are cut to whole seconds before they are compared, as strings, since RFC 3339 in UTC sorts as it reads.
+native_node_ready_since() {
+  local renewed
+  [ "$(kubectl_on 1 get node "$native_host" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null </dev/null)" = True ] || return 1
+  renewed=$(kubectl_on 1 --namespace kube-node-lease get lease "$native_host" -o 'jsonpath={.spec.renewTime}' 2>/dev/null </dev/null) || return 1
+  [ -n "$renewed" ] || return 1
+  [[ ! "${renewed:0:19}" < "${1:0:19}" ]]
+}
 native_member_removed() { [ -n "$(kubectl_on 1 get node "$native_host" -o 'jsonpath={.metadata.annotations.etcd\.k3s\.cattle\.io/removed-node-name}' 2>/dev/null </dev/null)" ]; }
 started_member_count() { etcd_members 2>/dev/null | grep -c ', started, ' || true; }
 
@@ -1682,7 +1690,7 @@ scenario_role_actuator() {
   kubectl_on 1 annotate node "$native_host" etcd.k3s.cattle.io/remove- etcd.k3s.cattle.io/removed-node-name- etcd.k3s.cattle.io/node-name- etcd.k3s.cattle.io/node-address- \
     "${actuator_prefix}/role-swap-" "${actuator_prefix}/role-step-" "${actuator_prefix}/role-join-node-" >/dev/null
   kubectl_on 1 taint node "$native_host" node-role.kubernetes.io/control-plane=true:NoSchedule- >/dev/null
-  wait_for "${native_host} to be Ready as an agent again" "$actuator_wait_seconds" native_node_ready
+  wait_for "${native_host} to be Ready as an agent again" "$actuator_wait_seconds" native_node_ready_since "$(actuator_report | jq -r .started_at)"
   kubectl_on 1 uncordon "$native_host" >/dev/null
   kubectl_on 1 delete lease fleet-regrade --namespace kube-system >/dev/null
   touch "$stop"
