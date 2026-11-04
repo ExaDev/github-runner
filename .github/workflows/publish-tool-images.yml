@@ -33,6 +33,7 @@ jobs:
           - {name: terraform, kind: toolcache}
           - {name: tflint, kind: toolcache}
           - {name: awscli, kind: toolcache}
+          - {name: strace, kind: toolcache}
           - {name: openmpi, kind: sysroot}
           - {name: highs, kind: sysroot}
           - {name: libpq, kind: sysroot}
@@ -134,6 +135,7 @@ jobs:
           - {name: terraform, kind: toolcache}
           - {name: tflint, kind: toolcache}
           - {name: awscli, kind: toolcache}
+          - {name: strace, kind: toolcache}
           - {name: openmpi, kind: sysroot}
           - {name: highs, kind: sysroot}
           - {name: libpq, kind: sysroot}
