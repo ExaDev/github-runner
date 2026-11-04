@@ -573,7 +573,7 @@ class RoleSetupTest(NativeRoleHarness):
         self.assertEqual(kubeconfig["users"], [{"name": "fleet-role-actuator", "user": {"token": ACTUATOR_TOKEN}}])
         self.assertEqual(kubeconfig["clusters"][0]["cluster"], {"server": f"https://server1.{DOMAIN}:6443", "certificate-authority-data": base64.b64encode(b"cluster-ca").decode()})
         # The credential was applied, and the ConfigMap created, through a Docker server's container, since this host's own k3s may be the one a swap stops.
-        self.assertIn("docker exec github-runner-k3s kubectl apply --filename -", self.calls())
+        self.assertIn("docker exec --interactive github-runner-k3s kubectl apply --filename -", self.calls())
         self.assertIn("docker exec github-runner-k3s kubectl create configmap fleet-role-actuators --namespace github-runner-platform", self.calls())
 
     def test_the_token_stays_out_of_everything_the_role_prints(self) -> None:

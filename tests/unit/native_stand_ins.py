@@ -198,10 +198,11 @@ esac
   esac
 done
 """)
-        # `docker exec <container> kubectl ...` reaches the same kubectl stand-in as `k3s kubectl ...`.
+        # `docker exec <container> kubectl ...` reaches the same kubectl stand-in as `k3s kubectl ...`. As Docker does, it passes its own standard input to the command only with --interactive, and the command otherwise reads an empty one.
         stand_in(bin_dir / "docker", log + r"""case "$*" in
   "ps "*) if [ -e "$STUB/state/docker-stopped" ]; then echo exited; else echo running; fi ;;
-  "exec "*" kubectl "*) shift 3; exec "$STUB/bin/kubectl" "$@" ;;
+  "exec --interactive "*" kubectl "*) shift 4; exec "$STUB/bin/kubectl" "$@" ;;
+  "exec "*" kubectl "*) shift 3; exec "$STUB/bin/kubectl" "$@" < /dev/null ;;
   *) echo "docker stand-in: unexpected $*" >&2; exit 1 ;;
 esac
 """)
@@ -221,7 +222,10 @@ case "$*" in
   "get pods "*) [ -e "$state/runner-pods" ] && cat "$state/runner-pods"; exit 0 ;;
   cordon*|uncordon*|drain*|label*|annotate*) ;;
   # The role actuator's credential: what is applied is kept for the test to read, the report ConfigMap exists once created, and its token Secret, filled as the token controller fills one, holds ACTUATOR_TOKEN.
-  "apply --filename -"*) cat > "$state/applied" ;;
+  "apply --filename -"*)
+    cat > "$state/applied"
+    # As kubectl refuses a manifest with no objects in it.
+    if ! grep -q '[^[:space:]]' "$state/applied"; then echo "error: no objects passed to apply" >&2; exit 1; fi ;;
   "create configmap "*)
     if [ -e "$state/configmap-created" ]; then echo "Error from server (AlreadyExists): configmaps \"$3\" already exists" >&2; exit 1; fi
     touch "$state/configmap-created" ;;
