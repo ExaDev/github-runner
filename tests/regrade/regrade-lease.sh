@@ -113,9 +113,12 @@ acquires_for() { acquire_lease "$1" > /dev/null 2>&1; }
 check_not "another holder is refused while the named holder has it" acquires_for testnode
 check "the named holder takes its own lease again" acquires_for fleet-role
 check "taking it again with no annotations leaves the lease as that call wrote it" test "$(jq -c '.metadata.annotations' "$lease")" = null
+
+reset_cluster
+acquire_lease fleet-role '{"example.test/id":"swap-1"}' > /dev/null
 release_lease fleet-role
 check "the named holder's release clears the holder" test "$(holder)" = ""
-check "and the annotations" test "$(jq -c '.metadata.annotations' "$lease")" = null
+check "and the annotations it wrote" test "$(jq -c '.metadata.annotations' "$lease")" = null
 
 reset_cluster
 acquire_lease fleet-role '{"example.test/id":"swap-1"}' > /dev/null
