@@ -73,9 +73,9 @@ export KUBECTL=kubectl KUBECONFIG_PATH='' LEASE_DURATION_SECONDS=$lease_seconds 
 . "${FLEET_REGRADE_CORE:-/app/fleet-regrade-core.sh}"
 
 # The names the controller and the actuators share, from the one place that defines them.
-read -r desired_role_label swap_annotation step_annotation join_node_annotation snapshot_annotation lease_swap_id_annotation lease_swap_nodes_annotation \
+read -r desired_role_label swap_annotation step_annotation join_node_annotation snapshot_annotation member_gone_annotation lease_swap_id_annotation lease_swap_nodes_annotation \
   etcd_label control_plane_label master_label etcd_annotation_prefix remove_annotation lease_holder < <(jq -nr -L "$modules" \
-  'include "fleet-role-swap"; interface | [.desired_role_label, .swap_annotation, .step_annotation, .join_node_annotation, .snapshot_annotation, .lease_swap_id_annotation, .lease_swap_nodes_annotation, .etcd_label, .control_plane_label, .master_label, .etcd_annotation_prefix, .remove_annotation, .lease_holder] | join(" ")')
+  'include "fleet-role-swap"; interface | [.desired_role_label, .swap_annotation, .step_annotation, .join_node_annotation, .snapshot_annotation, .member_gone_annotation, .lease_swap_id_annotation, .lease_swap_nodes_annotation, .etcd_label, .control_plane_label, .master_label, .etcd_annotation_prefix, .remove_annotation, .lease_holder] | join(" ")')
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -264,6 +264,11 @@ act_annotate_remove() {
   kube annotate --overwrite node "$1" "${remove_annotation}=true"
 }
 
+# Tells the outgoing voter's actuator, under the swap $2, that etcd no longer lists its member, as every remaining voter reports.
+act_mark_member_gone() {
+  kube annotate --overwrite node "$1" "${member_gone_annotation}=$2"
+}
+
 # Removes what k3s and regrading left on a node that is no longer a server (the role labels, the etcd annotations, the level label and the taint), whichever of them it carries, and uncordons it when asked. The desired-role label stays, as the record of the role the host runs, and the swap annotations stay until the swap ends.
 act_clean_node() {
   local node=$1 uncordon=$2 json labels annotations taint
@@ -288,7 +293,7 @@ act_finalise() {
   nodes=$(jq -r --arg id "$id" --arg swap "$swap_annotation" --arg snapshot "$snapshot_annotation" \
     '.items[] | select((.metadata.annotations[$swap] == $id) or (.metadata.annotations[$snapshot] == $id)) | .metadata.name' "$work/nodes.json") || return 1
   for node in $nodes; do
-    kube annotate node "$node" "${swap_annotation}-" "${step_annotation}-" "${join_node_annotation}-" "${snapshot_annotation}-" || return 1
+    kube annotate node "$node" "${swap_annotation}-" "${step_annotation}-" "${join_node_annotation}-" "${snapshot_annotation}-" "${member_gone_annotation}-" || return 1
   done
   release_lease "$lease_holder"
 }
@@ -307,6 +312,7 @@ carry_out() {
     cordon_out) act_cordon_out "$(jq -r '.node' <<< "$action")" ;;
     step_down_out) act_step_down_out "$(jq -r '.node' <<< "$action")" "$(jq -r '.id' <<< "$action")" "$(jq -r '.drain' <<< "$action")" ;;
     annotate_remove) act_annotate_remove "$(jq -r '.node' <<< "$action")" ;;
+    mark_member_gone) act_mark_member_gone "$(jq -r '.node' <<< "$action")" "$(jq -r '.id' <<< "$action")" ;;
     clean_node) act_clean_node "$(jq -r '.node' <<< "$action")" "$(jq -r '.uncordon' <<< "$action")" ;;
     finalise) act_finalise "$(jq -r '.swap.id' <<< "$plan")" "$(jq -c '.uncordon' <<< "$action")" ;;
     *) fail "the plan names an action this controller does not know: ${kind}" ;;

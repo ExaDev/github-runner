@@ -1406,6 +1406,8 @@ scenario_role_controller_swap() {
   kubectl_on 1 --namespace "$platform_namespace" rollout status deployment/fleet-role --timeout=300s
   wait_for_swap "$(node_name "$slow")" "$(node_name 4)" completed
   role_status | jq -e '.dry_run == false and .request == null' >/dev/null || fail "the swap was not the controller's own decision: $(role_status | jq -c '{dry_run, request, last_swap}')"
+  # The slow voter stays up throughout, so its actuator finishes the demotion inside the swap; a swap that leaves it to node recovery has lost the finish, whatever the outcome says.
+  role_status | jq -e '.last_swap.outgoing_pending != true' >/dev/null || fail "the swap left $(node_name "$slow") to node recovery rather than finishing it as an agent: $(role_status | jq -c .last_swap)"
   [ "$(node_is_voter "$(node_name 4)" && echo yes)" = yes ] || fail "$(node_name 4) is not a voter after the swap"
   [ "$(voter_count)" = 3 ] || fail "expected three voters after the swap, got $(voter_count)"
   node_is_clean "$(node_name "$slow")" || fail "$(node_name "$slow")'s labels and annotations were not cleaned up"

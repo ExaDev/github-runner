@@ -35,6 +35,7 @@ SWAP_ANNOTATION = DOMAIN + "role-swap"
 STEP_ANNOTATION = DOMAIN + "role-step"
 JOIN_ANNOTATION = DOMAIN + "role-join-node"
 SNAPSHOT_ANNOTATION = DOMAIN + "snapshot-request"
+MEMBER_GONE = DOMAIN + "role-member-gone"
 LEASE_ID = DOMAIN + "swap-id"
 LEASE_NODES = DOMAIN + "swap-nodes"
 REMOVE = "etcd.k3s.cattle.io/remove"
@@ -740,7 +741,7 @@ class OutgoingTest(SwapCase):
 
     def test_the_swap_ends_completed_the_annotations_cleared_the_lease_released(self) -> None:
         self.at_demotion_finished()
-        self.edit(OUT, labels={VOTER_LABEL: None, MASTER: None, CONTROL_PLANE: None, LEVEL_LABEL: None}, annotations={REMOVED: None}, cordoned=False, taint=False)
+        self.edit(OUT, labels={VOTER_LABEL: None, MASTER: None, CONTROL_PLANE: None, LEVEL_LABEL: None}, annotations={REMOVED: None, MEMBER_GONE: self.id}, cordoned=False, taint=False)
         self.hosts[2].voter = False
         self.previous("cleanup")
         self.ok_pass()
@@ -787,12 +788,27 @@ class OutgoingTest(SwapCase):
         self.at_removed_with_its_server_still_running()
         self.ok_pass()
         self.assertNotIn(REMOVE, self.annotations(OUT))
-        self.assertEqual(self.changes(), [])
         status = self.cluster.status()
         self.assertEqual(status["gates"], [])
         self.assertEqual(status["membership"]["departed"], [OUT])
         self.assertEqual(self.swap()["step"], "finish")
+        # The actuator is told, under this swap, that etcd lists none of its members, and the next pass waits for its finish with nothing more written.
+        self.assertEqual(self.annotations(OUT)[MEMBER_GONE], self.id)
+        self.ok_pass(repopulate=False)
+        self.assertEqual(len([w for w in self.changes() if f"{MEMBER_GONE}={self.id}" in w]), 1)
         self.assertIn(f"waiting for {OUT}'s actuator to finish its demotion", self.completed.stdout if self.completed else "")
+
+    def test_a_member_k3s_recorded_removed_is_marked_gone_once_every_remaining_voter_lists_only_the_voters(self) -> None:
+        # k3s's record on the Node can name another member than the datastore's, so the actuator is told what etcd itself shows.
+        self.at_member_removed()
+        self.hosts[2].voter = False
+        self.hosts[0].etcd = {"known_members": TARGET + 1}
+        self.ok_pass()
+        self.assertNotIn(MEMBER_GONE, self.annotations(OUT), "a remaining voter that lists the outgoing member is no proof")
+        for host in self.hosts[:2] + self.hosts[3:]:
+            host.etcd = {"known_members": TARGET, "active_peers": TARGET - 1}
+        self.ok_pass()
+        self.assertEqual(self.annotations(OUT)[MEMBER_GONE], self.id)
 
     def assert_still_counted_as_a_member(self) -> None:
         self.ok_pass()
@@ -814,6 +830,7 @@ class OutgoingTest(SwapCase):
 
     def test_a_departed_member_whose_server_never_finishes_ends_the_swap_completed_and_left_to_node_recovery(self) -> None:
         self.at_removed_with_its_server_still_running()
+        self.edit(OUT, annotations={MEMBER_GONE: self.id})
         self.previous("finish", since_ago=OPERATION_TIMEOUT_SECONDS + 5)
         self.ok_pass()
         self.assertTrue(self.swap()["outgoing_pending"])
@@ -989,6 +1006,7 @@ class InterfaceTest(unittest.TestCase):
         self.assertEqual(interface["step_annotation"], constants["STEP_ANNOTATION"])
         self.assertEqual(interface["join_node_annotation"], constants["JOIN_NODE_ANNOTATION"])
         self.assertEqual(interface["snapshot_annotation"], constants["SNAPSHOT_ANNOTATION"])
+        self.assertEqual(interface["member_gone_annotation"], constants["MEMBER_GONE_ANNOTATION"])
         self.assertEqual(interface["etcd_label"], constants["ETCD_LABEL"])
         self.assertEqual(interface["removed_annotation"], re.search(r"^REMOVED_ANNOTATION=(\S+)$", actuator, re.MULTILINE).group(1))  # type: ignore[union-attr]
         cluster = (ROOT / "roles" / "github_runner_cluster" / "defaults" / "main.yml").read_text()

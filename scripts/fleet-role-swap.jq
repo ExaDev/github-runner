@@ -23,6 +23,7 @@ def interface: {
   step_annotation: (domain + "role-step"),
   join_node_annotation: (domain + "role-join-node"),
   snapshot_annotation: (domain + "snapshot-request"),
+  member_gone_annotation: (domain + "role-member-gone"),
   lease_swap_id_annotation: (domain + "swap-id"),
   lease_swap_nodes_annotation: (domain + "swap-nodes"),
   etcd_label: "node-role.kubernetes.io/etcd",
@@ -74,6 +75,7 @@ def facts($c):
       swap: ($annotations[$i.swap_annotation] // ""),
       step: ($annotations[$i.step_annotation] // ""),
       snapshot_request: ($annotations[$i.snapshot_annotation] // ""),
+      member_gone: ($annotations[$i.member_gone_annotation] // ""),
       etcd_annotations: ($annotations | keys | map(select(startswith($i.etcd_annotation_prefix)))),
       server_labels: ([$i.etcd_label, $i.control_plane_label, $i.master_label] | map(select($labels[.] != null)))
     };
@@ -171,6 +173,12 @@ def renewed_since($s; $node; $since):
   ($s.node_leases[$node] // "") as $renewed
   | $since != null and $since != "" and $renewed != "" and ($renewed | seconds) >= ($since | seconds);
 
+# Succeeds when etcd no longer lists the outgoing node $o's member: it is not a voter, and every voter reports, fresh, that etcd lists as many members as there are voters, so the members are the voters and nothing else (a learner or a member that has not started counts among the members a voter reports).
+def gone_from_etcd($s; $o):
+  ($s.decision.membership.voters) as $voters
+  | ($o.voter | not) and ($voters | length) > 0
+    and ($voters | all(. as $v | $s.decision.membership.known_members[$v] == ($voters | length)));
+
 # The swap, step by step. Returns {swap, action, wait, consume_request, last_swap}: `swap` the record the status holds, `action` the one thing to do this pass (or null), `wait` why nothing is done, `last_swap` the record of a swap or a request that ends this pass if the action succeeds.
 def in_progress($s; $id):
   by_name($s) as $nodes
@@ -228,9 +236,11 @@ def in_progress($s; $id):
               {swap: ($record + {outgoing_pending: true}), action: null, wait: ["\($id.out) did not come back as an agent within \(budget($c).cleanup) s; it is left to node recovery"], consume_request: false, last_swap: null}
             else wait("cleanup"; ["waiting for \($id.out) to be Ready as an agent"]) end
         end
-      # Removed, as k3s records it on the Node or as etcd's own membership shows it (the decision's `departed`), which is the proof that holds when the Node's labels and annotations have been set again by a server still running on the host.
-      elif $o.removed or (($s.decision.membership.departed // []) | index($id.out)) != null then
+      # Removed, as k3s records it on the Node or as etcd's own membership shows it, which is the proof that holds when the Node's labels and annotations have been set again by a server still running on the host, or name a member other than the one its datastore holds.
+      elif $o.removed or gone_from_etcd($s; $o) then
         if $finish != null and $finish.phase == "done" then do("cleanup"; {kind: "clean_node", node: $id.out, uncordon: false})
+        # The actuator cannot read etcd's membership, and k3s's record on the Node can name another member than the datastore's, so the controller tells it, under this swap, what every remaining voter reports.
+        elif gone_from_etcd($s; $o) and $o.member_gone != $id.id then do("finish"; {kind: "mark_member_gone", node: $id.out, id: $id.id})
         else
           step_record($s; $id; "finish"; {}) as $record
           | if $c.now >= $record.deadline and ($s.previous.swap.outgoing_pending // false) then
