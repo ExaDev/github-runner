@@ -1,3 +1,9 @@
+## [2.41.0](https://github.com/ExaDev/github-runner/compare/v2.40.1...v2.41.0) (2026-11-05)
+
+### Features
+
+* test published role images in mesh ([b5228a3](https://github.com/ExaDev/github-runner/commit/b5228a3eea2c4eaeb65a38a02df53cc96e618833))
+
 ## [2.40.1](https://github.com/ExaDev/github-runner/compare/v2.40.0...v2.40.1) (2026-11-05)
 
 ### Bug Fixes
