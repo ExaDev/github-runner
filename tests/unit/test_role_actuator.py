@@ -382,6 +382,28 @@ class FinishDemoteTest(ActuatorHarness):
         self.assertTrue((self.data / "server" / "db").is_dir())
         self.assertTrue(self.active("k3s"))
 
+    def asked_to_step_down(self, annotations: dict[str, str]) -> None:
+        self.set_node({"github-runner.exadev.com/desired-role": "agent", "node-role.kubernetes.io/etcd": "true"}, {"github-runner.exadev.com/role-swap": SWAP, "github-runner.exadev.com/role-step": "step-down", **annotations})
+
+    def test_a_server_whose_step_down_failed_is_finished_as_an_agent_once_k3s_records_the_members_removal(self) -> None:
+        # The step-down failed before the role file named the agent, and the controller removed the member of a host that was not Ready; without the finish, the server unit's restarts would join etcd again as a new member.
+        self.running_server(level="etcd-only")
+        self.asked_to_step_down({"etcd.k3s.cattle.io/removed-node-name": f"{NODE}-0a1b2c3d"})
+        self.assert_status(self.actuator("finish-demote"), DONE)
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertFalse(self.active("k3s"))
+        self.assertTrue(self.active("k3s-agent"))
+        self.assertTrue((self.data / "server" / "db.demoted").is_dir())
+        self.assert_never_both_running()
+
+    def test_a_server_asked_to_step_down_is_not_finished_while_its_member_stays(self) -> None:
+        self.running_server(level="etcd-only")
+        self.asked_to_step_down({"etcd.k3s.cattle.io/removed-node-name": "another-member"})
+        self.assert_status(self.actuator("finish-demote"), NOT_YET)
+        self.assertEqual(self.role_file.read_text(), "server")
+        self.assertTrue(self.active("k3s"))
+        self.assertTrue((self.data / "server" / "db").is_dir())
+
     def test_a_server_host_that_was_down_while_removed_and_holds_the_tombstone_is_finished_as_an_agent_on_its_return(self) -> None:
         self.running_server()
         (self.data / "server" / "db" / "etcd" / "tombstone").write_text("")
@@ -593,6 +615,21 @@ class WatchTest(ActuatorHarness):
         self.assertTrue(self.active("k3s-agent"))
         self.assertFalse(self.active("k3s"))
         self.assertTrue((self.data / "server" / "db.demoted").is_dir())
+
+    def test_the_watcher_finishes_a_server_whose_step_down_failed_once_its_member_is_removed(self) -> None:
+        self.running_server(level="etcd-only")
+        step_down = {"github-runner.exadev.com/role-swap": SWAP, "github-runner.exadev.com/role-step": "step-down"}
+        self.set_node({"github-runner.exadev.com/desired-role": "agent", "node-role.kubernetes.io/etcd": "true"}, step_down)
+        self.seed_report(step="step-down", phase="failed", role="server")
+        self.watch()
+        time.sleep(3 * WATCH_POLL_SECONDS)
+        self.assertTrue(self.active("k3s"), "a server whose member stays is left alone")
+        self.set_node({"github-runner.exadev.com/desired-role": "agent", "node-role.kubernetes.io/etcd": "true"}, {**step_down, "etcd.k3s.cattle.io/removed-node-name": f"{NODE}-0a1b2c3d"})
+        self.wait_for_report("finish-demote", "done")
+        self.assertEqual(self.role_file.read_text(), "agent")
+        self.assertTrue(self.active("k3s-agent"))
+        self.assertFalse(self.active("k3s"))
+        self.assert_never_both_running()
 
     def test_a_step_that_is_not_a_demotion_gets_no_finish_from_the_watcher(self) -> None:
         self.running_agent()
