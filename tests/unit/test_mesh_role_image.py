@@ -38,5 +38,22 @@ class MeshRoleImageTest(unittest.TestCase):
         self.assertIn("must not be empty", result.stderr)
 
 
+class CanaryInputTest(unittest.TestCase):
+    def validate(self, image: str, scenario: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(ROOT / "tests/mesh/validate-canary.sh"), image, scenario], text=True, capture_output=True, check=False)
+
+    def test_accepts_only_image_exercising_scenarios(self) -> None:
+        image = "ghcr.io/example/fleet-role@sha256:" + "a" * 64
+        for scenario in ("role_controller", "role_controller_swap", "role_swap", "role_swap_paused", "role_swap_blocked_peer", "role_swap_refused"):
+            with self.subTest(scenario=scenario):
+                self.assertEqual(self.validate(image, scenario).returncode, 0)
+        self.assertNotEqual(self.validate(image, "hosted").returncode, 0)
+
+    def test_rejects_mutable_and_malformed_references(self) -> None:
+        for image in ("", "ghcr.io/example/fleet-role:latest", "ghcr.io/example/fleet-role@sha256:abc", "ghcr.io/example/fleet-role@sha256:" + "g" * 64):
+            with self.subTest(image=image):
+                self.assertNotEqual(self.validate(image, "role_controller").returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

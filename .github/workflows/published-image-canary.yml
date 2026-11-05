@@ -1,0 +1,76 @@
+name: Published image canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Public fleet-role image pinned by sha256 digest
+        required: true
+        type: string
+      scenario:
+        description: Mesh role-controller scenario
+        required: true
+        type: choice
+        options:
+          - role_controller
+          - role_controller_swap
+          - role_swap
+          - role_swap_paused
+          - role_swap_blocked_peer
+          - role_swap_refused
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Published image mesh (${{ inputs.scenario }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        env:
+          IMAGE: ${{ inputs.image }}
+          SCENARIO: ${{ inputs.scenario }}
+        run: bash tests/mesh/validate-canary.sh "$IMAGE" "$SCENARIO"
+
+      - name: Install Docker Compose
+        env:
+          COMPOSE_VERSION: v5.5.1
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) arch=x86_64 ;;
+            aarch64 | arm64) arch=aarch64 ;;
+            *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          mkdir -p "${HOME}/.docker/cli-plugins"
+          base="https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${arch}"
+          curl -fsSL -o "${RUNNER_TEMP}/docker-compose" "$base"
+          echo "$(curl -fsSL "${base}.sha256" | cut -d' ' -f1)  ${RUNNER_TEMP}/docker-compose" | sha256sum -c -
+          install -m 0755 "${RUNNER_TEMP}/docker-compose" "${HOME}/.docker/cli-plugins/docker-compose"
+          docker compose version
+
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core
+          "${RUNNER_TEMP}/venv/bin/ansible-galaxy" collection install --no-cache -r ansible/requirements.yml -p "${RUNNER_TEMP}/collections"
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run published image in the mesh
+        env:
+          ANSIBLE_COLLECTIONS_PATH: ${{ runner.temp }}/collections
+          GRTEST_WORK: ${{ runner.temp }}/grtest-mesh
+          GRTEST_ROLE_IMAGE: ${{ inputs.image }}
+          SCENARIO: ${{ inputs.scenario }}
+        run: tests/mesh/run.sh "$SCENARIO"
