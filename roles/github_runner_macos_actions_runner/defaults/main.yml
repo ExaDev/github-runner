@@ -9,8 +9,9 @@ github_runner_macos_actions_runner_private_key: ""
 github_runner_macos_actions_runner_private_key_op_reference: ""
 github_runner_macos_actions_runner_label: exadev-macos
 github_runner_macos_actions_runner_name: "{{ inventory_hostname }}-macos"
-github_runner_macos_actions_runner_user: github-runner
-github_runner_macos_actions_runner_uid: 401
+# macOS role accounts require a leading underscore and a UID in 450-499; they do not need an interactive password.
+github_runner_macos_actions_runner_user: _github-runner
+github_runner_macos_actions_runner_uid: 498
 github_runner_macos_actions_runner_version: "2.338.2"
 github_runner_macos_actions_runner_sha256: 25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388
 # Repository identity is part of the directory. Changing the repository therefore creates a new unregistered runner rather than leaving a runner enrolled in the old scope.
