@@ -1,3 +1,9 @@
+## [2.42.0](https://github.com/ExaDev/github-runner/compare/v2.41.0...v2.42.0) (2026-11-05)
+
+### Features
+
+* add published fleet role image canary ([dad6cb7](https://github.com/ExaDev/github-runner/commit/dad6cb77c8c67999583bada5db86fa07add51fc1))
+
 ## [2.41.0](https://github.com/ExaDev/github-runner/compare/v2.40.1...v2.41.0) (2026-11-05)
 
 ### Features
