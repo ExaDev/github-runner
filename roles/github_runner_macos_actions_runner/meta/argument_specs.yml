@@ -32,6 +32,12 @@ argument_specs:
       github_runner_macos_actions_runner_name:
         type: str
         default: ""
+      github_runner_macos_actions_runner_user:
+        type: str
+        default: github-runner
+      github_runner_macos_actions_runner_uid:
+        type: int
+        default: 401
       github_runner_macos_actions_runner_version:
         type: str
         default: "2.338.2"
