@@ -1,3 +1,9 @@
+## [2.43.2](https://github.com/ExaDev/github-runner/compare/v2.43.1...v2.43.2) (2026-11-05)
+
+### Bug Fixes
+
+* keep autoscaler canary polls schedulable ([3aacf0e](https://github.com/ExaDev/github-runner/commit/3aacf0e37890b657d55acb4162cb83e52eb2ca9e))
+
 ## [2.43.1](https://github.com/ExaDev/github-runner/compare/v2.43.0...v2.43.1) (2026-11-05)
 
 ### Bug Fixes
