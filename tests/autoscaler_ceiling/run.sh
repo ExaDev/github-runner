@@ -176,6 +176,18 @@ poll() {
       case "$phase" in Succeeded|Failed) break ;; esac
       sleep 2
     done
+    kubectl -n "$platform_namespace" get pod autoscaler-poll -o json > "$work/autoscaler-pod.json"
+    "$python" - "$repo_root" "$work/autoscaler-pod.json" <<'PY'
+import json, pathlib, sys, yaml
+root = pathlib.Path(sys.argv[1])
+tasks = yaml.safe_load((root / 'roles/github_runner_arc/tasks/install_platform.yml').read_text())
+task = next(t for t in tasks if t.get('name') == 'Platform: install/upgrade the autoscaler Deployment')
+expected = task['kubernetes.core.k8s']['definition']['spec']['template']['spec']
+actual = json.loads(pathlib.Path(sys.argv[2]).read_text())['spec']
+assert actual['serviceAccountName'] == expected['serviceAccountName']
+assert actual.get('securityContext', {}) == expected.get('securityContext', {})
+assert actual['containers'][0].get('securityContext', {}) == expected['containers'][0].get('securityContext', {})
+PY
     kubectl -n "$platform_namespace" logs autoscaler-poll > "$work/poll.log" || fail "could not read poll logs"
     [ "$phase" = Succeeded ] || fail "the poll pod ended in $phase"
     return
