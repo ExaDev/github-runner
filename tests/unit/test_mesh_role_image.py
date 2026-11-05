@@ -2,7 +2,9 @@
 
 import os
 import subprocess
+import tempfile
 import unittest
+import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +55,27 @@ class CanaryInputTest(unittest.TestCase):
         for image in ("", "ghcr.io/example/fleet-role:latest", "ghcr.io/example/fleet-role@sha256:abc", "ghcr.io/example/fleet-role@sha256:" + "g" * 64):
             with self.subTest(image=image):
                 self.assertNotEqual(self.validate(image, "role_controller").returncode, 0)
+
+
+class ComparisonTest(unittest.TestCase):
+    def test_abba_order_and_failures_are_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mesh = root / "tests/mesh"
+            mesh.mkdir(parents=True)
+            for name in ("compare-images.sh", "validate-canary.sh"):
+                shutil.copy(ROOT / "tests/mesh" / name, mesh / name)
+            (mesh / "run.sh").write_text('#!/bin/bash\nprintf "%s\\n" "$GRTEST_ROLE_IMAGE"\n[[ "$GRTEST_WORK" != *mesh-2 ]]\n')
+            (mesh / "run.sh").chmod(0o755)
+            image_a = "ghcr.io/example/role@sha256:" + "a" * 64
+            image_b = "ghcr.io/example/role@sha256:" + "b" * 64
+            results = root / "results"
+            result = subprocess.run(["bash", str(mesh / "compare-images.sh"), image_a, image_b, "role_controller", str(results)], capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            rows = [line.split("\t") for line in (results / "results.tsv").read_text().splitlines()[1:]]
+            self.assertEqual([row[1] for row in rows], [image_a, image_b, image_b, image_a])
+            self.assertEqual([row[3] for row in rows], ["pass", "fail", "pass", "pass"])
+            self.assertEqual((results / "run-2.log").read_text().strip(), image_b)
 
 
 if __name__ == "__main__":
