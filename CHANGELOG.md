@@ -1,3 +1,9 @@
+## [2.43.1](https://github.com/ExaDev/github-runner/compare/v2.43.0...v2.43.1) (2026-11-05)
+
+### Bug Fixes
+
+* create and verify macOS runner role account ([759263d](https://github.com/ExaDev/github-runner/commit/759263dc56d89fe3f50560776f3fd23e432db829))
+
 ## [2.43.0](https://github.com/ExaDev/github-runner/compare/v2.42.1...v2.43.0) (2026-11-05)
 
 ### Features
