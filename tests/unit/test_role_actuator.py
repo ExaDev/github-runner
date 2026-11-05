@@ -893,6 +893,19 @@ class DockerStepDownAndFinishTest(DockerActuatorHarness):
         self.assert_clean_switch(result)
         self.assertEqual({key: self.report()[key] for key in ("step", "phase", "role")}, {"step": "finish-demote", "phase": "done", "role": "agent"})
 
+    def test_a_finish_taken_again_reports_the_start_of_the_agent_it_finds_running(self) -> None:
+        # A Docker host's first report of the finish is often lost, since its agent has no Tailscale yet, and the watch takes the finish again: the agent already runs, and the report must carry the time it was started, which the controller waits for a later heartbeat than before it uncordons the node.
+        self.running_as("server", level="etcd-only")
+        self.role_file.write_text("agent")
+        (self.data / "server" / "db" / "etcd" / "tombstone").write_text("")
+        (self.project / "fleet-role.d" / "join-url").write_text(JOIN_URL + "\n")
+        self.assert_status(self.actuator("finish-demote"), DONE)
+        first = self.report()["started_at"]
+        self.assertRegex(first, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assert_status(self.actuator("finish-demote"), DONE)
+        self.assertEqual(self.container_state(AGENT_CONTAINER), "running")
+        self.assertEqual(self.report()["started_at"], first)
+
     def test_a_demotion_is_not_finished_while_the_member_stays(self) -> None:
         self.running_as("server", level="etcd-only")
         self.role_file.write_text("agent")
