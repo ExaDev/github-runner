@@ -144,7 +144,7 @@ docker_on() {
 teardown() {
   for index in $(seq 1 "$node_count"); do
     if [ -f "${work}/$(node_name "$index")/docker-compose.yml" ]; then
-      docker compose --project-directory "${work}/$(node_name "$index")" -f "${work}/$(node_name "$index")/docker-compose.yml" --profile server --profile agent --profile regrade down -v --rmi local >/dev/null 2>&1 || true
+      docker compose --project-directory "${work}/$(node_name "$index")" -f "${work}/$(node_name "$index")/docker-compose.yml" --profile server --profile agent --profile regrade down --remove-orphans -v --rmi local || return
     fi
   done
   if [ -f "${work}/headscale/docker-compose.yml" ]; then
@@ -309,7 +309,7 @@ EOF
 run_role() {
   log "Running the cluster role"
   # Returns the playbook's own status, which a caller testing it (compose_faulty) relies on, errexit being off there. Any arguments go to ansible-playbook.
-  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" "$@" || return
+  ansible_run -i "${work}/inventory.yml" "${repo_root}/tests/mesh/cluster.yml" "$@" || { diagnose >&2 || true; return 1; }
   if [ "$pin_context" = 1 ]; then grtest_assert_current_context_unchanged "$docker_config" || fail "the role changed the current Docker context"; fi
 }
 
