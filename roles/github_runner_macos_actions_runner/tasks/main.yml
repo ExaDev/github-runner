@@ -18,6 +18,7 @@
     argv: [op, read, "{{ github_runner_macos_actions_runner_private_key_op_reference }}"]
   register: github_runner_macos_actions_runner_op_key
   changed_when: false
+  check_mode: false
   no_log: true
   when:
     - github_runner_macos_actions_runner_enabled | bool
