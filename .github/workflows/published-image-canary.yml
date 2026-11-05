@@ -7,6 +7,10 @@ on:
         description: Public fleet-role image pinned by sha256 digest
         required: true
         type: string
+      comparison_image:
+        description: Optional second public fleet-role image pinned by sha256 digest
+        required: false
+        type: string
       scenario:
         description: Mesh role-controller scenario
         required: true
@@ -26,7 +30,7 @@ jobs:
   canary:
     name: Published image mesh (${{ inputs.scenario }})
     runs-on: ubuntu-latest
-    timeout-minutes: 105
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
         with:
@@ -36,7 +40,13 @@ jobs:
         env:
           IMAGE: ${{ inputs.image }}
           SCENARIO: ${{ inputs.scenario }}
-        run: bash tests/mesh/validate-canary.sh "$IMAGE" "$SCENARIO"
+          COMPARISON_IMAGE: ${{ inputs.comparison_image }}
+        run: |
+          bash tests/mesh/validate-canary.sh "$IMAGE" "$SCENARIO"
+          if [ -n "$COMPARISON_IMAGE" ]; then
+            bash tests/mesh/validate-canary.sh "$COMPARISON_IMAGE" "$SCENARIO"
+            [ "$IMAGE" != "$COMPARISON_IMAGE" ] || { echo 'Images must differ' >&2; exit 1; }
+          fi
 
       - name: Install Docker Compose
         env:
@@ -68,9 +78,28 @@ jobs:
           echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
 
       - name: Run published image in the mesh
+        if: inputs.comparison_image == ''
         env:
           ANSIBLE_COLLECTIONS_PATH: ${{ runner.temp }}/collections
           GRTEST_WORK: ${{ runner.temp }}/grtest-mesh
           GRTEST_ROLE_IMAGE: ${{ inputs.image }}
           SCENARIO: ${{ inputs.scenario }}
         run: tests/mesh/run.sh "$SCENARIO"
+
+      - name: Compare published images in the mesh
+        if: inputs.comparison_image != ''
+        env:
+          ANSIBLE_COLLECTIONS_PATH: ${{ runner.temp }}/collections
+          IMAGE: ${{ inputs.image }}
+          COMPARISON_IMAGE: ${{ inputs.comparison_image }}
+          SCENARIO: ${{ inputs.scenario }}
+          RESULTS: ${{ runner.temp }}/image-comparison
+        run: bash tests/mesh/compare-images.sh "$IMAGE" "$COMPARISON_IMAGE" "$SCENARIO" "$RESULTS"
+
+      - name: Upload comparison results
+        if: always() && inputs.comparison_image != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: published-image-comparison
+          path: ${{ runner.temp }}/image-comparison/
+          if-no-files-found: warn
