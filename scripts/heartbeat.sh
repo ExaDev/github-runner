@@ -21,6 +21,7 @@ set -euo pipefail
 
 HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT with gist scope)}"
 HEARTBEAT_GIST_ID="${HEARTBEAT_GIST_ID:?HEARTBEAT_GIST_ID must be set}"
+HEARTBEAT_GITHUB_API_URL="${HEARTBEAT_GITHUB_API_URL:-https://api.github.com}"
 GIST_FILE="${GIST_FILE:-arc-healthy-until}"
 HEALTH_GIST_FILE="${HEALTH_GIST_FILE:-fleet-health.json}"
 JOB_PEAK_SUMMARY_GIST_FILE="${HEARTBEAT_JOB_PEAK_SUMMARY_GIST_FILE:-job-peak-summary.json}"
@@ -101,7 +102,7 @@ reasons_json="$(printf '%s\n' "${reasons[@]}" | jq -R . | jq -sc 'map(select(len
 # When each problem began, so a reader (scripts/fleet-alert.sh) can tell an outage that has lasted from a blip without a clock of its own: a problem still present keeps the onset the last tick published, and a new one starts now. The last tick's document is read back from the gist; if that read fails every onset restarts at now, which delays an alert and never raises a false one.
 at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 previous_health="$(curl -fsS -H "Authorization: Bearer ${HEARTBEAT_GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/gists/${HEARTBEAT_GIST_ID}" 2>/dev/null \
+  "${HEARTBEAT_GITHUB_API_URL}/gists/${HEARTBEAT_GIST_ID}" 2>/dev/null \
   | jq -c --arg file "$HEALTH_GIST_FILE" '.files[$file].content // empty | fromjson' 2>/dev/null || true)"
 
 # A server node is one carrying the control-plane role label, which k3s sets on every server. A node that is not Ready is listed whether or not it is a server, but only a server's absence endangers etcd quorum and the API, which is why the flag is published. A server that regrading has stepped down carries the level label and is not Ready on purpose (at etcd-only it runs no kubelet), so its level is published beside it, for a reader to tell it from a server that has failed.
@@ -157,7 +158,7 @@ curl -fsS -X PATCH \
   -H "Authorization: Bearer ${HEARTBEAT_GH_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
   -d "$body" \
-  "https://api.github.com/gists/${HEARTBEAT_GIST_ID}" >/dev/null
+  "${HEARTBEAT_GITHUB_API_URL}/gists/${HEARTBEAT_GIST_ID}" >/dev/null
 
 if [ "$healthy" != "true" ]; then
   echo "Unhealthy (${reasons[*]}) - heartbeat gist reason updated, timestamp not refreshed" >&2
