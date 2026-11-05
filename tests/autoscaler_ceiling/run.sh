@@ -9,7 +9,7 @@
 #
 # The runner pod's cpu request is chosen from the node's free cpu so that cpu decides the ceiling, whatever size of node the cluster has.
 #
-# Usage: tests/autoscaler_ceiling/run.sh. Needs Docker, kind, kubectl, helm, jq, and python3 (PYTHON overrides which) with PyYAML, Jinja2 and ansible-core (plugins/filter/arc.py imports it). Creates a kind cluster named grtest-ceiling with metrics-server and removes it on exit; GRTEST_KEEP=1 keeps it. With GRTEST_KUBECONFIG and GRTEST_DISPOSABLE=1 it uses that cluster instead, which must have exactly one node and a working metrics API (k3s's own metrics-server, for one); the test labels and cordons that node, so it refuses a cluster not declared disposable.
+# Usage: tests/autoscaler_ceiling/run.sh. Needs Docker, kind, kubectl, helm, jq, and python3 (PYTHON overrides which) with PyYAML, Jinja2 and ansible-core (plugins/filter/arc.py imports it). Creates a two-node kind cluster named grtest-ceiling with metrics-server and removes it on exit; GRTEST_KEEP=1 keeps it. With GRTEST_KUBECONFIG and GRTEST_DISPOSABLE=1 it uses a disposable cluster with exactly two schedulable nodes and a working metrics API. It labels the nodes and cordons one of them.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -25,6 +25,7 @@ platform_namespace=grtest-ceiling-platform
 pooled_namespaces=(grtest-ceiling-a grtest-ceiling-b)
 other_namespace=grtest-ceiling-other
 eligibility_label=grtest.example/eligible
+control_label=grtest.example/control
 initial_max_runners=3
 # The cpu request is the node's free cpu divided by this, so that cpu alone places this many runners on the node.
 runners_by_cpu=4
@@ -48,6 +49,8 @@ cleanup() {
       kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
     elif [ -n "${GRTEST_KUBECONFIG:-}" ]; then
       kubectl uncordon "${node:-}" >/dev/null 2>&1 || true
+      kubectl label node "${node:-}" "${eligibility_label}-" >/dev/null 2>&1 || true
+      kubectl label node "${control_node:-}" "${control_label}-" >/dev/null 2>&1 || true
       # The chart puts the controller's cleanup finalizer on what it installs, and no controller runs here to remove it, so the namespaces would never finish terminating.
       for namespace in "${pooled_namespaces[@]}"; do
         kubectl get autoscalingrunnersets,roles,rolebindings,serviceaccounts,secrets -n "$namespace" -o name 2>/dev/null | while read -r object; do
@@ -67,8 +70,10 @@ if [ -n "${GRTEST_KUBECONFIG:-}" ]; then
 else
   export KUBECONFIG="$work/kubeconfig"
   log "Creating the kind cluster and installing metrics-server"
-  kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s >/dev/null
+  printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n  - role: worker\n' > "$work/kind.yaml"
+  kind create cluster --name "$cluster" --config "$work/kind.yaml" --kubeconfig "$KUBECONFIG" --wait 120s >/dev/null
   cluster_created=1
+  kubectl taint node "${cluster}-control-plane" node-role.kubernetes.io/control-plane:NoSchedule- >/dev/null
   curl -fsSLo "$work/metrics-server.yaml" "https://github.com/kubernetes-sigs/metrics-server/releases/download/${metrics_server_version}/components.yaml"
   echo "${metrics_server_sha256}  $work/metrics-server.yaml" | sha256sum -c - >/dev/null || fail "metrics-server's components.yaml does not match its pinned digest"
   kubectl apply -f "$work/metrics-server.yaml" >/dev/null
@@ -77,8 +82,15 @@ else
 fi
 
 mapfile -t nodes < <(kubectl get nodes -o name)
-[ "${#nodes[@]}" -eq 1 ] || fail "the cluster has ${#nodes[@]} nodes; this test needs exactly one"
-node="${nodes[0]#node/}"
+[ "${#nodes[@]}" -eq 2 ] || fail "the cluster has ${#nodes[@]} nodes; this test needs exactly two"
+if [ "$cluster_created" = 1 ]; then
+  node="${cluster}-worker"
+  control_node="${cluster}-control-plane"
+else
+  node="${nodes[0]#node/}"
+  control_node="${nodes[1]#node/}"
+fi
+kubectl label node "$control_node" "${control_label}=true" --overwrite >/dev/null
 
 log "Waiting for the metrics API"
 for _ in $(seq 1 60); do
@@ -169,7 +181,7 @@ poll() {
   if [ -n "${GRTEST_AUTOSCALER_IMAGE:-}" ]; then
     kubectl -n "$platform_namespace" delete pod autoscaler-poll --ignore-not-found --wait=true >/dev/null
     kubectl -n "$platform_namespace" run autoscaler-poll --image="$GRTEST_AUTOSCALER_IMAGE" --restart=Never \
-      --overrides "$(jq -n --arg targets "${targets# }" --arg ns "$platform_namespace" --arg selector "${eligibility_label}=true" '{spec:{serviceAccountName:"autoscaler",containers:[{name:"autoscaler-poll",image:env.GRTEST_AUTOSCALER_IMAGE,command:["/app/scripts/autoscaler.sh"],env:[{name:"AUTOSCALER_TARGETS",value:$targets},{name:"AUTOSCALER_DRY_RUN",value:"false"},{name:"AUTOSCALER_USABLE_BUDGET_GI",value:"1024"},{name:"AUTOSCALER_FLOOR",value:"1"},{name:"AUTOSCALER_NODE_SELECTOR",value:$selector},{name:"AUTOSCALER_STATE_NAMESPACE",value:$ns},{name:"AUTOSCALER_STATUS_CONFIGMAP",value:"autoscaler-status"}]}]}}')" >/dev/null
+      --overrides "$(jq -n --arg targets "${targets# }" --arg ns "$platform_namespace" --arg selector "${eligibility_label}=true" --arg control "$control_label" '{spec:{nodeSelector:{($control):"true"},serviceAccountName:"autoscaler",containers:[{name:"autoscaler-poll",image:env.GRTEST_AUTOSCALER_IMAGE,command:["/app/scripts/autoscaler.sh"],env:[{name:"AUTOSCALER_TARGETS",value:$targets},{name:"AUTOSCALER_DRY_RUN",value:"false"},{name:"AUTOSCALER_USABLE_BUDGET_GI",value:"1024"},{name:"AUTOSCALER_FLOOR",value:"1"},{name:"AUTOSCALER_NODE_SELECTOR",value:$selector},{name:"AUTOSCALER_STATE_NAMESPACE",value:$ns},{name:"AUTOSCALER_STATUS_CONFIGMAP",value:"autoscaler-status"}]}]}}')" >/dev/null
     local phase
     for _ in {1..120}; do
       phase="$(kubectl -n "$platform_namespace" get pod autoscaler-poll -o jsonpath='{.status.phase}')"
@@ -188,8 +200,13 @@ assert actual['serviceAccountName'] == expected['serviceAccountName']
 assert actual.get('securityContext', {}) == expected.get('securityContext', {})
 assert actual['containers'][0].get('securityContext', {}) == expected['containers'][0].get('securityContext', {})
 PY
+    if [ "$phase" != Succeeded ]; then
+      kubectl -n "$platform_namespace" describe pod autoscaler-poll >&2 || true
+      kubectl -n "$platform_namespace" get events --field-selector involvedObject.kind=Pod,involvedObject.name=autoscaler-poll >&2 || true
+      kubectl -n "$platform_namespace" logs autoscaler-poll > "$work/poll.log" 2>&1 || true
+      fail "the poll pod ended in $phase"
+    fi
     kubectl -n "$platform_namespace" logs autoscaler-poll > "$work/poll.log" || fail "could not read poll logs"
-    [ "$phase" = Succeeded ] || fail "the poll pod ended in $phase"
     return
   fi
   PATH="$work/bin:$PATH" \
@@ -236,7 +253,7 @@ grep -qF "FAIL-SAFE" "$work/poll.log" && fail "a pod with no metrics failed the 
 kubectl delete pod unmeasured -n "${pooled_namespaces[0]}" --wait=true >/dev/null
 
 log "Another workload's pod taking a runner's cpu lowers the ceiling and the pool"
-kubectl run consumer -n "$other_namespace" --image=registry.k8s.io/pause:3.10 --restart=Never --overrides "{\"spec\": {\"containers\": [{\"name\": \"consumer\", \"image\": \"registry.k8s.io/pause:3.10\", \"resources\": {\"requests\": {\"cpu\": \"${runner_cpu}\"}}}]}}" >/dev/null
+kubectl run consumer -n "$other_namespace" --image=registry.k8s.io/pause:3.10 --restart=Never --overrides "{\"spec\": {\"nodeSelector\": {\"${eligibility_label}\": \"true\"}, \"containers\": [{\"name\": \"consumer\", \"image\": \"registry.k8s.io/pause:3.10\", \"resources\": {\"requests\": {\"cpu\": \"${runner_cpu}\"}}}]}}" >/dev/null
 kubectl wait --for=condition=Ready pod/consumer -n "$other_namespace" --timeout=180s >/dev/null || fail "the consumer pod never started"
 read -r lowered _ < <(reference "$runner_cpu")
 [ "$lowered" -eq $(( expected - 1 )) ] || fail "the reference places ${lowered} beside the consumer, not $(( expected - 1 ))"
