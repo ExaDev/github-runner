@@ -655,7 +655,7 @@ class SizeTest(ControllerCase):
 class MembershipTest(ControllerCase):
     def test_the_first_pass_records_the_voters_and_no_change(self) -> None:
         status = self.pass_(healthy())
-        self.assertEqual(status["membership"], {"voters": ["a", "b", "c"], "known_members": {"a": 3, "b": 3, "c": 3}, "changed_at": None, "cooldown_until": None})
+        self.assertEqual(status["membership"], {"voters": ["a", "b", "c"], "known_members": {"a": 3, "b": 3, "c": 3}, "departed": [], "changed_at": None, "cooldown_until": None})
 
     def test_a_pass_that_sees_the_same_voters_keeps_the_time_of_the_last_change(self) -> None:
         self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": 1700000000, "cooldown_until": 1700000000 + COOLDOWN_SECONDS}})

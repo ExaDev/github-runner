@@ -228,11 +228,14 @@ def in_progress($s; $id):
               {swap: ($record + {outgoing_pending: true}), action: null, wait: ["\($id.out) did not come back as an agent within \(budget($c).cleanup) s; it is left to node recovery"], consume_request: false, last_swap: null}
             else wait("cleanup"; ["waiting for \($id.out) to be Ready as an agent"]) end
         end
-      elif $o.removed then
+      # Removed, as k3s records it on the Node or as etcd's own membership shows it (the decision's `departed`), which is the proof that holds when the Node's labels and annotations have been set again by a server still running on the host.
+      elif $o.removed or (($s.decision.membership.departed // []) | index($id.out)) != null then
         if $finish != null and $finish.phase == "done" then do("cleanup"; {kind: "clean_node", node: $id.out, uncordon: false})
         else
           step_record($s; $id; "finish"; {}) as $record
-          | if $c.now >= $record.deadline then
+          | if $c.now >= $record.deadline and ($s.previous.swap.outgoing_pending // false) then
+              finalise("finish"; "completed"; ["\($id.in) votes and etcd no longer lists \($id.out), whose actuator did not finish its demotion within \(budget($c).finish) s; it is left to node recovery"]; []; true)
+            elif $c.now >= $record.deadline then
               {swap: ($record + {outgoing_pending: true}), action: {kind: "clean_node", node: $id.out, uncordon: false}, wait: [], consume_request: false, last_swap: null}
             else wait("finish"; ["waiting for \($id.out)'s actuator to finish its demotion"]) end
         end

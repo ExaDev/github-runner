@@ -240,11 +240,17 @@ $config as $c
 | ($voter_names | map({key: ., value: (if ($probes[.].samples[-1].t // 0) >= ($now - $stale_seconds) then $probes[.].samples[-1].etcd.known_members else null end)}) | from_entries) as $known_members
 | ($c.ignored_voters // []) as $ignored
 | ($voter_names | map(select(. as $v | $ignored | index($v) | not))) as $judged
-| ([$all[] | select(.name as $n | $ignored | index($n)) | select(.labelled and (.removed | not))]) as $ignored_members
+# A voter a swap is taking out that no longer says EtcdIsVoter has left etcd once every voter it does not ignore reports, fresh, that etcd lists as many members as there are voters: each voter is a member, so those members are the voters and nothing else. Its Node's etcd label and the absence of k3s's removed-node-name annotation say nothing then, since a server that is still running sets the label again and k3s clears the annotation when a server rejoins under a new name (pkg/etcd/metadata_controller.go and member_controller.go); counting it there would expect a member etcd does not have, for ever.
+| (($judged | length) > 0 and ($judged | all(. as $v | $known_members[$v] == ($voters | length)))) as $etcd_lists_the_voters
+| ([$all[] | select(.name as $n | $ignored | index($n)) | select(.labelled and (.removed | not))]) as $ignored_labelled
+| (if $etcd_lists_the_voters then $ignored_labelled | map(select(.voter | not) | .name) else [] end) as $departed
+| ($ignored_labelled | map(select(.name as $n | $departed | index($n) | not))) as $ignored_members
 | ($ignored_members | map(select(.voter | not)) | length) as $held_members
 | (($voters | length) + $held_members) as $members_expected
+# The voters expected, as the controller was told, less a departed voter, which it counted as one of the swap's two.
+| ($c.expected_voters - ($departed | length)) as $expected_voters
 | ([
-    (if $members_expected != $c.expected_voters then "there are \($members_expected) voters, not the \(if $c.expected_voters == $c.target then "target \($c.target)" else "expected \($c.expected_voters) (the target \($c.target) and the new voter a swap holds)" end)" else empty end),
+    (if $members_expected != $expected_voters then "there are \($members_expected) voters, not the \(if $expected_voters == $c.target then "target \($c.target)" else "expected \($expected_voters) (the target \($c.target) and the new voter a swap holds)" end)" else empty end),
     ($all[] | select(.name as $n | $ignored | index($n) | not) | select(.labelled and (.voter | not)) | if .removed then "node \(.name) is a member k3s has removed: it still carries the etcd label" else "node \(.name) is a member but not a voter: it carries the etcd label without \(voter_condition)=True" end),
     ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.regrade_level != null) | "voter \(.name) is at regrade level \(.regrade_level), below full"),
     ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.ready | not) | "voter \(.name) is not Ready"),
@@ -293,7 +299,7 @@ $config as $c
              unfit_rtt_ms: $unfit_rtt_ms, fit_rtt_ms: $fit_rtt_ms, wal_fsync_limit_ms: wal_fsync_limit_ms, backend_commit_limit_ms: backend_commit_limit_ms,
              window_samples: window_samples, sample_seconds: $c.sample_seconds, window_seconds: $window_seconds, cooldown_seconds: $cooldown_seconds,
              quota_bytes: $quota_bytes},
-    membership: {voters: $voter_names, known_members: $known_members, changed_at: $changed_at, cooldown_until: $cooldown_until},
+    membership: {voters: $voter_names, known_members: $known_members, departed: $departed, changed_at: $changed_at, cooldown_until: $cooldown_until},
     hosts: ($hosts | map({key: .name, value: del(.name, .rank, .m)}) | from_entries),
     attribution: $attribution,
     ranking: ($hosts | map(select(.verdict == "fit")) | sort_by(.rank) | map(.name)),

@@ -772,6 +772,59 @@ class OutgoingTest(SwapCase):
         self.assertNotIn(VOTER_LABEL, self.labels(OUT))
         self.assertTrue(self.swap()["outgoing_pending"])
 
+    def at_removed_with_its_server_still_running(self) -> None:
+        """The outgoing voter's step-down failed while it was not Ready and k3s removed its member, but the server its role file still names runs on: it has set the etcd label again, and the removed-node-name annotation is gone (k3s clears it when the server joins again under a new name, and the controller's clean-up takes it off at the finish's deadline). The voters that remain each report that etcd lists three members."""
+        self.at_member_removed()
+        self.report(OUT, self.id, "step-down", "failed", message="the server did not come back at etcd-only")
+        self.edit(OUT, annotations={REMOVED: None})
+        self.hosts[2].voter = False
+        self.hosts[2].learner = True
+        self.hosts[2].level = "etcd-only"
+        self.hosts[2].ready = False
+        self.hosts[2].stale_by = 10 * SAMPLE_SECONDS
+
+    def test_a_member_etcd_no_longer_lists_is_finished_not_removed_again_though_its_node_says_it_is_one(self) -> None:
+        self.at_removed_with_its_server_still_running()
+        self.ok_pass()
+        self.assertNotIn(REMOVE, self.annotations(OUT))
+        self.assertEqual(self.changes(), [])
+        status = self.cluster.status()
+        self.assertEqual(status["gates"], [])
+        self.assertEqual(status["membership"]["departed"], [OUT])
+        self.assertEqual(self.swap()["step"], "finish")
+        self.assertIn(f"waiting for {OUT}'s actuator to finish its demotion", self.completed.stdout if self.completed else "")
+
+    def assert_still_counted_as_a_member(self) -> None:
+        self.ok_pass()
+        status = self.cluster.status()
+        self.assertEqual(status["membership"]["departed"], [])
+        self.assertNotEqual(status["gates"], [])
+        self.assertNotIn(REMOVE, self.annotations(OUT), "nothing is removed while a remaining voter is not healthy")
+        self.assertNotEqual(self.swap()["step"], "finish")
+
+    def test_a_member_is_counted_as_one_while_a_remaining_voter_still_lists_it(self) -> None:
+        self.at_removed_with_its_server_still_running()
+        self.hosts[0].etcd = {"known_members": TARGET + 1}
+        self.assert_still_counted_as_a_member()
+
+    def test_a_member_is_counted_as_one_while_a_remaining_voter_has_not_reported(self) -> None:
+        self.at_removed_with_its_server_still_running()
+        self.hosts[0].stale_by = 10 * SAMPLE_SECONDS
+        self.assert_still_counted_as_a_member()
+
+    def test_a_departed_member_whose_server_never_finishes_ends_the_swap_completed_and_left_to_node_recovery(self) -> None:
+        self.at_removed_with_its_server_still_running()
+        self.previous("finish", since_ago=OPERATION_TIMEOUT_SECONDS + 5)
+        self.ok_pass()
+        self.assertTrue(self.swap()["outgoing_pending"])
+        # The server sets its etcd label again after the clean-up, so the Node is never clean; the swap ends rather than cleaning it for ever.
+        self.previous("finish", since_ago=OPERATION_TIMEOUT_SECONDS + 5, outgoing_pending=True)
+        self.ok_pass()
+        self.assertEqual(self.last_swap()["outcome"], "completed")
+        self.assertTrue(self.last_swap()["outgoing_pending"])
+        self.assertEqual(self.held_by(), "")
+        self.assertIsNone(self.swap())
+
     def test_the_removed_member_is_no_voter_so_the_membership_the_controller_publishes_has_three_voters(self) -> None:
         self.at_member_removed()
         self.ok_pass()
