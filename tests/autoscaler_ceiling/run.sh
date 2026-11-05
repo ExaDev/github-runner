@@ -166,6 +166,20 @@ for namespace in "${pooled_namespaces[@]}"; do targets="$targets $namespace/grte
 
 # One poll, for real (not dry run), its output kept for the checks and for a failure's report.
 poll() {
+  if [ -n "${GRTEST_AUTOSCALER_IMAGE:-}" ]; then
+    kubectl -n "$platform_namespace" delete pod autoscaler-poll --ignore-not-found --wait=true >/dev/null
+    kubectl -n "$platform_namespace" run autoscaler-poll --image="$GRTEST_AUTOSCALER_IMAGE" --restart=Never \
+      --overrides "$(jq -n --arg targets "${targets# }" --arg ns "$platform_namespace" --arg selector "${eligibility_label}=true" '{spec:{serviceAccountName:"autoscaler",containers:[{name:"autoscaler-poll",image:env.GRTEST_AUTOSCALER_IMAGE,command:["/app/scripts/autoscaler.sh"],env:[{name:"AUTOSCALER_TARGETS",value:$targets},{name:"AUTOSCALER_DRY_RUN",value:"false"},{name:"AUTOSCALER_USABLE_BUDGET_GI",value:"1024"},{name:"AUTOSCALER_FLOOR",value:"1"},{name:"AUTOSCALER_NODE_SELECTOR",value:$selector},{name:"AUTOSCALER_STATE_NAMESPACE",value:$ns},{name:"AUTOSCALER_STATUS_CONFIGMAP",value:"autoscaler-status"}]}]}}')" >/dev/null
+    local phase
+    for _ in {1..120}; do
+      phase="$(kubectl -n "$platform_namespace" get pod autoscaler-poll -o jsonpath='{.status.phase}')"
+      case "$phase" in Succeeded|Failed) break ;; esac
+      sleep 2
+    done
+    kubectl -n "$platform_namespace" logs autoscaler-poll > "$work/poll.log" || fail "could not read poll logs"
+    [ "$phase" = Succeeded ] || fail "the poll pod ended in $phase"
+    return
+  fi
   PATH="$work/bin:$PATH" \
   AUTOSCALER_TARGETS="${targets# }" \
   AUTOSCALER_DRY_RUN=false \
