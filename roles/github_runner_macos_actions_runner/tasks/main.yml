@@ -227,8 +227,6 @@
           - --unattended
           - --url
           - "https://github.com/{{ github_runner_macos_actions_runner_organization }}/{{ github_runner_macos_actions_runner_repository }}"
-          - --token
-          - "{{ github_runner_macos_actions_runner_registration_token.json.token }}"
           - --name
           - "{{ github_runner_macos_actions_runner_name }}"
           - --labels
@@ -236,6 +234,8 @@
           - --work
           - "{{ github_runner_macos_actions_runner_work_dir }}"
           - --replace
+      environment:
+        ACTIONS_RUNNER_INPUT_TOKEN: "{{ github_runner_macos_actions_runner_registration_token.json.token }}"
       no_log: true
       changed_when: true
       when: not github_runner_macos_actions_runner_registration.stat.exists
