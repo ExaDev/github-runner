@@ -9,6 +9,9 @@ argument_specs:
       github_runner_macos_actions_runner_organization:
         type: str
         default: ""
+      github_runner_macos_actions_runner_repository:
+        type: str
+        default: ""
       github_runner_macos_actions_runner_app_id:
         type: str
         default: ""
