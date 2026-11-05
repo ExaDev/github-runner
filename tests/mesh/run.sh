@@ -1571,6 +1571,8 @@ etcd_cluster_id() {
     --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key \
     endpoint status -w fields </dev/null | sed -n 's/^"ClusterID" : \([0-9]*\)$/\1/p'
 }
+# Whether node $1's own etcd answers on its client port. A member that has just joined or been promoted can be counted a voter by the others, and its Node say EtcdIsVoter, before its own etcd serves its clients, so a read of its cluster ID waits for this rather than reading an empty ID as another cluster.
+etcd_answers() { [ -n "$(etcd_cluster_id "$1")" ]; }
 # Whether node $1's log has the line $2 in it; grep without -q reads the whole log, as in assert_cluster.
 container_logged() { docker logs "$(container "$1")" 2>&1 | grep -F "$2" >/dev/null; }
 removed_member_recorded() { [ -n "$(kubectl_on 2 get node "$(node_name 1)" -o 'jsonpath={.metadata.annotations.etcd\.k3s\.cattle\.io/removed-node-name}' 2>/dev/null)" ]; }
@@ -1652,6 +1654,7 @@ scenario_rejoin() {
   done
   [ "$promoted" = 1 ] || fail "no other server's k3s logged promoting $(node_name 1)'s learner"
   [ "$(started_members)" = 3 ] || { etcd_members 2; fail "expected three started etcd members after the rejoin"; }
+  wait_for "$(node_name 1)'s etcd to answer" 300 etcd_answers 1
   [ "$(etcd_cluster_id 1)" = "$cluster_id" ] || fail "$(node_name 1) joined a cluster with another ID: $(etcd_cluster_id 1) (was ${cluster_id})"
   [ "$(node_password_hash 1)" = "$password" ] || fail "$(node_name 1)'s node password changed"
   docker run --rm -v "$(node_name 1)_k3s-data:/data" "$busybox_image" test -d /data/server/db.demoted || fail "the moved-aside datastore is gone"
@@ -1986,6 +1989,7 @@ role_actuator_docker() {
   [ "$(docker_state "$agent")" = exited ] || fail "${node}'s agent container is $(docker_state "$agent"), not stopped"
   [ "$(docker exec "$server" sha256sum /etc/rancher/node/password </dev/null | cut -d' ' -f1)" = "$password" ] || fail "${node}'s server has another node password"
   [ "$(docker exec "$server" tailscale ip -4 </dev/null | head -n 1)" = "$address" ] || fail "${node}'s server has another Tailscale address"
+  wait_for "${node}'s etcd to answer" "$actuator_wait_seconds" etcd_answers 3
   [ "$(etcd_cluster_id 3)" = "$cluster_id" ] || fail "${node} joined a cluster with another ID: $(etcd_cluster_id 3) (was ${cluster_id})"
   [ "$(started_member_count)" = 3 ] || { etcd_members; fail "expected three started etcd members after ${node}'s promotion"; }
   kubectl_on 1 uncordon "$node" >/dev/null
@@ -2040,6 +2044,7 @@ scenario_role_swap() {
   wait "$writer" "$unit_watcher"
   [ "$(voter_count)" = 3 ] || { etcd_members; fail "expected three voters after the second swap, got $(voter_count)"; }
   node_is_voter "$node" || fail "${node} is not a voter again"
+  wait_for "${node}'s etcd to answer" "$actuator_wait_seconds" etcd_answers 1
   [ "$(etcd_cluster_id 1)" = "$cluster_id" ] || fail "${node} joined a cluster with another ID: $(etcd_cluster_id 1) (was ${cluster_id})"
   [ "$(etcd_cluster_id 2)" = "$cluster_id" ] || fail "the etcd cluster ID changed after the second swap"
   [ "$(started_member_count)" = 3 ] || { etcd_members; fail "expected three started etcd members after the second swap"; }
