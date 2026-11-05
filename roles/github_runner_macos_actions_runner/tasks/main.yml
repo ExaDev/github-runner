@@ -12,6 +12,99 @@
   ansible.builtin.meta: end_role
   when: ansible_facts['system'] != 'Darwin'
 
+- name: Inspect the runner directory before making changes
+  become: true
+  ansible.builtin.stat:
+    path: "{{ github_runner_macos_actions_runner_root }}"
+    follow: false
+  register: github_runner_macos_actions_runner_directory
+
+- name: Inspect the runner registration before making changes
+  become: true
+  ansible.builtin.stat:
+    path: "{{ github_runner_macos_actions_runner_root }}/.runner"
+    follow: false
+  register: github_runner_macos_actions_runner_registration
+
+- name: Inspect the launchd service before making changes
+  become: true
+  ansible.builtin.command:
+    argv: [launchctl, print, "system/{{ github_runner_macos_actions_runner_launchd_label }}"]
+  register: github_runner_macos_actions_runner_service
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Refuse unknown launchd service state
+  ansible.builtin.assert:
+    that:
+      - github_runner_macos_actions_runner_service.rc in [0, 113]
+    fail_msg: Cannot establish whether the macOS runner service exists; leaving it untouched.
+
+- name: Refuse disabling an existing runner
+  ansible.builtin.assert:
+    that:
+      - not github_runner_macos_actions_runner_directory.stat.exists
+      - not github_runner_macos_actions_runner_registration.stat.exists
+      - github_runner_macos_actions_runner_service.rc == 113
+    fail_msg: Disabling an existing macOS runner is unsupported until a race-free mechanism exists.
+  when: not (github_runner_macos_actions_runner_enabled | bool)
+
+- name: End the role when disabled and absent
+  ansible.builtin.meta: end_role
+  when: not (github_runner_macos_actions_runner_enabled | bool)
+
+- name: Check the registered runner version
+  become: true
+  ansible.builtin.command:
+    argv: ["{{ github_runner_macos_actions_runner_root }}/bin/Runner.Listener", --version]
+  register: github_runner_macos_actions_runner_existing_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: github_runner_macos_actions_runner_registration.stat.exists
+
+- name: Refuse an upgrade or unrecognised registration
+  ansible.builtin.assert:
+    that:
+      - github_runner_macos_actions_runner_existing_version.rc == 0
+      - github_runner_macos_actions_runner_existing_version.stdout | trim == github_runner_macos_actions_runner_version
+    fail_msg: Upgrading or replacing a registered macOS runner is unsupported until a race-free mechanism exists.
+  when: github_runner_macos_actions_runner_registration.stat.exists
+
+- name: Leave an existing matching registration untouched
+  ansible.builtin.meta: end_role
+  when: github_runner_macos_actions_runner_registration.stat.exists
+
+- name: Refuse an existing launchd service
+  ansible.builtin.assert:
+    that:
+      - github_runner_macos_actions_runner_service.rc == 113
+    fail_msg: An existing macOS runner service cannot be safely replaced.
+
+- name: Require a real runner directory
+  ansible.builtin.assert:
+    that:
+      - not github_runner_macos_actions_runner_directory.stat.exists or (github_runner_macos_actions_runner_directory.stat.isdir and not github_runner_macos_actions_runner_directory.stat.islnk)
+    fail_msg: The runner path is not a real directory; leaving it untouched.
+
+- name: Inspect the existing runner directory contents
+  become: true
+  ansible.builtin.find:
+    paths: "{{ github_runner_macos_actions_runner_root }}"
+    hidden: true
+    file_type: any
+    recurse: false
+  register: github_runner_macos_actions_runner_contents
+  when: github_runner_macos_actions_runner_directory.stat.exists
+
+- name: Refuse a non-empty runner directory
+  ansible.builtin.assert:
+    that:
+      - github_runner_macos_actions_runner_contents.matched == 0
+    fail_msg: The runner directory is not empty; leaving its installation and workspace untouched.
+  when: github_runner_macos_actions_runner_directory.stat.exists
+
 - name: Read the macOS runner App key from 1Password
   delegate_to: localhost
   ansible.builtin.command:
@@ -43,20 +136,6 @@
     quiet: true
   when: github_runner_macos_actions_runner_enabled | bool
   no_log: true
-
-- name: Stop and remove a disabled macOS runner
-  become: true
-  when: not (github_runner_macos_actions_runner_enabled | bool)
-  block:
-    - name: Remove the runner launch daemon
-      ansible.builtin.file:
-        path: "{{ github_runner_macos_actions_runner_plist }}"
-        state: absent
-    - name: Stop the disabled runner service
-      ansible.builtin.command:
-        argv: [launchctl, bootout, "system/{{ github_runner_macos_actions_runner_launchd_label }}"]
-      failed_when: false
-      changed_when: false
 
 - name: Configure the enabled macOS runner
   when: github_runner_macos_actions_runner_enabled | bool
@@ -110,17 +189,6 @@
         owner: "{{ github_runner_macos_actions_runner_user }}"
         mode: "0750"
 
-    - name: Check the installed runner version
-      become: true
-      become_user: "{{ github_runner_macos_actions_runner_user }}"
-      ansible.builtin.command:
-        argv: ["{{ github_runner_macos_actions_runner_root }}/bin/Runner.Listener", --version]
-      register: github_runner_macos_actions_runner_installed_version
-      changed_when: false
-      failed_when: false
-      check_mode: false
-      when: not ansible_check_mode or github_runner_macos_actions_runner_account.rc == 0
-
     - name: Download the pinned Apple Silicon runner package
       become: true
       ansible.builtin.get_url:
@@ -130,30 +198,6 @@
         mode: "0644"
       when:
         - not ansible_check_mode
-        - github_runner_macos_actions_runner_installed_version.stdout | default('') | trim != github_runner_macos_actions_runner_version
-
-    - name: Stop the runner before replacing its installation
-      become: true
-      ansible.builtin.command:
-        argv: [launchctl, bootout, "system/{{ github_runner_macos_actions_runner_launchd_label }}"]
-      failed_when: false
-      changed_when: false
-      when: github_runner_macos_actions_runner_installed_version.stdout | default('') | trim != github_runner_macos_actions_runner_version
-
-    - name: Remove the prior runner installation
-      ansible.builtin.file:
-        path: "{{ github_runner_macos_actions_runner_root }}"
-        state: absent
-      when: github_runner_macos_actions_runner_installed_version.stdout | default('') | trim != github_runner_macos_actions_runner_version
-
-    - name: Recreate the runner directory
-      become: true
-      ansible.builtin.file:
-        path: "{{ github_runner_macos_actions_runner_root }}"
-        state: directory
-        owner: "{{ github_runner_macos_actions_runner_user }}"
-        mode: "0750"
-      when: github_runner_macos_actions_runner_installed_version.stdout | default('') | trim != github_runner_macos_actions_runner_version
 
     - name: Install the pinned Apple Silicon runner package
       become: true
@@ -164,12 +208,6 @@
         owner: "{{ github_runner_macos_actions_runner_user }}"
       when:
         - not ansible_check_mode
-        - github_runner_macos_actions_runner_installed_version.stdout | default('') | trim != github_runner_macos_actions_runner_version
-
-    - name: Check whether the runner is registered
-      ansible.builtin.stat:
-        path: "{{ github_runner_macos_actions_runner_root }}/.runner"
-      register: github_runner_macos_actions_runner_registration
 
     - name: Register the runner through the GitHub App
       delegate_to: localhost
@@ -245,7 +283,6 @@
           - "{{ github_runner_macos_actions_runner_label }}"
           - --work
           - "{{ github_runner_macos_actions_runner_work_dir }}"
-          - --replace
       environment:
         ACTIONS_RUNNER_INPUT_TOKEN: "{{ github_runner_macos_actions_runner_registration_token.json.token }}"
       no_log: true
