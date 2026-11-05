@@ -204,11 +204,6 @@ prepare_nodes() {
       else
         echo "    ports: !reset []"
       fi
-      # etcd's data on memory when asked: the role_controller scenario judges the voters' and the standby's disk against etcd's own limits (a WAL fsync under 10 ms), which a laptop's or a runner's virtual disk does not reliably meet (a laptop's measured 15 to 30 ms), and what it tests is the controller's pipeline, not the disk of the machine it runs on.
-      if [ "${etcd_on_memory:-0}" = 1 ]; then
-        echo "    tmpfs:"
-        echo "      - /var/lib/rancher/k3s/server/db"
-      fi
       echo "    networks:"
       echo "      ${network}:"
       echo "        ipv4_address: $(node_ip "$index")"
@@ -224,6 +219,12 @@ prepare_nodes() {
       echo "networks:"
       echo "  ${network}:"
       echo "    external: true"
+      # etcd's data on memory when asked: the role_controller scenario judges the voters' and the standby's disk against etcd's own limits (a WAL fsync under 10 ms), which a laptop's or a runner's virtual disk does not reliably meet (a laptop's measured 15 to 30 ms), and what it tests is the controller's pipeline, not the disk of the machine it runs on. The server's whole data volume is on memory, rather than a tmpfs mount over server/db in the k3s service alone: the volume is what the role actuator mounts too, so it sees the datastore the server runs on (its member name, k3s's tombstone) and moves that one aside, and it outlives a restart of the server's container while the actuator holds it, as a disk does. A tmpfs mount is emptied at every restart, so a server restarted into etcd-only, or by its restart policy after its member was removed, came back with no datastore and no tombstone and joined etcd again as a new member.
+      if [ "${etcd_on_memory:-0}" = 1 ]; then
+        echo "volumes:"
+        echo "  k3s-data:"
+        echo "    driver_opts: {type: tmpfs, device: tmpfs}"
+      fi
     } > "${dir}/compose.grtest.yml"
   done
 }
