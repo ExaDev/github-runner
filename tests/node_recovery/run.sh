@@ -11,7 +11,7 @@ ansible_playbook="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 cluster=grtest-recovery
 platform_namespace=github-runner-platform
 namespace=grtest-listeners
-image=grtest/node-recovery:test
+image="${GRTEST_NODE_RECOVERY_IMAGE:-grtest/node-recovery:test}"
 pod_image=busybox:1.36
 watcher_node="${cluster}-worker"
 doomed_node="${cluster}-worker2"
@@ -153,9 +153,12 @@ server_version="$(kubectl version -o json | jq -r '.serverVersion.gitVersion')"
 log "Server version ${server_version}"
 doomed_uid="$(kubectl get node "$doomed_node" -o jsonpath='{.metadata.uid}')"
 
-log "Building and loading the watcher image and the stand-in's image"
-docker build -q -f "$repo_root/node-recovery/Dockerfile" -t "$image" "$repo_root" >/dev/null
-kind load docker-image "$image" --name "$cluster" >/dev/null
+if [ -z "${GRTEST_NODE_RECOVERY_IMAGE:-}" ]; then
+  log "Building and loading the watcher image"
+  docker build -q -f "$repo_root/node-recovery/Dockerfile" -t "$image" "$repo_root" >/dev/null
+  kind load docker-image "$image" --name "$cluster" >/dev/null
+fi
+log "Loading the stand-in's image"
 # The stand-in's image is pulled by each node's own runtime: a host Docker on the containerd image store pulls a multi-platform index holding only the host platform's blobs, and kind's import of it with all platforms fails on the missing ones.
 for node in $(kind get nodes --name "$cluster"); do
   docker exec "$node" crictl pull "$pod_image" >/dev/null
