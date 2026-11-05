@@ -125,8 +125,12 @@ copy_identity() {
 }
 
 # A server whose container did not come up has not joined anything, so the agent is brought back at once, with the role file naming it again and the join URL gone: unlike a native host, whose own Tailscale client keeps the API in reach, a Docker host with neither node container up cannot read the Lease that a rollback asks for, and would be left with nothing running.
+# A container already running was started by an earlier take of the step, whose report may not have reached the API, so its start is reported again: the controller waits for a heartbeat later than STARTED_AT, and an empty one never comes.
 start_server_unit() {
-  if server_active; then return 0; fi
+  if server_active; then
+    STARTED_AT=$(last_start)
+    return 0
+  fi
   compose agent stop "$(service_of agent)" || return 1
   if copy_identity agent server && record_start && compose server up --detach --no-deps "$(service_of server)"; then
     return 0
@@ -143,8 +147,12 @@ stop_server_unit() {
   compose server stop "$(service_of server)"
 }
 
+# As start_server_unit, for the agent: a finish taken again finds the agent it started running.
 start_agent_unit() {
-  if agent_active; then return 0; fi
+  if agent_active; then
+    STARTED_AT=$(last_start)
+    return 0
+  fi
   copy_identity server agent || return 1
   record_start || return 1
   compose agent up --detach --no-deps "$(service_of agent)"
