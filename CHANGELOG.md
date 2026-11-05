@@ -1,3 +1,19 @@
+## [2.43.0](https://github.com/ExaDev/github-runner/compare/v2.42.1...v2.43.0) (2026-11-05)
+
+### Features
+
+* allow heartbeat API endpoint injection ([c509fad](https://github.com/ExaDev/github-runner/commit/c509fad187c57cc62eb903196017e4fa3180e717))
+
+### Reverts
+
+* Revert "feat: allow heartbeat API endpoint injection" ([183f8a4](https://github.com/ExaDev/github-runner/commit/183f8a40b5d37b8c4f4e97f2d1a0604a9040e2cb))
+
+### Tests
+
+* check autoscaler pod security parity ([447865f](https://github.com/ExaDev/github-runner/commit/447865f7ddd7871bc5718589b3b8556a71066a8b))
+* compare published recovery and renewal images ([b453fe4](https://github.com/ExaDev/github-runner/commit/b453fe462e9fe2d5246ae8064ba046691fe90169))
+* exercise published autoscaler in kind ([81d766e](https://github.com/ExaDev/github-runner/commit/81d766ec3763339ccbae37a65a0ae7172d2b0ac6))
+
 ## [2.42.1](https://github.com/ExaDev/github-runner/compare/v2.42.0...v2.42.1) (2026-11-05)
 
 ### Bug Fixes
