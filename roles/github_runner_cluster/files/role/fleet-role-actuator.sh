@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # fleet-role-actuator: switches this host between a k3s server and a k3s agent, for the role controller's voter swap (scripts/fleet-role.sh), as its Node asks. It does only what has to happen on the host: the controller does everything on the API (the cordon, the wait for runner pods, the drain, the taint, the regrading level label, the removal of the etcd member, the clean-up of the Node's labels and annotations, the uncordon), and the actuator's own credential can read Nodes and the regrade Lease and patch its report, nothing more.
 #
-# THE NODE. Only the controller sets these, on this host's Node; all are under github-runner.exadev.com/. The label desired-role (server or agent) is the role the host is to run. The annotation role-swap names the swap (<UTC %Y%m%dT%H%M%SZ>-<outgoing node>-<incoming node>), role-step the step this host is to take in it (promote, step-down or rollback), role-join-node the node of the voter a promotion joins, and snapshot-request a swap whose snapshot this host, a voter that stays, is to take.
+# THE NODE. Only the controller sets these, on this host's Node; all are under github-runner.exadev.com/. The label desired-role (server or agent) is the role the host is to run. The annotation role-swap names the swap (<UTC %Y%m%dT%H%M%SZ>-<outgoing node>-<incoming node>), role-step the step this host is to take in it (promote, step-down or rollback), role-join-node the node of the voter a promotion joins, snapshot-request a swap whose snapshot this host, a voter that stays, is to take, and role-member-gone the swap under which every remaining voter reports that etcd no longer lists this host's member.
 #
 # THE REPORT. Each step's outcome goes to the ConfigMap ACTUATOR_CONFIGMAP in ACTUATOR_NAMESPACE, under this node's name, as JSON: {swap, step, phase, role, started_at, at, message, snapshot}, phase being running, done, failed or refused, role what the role file names afterwards, started_at the host's time just before a unit was started (what the controller waits for a later heartbeat than), at the time of the report and snapshot the names of the files a snapshot created. A report the API does not take is made again by the watch, which runs a step again until its outcome is reported; every step can be run again.
 #
-# AUTHORITY. Every step that could add a member (promote), and every other step a swap asks for (step-down, rollback, snapshot), is taken only while the regrade Lease (LEASE_NAMESPACE/LEASE_NAME) is held, unexpired, by ROLE_LEASE_HOLDER with the swap's id in its SWAP_ID_ANNOTATION: the controller holds it for the whole swap, and a regrade step or a run of the role cannot hold it meanwhile. finish-demote needs no Lease: it runs only once the role file names the agent (or, naming the server, the datastore holds k3s's tombstone, which a host down during its step-down and removal has in place of the role file, or the Node asks for a step-down that failed before the role file was written, after which the controller removes a host that is not Ready) and the server's etcd member is gone (a tombstone in the datastore, the Node's etcd.k3s.cattle.io/removed-node-name naming the datastore's member, or no etcd label on the Node), and completing the demotion of a member that is no longer one can never cost quorum, so a host that was down while it was removed finishes on its return.
+# AUTHORITY. Every step that could add a member (promote), and every other step a swap asks for (step-down, rollback, snapshot), is taken only while the regrade Lease (LEASE_NAMESPACE/LEASE_NAME) is held, unexpired, by ROLE_LEASE_HOLDER with the swap's id in its SWAP_ID_ANNOTATION: the controller holds it for the whole swap, and a regrade step or a run of the role cannot hold it meanwhile. finish-demote needs no Lease: it runs only once the role file names the agent (or, naming the server, the datastore holds k3s's tombstone, which a host down during its step-down and removal has in place of the role file, or the Node asks for a step-down that failed before the role file was written, after which the controller removes a host that is not Ready) and the server's etcd member is gone (a tombstone in the datastore, the Node's etcd.k3s.cattle.io/removed-node-name naming the datastore's member, the Node's role-member-gone naming the swap it is in, or no etcd label on the Node), and completing the demotion of a member that is no longer one can never cost quorum, so a host that was down while it was removed finishes on its return.
 #
 # COMMANDS. watch runs for ever, reading this host's Node every POLL_SECONDS and taking the step it asks for, a snapshot it asks for, and the finish of a demotion whose member is gone. status prints the host's role, units and datastore and its last report. promote ID, step-down ID, rollback ID, snapshot ID and finish-demote take one step by hand and report it as the watch does. promote-local [JOIN_URL] and demote-local are the host-local part of a switch with no Lease and no report, for the role's own promotion and demotion (tasks/native/server_turn.yml and demote.yml), so that Ansible and the actuator switch a host the same way.
 #
@@ -48,6 +48,7 @@ SWAP_ANNOTATION=github-runner.exadev.com/role-swap
 STEP_ANNOTATION=github-runner.exadev.com/role-step
 JOIN_NODE_ANNOTATION=github-runner.exadev.com/role-join-node
 SNAPSHOT_ANNOTATION=github-runner.exadev.com/snapshot-request
+MEMBER_GONE_ANNOTATION=github-runner.exadev.com/role-member-gone
 # What k3s writes: the etcd role label it puts on a member's Node, and the annotation its member controller records once etcd has removed the member named in it (pkg/etcd/member_controller.go).
 ETCD_LABEL=node-role.kubernetes.io/etcd
 REMOVED_ANNOTATION=etcd.k3s.cattle.io/removed-node-name
@@ -246,6 +247,11 @@ member_gone() {
   fi
   if [ -n "$member" ] && [ "$(node_annotation "$REMOVED_ANNOTATION")" = "$member" ]; then
     MESSAGE="k3s recorded the removal of member $member"
+    return 0
+  fi
+  # The controller's word, for the swap the Node is in, that etcd lists none of this host's members, from every remaining voter's own report: k3s's record names only the member it last removed and is cleared whenever the Node's etcd name annotation changes (pkg/etcd/member_controller.go), so it can disagree with the datastore's member while etcd lists neither.
+  if [ -n "$(node_annotation "$SWAP_ANNOTATION")" ] && [ "$(node_annotation "$MEMBER_GONE_ANNOTATION")" = "$(node_annotation "$SWAP_ANNOTATION")" ]; then
+    MESSAGE="the controller reports that etcd no longer lists this host's member, for swap $(node_annotation "$SWAP_ANNOTATION")"
     return 0
   fi
   if [ -z "$(node_label "$ETCD_LABEL")" ]; then

@@ -396,6 +396,20 @@ class FinishDemoteTest(ActuatorHarness):
         self.assertTrue((self.data / "server" / "db.demoted").is_dir())
         self.assert_never_both_running()
 
+    def test_a_demotion_is_finished_on_the_controllers_word_for_this_swap_that_etcd_lists_no_member_of_the_host(self) -> None:
+        # k3s's record names another member than the datastore's, as it does once it has been cleared and rewritten.
+        self.stepped_down()
+        self.asked_to_step_down({"etcd.k3s.cattle.io/removed-node-name": "another-member", "github-runner.exadev.com/role-member-gone": SWAP})
+        self.assert_status(self.actuator("finish-demote"), DONE)
+        self.assert_finished()
+
+    def test_the_controllers_word_for_another_swap_is_no_proof_that_the_member_is_gone(self) -> None:
+        self.stepped_down()
+        self.asked_to_step_down({"github-runner.exadev.com/role-member-gone": "20260101T000000Z-other-node"})
+        self.assert_status(self.actuator("finish-demote"), NOT_YET)
+        self.assertTrue(self.active("k3s"))
+        self.assertTrue((self.data / "server" / "db").is_dir())
+
     def test_a_server_asked_to_step_down_is_not_finished_while_its_member_stays(self) -> None:
         self.running_server(level="etcd-only")
         self.asked_to_step_down({"etcd.k3s.cattle.io/removed-node-name": "another-member"})
