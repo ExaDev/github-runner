@@ -1,3 +1,38 @@
+## [2.40.0](https://github.com/ExaDev/github-runner/compare/v2.39.0...v2.40.0) (2026-11-05)
+
+### Features
+
+* **regrade:** let a named holder take and release the Lease with annotations ([7b5b96b](https://github.com/ExaDev/github-runner/commit/7b5b96bc6e907320abf0be65ba4e8f6871e5f3de))
+* **role:** carry out a voter swap, by decision or by command ([b9fb667](https://github.com/ExaDev/github-runner/commit/b9fb66724cf143137c533be32ba44aedec67f573))
+
+### Bug Fixes
+
+* **cluster:** finish the demotion of a server whose datastore holds k3s's tombstone ([7214647](https://github.com/ExaDev/github-runner/commit/721464748a408d818fc066b3e3eb7295db91aebc))
+* **cluster:** give a Docker bootstrap host's agent a server to join ([9408fa9](https://github.com/ExaDev/github-runner/commit/9408fa9dfaf5ac1bf22a43ce6a882d8685c903fc))
+* **role:** count a stepped-down member that etcd still lists when gating the removal ([7464ef2](https://github.com/ExaDev/github-runner/commit/7464ef2e00fe12e939e4f849ac0b374ffb7d75f1))
+* **role:** finish a removed server whose step-down failed as an agent ([2cd4bf7](https://github.com/ExaDev/github-runner/commit/2cd4bf7763e9ff0f461d558221f43310d73689d5))
+* **role:** report the start of a Docker host's running container when a step is taken again ([a53cfb8](https://github.com/ExaDev/github-runner/commit/a53cfb871c4a92324fe1a1da65347ff16c7e0c0c))
+* **role:** take etcd's own membership as proof that the outgoing member has gone ([e091792](https://github.com/ExaDev/github-runner/commit/e0917929403181cab26acf20ae8a8ddce0224ec6))
+* **role:** tell the outgoing actuator that etcd no longer lists its member ([0b046d8](https://github.com/ExaDev/github-runner/commit/0b046d8833e80628ba322dec9d11baedf5303b3c))
+
+### Tests
+
+* **mesh:** allow one leader election in the writes made through a swap ([9c6072d](https://github.com/ExaDev/github-runner/commit/9c6072d28a4fb242a770511c8c90930e7eb943e3))
+* **mesh:** judge a voter a swap did not touch by its swap markers, not by lacking the voter labels ([5edfd9f](https://github.com/ExaDev/github-runner/commit/5edfd9fcb88c216462fcab33fc68c78433ac3a80))
+* **mesh:** keep etcd on memory in the server's data volume, not a tmpfs over its datastore ([75d41de](https://github.com/ExaDev/github-runner/commit/75d41de5244244e2c4ace9584474c18d027a9301))
+* **mesh:** print the demoted server's agent container when a scenario fails ([60883ee](https://github.com/ExaDev/github-runner/commit/60883eed35feda286e64b9ff67df4d0fc75e3388))
+* **mesh:** run the controller's own swap in a scenario of its own at the default period ([71fa77f](https://github.com/ExaDev/github-runner/commit/71fa77f52acde6f7984d3e1151a99958512f9df8))
+* **mesh:** run the role controller's voter swap against real k3s and etcd ([6af249c](https://github.com/ExaDev/github-runner/commit/6af249ce1e8b33777b519b2f2ee8839130b9d868))
+* **mesh:** sample the swap at the role's default period and bound it by its steps ([46a54e6](https://github.com/ExaDev/github-runner/commit/46a54e68fae7db31b55c9c2334e02f94ff8eeede))
+* **mesh:** wait for a joined member's etcd to answer before reading its cluster ID ([54b216e](https://github.com/ExaDev/github-runner/commit/54b216e7f4fe651d3370c06dee426eaba86837d6))
+* **regrade:** check that releasing the Lease clears the annotations it was taken with ([5fcba5f](https://github.com/ExaDev/github-runner/commit/5fcba5f224e5a2840099ced849e13f9109f564c8))
+* **role:** hold the swap tests to the stand-in's call names and an unchanged step start ([addd7e4](https://github.com/ExaDev/github-runner/commit/addd7e4bec524ce5b4bf1757d965eb889f434fb2))
+* **role:** run the swap module and the controller's new settings in the image smoke test ([2069049](https://github.com/ExaDev/github-runner/commit/2069049fa16ec49ccec2ad47940fe27ea3a68096))
+
+### Continuous Integration
+
+* **mesh:** derive the controller-swap timeout from its operation bounds ([bfada03](https://github.com/ExaDev/github-runner/commit/bfada03bd0b96f45a9985aa90f49a0b4079e4c6f))
+
 ## [2.39.0](https://github.com/ExaDev/github-runner/compare/v2.38.0...v2.39.0) (2026-11-05)
 
 ### Features
