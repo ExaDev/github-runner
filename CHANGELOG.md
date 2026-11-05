@@ -1,3 +1,9 @@
+## [2.42.1](https://github.com/ExaDev/github-runner/compare/v2.42.0...v2.42.1) (2026-11-05)
+
+### Bug Fixes
+
+* support first-install macOS runner checks ([daef86f](https://github.com/ExaDev/github-runner/commit/daef86f9a8731544ff519002358974391e35daa4))
+
 ## [2.42.0](https://github.com/ExaDev/github-runner/compare/v2.41.0...v2.42.0) (2026-11-05)
 
 ### Features
