@@ -1,0 +1,66 @@
+name: Platform image canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to compare
+        required: true
+        type: choice
+        options:
+          - node-recovery
+          - pull-secret-renewer
+      old_image:
+        description: Previously published image pinned by digest
+        required: true
+        type: string
+      new_image:
+        description: Candidate published image pinned by digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Validate image references
+        env:
+          COMPONENT: ${{ inputs.component }}
+          OLD_IMAGE: ${{ inputs.old_image }}
+          NEW_IMAGE: ${{ inputs.new_image }}
+        run: |
+          set -euo pipefail
+          for image in "$OLD_IMAGE" "$NEW_IMAGE"; do
+            [[ "$image" =~ ^ghcr\.io/exadev/github-runner-${COMPONENT}@sha256:[0-9a-f]{64}$ ]] || { echo "Invalid image reference: $image" >&2; exit 1; }
+          done
+          [[ "$OLD_IMAGE" != "$NEW_IMAGE" ]] || { echo 'Images must differ' >&2; exit 1; }
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/venv"
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet ansible-core
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+      - name: Compare published images
+        env:
+          COMPONENT: ${{ inputs.component }}
+          OLD_IMAGE: ${{ inputs.old_image }}
+          NEW_IMAGE: ${{ inputs.new_image }}
+        run: |
+          set -euo pipefail
+          for image in "$OLD_IMAGE" "$NEW_IMAGE"; do
+            for run in 1 2; do
+              echo "Testing ${image}, run ${run}"
+              case "$COMPONENT" in
+                node-recovery) GRTEST_NODE_RECOVERY_IMAGE="$image" tests/node_recovery/run.sh ;;
+                pull-secret-renewer) GRTEST_RENEWER_IMAGE="$image" tests/pull_secret_renewal/run.sh ;;
+                *) exit 1 ;;
+              esac
+            done
+          done

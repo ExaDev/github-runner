@@ -8,7 +8,7 @@ repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 ansible_playbook="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 cluster=grtest-renewal
 namespace=grtest-runners
-image=grtest/pull-secret-renewer:test
+image="${GRTEST_RENEWER_IMAGE:-grtest/pull-secret-renewer:test}"
 stub_image=python:3.13-alpine
 pull_secret=ghcr-pull
 renewer="${pull_secret}-renewer"
@@ -63,9 +63,11 @@ run_job() {
 log "Creating kind cluster $cluster"
 kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --wait 120s >/dev/null
 
-log "Building and loading the renewer image"
-docker build -q -f "$repo_root/pull-secret-renewer/Dockerfile" -t "$image" "$repo_root" >/dev/null
-kind load docker-image "$image" --name "$cluster" >/dev/null
+if [ -z "${GRTEST_RENEWER_IMAGE:-}" ]; then
+  log "Building and loading the renewer image"
+  docker build -q -f "$repo_root/pull-secret-renewer/Dockerfile" -t "$image" "$repo_root" >/dev/null
+  kind load docker-image "$image" --name "$cluster" >/dev/null
+fi
 
 log "Starting the GitHub stand-in"
 kubectl create namespace "$namespace" >/dev/null
