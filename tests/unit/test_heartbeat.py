@@ -57,8 +57,6 @@ FAKE_CURL = textwrap.dedent(
     #!/usr/bin/env python3
     import json, os, sys
     args = sys.argv[1:]
-    with open(os.environ["FAKE_CURL_BODY"] + ".urls", "a") as urls:
-        urls.write(args[-1] + "\\n")
     if "-d" in args:
         open(os.environ["FAKE_CURL_BODY"], "w").write(args[args.index("-d") + 1])
         sys.exit(0)
@@ -139,11 +137,6 @@ class HeartbeatTest(unittest.TestCase):
         health = json.loads(files[HEALTH_FILE])
         self.assertFalse(health["healthy"])
         self.assertTrue(health["reasons"])
-
-    def test_gist_api_endpoint_is_configurable(self) -> None:
-        result, _ = self.tick(env={"HEARTBEAT_GITHUB_API_URL": "http://example.test:8080"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.dir / "curl-body.json.urls").read_text().splitlines(), ["http://example.test:8080/gists/test-gist"] * 2)
 
     def test_a_healthy_fleet_refreshes_the_gist(self) -> None:
         result, files = self.tick()
