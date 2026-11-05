@@ -1,3 +1,13 @@
+## [2.44.1](https://github.com/ExaDev/github-runner/compare/v2.44.0...v2.44.1) (2026-11-05)
+
+### Bug Fixes
+
+* remove orphaned mesh test containers ([b58f4dd](https://github.com/ExaDev/github-runner/commit/b58f4dd72b5fe1dfcba05a5311d9088719e9356d))
+
+### Tests
+
+* capture etcd peer metrics on mesh failure ([099868c](https://github.com/ExaDev/github-runner/commit/099868c4c4af122c92865837462f06e490673586))
+
 ## [2.44.0](https://github.com/ExaDev/github-runner/compare/v2.43.2...v2.44.0) (2026-11-05)
 
 ### Features
