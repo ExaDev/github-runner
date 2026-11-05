@@ -99,6 +99,20 @@ diagnose() {
         break
       fi
     done
+    echo "----- etcd membership and per-voter peer metrics"
+    # etcdctl's simple output prints member IDs in the same hexadecimal form as the metrics' Remote labels. Read both before teardown so an extra active series can be compared with actual membership.
+    etcd_members "${api_node:-1}" 2>&1 || echo "could not read etcd membership"
+    for index in $(seq 1 "$node_count"); do
+      docker_on "$index" inspect "$(container "$index")" >/dev/null 2>&1 || continue
+      if reports=$(kubectl_on "$index" --namespace "$platform_namespace" get pods -l app.kubernetes.io/name=fleet-role-probe -o json </dev/null 2>/dev/null); then
+        while IFS=$'\t' read -r probe node; do
+          [ -n "$probe" ] || continue
+          echo "----- ${node}: etcd server and peer series"
+          kubectl_on "$index" --namespace "$platform_namespace" exec "$probe" -- sh -c 'curl -fsS --max-time 5 http://127.0.0.1:2381/metrics | grep -E "^etcd_(server_id|network_active_peers|network_known_peers)(\\{| )"' </dev/null 2>&1 || echo "could not read peer metrics for ${node}"
+        done < <(jq -r '.items[] | [.metadata.name, .spec.nodeName] | @tsv' <<< "$reports")
+        break
+      fi
+    done
     echo "----- the role controller's status and log"
     for index in $(seq 1 "$node_count"); do
       docker_on "$index" inspect "$(container "$index")" >/dev/null 2>&1 || continue
