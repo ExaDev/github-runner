@@ -1,12 +1,4 @@
 ---
-- name: Stop the previous macOS Actions runner launch daemon
-  listen: Restart macOS Actions runner
-  become: true
-  ansible.builtin.command:
-    argv: [launchctl, bootout, "system/{{ github_runner_macos_actions_runner_launchd_label }}"]
-  failed_when: false
-  changed_when: false
-
 - name: Start the macOS Actions runner launch daemon
   listen: Restart macOS Actions runner
   become: true
