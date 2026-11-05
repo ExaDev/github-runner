@@ -1,3 +1,17 @@
+## [2.39.0](https://github.com/ExaDev/github-runner/compare/v2.38.0...v2.39.0) (2026-11-05)
+
+### Features
+
+* provision managed macOS Actions runners ([48c19b3](https://github.com/ExaDev/github-runner/commit/48c19b30a0aa3e63d4a63b95c8af4b1f3eb8f5f2))
+
+### Bug Fixes
+
+* isolate macOS runner account and scope ([bfed4e2](https://github.com/ExaDev/github-runner/commit/bfed4e2bb4a108c2b7d24053884f49256b8fc601))
+* isolate macOS runner deployment ([d0bb426](https://github.com/ExaDev/github-runner/commit/d0bb426825e25b9d84f3601586cd3edfbb0d2f90))
+* keep runner registration token off argv ([fd18766](https://github.com/ExaDev/github-runner/commit/fd18766e4882caa08d9aca1bcc93e05f49725611))
+* restrict macOS runner to one repository ([20ba737](https://github.com/ExaDev/github-runner/commit/20ba7371c787bd799df8590bea19860742cd35bb))
+* stop runner before replacement ([8ac4376](https://github.com/ExaDev/github-runner/commit/8ac4376c3c1214b046f72b18c0bf7d6beb1dfa7f))
+
 ## [2.38.0](https://github.com/ExaDev/github-runner/compare/v2.37.0...v2.38.0) (2026-11-04)
 
 ### Features
