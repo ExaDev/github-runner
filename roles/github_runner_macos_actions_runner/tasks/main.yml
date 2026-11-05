@@ -34,6 +34,7 @@
   ansible.builtin.assert:
     that:
       - github_runner_macos_actions_runner_organization | length > 0
+      - github_runner_macos_actions_runner_repository | length > 0
       - github_runner_macos_actions_runner_app_id | string | regex_search('^[0-9]+$') is not none
       - github_runner_macos_actions_runner_installation_id | string | regex_search('^[0-9]+$') is not none
       - github_runner_macos_actions_runner_private_key | length > 0
@@ -153,13 +154,14 @@
             body_format: json
             body:
               permissions:
-                organization_self_hosted_runners: write
+                administration: write
+                metadata: read
             status_code: 201
           register: github_runner_macos_actions_runner_installation_token
 
         - name: Request a runner registration token
           ansible.builtin.uri:
-            url: "https://api.github.com/orgs/{{ github_runner_macos_actions_runner_organization }}/actions/runners/registration-token"
+            url: "https://api.github.com/repos/{{ github_runner_macos_actions_runner_organization }}/{{ github_runner_macos_actions_runner_repository }}/actions/runners/registration-token"
             method: POST
             headers:
               Authorization: "Bearer {{ github_runner_macos_actions_runner_installation_token.json.token }}"
@@ -180,7 +182,7 @@
           - "{{ github_runner_macos_actions_runner_root }}/config.sh"
           - --unattended
           - --url
-          - "https://github.com/{{ github_runner_macos_actions_runner_organization }}"
+          - "https://github.com/{{ github_runner_macos_actions_runner_organization }}/{{ github_runner_macos_actions_runner_repository }}"
           - --token
           - "{{ github_runner_macos_actions_runner_registration_token.json.token }}"
           - --name
