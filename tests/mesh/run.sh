@@ -3,7 +3,7 @@
 #
 # With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
 #
-# Usage: tests/mesh/run.sh <scenario>... (default: all three). Needs Docker with Compose, and Python 3 with ansible-core (ANSIBLE_PLAYBOOK overrides which ansible-playbook runs). Creates only Docker objects named grtest-*, and removes them again on exit unless GRTEST_KEEP=1.
+# Usage: tests/mesh/run.sh <scenario>... (default: all three). Needs Docker with Compose, and Python 3 with ansible-core (ANSIBLE_PLAYBOOK overrides which ansible-playbook runs). Creates only Docker objects named grtest-*, and removes them again on exit unless GRTEST_KEEP=1. Set GRTEST_ROLE_IMAGE to a published image reference to have k3s pull it for role_controller and role_swap scenarios instead of building and importing the checkout's image; the registry must be reachable without a pull secret.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -1190,7 +1190,9 @@ scenario_native_server() {
 
 # The slow link the role_controller scenario puts on a voter, in milliseconds each way on its mesh interface: above the unfit round trip limit, a tenth of the election timeout the inventory sets.
 role_controller_delay_ms=$((etcd_election_ms / 10 + 100))
-role_controller_image=grtest/fleet-role:test
+# shellcheck source=tests/mesh/role-image.sh
+. "${repo_root}/tests/mesh/role-image.sh"
+grtest_select_role_image
 platform_namespace=github-runner-platform
 
 role_status() { kubectl_on "$api_node" --namespace "$platform_namespace" get configmap fleet-role-status -o 'jsonpath={.data.status\.json}' 2>/dev/null; }
@@ -1217,20 +1219,24 @@ keep_role_image_loaded() {
   done
 }
 
-# Runs the role controller's probe and controller in the cluster, the probes at $1 seconds (role_controller_sample_seconds by default): the image built from this checkout is loaded into every node (the native host's containerd too, when the scenario has one), the ARC role renders its manifests, and they are applied and rolled out.
+# Runs the role controller's probe and controller in the cluster, the probes at $1 seconds (role_controller_sample_seconds by default): the ARC role renders its manifests for the selected image, which is built and loaded into every node by default or pulled by k3s when GRTEST_ROLE_IMAGE is set.
 deploy_role_controller() {
   local index image_file manifests sample_seconds=${1:-$role_controller_sample_seconds}
-  log "Building the role controller image from this checkout and loading it into every node"
-  docker build --quiet --file "${repo_root}/fleet-role/Dockerfile" --tag "$role_controller_image" "$repo_root" >/dev/null
-  image_file="${work}/fleet-role-image.tar"
-  docker save --output "$image_file" "$role_controller_image"
-  for index in $(seq 1 "$node_count"); do
-    docker exec -i "$(container "$index")" /bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images import - < "$image_file" >/dev/null
-  done
-  if [ -n "$native_role" ]; then native_exec k3s ctr --namespace k8s.io images import - < "$image_file" >/dev/null; fi
-  # A host that changes role starts a container whose containerd has no copy of the image (the server and agent services keep separate data volumes, and a real host pulls the image from its registry), so a loop loads it into each node container as one comes up, which keeps the new voter's probe running.
-  keep_role_image_loaded "$image_file" &
-  image_loader_pid=$!
+  if [ "$role_image_published" = 1 ]; then
+    log "Using published role controller image ${role_controller_image}; k3s pulls it on each node"
+  else
+    log "Building the role controller image from this checkout and loading it into every node"
+    docker build --quiet --file "${repo_root}/fleet-role/Dockerfile" --tag "$role_controller_image" "$repo_root" >/dev/null
+    image_file="${work}/fleet-role-image.tar"
+    docker save --output "$image_file" "$role_controller_image"
+    for index in $(seq 1 "$node_count"); do
+      docker exec -i "$(container "$index")" /bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io images import - < "$image_file" >/dev/null
+    done
+    if [ -n "$native_role" ]; then native_exec k3s ctr --namespace k8s.io images import - < "$image_file" >/dev/null; fi
+    # A host that changes role starts a container whose containerd has no copy of the image (the server and agent services keep separate data volumes, and a real host pulls the image from its registry), so a loop loads it into each node container as one comes up, which keeps the new voter's probe running.
+    keep_role_image_loaded "$image_file" &
+    image_loader_pid=$!
+  fi
 
   log "Rendering the ARC role's manifests for the controller and the probe, and applying them"
   manifests="${work}/fleet-role.yaml"
