@@ -1,3 +1,9 @@
+## [2.44.0](https://github.com/ExaDev/github-runner/compare/v2.43.2...v2.44.0) (2026-11-05)
+
+### Features
+
+* compare published role images on one runner ([7a8ab6e](https://github.com/ExaDev/github-runner/commit/7a8ab6e77909e5052453b21429836456702651db))
+
 ## [2.43.2](https://github.com/ExaDev/github-runner/compare/v2.43.1...v2.43.2) (2026-11-05)
 
 ### Bug Fixes
