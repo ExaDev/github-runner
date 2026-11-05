@@ -9,9 +9,12 @@ github_runner_macos_actions_runner_private_key: ""
 github_runner_macos_actions_runner_private_key_op_reference: ""
 github_runner_macos_actions_runner_label: exadev-macos
 github_runner_macos_actions_runner_name: "{{ inventory_hostname }}-macos"
+github_runner_macos_actions_runner_user: github-runner
+github_runner_macos_actions_runner_uid: 401
 github_runner_macos_actions_runner_version: "2.338.2"
 github_runner_macos_actions_runner_sha256: 25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388
-github_runner_macos_actions_runner_root: "{{ ansible_facts['env']['HOME'] }}/.github-actions-runner"
+# Repository identity is part of the directory. Changing the repository therefore creates a new unregistered runner rather than leaving a runner enrolled in the old scope.
+github_runner_macos_actions_runner_root: "/var/lib/github-actions-runner/{{ github_runner_macos_actions_runner_organization }}-{{ github_runner_macos_actions_runner_repository }}"
 github_runner_macos_actions_runner_work_dir: "{{ github_runner_macos_actions_runner_root }}/_work"
 github_runner_macos_actions_runner_plist: "/Library/LaunchDaemons/io.exadev.github-actions-runner.{{ github_runner_macos_actions_runner_name }}.plist"
 github_runner_macos_actions_runner_launchd_label: "io.exadev.github-actions-runner.{{ github_runner_macos_actions_runner_name }}"

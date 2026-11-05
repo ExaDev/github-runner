@@ -60,14 +60,53 @@
 - name: Configure the enabled macOS runner
   when: github_runner_macos_actions_runner_enabled | bool
   block:
+    - name: Read the runner account
+      ansible.builtin.command:
+        argv: [dscl, ., -read, "/Users/{{ github_runner_macos_actions_runner_user }}", UniqueID]
+      register: github_runner_macos_actions_runner_account
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Create the unprivileged runner account
+      become: true
+      ansible.builtin.command:
+        argv:
+          - sysadminctl
+          - -addUser
+          - "{{ github_runner_macos_actions_runner_user }}"
+          - -fullName
+          - GitHub Actions Runner
+          - -UID
+          - "{{ github_runner_macos_actions_runner_uid }}"
+          - -shell
+          - /usr/bin/false
+          - -home
+          - "{{ github_runner_macos_actions_runner_root }}"
+          - -password
+          - '*'
+      no_log: true
+      changed_when: true
+      when: github_runner_macos_actions_runner_account.rc != 0
+
+    - name: Require the runner account's expected identity
+      ansible.builtin.assert:
+        that:
+          - "github_runner_macos_actions_runner_account.rc != 0 or github_runner_macos_actions_runner_account.stdout is regex('UniqueID: ' ~ (github_runner_macos_actions_runner_uid | string) ~ '$')"
+        quiet: true
+      when: not ansible_check_mode
+
     - name: Create the runner directory
+      become: true
       ansible.builtin.file:
         path: "{{ github_runner_macos_actions_runner_root }}"
         state: directory
-        owner: "{{ ansible_facts['user_id'] }}"
-        mode: "0755"
+        owner: "{{ github_runner_macos_actions_runner_user }}"
+        mode: "0750"
 
     - name: Check the installed runner version
+      become: true
+      become_user: "{{ github_runner_macos_actions_runner_user }}"
       ansible.builtin.command:
         argv: ["{{ github_runner_macos_actions_runner_root }}/bin/Runner.Listener", --version]
       register: github_runner_macos_actions_runner_installed_version
@@ -76,6 +115,7 @@
       check_mode: false
 
     - name: Download the pinned Apple Silicon runner package
+      become: true
       ansible.builtin.get_url:
         url: "https://github.com/actions/runner/releases/download/v{{ github_runner_macos_actions_runner_version }}/actions-runner-osx-arm64-{{ github_runner_macos_actions_runner_version }}.tar.gz"
         dest: "{{ github_runner_macos_actions_runner_root }}-{{ github_runner_macos_actions_runner_version }}.tar.gz"
@@ -98,19 +138,21 @@
       when: github_runner_macos_actions_runner_installed_version.stdout | trim != github_runner_macos_actions_runner_version
 
     - name: Recreate the runner directory
+      become: true
       ansible.builtin.file:
         path: "{{ github_runner_macos_actions_runner_root }}"
         state: directory
-        owner: "{{ ansible_facts['user_id'] }}"
-        mode: "0755"
+        owner: "{{ github_runner_macos_actions_runner_user }}"
+        mode: "0750"
       when: github_runner_macos_actions_runner_installed_version.stdout | trim != github_runner_macos_actions_runner_version
 
     - name: Install the pinned Apple Silicon runner package
+      become: true
       ansible.builtin.unarchive:
         src: "{{ github_runner_macos_actions_runner_root }}-{{ github_runner_macos_actions_runner_version }}.tar.gz"
         dest: "{{ github_runner_macos_actions_runner_root }}"
         remote_src: true
-        owner: "{{ ansible_facts['user_id'] }}"
+        owner: "{{ github_runner_macos_actions_runner_user }}"
       when: github_runner_macos_actions_runner_installed_version.stdout | trim != github_runner_macos_actions_runner_version
 
     - name: Check whether the runner is registered
@@ -177,6 +219,8 @@
           when: github_runner_macos_actions_runner_key_file.path is defined
 
     - name: Configure the macOS runner
+      become: true
+      become_user: "{{ github_runner_macos_actions_runner_user }}"
       ansible.builtin.command:
         argv:
           - "{{ github_runner_macos_actions_runner_root }}/config.sh"
