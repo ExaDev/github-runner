@@ -1,3 +1,9 @@
+## [2.40.1](https://github.com/ExaDev/github-runner/compare/v2.40.0...v2.40.1) (2026-11-05)
+
+### Bug Fixes
+
+* load runner key during check mode ([8633334](https://github.com/ExaDev/github-runner/commit/863333458d958e01a85ad91f3e8e7212fff7cfee))
+
 ## [2.40.0](https://github.com/ExaDev/github-runner/compare/v2.39.0...v2.40.0) (2026-11-05)
 
 ### Features
