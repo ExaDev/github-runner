@@ -70,6 +70,7 @@ $config as $c
       voter: ($labelled and condition_true(voter_condition) and ((.metadata.annotations // {})[removed_annotation] // "") == ""),
       eligible: ($labels[$c.eligible_label] == "true"),
       pinned: ($labels[$c.pinned_label] == "true"),
+      cordoned: (.spec.unschedulable // false),
       removed: (((.metadata.annotations // {})[removed_annotation] // "") != ""),
       regrade_level: $labels[$c.level_label]}] as $all
 | ($all | map(select(.voter)) | sort_by(.name)) as $voters
@@ -192,6 +193,7 @@ $config as $c
        role: (if $node.voter then "voter" else "standby" end),
        eligible: $node.eligible,
        pinned: $node.pinned,
+       cordoned: $node.cordoned,
        verdict: (if ($gaps | length) > 0 then "unknown" elif ($faults | length) > 0 then "unfit" else "fit" end),
        reasons: (if ($gaps | length) > 0 then $gaps else $faults end),
        link: $m.link,
@@ -274,7 +276,7 @@ $config as $c
 # The swap. A slow link makes both of its ends unfit, since a voter is unfit when its round trip to any other voter is, so the voter to replace is the one at fault: the unfit voter the most hosts' unfit verdicts are attributed to, the worst-ranked among those with as many. It goes out only if it is eligible and not pinned; when it is not, replacing a voter that shares a slow link with it would fix nothing, so nothing is swapped. The best fit eligible standby that ranks above it comes in, judged against the voters that would remain.
 | ([$hosts[] | select(.role == "voter" and .verdict == "unfit") | . + {accounts_for: ($attribution[.name] // [] | length)}] | sort_by(.rank) | reverse | sort_by(-.accounts_for) | first) as $culprit
 | (if $culprit != null and $culprit.eligible and ($culprit.pinned | not) then $culprit else null end) as $out
-| ([$hosts[] | select(.role == "standby" and .eligible)
+| ([$hosts[] | select(.role == "standby" and .eligible and (.cordoned | not))
     | (if $out == null then .m else (.m | without($out.name)) end) as $m
     | select((gaps($m) | length) == 0 and (faults($m) | length) == 0)
     | . + {rank: rank($m)}] | sort_by(.rank)) as $fit_candidates
