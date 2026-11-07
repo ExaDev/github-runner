@@ -55,6 +55,8 @@ class Host:
     learner: bool = False
     eligible: bool = False
     pinned: bool = False
+    # An operator's cordon: the host takes no new work, so it is never the voter that comes in.
+    cordoned: bool = False
     ready: bool = True
     ready_for: float = 24 * 3600
     level: str | None = None
@@ -96,7 +98,7 @@ def populate(cluster: Cluster, hosts: list[Host]) -> None:
     """Gives the cluster these Nodes and, for each host, a probe entry of its last `samples` samples ending now (less stale_by)."""
     voters = [h.name for h in hosts if h.voter]
     cluster.nodes = [
-        node(h.name, voter=h.voter, learner=h.learner, eligible=h.eligible, pinned=h.pinned, ready=h.ready, ready_for=h.ready_for, level=h.level) for h in hosts
+        node(h.name, voter=h.voter, learner=h.learner, eligible=h.eligible, pinned=h.pinned, cordoned=h.cordoned, ready=h.ready, ready_for=h.ready_for, level=h.level) for h in hosts
     ]
     entries = {}
     for h in hosts:
@@ -388,6 +390,13 @@ class RankingTest(ControllerCase):
                 hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50, "link": "wifi"}, d={"tcp": FIT_RTT_MS + 20})
                 hosts += [Host("e", eligible=True, **{**base, **overrides["e"]}), Host("f", eligible=True, **{**base, **overrides["f"]})]
                 self.assertEqual(self.pass_(hosts)["decision"]["swap"], {"out": "a", "in": expected})
+
+    def test_a_cordoned_standby_is_never_the_voter_that_comes_in(self) -> None:
+        hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50}, d={"cordoned": True})
+        status = self.pass_(hosts)
+        self.assertEqual(status["decision"]["action"], "none")
+        self.assertEqual(status["decision"]["because"][0], "voter a is unfit and no eligible standby is fit and ranks above it")
+        self.assertTrue(status["hosts"]["d"]["cordoned"])
 
     def test_a_candidate_must_rank_above_the_voter_it_replaces(self) -> None:
         # The unfit voter is wired; the only fit standby is on a link the cluster cannot see, which ranks below wired.

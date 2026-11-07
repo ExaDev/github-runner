@@ -364,6 +364,7 @@ def node(
     learner: bool = False,
     eligible: bool = False,
     pinned: bool = False,
+    cordoned: bool = False,
     ready: bool = True,
     ready_for: float = 24 * 3600,
     level: str | None = None,
@@ -387,6 +388,7 @@ def node(
         conditions.append({"type": VOTER_CONDITION, "status": "True", "lastTransitionTime": transition_time(ready_for)})
     return {
         "metadata": {"name": name, "labels": labels},
+        "spec": {"unschedulable": True} if cordoned else {},
         "status": {
             "conditions": conditions,
             "addresses": [{"type": "InternalIP", "address": address or "127.0.0.1"}, {"type": "Hostname", "address": name}],
