@@ -1,3 +1,15 @@
+## [2.45.0](https://github.com/ExaDev/github-runner/compare/v2.44.2...v2.45.0) (2026-11-07)
+
+### Features
+
+* **host:** add a guarded NetworkManager connectivity change with host-owned rollback ([6980511](https://github.com/ExaDev/github-runner/commit/6980511184ceabb61d34706f24cfdec98a6b267a))
+* **host:** plan route metrics read-only and bind the metric transaction to one daemon ([1bf598f](https://github.com/ExaDev/github-runner/commit/1bf598fd0ff1adac1411cd67f30bb95aed86d092))
+
+### Tests
+
+* **host:** add an isolated NetworkManager fixture and a KVM harness that runs it ([c23cf94](https://github.com/ExaDev/github-runner/commit/c23cf94a7e054bc77d7584908ab0193c46ed718f))
+* **host:** write the connectivity module playbook per test and fix the harness script lint ([64b229a](https://github.com/ExaDev/github-runner/commit/64b229a8d36cde9f497c00751c237c5642c4a4cc))
+
 ## [2.44.2](https://github.com/ExaDev/github-runner/compare/v2.44.1...v2.44.2) (2026-11-07)
 
 ### Bug Fixes
