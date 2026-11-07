@@ -1,0 +1,12 @@
+---
+# Calls the connectivity module directly by short name, for tests/unit/test_linux_host.py, which puts a copy of the module without its refusal on the library path. The role refuses to make this change until a host-owned watchdog serialises reloads, so the module's own behaviour (the drop-in, the reload, the marker and its recovery) is tested here without the role.
+- name: Run the connectivity module
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Apply or remove the connectivity drop-in
+      networkmanager_connectivity:
+        dropin: "{{ github_runner_linux_host_networkmanager_connectivity_dropin }}"
+        disabled: "{{ github_runner_linux_host_networkmanager_connectivity_check_off }}"
+      become: "{{ ansible_become | default(false) }}"

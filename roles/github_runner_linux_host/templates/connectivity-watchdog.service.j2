@@ -1,0 +1,16 @@
+[Unit]
+Description=Recover expired NetworkManager connectivity transactions
+After=local-fs.target NetworkManager.service
+Requires=NetworkManager.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+StateDirectory=github-runner-connectivity
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /usr/local/lib/github-runner-connectivity/connectivity_watchdog.py --state-dir /var/lib/github-runner-connectivity
+Restart=always
+RestartSec=1s
+
+[Install]
+WantedBy=multi-user.target

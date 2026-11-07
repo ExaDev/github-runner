@@ -1,0 +1,11 @@
+---
+# Calls the shipped connectivity module by its collection name, with no test copy on the library path, to show that it refuses.
+- name: Run the shipped connectivity module
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Apply or remove the connectivity drop-in
+      exadev.github_runner.networkmanager_connectivity:
+        dropin: "{{ github_runner_linux_host_networkmanager_connectivity_dropin }}"
+        disabled: "{{ github_runner_linux_host_networkmanager_connectivity_check_off }}"

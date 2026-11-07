@@ -19,6 +19,10 @@ github_runner_linux_host_logind_dropin: /etc/systemd/logind.conf.d/90-github-run
 
 # Whether the host's Wi-Fi is kept from power saving. A Wi-Fi radio in power-save mode sleeps between beacons and drops or delays packets, which on a node of the cluster shows as the node flapping NotReady; it matters only for a host that is on Wi-Fi, and does nothing to a host without a Wi-Fi device. On a host whose Wi-Fi NetworkManager manages, NetworkManager is told not to (wifi.powersave = 2, disable) for every connection that does not set its own; on a host without NetworkManager that runs systemd-networkd, a udev rule and a systemd unit run `iw dev <interface> set power_save off` for each Wi-Fi interface when it appears, and iw is installed. Both apply to the radio now. A host where neither stack manages a Wi-Fi device fails.
 github_runner_linux_host_wifi_powersave_off: false
+# Disable NetworkManager's probe-driven route metric penalty without changing connection metrics or carrier handling.
+github_runner_linux_host_networkmanager_connectivity_check_off: null
+# Where the connectivity drop-in goes; a variable so tests can use a stand-in.
+github_runner_linux_host_networkmanager_connectivity_dropin: /etc/NetworkManager/conf.d/zz-github-runner-connectivity.conf
 # Not settings: where the NetworkManager drop-in goes. The name sorts after Ubuntu's default-wifi-powersave-on.conf (wifi.powersave = 3), because NetworkManager reads its configuration files in alphabetical order and the last one to set a value wins. Variables only so the tests can point them at a stand-in.
 github_runner_linux_host_networkmanager_dropin: /etc/NetworkManager/conf.d/zz-github-runner-wifi-powersave.conf
 # Not settings: where the sysfs network class is read for the host's Wi-Fi devices, and where the udev rule and the systemd unit template of the systemd-networkd path go. The unit's name must end in @.service, since the rule instantiates it for each interface. Variables only so the tests can point them at a stand-in.
