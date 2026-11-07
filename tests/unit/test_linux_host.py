@@ -19,7 +19,19 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / "roles" / "github_runner_linux_host"
 RUN = ROOT / "tests" / "linux_host" / "run.yml"
-MODULE_RUN = ROOT / "tests" / "linux_host" / "connectivity_module.yml"
+# Calls the module by its short name, which resolves to the test copy on the library path. It is written to the test's temporary directory because a lint of the repository cannot resolve a name that only exists while the test runs.
+MODULE_PLAYBOOK = """---
+- name: Run the connectivity module
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Apply or remove the connectivity drop-in
+      networkmanager_connectivity:
+        dropin: "{{ github_runner_linux_host_networkmanager_connectivity_dropin }}"
+        disabled: "{{ github_runner_linux_host_networkmanager_connectivity_check_off }}"
+      become: "{{ ansible_become | default(false) }}"
+"""
 ANSIBLE_PLAYBOOK = os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook")
 DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
 SPECS: dict[str, Any] = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())["argument_specs"]["main"]["options"]
@@ -353,7 +365,9 @@ esac
         guard = '    module.fail_json(msg="NetworkManager connectivity changes are not ready: reload isolation and the exclusive writer boundary are not established")\n'
         self.assertEqual(source.count(guard), 1, "the module's refusal moved: update this test helper")
         (library / "networkmanager_connectivity.py").write_text(source.replace(guard, ""))
-        return self.run_role(*args, playbook=MODULE_RUN, **kwargs)
+        playbook = self.tmp / "connectivity_module.yml"
+        playbook.write_text(MODULE_PLAYBOOK)
+        return self.run_role(*args, playbook=playbook, **kwargs)
 
     def calls(self) -> list[str]:
         log = self.stubs / "calls.log"

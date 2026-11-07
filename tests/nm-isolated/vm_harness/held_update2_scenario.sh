@@ -10,7 +10,7 @@ id nm-isolated >/dev/null 2>&1 || useradd --system --shell /usr/sbin/nologin --n
 systemctl stop NetworkManager 2>/dev/null
 dbus-daemon --config-file=$D/bus.conf --nofork >$RUN/bus.log 2>&1 &
 BUSPID=$!
-for i in $(seq 1 50); do [ -S $RUN/bus ] && break; sleep 0.1; done
+for _ in $(seq 1 50); do [ -S $RUN/bus ] && break; sleep 0.1; done
 chmod 0666 $RUN/bus 2>/dev/null
 export DBUS_SYSTEM_BUS_ADDRESS=$ADDR
 python3 $D/polkit_stub.py --private-bus-address $ADDR >$RUN/stub.log 2>&1 &
@@ -312,8 +312,8 @@ if dev:
 out["H_external_writer"] = H
 print(json.dumps(out))
 PY
-sc=$(tr '\n"\\' '  _' < $RUN/scenario.json | cut -c1-5200)
-er=$(tail -c 1100 $RUN/scenario.err 2>/dev/null | tr '\n"\\' '  _')
-sl=$(tail -c 200 $RUN/stub.log 2>/dev/null | tr '\n"\\' '  _')
-printf '{"scenario":"%s","err":"%s","stub":"%s","dummy":"%s"}\n' "$sc" "$er" "$sl" "$(cat $RUN/dummy.err 2>/dev/null | tr '\n"\\' '  _' | cut -c1-120)" > $PORT
+sc=$(tr '\012\042\134' '  _' < $RUN/scenario.json | cut -c1-5200)
+er=$(tail -c 1100 $RUN/scenario.err 2>/dev/null | tr '\012\042\134' '  _')
+sl=$(tail -c 200 $RUN/stub.log 2>/dev/null | tr '\012\042\134' '  _')
+printf '{"scenario":"%s","err":"%s","stub":"%s","dummy":"%s"}\n' "$sc" "$er" "$sl" "$(cat $RUN/dummy.err 2>/dev/null | tr '\012\042\134' '  _' | cut -c1-120)" > $PORT
 kill $NMPID $STUBPID $BUSPID 2>/dev/null
