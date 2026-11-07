@@ -1,3 +1,9 @@
+## [2.44.2](https://github.com/ExaDev/github-runner/compare/v2.44.1...v2.44.2) (2026-11-07)
+
+### Bug Fixes
+
+* **role:** never choose a cordoned standby as the voter that comes in ([2f758e8](https://github.com/ExaDev/github-runner/commit/2f758e8ea3506276961330af9232ffc8e723cce2))
+
 ## [2.44.1](https://github.com/ExaDev/github-runner/compare/v2.44.0...v2.44.1) (2026-11-05)
 
 ### Bug Fixes
