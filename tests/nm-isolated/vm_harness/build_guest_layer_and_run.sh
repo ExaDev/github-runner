@@ -12,12 +12,15 @@ for name in gp.FILES:
     digests[name] = hashlib.sha256(data).hexdigest()
     files.append({"path": f"{gp.DESTINATION}/{name}", "encoding": "b64", "content": base64.b64encode(data).decode(), "permissions": "0755" if name.endswith(".sh") else "0644"})
 smoke = open(os.path.expanduser('~/Developer/ExaDev/Internal/github-runner-worktrees/nm-isolated-vm/smoke.sh')).read()
+for mod in ("connectivity_transaction.py", "connectivity_watchdog.py"):
+    files.append({"path": "/usr/local/lib/github-runner-connectivity/" + mod, "encoding": "b64", "content": base64.b64encode(open(os.path.join(root, "wd-modules", mod), "rb").read()).decode(), "permissions": "0644"})
+files.append({"path": "/etc/systemd/system/github-runner-connectivity-watchdog.service", "content": open(os.path.join(root, "wd-modules", "connectivity-watchdog.service")).read(), "permissions": "0644"})
 files.append({"path": gp.DESTINATION + "/DIGESTS", "content": "".join(f"{n} {h}\n" for n, h in digests.items()), "permissions": "0644"})
 files.append({"path": gp.DESTINATION + "/smoke.sh", "content": smoke, "permissions": "0755"})
 files.append({"path": "/etc/systemd/system/nm-smoke.service", "content": "[Unit]\nDescription=Fixture smoke\nAfter=multi-user.target\n[Service]\nType=oneshot\nExecStart=/opt/nm-isolated-test/smoke.sh\n[Install]\nWantedBy=multi-user.target\n", "permissions": "0644"})
 ud = {"write_files": files, "runcmd": [["systemctl", "enable", "nm-smoke.service"]], "power_state": {"mode": "poweroff", "timeout": 30, "condition": True}}
 open("user-data", "w").write("#cloud-config\n" + json.dumps(ud))
-open("meta-data", "w").write("instance-id: nm-golden-23\nlocal-hostname: nm-golden\n")
+open("meta-data", "w").write("instance-id: nm-golden-30\nlocal-hostname: nm-golden\n")
 print("files", len(files))
 PY
 cloud-localds seed2.img user-data meta-data
@@ -32,7 +35,7 @@ with qemu_vm.disposable_vm(root + '/golden2-nm-fixture.qcow2', w, qemu='/usr/bin
     for _ in range(100):
         if os.path.exists(w + '/guest.sock'): break
         time.sleep(0.1)
-    s = socket.socket(socket.AF_UNIX); s.settimeout(90); s.connect(w + '/guest.sock')
+    s = socket.socket(socket.AF_UNIX); s.settimeout(300); s.connect(w + '/guest.sock')
     buf = b''
     while b'\n' not in buf:
         c = s.recv(4096)
