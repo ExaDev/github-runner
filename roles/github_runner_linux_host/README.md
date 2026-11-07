@@ -8,6 +8,10 @@ Its tasks that change the host use `become` on their own, so the connecting user
 
 `github_runner_linux_host_keep_awake: true` masks `sleep.target`, `suspend.target`, `hibernate.target` and `hybrid-sleep.target`, and writes a systemd-logind drop-in (`/etc/systemd/logind.conf.d/90-github-runner-keep-awake.conf`) that sets `HandleLidSwitch`, `HandleLidSwitchExternalPower` and `HandleLidSwitchDocked` to `ignore`, then has logind read it with `SIGHUP`, which reloads its configuration without ending the login sessions it tracks. A host that suspends drops off the network, so its node leaves the cluster and its runner pods stop; a laptop suspends whenever its lid closes (logind's default for `HandleLidSwitch` is `suspend`), and its desktop or power button can ask logind to suspend it as well. Masking is what stops a request that does not come from the lid: the target cannot be started, so `systemctl suspend` fails. Both parts are idempotent, and the role checks what is masked before it masks anything.
 
+## NetworkManager connectivity checks
+
+The NetworkManager connectivity setting is not ready for use. Setting `github_runner_linux_host_networkmanager_connectivity_check_off` to either `true` or `false` fails without changing the host; leaving it unset leaves the configuration unmanaged. The watchdog is not installed by the role. Safe integration requires verified service readiness, exclusive control of drop-in writers, and preventing an in-flight NetworkManager reload from overlapping recovery. Scheduled deadlines use a suspend-aware boot clock and expire on a different boot.
+
 ## Wi-Fi power save
 
 `github_runner_linux_host_wifi_powersave_off: true` keeps the host's Wi-Fi from power saving. A radio in power-save mode sleeps between beacons and delays or drops packets, which on a node of the cluster shows as the node flapping `NotReady`. It matters only for a host on Wi-Fi, and does nothing to a host without a Wi-Fi device. The mechanism depends on what manages the Wi-Fi, which the role reads from the host: NetworkManager when `nmcli` lists a Wi-Fi device that is not `unmanaged`, else systemd-networkd when it is running and the kernel has a Wi-Fi network device (one with a `phy80211` link under `/sys/class/net`). A host where neither manages a Wi-Fi device fails, since the setting is explicitly asked for; a host with no Wi-Fi device at all is left alone as long as one of the two answers.
@@ -91,6 +95,8 @@ A host that is not Debian or Ubuntu, a host without the package, and a package n
 ## Variables
 
 - `github_runner_linux_host_keep_awake` (default `false`): mask the sleep targets and have logind ignore the lid switch.
+- `github_runner_linux_host_networkmanager_connectivity_check_off` (default `null`): `null` leaves connectivity configuration unmanaged; either boolean fails because this feature is not ready.
+- `github_runner_linux_host_networkmanager_connectivity_dropin`: where the connectivity drop-in goes, a variable for tests, not a setting.
 - `github_runner_linux_host_wifi_powersave_off` (default `false`): turn Wi-Fi power save off, in NetworkManager or, on a host without it that runs systemd-networkd, with a udev rule and a unit that run `iw`, and on the radio.
 - `github_runner_linux_host_k3s_prerequisites` (default `false`): load the modules and set the sysctls k3s needs, now and at boot.
 - `github_runner_linux_host_containerd_apparmor_stacking_fix` (default `false`): install and load the AppArmor profile for containerd's containers that allows signals and ptrace between peers of a stacked label, on a host with AppArmor, and refuse a k3s whose containerd it was not taken from.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / "roles" / "github_runner_linux_host"
 RUN = ROOT / "tests" / "linux_host" / "run.yml"
+MODULE_RUN = ROOT / "tests" / "linux_host" / "connectivity_module.yml"
 ANSIBLE_PLAYBOOK = os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook")
 DEFAULTS: dict[str, Any] = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
 SPECS: dict[str, Any] = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())["argument_specs"]["main"]["options"]
@@ -44,8 +46,9 @@ class DefaultsTest(unittest.TestCase):
             with self.subTest(step=step):
                 self.assertIs(DEFAULTS[step], False)
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
-        gated = [next(condition for condition in task["when"] if "| bool" in condition).split(" ")[0] for task in tasks if "when" in task and isinstance(task["when"], list)]
+        gated = [next(condition for condition in task["when"] if "| bool" in condition).split(" ")[0] for task in tasks if "when" in task and isinstance(task["when"], list) and any("| bool" in condition for condition in task["when"])]
         self.assertEqual(gated, STEPS + [TAILSCALE])
+        self.assertIsNone(DEFAULTS["github_runner_linux_host_networkmanager_connectivity_check_off"])
 
     def test_the_tailscale_update_is_the_one_step_that_is_on_by_default(self) -> None:
         self.assertIs(DEFAULTS[TAILSCALE], True)
@@ -125,6 +128,7 @@ class Harness(unittest.TestCase):
         self.host = self.tmp / "host"
         self.logind = self.host / "etc" / "systemd" / "logind.conf.d" / "90-github-runner-keep-awake.conf"
         self.networkmanager = self.host / "etc" / "NetworkManager" / "conf.d" / "zz-github-runner-wifi-powersave.conf"
+        self.connectivity = self.host / "etc" / "NetworkManager" / "conf.d" / "zz-github-runner-connectivity.conf"
         self.modules_file = self.host / "etc" / "modules-load.d" / "github-runner-k3s.conf"
         self.sysctl_file = self.host / "etc" / "sysctl.d" / "90-github-runner-k3s.conf"
         self.sys_module = self.host / "sys" / "module"
@@ -203,7 +207,13 @@ esac
 """)
         stand_in(bin_dir / "nmcli", log + r"""case "$*" in
   *"device status"*) [ -e "$STUB/state/no-networkmanager" ] && { echo "nmcli: not running" >&2; exit 8; }; cat "$STUB/state/devices" ;;
+  "general reload conf")
+    [ -e "$STUB/state/reload-interrupt" ] && { kill -KILL "$PPID"; exit 1; }
+    [ -e "$STUB/state/reload-fails" ] && exit 1
+    if [ -e "$CONNECTIVITY_DROPIN" ] && [ ! -e "$STUB/state/connectivity-override" ]; then touch "$STUB/state/connectivity-disabled"; else rm -f "$STUB/state/connectivity-disabled"; fi ;;
 esac
+""")
+        stand_in(bin_dir / "busctl", log + r"""if [ -e "$STUB/state/connectivity-disabled" ]; then echo 'b false'; else echo 'b true'; fi
 """)
         stand_in(bin_dir / "iw", log + r"""if [ -e "$STUB/state/no-iw" ]; then echo "iw: command not found" >&2; exit 127; fi
 device="$2"
@@ -282,13 +292,14 @@ esac
 """)
         stand_in(bin_dir / "shutdown", log)
 
-    def run_role(self, *args: str, check: bool = False, system: str = "Linux", os_family: str = "Debian", **variables: Any) -> subprocess.CompletedProcess[str]:
-        inventory = self.tmp / "inventory.yml"
+    def run_role(self, *args: str, check: bool = False, system: str = "Linux", os_family: str = "Debian", inventory_name: str = "inventory.yml", playbook: Path = RUN, **variables: Any) -> subprocess.CompletedProcess[str]:
+        inventory = self.tmp / inventory_name
         host = {
             "ansible_connection": "local",
             "ansible_become": False,
             "github_runner_linux_host_logind_dropin": str(self.logind),
             "github_runner_linux_host_networkmanager_dropin": str(self.networkmanager),
+            "github_runner_linux_host_networkmanager_connectivity_dropin": str(self.connectivity),
             "github_runner_linux_host_sysfs_net_dir": str(self.sysfs_net),
             "github_runner_linux_host_wifi_udev_rule": str(self.wifi_rule),
             "github_runner_linux_host_wifi_powersave_unit": str(self.wifi_unit),
@@ -315,19 +326,34 @@ esac
             **os.environ,
             "PATH": f"{self.bin}:{os.environ['PATH']}",
             "STUB": str(self.stubs),
+            "CONNECTIVITY_DROPIN": str(self.connectivity),
             "SYS_MODULE": str(self.sys_module),
             "REBOOT_REQUIRED": str(self.reboot_required),
             "APPARMOR_PROFILES": str(self.apparmor_profiles),
             "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"),
+            "ANSIBLE_LIBRARY": str(self.tmp / "library"),
             "ANSIBLE_NOCOLOR": "1",
             "ANSIBLE_LOCALHOST_WARNING": "false",
             "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false",
             "ANSIBLE_RETRY_FILES_ENABLED": "false",
         }
-        command = [ANSIBLE_PLAYBOOK, "-i", str(inventory), str(RUN), "-e", json.dumps({"host_system": system, "host_os_family": os_family}), *args]
+        command = [ANSIBLE_PLAYBOOK, "-i", str(inventory), str(playbook), "-e", json.dumps({"host_system": system, "host_os_family": os_family}), *args]
         if check:
             command.append("--check")
         return subprocess.run(command, env=env, capture_output=True, text=True, timeout=300, check=False, cwd=ROOT / "ansible")
+
+    def run_module(self, *args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """Run the connectivity module's logic on its own.
+
+        Production refuses every change: the role fails, and the module's first statement fails. This exercises the logic below that refusal through a copy of the module in which only that one statement is removed, so a change to the logic is still tested and the refusal itself is tested separately.
+        """
+        library = self.tmp / "library"
+        library.mkdir(exist_ok=True)
+        source = (ROOT / "playbooks" / "collections" / "ansible_collections" / "exadev" / "github_runner" / "plugins" / "modules" / "networkmanager_connectivity.py").read_text()
+        guard = '    module.fail_json(msg="NetworkManager connectivity changes are not ready: reload isolation and the exclusive writer boundary are not established")\n'
+        self.assertEqual(source.count(guard), 1, "the module's refusal moved: update this test helper")
+        (library / "networkmanager_connectivity.py").write_text(source.replace(guard, ""))
+        return self.run_role(*args, playbook=MODULE_RUN, **kwargs)
 
     def calls(self) -> list[str]:
         log = self.stubs / "calls.log"
@@ -346,6 +372,167 @@ class RoleTest(Harness):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.logind.exists() or self.networkmanager.exists())
+
+    def test_connectivity_check_is_opt_in_and_reloads_only_on_change(self) -> None:
+        self.assertEqual(self.run_role().returncode, 0)
+        self.assertFalse(self.connectivity.exists())
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[connectivity]\nenabled=false\n", self.connectivity.read_text())
+        self.assertEqual(stat.S_IMODE(self.connectivity.stat().st_mode), 0o644)
+        self.assertEqual(self.changes(), ["nmcli general reload conf"])
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual(self.changes(), ["nmcli general reload conf"])
+
+    def test_the_module_refuses_every_change_and_touches_nothing(self) -> None:
+        for value in (True, False):
+            with self.subTest(check_off=value):
+                inventory = self.tmp / "refusal.yml"
+                inventory.write_text(yaml.safe_dump({"all": {"hosts": {"host": {"ansible_connection": "local", "github_runner_linux_host_networkmanager_connectivity_dropin": str(self.connectivity), "github_runner_linux_host_networkmanager_connectivity_check_off": value}}}}))
+                env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "STUB": str(self.stubs), "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"), "ANSIBLE_NOCOLOR": "1", "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false"}
+                result = subprocess.run([ANSIBLE_PLAYBOOK, "-i", str(inventory), str(ROOT / "tests" / "linux_host" / "connectivity_module_real.yml")], env=env, capture_output=True, text=True, timeout=300, check=False, cwd=ROOT / "ansible")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("connectivity changes are not ready", result.stdout + result.stderr)
+                self.assertFalse(self.connectivity.exists())
+                self.assertEqual(self.changes(), [])
+
+    def test_the_role_refuses_a_connectivity_change_until_reloads_are_serialised(self) -> None:
+        for value in (True, False):
+            with self.subTest(check_off=value):
+                result = self.run_role(github_runner_linux_host_networkmanager_connectivity_check_off=value)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("connectivity changes are not ready", result.stdout + result.stderr)
+                self.assertFalse(self.connectivity.exists())
+                self.assertEqual(self.changes(), [])
+
+    def test_connectivity_defaults_do_not_escalate_privileges(self) -> None:
+        result = self.run_role(ansible_become=None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([call for call in self.calls() if call.startswith("sudo ")])
+        self.assertEqual(self.changes(), [])
+        self.assertFalse(self.connectivity.exists())
+
+    def test_connectivity_check_mode_reports_without_writing_or_reloading(self) -> None:
+        result = self.run_module(check=True, ansible_become=None, github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreater(self.changed(result), 0, result.stdout)
+        self.assertFalse(self.connectivity.exists())
+        self.assertEqual(self.changes(), [])
+        self.assertFalse([call for call in self.calls() if call.startswith("sudo ")])
+
+    def test_connectivity_opt_out_removes_only_its_drop_in_and_reloads_once(self) -> None:
+        self.assertEqual(self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True).returncode, 0)
+        self.networkmanager.write_text("other configuration\n")
+        result = self.run_module(check=True, github_runner_linux_host_networkmanager_connectivity_check_off=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreater(self.changed(result), 0, result.stdout)
+        self.assertTrue(self.connectivity.exists())
+        self.assertEqual(self.changes(), ["nmcli general reload conf"])
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.connectivity.exists())
+        self.assertEqual(self.networkmanager.read_text(), "other configuration\n")
+        self.assertEqual(self.changes(), ["nmcli general reload conf", "nmcli general reload conf"])
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.changed(result), 0, result.stdout)
+        self.assertEqual(len(self.changes()), 2)
+
+    def test_connectivity_concurrent_opt_in_and_opt_out_converge(self) -> None:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            enabled = pool.submit(self.run_module, inventory_name="enabled.yml", github_runner_linux_host_networkmanager_connectivity_check_off=True)
+            disabled = pool.submit(self.run_module, inventory_name="disabled.yml", github_runner_linux_host_networkmanager_connectivity_check_off=False)
+            results = [enabled.result(), disabled.result()]
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.connectivity.exists(), (self.state / "connectivity-disabled").exists())
+        self.assertFalse(Path(str(self.connectivity) + ".reload-pending").exists())
+
+    def test_connectivity_recovers_after_interrupted_reload(self) -> None:
+        (self.state / "reload-interrupt").touch()
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertNotEqual(result.returncode, 0)
+        marker = Path(str(self.connectivity) + ".reload-pending")
+        self.assertTrue(marker.exists())
+        self.assertTrue(self.connectivity.exists())
+        before = self.changes()
+        result = self.run_module(check=True, github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreater(self.changed(result), 0)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.changes(), before)
+        (self.state / "reload-interrupt").unlink()
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertTrue((self.state / "connectivity-disabled").exists())
+
+    def test_connectivity_retries_a_failed_reload(self) -> None:
+        (self.state / "reload-fails").touch()
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.connectivity.exists())
+        (self.state / "reload-fails").unlink()
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.state / "connectivity-disabled").exists())
+        self.assertEqual(self.changes(), ["nmcli general reload conf", "nmcli general reload conf"])
+
+    def test_connectivity_check_mode_reports_stale_runtime_without_reloading(self) -> None:
+        self.assertEqual(self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True).returncode, 0)
+        (self.state / "connectivity-disabled").unlink()
+        before = self.changes()
+        result = self.run_module(check=True, github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreater(self.changed(result), 0, result.stdout)
+        self.assertEqual(self.changes(), before)
+        self.assertFalse((self.state / "connectivity-disabled").exists())
+
+    def test_connectivity_opt_out_retries_failed_reload_and_check_mode_preserves_marker(self) -> None:
+        self.assertEqual(self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True).returncode, 0)
+        (self.state / "reload-fails").touch()
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=False)
+        self.assertNotEqual(result.returncode, 0)
+        marker = Path(str(self.connectivity) + ".reload-pending")
+        self.assertTrue(marker.exists())
+        self.assertFalse(self.connectivity.exists())
+        before = self.changes()
+        result = self.run_module(check=True, github_runner_linux_host_networkmanager_connectivity_check_off=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreater(self.changed(result), 0, result.stdout)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.changes(), before)
+        (self.state / "reload-fails").unlink()
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(len(self.changes()), len(before) + 1)
+        self.assertEqual(self.changed(self.run_role()), 0)
+
+    def test_connectivity_recovers_a_marker_left_before_the_file_change(self) -> None:
+        self.connectivity.parent.mkdir(parents=True)
+        marker = Path(str(self.connectivity) + ".reload-pending")
+        marker.write_text("pending\n")
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.connectivity.exists())
+        self.assertFalse(marker.exists())
+        self.assertTrue((self.state / "connectivity-disabled").exists())
+
+    def test_connectivity_refuses_an_effective_override(self) -> None:
+        (self.state / "connectivity-override").touch()
+        result = self.run_module(github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Verify NetworkManager connectivity checking is disabled", result.stdout)
+        self.assertFalse((self.state / "connectivity-disabled").exists())
+
+    def test_connectivity_check_is_skipped_on_non_linux(self) -> None:
+        result = self.run_role(system="Darwin", github_runner_linux_host_networkmanager_connectivity_check_off=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.connectivity.exists())
+        self.assertEqual(self.changes(), [])
 
     def test_keep_awake_masks_every_sleep_target_and_has_logind_ignore_the_lid(self) -> None:
         result = self.run_role(github_runner_linux_host_keep_awake=True)

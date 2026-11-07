@@ -35,6 +35,14 @@ argument_specs:
         type: bool
         default: false
         description: Whether the host's Wi-Fi is kept from power saving, through NetworkManager (wifi.powersave = 2, as the default for every connection) when it manages a Wi-Fi device, else through a udev rule and a systemd unit that run iw for each Wi-Fi interface when systemd-networkd is running, and on the radio now. Fails when neither manages a Wi-Fi device.
+      github_runner_linux_host_networkmanager_connectivity_check_off:
+        type: bool
+        default: null
+        description: Set true to disable connectivity checks, false to remove the role's configuration, or leave unset to leave it unmanaged.
+      github_runner_linux_host_networkmanager_connectivity_dropin:
+        type: path
+        default: /etc/NetworkManager/conf.d/zz-github-runner-connectivity.conf
+        description: Where the connectivity drop-in goes. Not a setting; a variable so tests can point it at a stand-in.
       github_runner_linux_host_networkmanager_dropin:
         type: path
         default: /etc/NetworkManager/conf.d/zz-github-runner-wifi-powersave.conf

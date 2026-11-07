@@ -23,6 +23,12 @@
     - ansible_facts['system'] == 'Linux'
     - github_runner_linux_host_wifi_powersave_off | bool
 
+- name: Configure NetworkManager connectivity checks
+  ansible.builtin.include_tasks: networkmanager_connectivity.yml
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - github_runner_linux_host_networkmanager_connectivity_check_off is not none
+
 - name: Make the host ready for k3s
   ansible.builtin.include_tasks: k3s_prerequisites.yml
   when:
