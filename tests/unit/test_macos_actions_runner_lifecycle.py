@@ -20,6 +20,12 @@ class MacOSActionsRunnerLifecycleTest(unittest.TestCase):
         # The directory is owned by the runner account with mode 0750, so the connecting user cannot remove it.
         self.assertIs(enabled_entries()["Remove the prior runner installation"].get("become"), True)
 
+    def test_service_restarts_after_an_upgrade_or_a_fresh_registration(self) -> None:
+        # The upgrade boots the service out and the launch daemon template is unchanged, so only these tasks can bring it back.
+        entries = enabled_entries()
+        for name in ("Install the pinned Apple Silicon runner package", "Configure the macOS runner"):
+            self.assertEqual(entries[name].get("notify"), "Restart macOS Actions runner", name)
+
 
 if __name__ == "__main__":
     unittest.main()

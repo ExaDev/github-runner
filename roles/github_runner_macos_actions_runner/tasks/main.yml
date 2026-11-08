@@ -166,6 +166,8 @@
       when:
         - not ansible_check_mode
         - github_runner_macos_actions_runner_installed_version.stdout | default('') | trim != github_runner_macos_actions_runner_version
+      # An upgrade boots the service out before the wipe, and an unchanged launch daemon would never bring it back.
+      notify: Restart macOS Actions runner
 
     - name: Check whether the runner is registered
       ansible.builtin.stat:
@@ -254,6 +256,8 @@
       when:
         - not ansible_check_mode
         - not github_runner_macos_actions_runner_registration.stat.exists
+      # A service already loaded against an unregistered installation keeps failing until it is restarted.
+      notify: Restart macOS Actions runner
 
     - name: Install the runner launch daemon
       become: true
