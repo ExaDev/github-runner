@@ -18,6 +18,10 @@
   # Before the macOS conditions below, which cannot assume the caller gathered facts.
   ansible.builtin.include_tasks: host_os.yml
 
+- name: Prepare the host for k3s, when its variables ask for it
+  # After the platform is known and the Docker daemon is chosen, before anything starts or recreates the node. See tasks/host_prerequisites.yml.
+  ansible.builtin.include_tasks: host_prerequisites.yml
+
 - name: Make the container runtime come back after a reboot, and check it is up
   # macOS only: the runtime is Colima or Docker Desktop there, a Linux VM that stays stopped after a reboot until something starts it, while Linux hosts run Docker as a system service. Before anything reads the daemon, since the version checks below fail on one that is down. See tasks/runtime.yml.
   ansible.builtin.include_tasks: runtime.yml

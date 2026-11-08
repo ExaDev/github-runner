@@ -103,6 +103,10 @@
 - name: Install the pinned k3s binary
   ansible.builtin.include_tasks: native/k3s_binary.yml
 
+- name: Prepare the host for k3s, when its variables ask for it
+  # After the binary is installed, so the AppArmor step can check its containerd, and before the node's unit is written and started. See tasks/host_prerequisites.yml.
+  ansible.builtin.include_tasks: host_prerequisites.yml
+
 - name: Write the node's helpers, configurations, secrets and units
   ansible.builtin.include_tasks: native/config.yml
 

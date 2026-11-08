@@ -1,0 +1,16 @@
+---
+# Runs the cluster role's tasks/host_prerequisites.yml, the entry both node modes include, for tests/unit/test_cluster_host_prerequisites.py. The host's facts are stood in for by the extra variable host_system, and the modprobe, sysctl and apparmor_parser the steps call are the test's stand-ins on PATH, so no real module, sysctl or profile is ever touched.
+- name: Run the cluster role's host preparation
+  hosts: all
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Stand in for the host's facts
+      ansible.builtin.set_fact:
+        ansible_facts:
+          system: "{{ host_system }}"
+
+    - name: Include the host preparation
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_cluster
+        tasks_from: host_prerequisites

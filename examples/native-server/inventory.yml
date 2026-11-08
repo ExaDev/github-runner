@@ -20,12 +20,10 @@ all:
           # A native host is a server only when it says so; it never takes an automatic server place.
           github_runner_cluster_node_role: server
           github_runner_cluster_native_tailscale_leave_other_tailnet: true
-          github_runner_linux_host_k3s_prerequisites: true
-          github_runner_linux_host_keep_awake: true
+          github_runner_cluster_k3s_prerequisites: true
         linux2:
           ansible_host: linux2.local
           github_runner_cluster_node_mode: native
           github_runner_cluster_voter_eligible: true
           github_runner_cluster_native_tailscale_leave_other_tailnet: true
-          github_runner_linux_host_k3s_prerequisites: true
-          github_runner_linux_host_keep_awake: true
+          github_runner_cluster_k3s_prerequisites: true

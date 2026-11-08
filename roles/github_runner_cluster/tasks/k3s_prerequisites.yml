@@ -5,24 +5,24 @@
   become: true
   ansible.builtin.copy:
     content: |
-      # Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand.
-      {% for module in github_runner_linux_host_kernel_modules %}
+      # Managed by the exadev.github_runner collection's github_runner_cluster role. Do not edit by hand.
+      {% for module in github_runner_cluster_kernel_modules %}
       {{ module }}
       {% endfor %}
-    dest: "{{ github_runner_linux_host_modules_load_file }}"
+    dest: "{{ github_runner_cluster_modules_load_file }}"
     mode: "0644"
 
 - name: Read which of the kernel modules are loaded
   ansible.builtin.stat:
-    path: "{{ github_runner_linux_host_sys_module_dir }}/{{ item }}"
-  loop: "{{ github_runner_linux_host_kernel_modules }}"
-  register: github_runner_linux_host_modules
+    path: "{{ github_runner_cluster_sys_module_dir }}/{{ item }}"
+  loop: "{{ github_runner_cluster_kernel_modules }}"
+  register: github_runner_cluster_modules
 
 - name: Load the kernel modules that are not loaded
   become: true
   ansible.builtin.command:
     argv: [modprobe, --, "{{ item.item }}"]
-  loop: "{{ github_runner_linux_host_modules.results | rejectattr('stat.exists') | list }}"
+  loop: "{{ github_runner_cluster_modules.results | rejectattr('stat.exists') | list }}"
   loop_control:
     label: "{{ item.item }}"
   changed_when: true
@@ -31,7 +31,7 @@
 - name: Report the kernel modules a real run would load
   ansible.builtin.debug:
     msg: "modprobe {{ item.item }}"
-  loop: "{{ github_runner_linux_host_modules.results | rejectattr('stat.exists') | list }}"
+  loop: "{{ github_runner_cluster_modules.results | rejectattr('stat.exists') | list }}"
   loop_control:
     label: "{{ item.item }}"
   changed_when: true
@@ -41,21 +41,21 @@
   become: true
   ansible.builtin.copy:
     content: |
-      # Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand.
-      {% for key, value in github_runner_linux_host_sysctl_settings.items() %}
+      # Managed by the exadev.github_runner collection's github_runner_cluster role. Do not edit by hand.
+      {% for key, value in github_runner_cluster_sysctl_settings.items() %}
       {{ key }} = {{ value }}
       {% endfor %}
-    dest: "{{ github_runner_linux_host_sysctl_file }}"
+    dest: "{{ github_runner_cluster_sysctl_file }}"
     mode: "0644"
 
 - name: Read the sysctls now
   # A key that does not exist yet (a bridge key before br_netfilter is loaded, which a real run has done by now) reads as no value, which differs from the wanted one.
   ansible.builtin.command:
     argv: [sysctl, -n, "{{ item.key }}"]
-  loop: "{{ github_runner_linux_host_sysctl_settings | dict2items }}"
+  loop: "{{ github_runner_cluster_sysctl_settings | dict2items }}"
   loop_control:
     label: "{{ item.key }}"
-  register: github_runner_linux_host_sysctls
+  register: github_runner_cluster_sysctls
   changed_when: false
   failed_when: false
   check_mode: false
@@ -64,7 +64,7 @@
   become: true
   ansible.builtin.command:
     argv: [sysctl, -w, "{{ item.item.key }}={{ item.item.value }}"]
-  loop: "{{ github_runner_linux_host_sysctls.results }}"
+  loop: "{{ github_runner_cluster_sysctls.results }}"
   loop_control:
     label: "{{ item.item.key }}"
   changed_when: true
@@ -75,7 +75,7 @@
 - name: Report the sysctls a real run would set
   ansible.builtin.debug:
     msg: "sysctl -w {{ item.item.key }}={{ item.item.value }}"
-  loop: "{{ github_runner_linux_host_sysctls.results }}"
+  loop: "{{ github_runner_cluster_sysctls.results }}"
   loop_control:
     label: "{{ item.item.key }}"
   changed_when: true
