@@ -141,6 +141,7 @@
       when: github_runner_macos_actions_runner_installed_version.stdout | default('') | trim != github_runner_macos_actions_runner_version
 
     - name: Remove the prior runner installation
+      become: true
       ansible.builtin.file:
         path: "{{ github_runner_macos_actions_runner_root }}"
         state: absent
