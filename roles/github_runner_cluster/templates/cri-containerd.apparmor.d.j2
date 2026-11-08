@@ -1,5 +1,5 @@
-# Managed by the exadev.github_runner collection's github_runner_linux_host role (github_runner_linux_host_containerd_apparmor_stacking_fix). Do not edit by hand.
-# containerd {{ github_runner_linux_host_containerd_apparmor_containerd_version }}'s default CRI profile (contrib/apparmor/template.go of k3s-io/containerd, rendered for a host whose k3s agent runs unconfined) plus the two stacked-peer rules of containerd/containerd PR 14487 (issue 14485).
+# Managed by the exadev.github_runner collection's github_runner_cluster role (github_runner_cluster_containerd_apparmor_stacking_fix). Do not edit by hand.
+# containerd {{ github_runner_cluster_containerd_apparmor_containerd_version }}'s default CRI profile (contrib/apparmor/template.go of k3s-io/containerd, rendered for a host whose k3s agent runs unconfined) plus the two stacked-peer rules of containerd/containerd PR 14487 (issue 14485).
 # containerd loads its own profile of this name only when none is loaded, so this file, loaded at boot by apparmor.service, takes its place.
 #include <tunables/global>
 

@@ -371,3 +371,31 @@ github_runner_cluster_native_regrade_commands: {jq: jq, ps: procps}
 # Not settings: where Tailscale's apt signing key and repository list file go, which are the paths Tailscale's own install instructions use. A host that has either already is left alone. Variables only so the tests can point them at a stand-in.
 github_runner_cluster_native_apt_keyring: /usr/share/keyrings/tailscale-archive-keyring.gpg
 github_runner_cluster_native_apt_source: /etc/apt/sources.list.d/tailscale.list
+# Host preparation that a Linux k3s node needs of the host, in either node mode and off by default, each behind a variable of its own: what k3s needs of the kernel (https://docs.k3s.io/installation/requirements and the sysctls kube-proxy and the CNI plugins rely on). true loads the kernel modules now and at boot (a modules-load.d file), and sets the sysctls now and at boot (a sysctl.d file). Linux hosts only: any other host skips it. k3s loads the modules and sets some of the sysctls itself when it starts, but the bridge ones only exist once br_netfilter is loaded, and a host that sets them before k3s starts does not depend on that.
+github_runner_cluster_k3s_prerequisites: false
+# The kernel modules loaded. Constants, not settings; variables only so the tests can narrow them. br_netfilter has to be loaded before the bridge sysctls below exist.
+github_runner_cluster_kernel_modules:
+  - overlay
+  - br_netfilter
+# The sysctls set: forwarding, which pod traffic between interfaces needs, and the bridge hooks that make bridged pod traffic pass through iptables, which services' NAT needs. Constants, not settings.
+github_runner_cluster_sysctl_settings:
+  net.ipv4.ip_forward: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+# Not settings: where the modules-load.d file, the sysctl.d file and the module directory the role reads loaded modules from are. Variables only so the tests can point them at a stand-in.
+github_runner_cluster_modules_load_file: /etc/modules-load.d/github-runner-k3s.conf
+github_runner_cluster_sysctl_file: /etc/sysctl.d/90-github-runner-k3s.conf
+github_runner_cluster_sys_module_dir: /sys/module
+
+# Whether the host carries the AppArmor profile that lets the processes of one container signal and trace each other under a stacked label, in place of the one containerd generates. Ubuntu 26.04 LTS (kernel 7.0, AppArmor 5) sets kernel.apparmor_restrict_unprivileged_unconfined=1, so with runc unconfined and without CAP_MAC_OVERRIDE the kernel stacks `//&unconfined` onto the label of every container containerd starts (`cri-containerd.apparmor.d//&unconfined`), and the profile k3s's containerd generates allows signals and ptrace only for the plain label: a container's signals to its own processes are denied, a .NET runtime that aborts is denied its SIGABRT as well, and glibc ends in a general protection fault (containerd/containerd issue 14485; PR 14487 adds the two rules this profile adds, and is not merged). containerd loads its own profile only when none of that name is loaded, so the file the role writes to /etc/apparmor.d, which apparmor.service loads at boot before k3s starts, takes its place and survives a reboot. The role loads the profile now when the file changed or the profile is not loaded. Off by default because it replaces a security profile and is needed only where the kernel stacks the label: a Ubuntu 26.04 native k3s node. A host without AppArmor is left alone, with a message. The profile is tied to the containerd of the k3s on the host: the role fails when the host's k3s ships another one than github_runner_cluster_containerd_apparmor_containerd_version.
+github_runner_cluster_containerd_apparmor_stacking_fix: false
+# Not a setting: the containerd version (the k3s-io/containerd tag) the profile's template was taken from, which is the containerd of k3s v1.34.1+k3s1 (its release notes list it). Change it only together with templates/cri-containerd.apparmor.d.j2, after reading the new containerd's contrib/apparmor/template.go and whether it already holds the stacked-peer rules (PR 14487): when it does, the override is no longer needed and the step is turned off instead.
+github_runner_cluster_containerd_apparmor_containerd_version: v2.1.4-k3s2
+# Not settings: the profile's name, which is the one containerd gives its CRI containers, and where its file goes (apparmor.service loads every file of /etc/apparmor.d at boot). Variables only so the tests can point the file at a stand-in.
+github_runner_cluster_containerd_apparmor_profile_name: cri-containerd.apparmor.d
+github_runner_cluster_containerd_apparmor_profile_file: /etc/apparmor.d/cri-containerd.apparmor.d
+# Not settings: the files the kernel says whether AppArmor is enabled in and which profiles are loaded in. Variables only so the tests can point them at a stand-in.
+github_runner_cluster_apparmor_enabled_file: /sys/module/apparmor/parameters/enabled
+github_runner_cluster_apparmor_profiles_file: /sys/kernel/security/apparmor/profiles
+# Not settings: the k3s binary the native node installs, in github_runner_cluster_native_bin_dir, and where it is read from; the data directory it unpacks itself into is github_runner_cluster_native_data_dir. k3s extracts the binary that carries containerd to <data dir>/data/<hash>/bin/k3s when it first starts at a release and points <data dir>/data/current at it, which is where the containerd version is read from. A variable only so the tests can point it at a stand-in.
+github_runner_cluster_k3s_binary: "{{ github_runner_cluster_native_bin_dir }}/k3s"

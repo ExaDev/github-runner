@@ -21,11 +21,5 @@ all:
           github_runner_cluster_node_mode: native
           # The host is dedicated to the cluster, so the role may log its client out of the tailnet it was in.
           github_runner_cluster_native_tailscale_leave_other_tailnet: true
-          # A laptop dedicated to the cluster (see roles/github_runner_linux_host/README.md): kernel modules and sysctls k3s needs, no suspend when the lid closes, no Wi-Fi power save, a charge limit on its always-on battery, no desktop, no daemons it does not need, and security updates that never reboot it. The package upgrade is not here: it is for one run, with -e github_runner_linux_host_upgrade=true.
-          github_runner_linux_host_k3s_prerequisites: true
-          github_runner_linux_host_keep_awake: true
-          github_runner_linux_host_wifi_powersave_off: true
-          github_runner_linux_host_battery_charge_limit: true
-          github_runner_linux_host_headless: true
-          github_runner_linux_host_disable_unneeded_services: true
-          github_runner_linux_host_unattended_upgrades: true
+          # The kernel modules and sysctls k3s needs, set by the cluster role. What else a laptop dedicated to the cluster needs of its host (no suspend when the lid closes, no Wi-Fi power save, a charge limit on its always-on battery, no desktop, security updates that never reboot it) is the operator's to provide before the play runs; see the README's Prerequisites.
+          github_runner_cluster_k3s_prerequisites: true

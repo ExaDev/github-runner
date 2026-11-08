@@ -1,0 +1,14 @@
+---
+# The two steps that prepare a Linux host for k3s, whichever way the node runs on it, each behind a variable of its own and off by default (see defaults/main.yml). Both are skipped on any other host. Their tasks that change the host use become (sudo). Included once per run, before the node is started or changed: from tasks/main.yml for a node under Docker Compose, and from tasks/native/main.yml for a native node, after it has installed the k3s binary the AppArmor step reads. Needs ansible_facts['system'], which both callers have read by then.
+
+- name: Make the host ready for k3s
+  ansible.builtin.include_tasks: k3s_prerequisites.yml
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - github_runner_cluster_k3s_prerequisites | bool
+
+- name: Let a container's processes signal each other under a stacked AppArmor label
+  ansible.builtin.include_tasks: containerd_apparmor.yml
+  when:
+    - ansible_facts['system'] == 'Linux'
+    - github_runner_cluster_containerd_apparmor_stacking_fix | bool
