@@ -1,8 +1,0 @@
-// Managed by the exadev.github_runner collection's github_runner_linux_host role. Do not edit by hand: change this host's variables and run the role again.
-// Refresh the package lists and install the allowed updates every day.
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-// Makes sure the distribution's security pocket is among the allowed origins, whatever the distribution's own configuration says; that configuration may allow others too.
-Unattended-Upgrade::Allowed-Origins:: "${distro_id}:${distro_codename}-security";
-// A node must not reboot itself: the reboot is for whoever has drained it.
-Unattended-Upgrade::Automatic-Reboot "false";

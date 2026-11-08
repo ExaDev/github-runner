@@ -157,25 +157,12 @@ jobs:
         shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
-      - name: Install Ansible, zsh and fio
-        # zsh is one of the two shells the host tools role writes startup lines for, and its tests read those lines back with a real zsh. fio is the disk check the role controller's probe takes its fdatasync reading with, which its tests run for real.
+      - name: Install Ansible and fio
+        # fio is the disk check the role controller's probe takes its fdatasync reading with, which its tests run for real.
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ansible pkg-config zsh fio
-      - name: Install mise
-        # The host tools tests read the mise configuration the role renders back with a real mise, to check that every value reaches the variable as given. A release more than a week old, pinned to its published checksum so the download is the file that was tested; the version is the one the tests were written against, raised by hand with its checksum from the release's SHASUMS256.txt.
-        env:
-          MISE_VERSION: v2026.10.20
-          MISE_SHA256: 5a9057180c3a9a795076f84be4f5f372e6e37179e1aeb49732928d6b395ce829
-        run: |
-          set -euo pipefail
-          directory="${RUNNER_TEMP}/mise"
-          mkdir -p "${directory}"
-          curl -fsSL -o "${directory}/mise.tar.gz" "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-x64.tar.gz"
-          echo "${MISE_SHA256}  ${directory}/mise.tar.gz" | sha256sum --check --strict
-          tar -xzf "${directory}/mise.tar.gz" -C "${directory}"
-          echo "${directory}/mise/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y -qq ansible pkg-config fio
       - name: Install etcd for the probe's live test
         # The probe's tests start a real three-member etcd to read its metrics from. Ubuntu's own etcd-server is 3.4, which has none of the 3.6 metrics the probe reads, so the official release is used: the exact version, and the SHA-256 of its linux-amd64 tarball as the release publishes it in its SHA256SUMS asset (https://github.com/etcd-io/etcd/releases/download/v3.6.15/SHA256SUMS), checked before anything is extracted. A mismatch fails the job.
         env:

@@ -1,4 +1,0 @@
----
-- name: Refuse connectivity changes until watchdog reloads are serialised
-  ansible.builtin.fail:
-    msg: "NetworkManager connectivity changes are not ready: an in-flight reload can overlap watchdog recovery."
