@@ -1,9 +1,0 @@
-{
-  "schema": 1,
-  "platform": "debian",
-  "networkmanager_version": "1.54.3",
-  "packages": ["dbus", "network-manager", "python3", "python3-dbus", "python3-gi", "systemd"] ,
-  "files": ["adapter_factory.py", "audit_log.py", "audit_observer.py", "bus.conf", "client_launcher.py", "daemon_capture.py", "fixture_lifetime.py", "fixture_owner.py", "guest_agent.py", "guest_factories.py", "guest_owner.py", "guest_runner.py", "guest_transport.py", "lifecycle_ports.py", "networkmanager.py", "polkit_stub.py", "preflight.sh", "private_bus.py", "scenario_bus.py", "scenarios.py", "update2_client.py"],
-  "destination": "/opt/nm-isolated-test",
-  "virtio_port": "test.nm.fixture"
-}
