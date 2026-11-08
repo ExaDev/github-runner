@@ -26,6 +26,11 @@ class MacOSActionsRunnerLifecycleTest(unittest.TestCase):
         for name in ("Install the pinned Apple Silicon runner package", "Configure the macOS runner"):
             self.assertEqual(entries[name].get("notify"), "Restart macOS Actions runner", name)
 
+    def test_description_does_not_call_the_persistent_runner_ephemeral(self) -> None:
+        # The runner registers once and keeps its installation between jobs, so it is not ephemeral.
+        specs = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())
+        self.assertNotIn("ephemeral", specs["argument_specs"]["main"]["short_description"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

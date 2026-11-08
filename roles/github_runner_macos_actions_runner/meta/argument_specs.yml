@@ -1,7 +1,7 @@
 ---
 argument_specs:
   main:
-    short_description: Registers a macOS runner as a launchd-managed ephemeral GitHub Actions runner.
+    short_description: Installs a persistent GitHub Actions runner on macOS, registered to one repository and supervised by launchd.
     options:
       github_runner_macos_actions_runner_enabled:
         type: bool
