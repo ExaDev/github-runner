@@ -12,6 +12,13 @@
   ansible.builtin.meta: end_role
   when: ansible_facts['system'] != 'Darwin'
 
+- name: Require an Apple Silicon host
+  ansible.builtin.assert:
+    that: ansible_facts['architecture'] == 'arm64'
+    fail_msg: The pinned runner package is for osx-arm64, but this host reports {{ ansible_facts['architecture'] }}.
+    quiet: true
+  when: github_runner_macos_actions_runner_enabled | bool
+
 - name: Read the macOS runner App key from 1Password
   delegate_to: localhost
   ansible.builtin.command:
