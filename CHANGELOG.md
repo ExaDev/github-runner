@@ -1,3 +1,13 @@
+## [2.45.1](https://github.com/ExaDev/github-runner/compare/v2.45.0...v2.45.1) (2026-11-08)
+
+### Bug Fixes
+
+* deregister a disabled macOS runner from GitHub ([ebc4cd0](https://github.com/ExaDev/github-runner/commit/ebc4cd0a986042aea79aaf39934f0ac69e5f8f72))
+* describe the macOS runner as persistent in its argument spec ([c53e970](https://github.com/ExaDev/github-runner/commit/c53e9704dc915e3617f7e041403b1d2badbcc41a))
+* refuse to install the Apple Silicon runner on another architecture ([7533bf8](https://github.com/ExaDev/github-runner/commit/7533bf8b612e9257950ccc65e29c4cae18466209))
+* remove the prior macOS runner installation as root ([1e5ceea](https://github.com/ExaDev/github-runner/commit/1e5ceea3f4f811de9fa96b89cc44e90a1b3454d9))
+* restart the macOS runner service after an upgrade or registration ([dec6eb9](https://github.com/ExaDev/github-runner/commit/dec6eb9d65c8dd07f0c385cd751fef95699d6397))
+
 ## [2.45.0](https://github.com/ExaDev/github-runner/compare/v2.44.2...v2.45.0) (2026-11-07)
 
 ### Features
