@@ -31,6 +31,14 @@ class MacOSActionsRunnerLifecycleTest(unittest.TestCase):
         specs = yaml.safe_load((ROLE / "meta" / "argument_specs.yml").read_text())
         self.assertNotIn("ephemeral", specs["argument_specs"]["main"]["short_description"].lower())
 
+    def test_enabling_requires_the_architecture_of_the_downloaded_package(self) -> None:
+        # The download URL names osx-arm64, so any other host would unpack a binary it cannot run.
+        tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
+        assertion = next(task for task in tasks if task["name"] == "Require an Apple Silicon host")
+        self.assertIn("arm64", str(assertion["ansible.builtin.assert"]["that"]))
+        self.assertIn("enabled", assertion["when"])
+        self.assertIn("osx-arm64", (ROLE / "tasks" / "main.yml").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
