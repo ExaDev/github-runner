@@ -39,6 +39,28 @@ class MacOSActionsRunnerLifecycleTest(unittest.TestCase):
         self.assertIn("enabled", assertion["when"])
         self.assertIn("osx-arm64", (ROLE / "tasks" / "main.yml").read_text())
 
+    def test_disabling_deregisters_the_runner_from_github_before_removing_its_daemon(self) -> None:
+        tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
+        names = [task["name"] for task in tasks]
+        stop = names.index("Stop a disabled macOS runner")
+        mint = names.index("Mint a runner removal token")
+        remove = names.index("Remove a disabled macOS runner's registration from GitHub")
+        daemon = names.index("Remove the disabled runner launch daemon")
+        self.assertLess(stop, mint)
+        self.assertLess(mint, remove)
+        self.assertLess(remove, daemon)
+        removal = tasks[remove]
+        self.assertEqual(removal["ansible.builtin.command"]["argv"][-2:], ["remove", "--unattended"])
+        self.assertEqual(removal["become_user"], "{{ github_runner_macos_actions_runner_user }}")
+        self.assertTrue(removal["no_log"])
+        self.assertIn("leftover_registration.stat.exists", str(removal["when"]))
+        self.assertEqual(tasks[mint]["vars"]["github_runner_macos_actions_runner_token_kind"], "remove")
+
+    def test_the_token_task_file_requests_the_kind_it_is_given(self) -> None:
+        # The remove and registration endpoints differ only in the path's last segment.
+        text = (ROLE / "tasks" / "runner_token.yml").read_text()
+        self.assertIn("actions/runners/{{ github_runner_macos_actions_runner_token_kind }}-token", text)
+
 
 if __name__ == "__main__":
     unittest.main()
