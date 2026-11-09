@@ -1,0 +1,68 @@
+---
+# Colima hosts only (runtime.yml includes it once the runtime answers). Installs files/route-guard.sh in the Linux VM the node runs in, with a systemd service and timer that run it at every VM boot and then every github_runner_cluster_colima_route_guard_interval_seconds seconds. A bridged Colima interface that loses its link keeps its default routes, and when they carry a lower metric than the working interface's, the VM's outbound traffic leaves by the dead one: the node then loses its peers, and with enough nodes cut off the cluster loses its datastore quorum. The guard removes a default route whose gateway answers neither ICMP nor ARP, and only while another default route's gateway answers. Idempotent: a file is written only when its content differs, and systemd is reloaded and the timer started only when something changed or the timer is not running. Under --check each change is reported and none is made. Every command runs inside the VM through github_runner_cluster_colima_vm_command.
+
+- name: Work out the files the VM keeps for the route guard
+  ansible.builtin.set_fact:
+    github_runner_cluster_colima_vm_files:
+      - path: "{{ github_runner_cluster_colima_route_guard_script }}"
+        mode: "0755"
+        content: "{{ lookup('ansible.builtin.file', 'route-guard.sh') }}"
+      - path: "/etc/systemd/system/{{ github_runner_cluster_colima_route_guard_unit }}.service"
+        content: |-
+          # Managed by the exadev.github_runner collection's github_runner_cluster role. Do not edit by hand.
+          [Unit]
+          Description=Remove default routes whose gateway does not answer
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ github_runner_cluster_colima_route_guard_script }}
+      - path: "/etc/systemd/system/{{ github_runner_cluster_colima_route_guard_unit }}.timer"
+        content: |-
+          # Managed by the exadev.github_runner collection's github_runner_cluster role. Do not edit by hand.
+          [Unit]
+          Description=Run the default route guard
+
+          [Timer]
+          OnBootSec={{ github_runner_cluster_colima_route_guard_interval_seconds }}s
+          OnUnitActiveSec={{ github_runner_cluster_colima_route_guard_interval_seconds }}s
+
+          [Install]
+          WantedBy=timers.target
+
+- name: Make the route guard's files exist in the VM
+  ansible.builtin.include_tasks: colima_vm_files.yml
+
+- name: Read whether the route guard's timer is enabled and running
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['systemctl', 'is-active', github_runner_cluster_colima_route_guard_unit ~ '.timer'] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_colima_route_guard_timer
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Reload systemd in the VM when a unit file changed
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'systemctl', 'daemon-reload'] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  changed_when: true
+  when:
+    - github_runner_cluster_colima_vm_file_written.results | rejectattr('skipped', 'defined') | list | length > 0
+    - not ansible_check_mode
+
+- name: Enable and start the route guard's timer in the VM
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'systemctl', 'enable', '--now', github_runner_cluster_colima_route_guard_unit ~ '.timer'] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  changed_when: true
+  when:
+    - github_runner_cluster_colima_route_guard_timer.stdout | trim != 'active'
+    - not ansible_check_mode
+
+- name: Report the timer a real run would start in the VM
+  ansible.builtin.debug:
+    msg: "systemctl enable --now {{ github_runner_cluster_colima_route_guard_unit }}.timer in the VM"
+  changed_when: true
+  when:
+    - github_runner_cluster_colima_route_guard_timer.stdout | trim != 'active'
+    - ansible_check_mode

@@ -105,3 +105,10 @@
   when:
     - github_runner_cluster_effective_runtime.kind == 'colima'
     - github_runner_cluster_runtime_up | bool
+
+- name: Install the default route guard in the Colima VM
+  # A bridged interface that loses its link keeps default routes with a lower metric than the working one, which cuts the VM off. See tasks/colima_route_guard.yml.
+  ansible.builtin.include_tasks: colima_route_guard.yml
+  when:
+    - github_runner_cluster_effective_runtime.kind == 'colima'
+    - github_runner_cluster_runtime_up | bool

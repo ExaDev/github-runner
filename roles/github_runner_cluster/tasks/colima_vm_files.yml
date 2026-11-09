@@ -1,0 +1,53 @@
+---
+# Colima hosts only (included by colima_kernel.yml and colima_route_guard.yml). Makes the files in github_runner_cluster_colima_vm_files, a list of {path, content, and optionally mode}, exist in the Colima VM with that content, and with that mode when the file names one (a file without one keeps what creating it gave it), writing a file only when its content differs. A file the VM does not have reads as no content, which differs from the wanted one. Under --check each write is reported and none is made. Publishes github_runner_cluster_colima_vm_file_state (one result per file, whose item.item is the file) and github_runner_cluster_colima_vm_file_written so the caller can act on what changed. Every command runs inside the VM through github_runner_cluster_colima_vm_command.
+
+- name: Read the files in the VM
+  # A file the VM does not have reads as no content, which differs from the wanted one.
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['cat', item.path] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  loop: "{{ github_runner_cluster_colima_vm_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: github_runner_cluster_colima_vm_file_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Write the files in the VM whose content differs
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'tee', item.item.path] }}"
+    stdin: "{{ item.item.content | trim }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  loop: "{{ github_runner_cluster_colima_vm_file_state.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.content | trim
+    - not ansible_check_mode
+  register: github_runner_cluster_colima_vm_file_written
+
+- name: Set the mode of the files in the VM that were written and name one
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'chmod', item.item.item.mode, item.item.item.path] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  loop: "{{ github_runner_cluster_colima_vm_file_written.results }}"
+  loop_control:
+    label: "{{ item.item.item.path }}"
+  changed_when: true
+  when:
+    - item is not skipped
+    - item.item.item.mode is defined
+    - not ansible_check_mode
+
+- name: Report the files in the VM a real run would write
+  ansible.builtin.debug:
+    msg: "write {{ item.item.path }} in the VM"
+  loop: "{{ github_runner_cluster_colima_vm_file_state.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  changed_when: true
+  when:
+    - item.stdout | trim != item.item.content | trim
+    - ansible_check_mode
