@@ -98,9 +98,10 @@ class GuardTest(unittest.TestCase):
     def test_the_vm_is_prepared_last_in_the_runtime_tasks_and_only_for_colima_once_it_answers(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "runtime.yml").read_text())
         names = [task.get("ansible.builtin.include_tasks") or ("fail" if "ansible.builtin.fail" in task else None) for task in tasks]
-        self.assertEqual(names[-2:], ["fail", "colima_kernel.yml"])
-        self.assertEqual(tasks[-1]["when"], ["github_runner_cluster_effective_runtime.kind == 'colima'", "github_runner_cluster_runtime_up | bool"])
-        self.assertNotIn("github_runner_cluster_runtime_autostart", json.dumps(tasks[-1]))
+        self.assertEqual(names[-3:], ["fail", "colima_kernel.yml", "colima_route_guard.yml"])
+        for task in tasks[-2:]:
+            self.assertEqual(task["when"], ["github_runner_cluster_effective_runtime.kind == 'colima'", "github_runner_cluster_runtime_up | bool"])
+            self.assertNotIn("github_runner_cluster_runtime_autostart", json.dumps(task))
 
     def test_the_readmes_say_what_the_role_does_to_the_vm(self) -> None:
         readme = (ROLE / "README.md").read_text()
@@ -347,6 +348,17 @@ elif name == "colima" and args[0] == "ssh":
         if command[-1] != "br_netfilter":
             sys.exit("modprobe: FATAL: Module " + command[-1] + " not found")
         os.makedirs(vm_file("/proc/sys/net/bridge"), exist_ok=True)
+    elif command[0] == "systemctl" and command[1] == "is-active":
+        active = open(os.path.join(vm, "active-units")).read().split() if os.path.exists(os.path.join(vm, "active-units")) else []
+        print("active" if command[2] in active else "inactive")
+        sys.exit(0 if command[2] in active else 3)
+    elif sudo and command[0] == "systemctl" and command[1] == "daemon-reload":
+        pass
+    elif sudo and command[0] == "systemctl" and command[1:3] == ["enable", "--now"]:
+        os.makedirs(vm, exist_ok=True)
+        open(os.path.join(vm, "active-units"), "a").write(command[3] + "\\n")
+    elif sudo and command[0] == "chmod":
+        os.chmod(vm_file(command[2]), int(command[1], 8))
     elif sudo and command[0] == "tee":
         os.makedirs(os.path.dirname(vm_file(command[1])), exist_ok=True)
         content = sys.stdin.read()
@@ -468,7 +480,18 @@ class RoleTest(unittest.TestCase):
 
     def vm_changes(self) -> list[str]:
         """The commands run as root in the Colima VM, in order, without the colima ssh prefix."""
+        return [command for command in self.vm_calls() if not self.is_route_guard(command)]
+
+    def vm_calls(self) -> list[str]:
         return [match.group(1) for call in self.calls() if (match := re.match(r"\S+ colima ssh --profile \S+ -- (sudo .*)", call))]
+
+    @staticmethod
+    def is_route_guard(command: str) -> bool:
+        return "route-guard" in command or "systemctl" in command
+
+    def route_guard_changes(self) -> list[str]:
+        """The commands that install the route guard in the VM, in order."""
+        return [command for command in self.vm_calls() if self.is_route_guard(command)]
 
     def vm_file(self, path: str) -> Path:
         return self.stub / "vm" / "files" / path.lstrip("/")
@@ -608,7 +631,7 @@ class RoleTest(unittest.TestCase):
         result = self.run_node()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before):] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print |colima ssh --profile \S+ -- (cat|test|sysctl -n) )", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before):] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print |colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active) )", call)], [])
         # The template runs as root to compare ownership; it is the only thing that does, and it changes nothing.
         self.assertEqual(self.system_calls(), [call for call in before if "launchctl bootstrap system" in call])
         self.assertTrue((self.stub / "sudo.log").read_text().startswith(sudo_before))
@@ -723,7 +746,7 @@ class RoleTest(unittest.TestCase):
         result = self.run_role(context=context, context_host=context_host)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n) )", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active) )", call)], [])
         self.assertNotIn("bootstrap", " ".join(self.calls()[len(before) :]))
 
     def test_a_second_run_changes_nothing(self) -> None:
@@ -849,6 +872,49 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
         self.assertEqual([call for call in self.calls()[len(before) :] if " sudo " in call], [])
+
+    def test_the_route_guard_is_installed_in_the_vm_with_its_timer_and_started(self) -> None:
+        script, unit = DEFAULTS["github_runner_cluster_colima_route_guard_script"], DEFAULTS["github_runner_cluster_colima_route_guard_unit"]
+        self.state("runtime-up")
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.route_guard_changes(),
+            [f"sudo tee {script}", f"sudo tee /etc/systemd/system/{unit}.service", f"sudo tee /etc/systemd/system/{unit}.timer", f"sudo chmod 0755 {script}", "sudo systemctl daemon-reload", f"sudo systemctl enable --now {unit}.timer"],
+        )
+        self.assertEqual(self.vm_file(script).read_text().strip(), (ROLE / "files" / "route-guard.sh").read_text().strip())
+        self.assertEqual(self.vm_file(script).stat().st_mode & 0o777, 0o755)
+        timer = self.vm_file(f"/etc/systemd/system/{unit}.timer").read_text()
+        self.assertIn(f"OnBootSec={DEFAULTS['github_runner_cluster_colima_route_guard_interval_seconds']}s", timer)
+        self.assertIn(f"ExecStart={script}", self.vm_file(f"/etc/systemd/system/{unit}.service").read_text())
+
+    def test_a_second_run_leaves_the_route_guard_alone(self) -> None:
+        self.state("runtime-up")
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        before = len(self.route_guard_changes())
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.route_guard_changes()[before:], [])
+
+    def test_a_stopped_route_guard_timer_is_started_again_without_rewriting_the_files(self) -> None:
+        unit = DEFAULTS["github_runner_cluster_colima_route_guard_unit"]
+        self.state("runtime-up")
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        (self.stub / "vm" / "active-units").write_text("")
+        before = len(self.route_guard_changes())
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.route_guard_changes()[before:], [f"sudo systemctl enable --now {unit}.timer"])
+
+    def test_a_changed_route_guard_script_is_rewritten_and_systemd_reloaded(self) -> None:
+        script = DEFAULTS["github_runner_cluster_colima_route_guard_script"]
+        self.state("runtime-up")
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.vm_file(script).write_text("#!/bin/sh\nexit 0\n")
+        before = len(self.route_guard_changes())
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.route_guard_changes()[before:], [f"sudo tee {script}", f"sudo chmod 0755 {script}", "sudo systemctl daemon-reload"])
 
     def test_the_module_is_loaded_again_when_a_restarted_vm_has_lost_it_and_the_files_are_left_alone(self) -> None:
         self.state("runtime-up")
