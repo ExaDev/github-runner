@@ -1,3 +1,36 @@
+## [3.0.0](https://github.com/ExaDev/github-runner/compare/v2.45.1...v3.0.0) (2026-11-09)
+
+### ⚠ BREAKING CHANGES
+
+* **cluster:** the roles github_runner_host_tools, github_runner_macos_host and
+github_runner_linux_host are removed, with every variable they read (github_runner_host_tools_*,
+github_runner_macos_host_*, github_runner_linux_host_*), the host_tools and macos_host filter
+plugins, the networkmanager_connectivity, connectivity_transaction, connectivity_watchdog,
+networkmanager_metric_plan and networkmanager_metric_transaction modules, and the three baseline
+plays of exadev.github_runner.site. The operator now provides the host baseline before the play
+runs. github_runner_linux_host_k3s_prerequisites is renamed
+github_runner_cluster_k3s_prerequisites and
+github_runner_linux_host_containerd_apparmor_stacking_fix is renamed
+github_runner_cluster_containerd_apparmor_stacking_fix; the other github_runner_linux_host_*
+variables have no replacement here.
+
+### Features
+
+* **cluster:** prepare a Linux host for k3s in either node mode ([2628f2a](https://github.com/ExaDev/github-runner/commit/2628f2a7411c9da407fda21ff8250fd1d2503e9d))
+
+### Code Refactoring
+
+* **cluster:** remove the host baseline roles from the collection ([8504d12](https://github.com/ExaDev/github-runner/commit/8504d12d7fc011d508c0a5aaa2ffc0f17270cfc1))
+
+### Documentation
+
+* state what each host must already have ([107ae34](https://github.com/ExaDev/github-runner/commit/107ae347800121c694376b145eaa2318a5ab510d))
+* stop naming a private repository in the README ([b849028](https://github.com/ExaDev/github-runner/commit/b849028c636c1c89b85c305f3bc1a666bf93c382))
+
+### Tests
+
+* remove the isolated NetworkManager fixture ([2b948e1](https://github.com/ExaDev/github-runner/commit/2b948e14e3c6b53aac27275009722ffdd131e4c1))
+
 ## [2.45.1](https://github.com/ExaDev/github-runner/compare/v2.45.0...v2.45.1) (2026-11-08)
 
 ### Bug Fixes
