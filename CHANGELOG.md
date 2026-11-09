@@ -1,3 +1,9 @@
+## [3.1.2](https://github.com/ExaDev/github-runner/compare/v3.1.1...v3.1.2) (2026-11-09)
+
+### Bug Fixes
+
+* **cluster:** refresh the package index before installing the ping in a new Colima VM ([1789cf8](https://github.com/ExaDev/github-runner/commit/1789cf8e41b3a660b3c3b1bc7c9a2b4fa20553a5))
+
 ## [3.1.1](https://github.com/ExaDev/github-runner/compare/v3.1.0...v3.1.1) (2026-11-09)
 
 ### Bug Fixes
