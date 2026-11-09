@@ -887,6 +887,8 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(self.vm_file(script).stat().st_mode & 0o777, 0o755)
         timer = self.vm_file(f"/etc/systemd/system/{unit}.timer").read_text()
         self.assertIn(f"OnBootSec={DEFAULTS['github_runner_cluster_colima_route_guard_interval_seconds']}s", timer)
+        # systemd's default accuracy of a minute would let a tick slip far past the interval.
+        self.assertIn("AccuracySec=1s", timer)
         self.assertIn(f"ExecStart={script}", self.vm_file(f"/etc/systemd/system/{unit}.service").read_text())
 
     def test_a_second_run_leaves_the_route_guard_alone(self) -> None:
