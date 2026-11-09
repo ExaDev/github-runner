@@ -11,6 +11,16 @@
   failed_when: false
   check_mode: false
 
+- name: Refresh the package index in the VM before installing the ping
+  # A freshly created Colima VM has an empty package index, so `apt-get install` alone fails with "Unable to locate package".
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'apt-get', 'update'] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  changed_when: true
+  when:
+    - "'install ok installed' not in github_runner_cluster_colima_route_guard_ping.stdout"
+    - not ansible_check_mode
+
 - name: Install the ping the guard probes with in the VM
   ansible.builtin.command:
     argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'apt-get', 'install', '-y', '--no-install-recommends', github_runner_cluster_colima_route_guard_ping_package] }}"

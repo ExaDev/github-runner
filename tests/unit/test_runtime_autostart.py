@@ -353,7 +353,13 @@ elif name == "colima" and args[0] == "ssh":
         if command[-1] not in installed:
             sys.exit("dpkg-query: no packages found matching " + command[-1])
         print("install ok installed", end="")
+    elif sudo and command[0] == "apt-get" and command[1] == "update":
+        os.makedirs(vm, exist_ok=True)
+        open(os.path.join(vm, "package-index"), "w").write("updated\\n")
     elif sudo and command[0] == "apt-get" and command[1] == "install":
+        # A fresh VM has an empty package index: an install with no update before it fails as apt does.
+        if not os.path.exists(os.path.join(vm, "package-index")):
+            sys.exit("E: Unable to locate package " + command[-1])
         os.makedirs(vm, exist_ok=True)
         open(os.path.join(vm, "packages"), "a").write(command[-1] + "\\n")
     elif command[0] == "systemctl" and command[1] == "is-active":
@@ -495,7 +501,7 @@ class RoleTest(unittest.TestCase):
 
     @staticmethod
     def is_route_guard(command: str) -> bool:
-        return "route-guard" in command or "systemctl" in command or "iputils-ping" in command
+        return "route-guard" in command or "systemctl" in command or "iputils-ping" in command or "apt-get update" in command
 
     def route_guard_changes(self) -> list[str]:
         """The commands that install the route guard in the VM, in order."""
@@ -889,7 +895,7 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             self.route_guard_changes(),
-            ["sudo apt-get install -y --no-install-recommends iputils-ping", f"sudo tee {script}", f"sudo tee /etc/systemd/system/{unit}.service", f"sudo tee /etc/systemd/system/{unit}.timer", f"sudo chmod 0755 {script}", "sudo systemctl daemon-reload", f"sudo systemctl enable --now {unit}.timer"],
+            ["sudo apt-get update", "sudo apt-get install -y --no-install-recommends iputils-ping", f"sudo tee {script}", f"sudo tee /etc/systemd/system/{unit}.service", f"sudo tee /etc/systemd/system/{unit}.timer", f"sudo chmod 0755 {script}", "sudo systemctl daemon-reload", f"sudo systemctl enable --now {unit}.timer"],
         )
         self.assertEqual(self.vm_file(script).read_text().strip(), (ROLE / "files" / "route-guard.sh").read_text().strip())
         self.assertEqual(self.vm_file(script).stat().st_mode & 0o777, 0o755)
