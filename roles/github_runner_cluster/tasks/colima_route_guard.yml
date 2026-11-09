@@ -1,5 +1,5 @@
 ---
-# Colima hosts only (runtime.yml includes it once the runtime answers). Installs files/route-guard.sh in the Linux VM the node runs in, with a systemd service and timer that run it at every VM boot and then every github_runner_cluster_colima_route_guard_interval_seconds seconds. A bridged Colima interface that loses its link keeps its default routes, and when they carry a lower metric than the working interface's, the VM's outbound traffic leaves by the dead one: the node then loses its peers, and with enough nodes cut off the cluster loses its datastore quorum. The guard removes a default route whose gateway answers neither ICMP nor ARP, and only while another default route's gateway answers. Idempotent: a file is written only when its content differs, and systemd is reloaded and the timer started only when something changed or the timer is not running. Under --check each change is reported and none is made. Every command runs inside the VM through github_runner_cluster_colima_vm_command.
+# Colima hosts only (runtime.yml includes it once the runtime answers). Installs files/route-guard.sh in the Linux VM the node runs in, with a systemd service and timer that run it at every VM boot and then every github_runner_cluster_colima_route_guard_interval_seconds seconds, with a one second accuracy because systemd's default lets a timer slip by up to a minute, which would make a 30 second interval meaningless. A bridged Colima interface that loses its link keeps its default routes, and when they carry a lower metric than the working interface's, the VM's outbound traffic leaves by the dead one: the node then loses its peers, and with enough nodes cut off the cluster loses its datastore quorum. The guard removes a default route whose gateway answers neither ICMP nor ARP, and only while another default route's gateway answers. Idempotent: a file is written only when its content differs, and systemd is reloaded and the timer started only when something changed or the timer is not running. Under --check each change is reported and none is made. Every command runs inside the VM through github_runner_cluster_colima_vm_command.
 
 - name: Work out the files the VM keeps for the route guard
   ansible.builtin.set_fact:
@@ -25,6 +25,7 @@
           [Timer]
           OnBootSec={{ github_runner_cluster_colima_route_guard_interval_seconds }}s
           OnUnitActiveSec={{ github_runner_cluster_colima_route_guard_interval_seconds }}s
+          AccuracySec=1s
 
           [Install]
           WantedBy=timers.target
