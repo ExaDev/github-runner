@@ -1,3 +1,16 @@
+## [3.1.0](https://github.com/ExaDev/github-runner/compare/v3.0.0...v3.1.0) (2026-11-09)
+
+### Features
+
+* **cluster:** add the Colima VM default route guard script ([3150550](https://github.com/ExaDev/github-runner/commit/3150550d5c147ee885024c3aaf910c3a7119ce84))
+* **cluster:** install the default route guard in the Colima VM ([6a8eaa5](https://github.com/ExaDev/github-runner/commit/6a8eaa5f39568a6321bad9784f5368db6a4da585))
+
+### Tests
+
+* **cluster:** cover the Colima VM default route guard ([a197401](https://github.com/ExaDev/github-runner/commit/a197401d369953c3343b82278dae631a2416dc6b))
+* **cluster:** cover the route guard install through the role ([7748152](https://github.com/ExaDev/github-runner/commit/77481528e8e1f5e7362b612b752640dfdbb84940))
+* **cluster:** keep the launchd system-domain check off the VM's systemd paths ([fc553b4](https://github.com/ExaDev/github-runner/commit/fc553b487ed169338eaddeeb4e9bdc2aa9898ef1))
+
 ## [3.0.0](https://github.com/ExaDev/github-runner/compare/v2.45.1...v3.0.0) (2026-11-09)
 
 ### ⚠ BREAKING CHANGES
