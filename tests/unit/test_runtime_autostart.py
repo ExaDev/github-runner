@@ -696,7 +696,8 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(self.changes(), ["colima colima start --profile default --activate=false", f"colima launchctl bootstrap gui/{UID} {self.plist}"])
         self.assertEqual(list(self.daemons.iterdir()), [])
         self.assertFalse((self.stub / "sudo.log").exists())
-        self.assertEqual([call for call in self.calls() if "system" in call], [])
+        # The VM's own systemd units live under /etc/systemd/system, which is not launchd's system domain.
+        self.assertEqual([call for call in self.calls() if "system" in call and "colima ssh" not in call], [])
 
     def test_autostart_off_leaves_an_installed_daemon_and_agent_as_they_are(self) -> None:
         self.state("runtime-up")
