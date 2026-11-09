@@ -639,7 +639,7 @@ class RoleTest(unittest.TestCase):
         result = self.run_node()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before):] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print |colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active) )", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before):] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print |colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active|dpkg-query) )", call)], [])
         # The template runs as root to compare ownership; it is the only thing that does, and it changes nothing.
         self.assertEqual(self.system_calls(), [call for call in before if "launchctl bootstrap system" in call])
         self.assertTrue((self.stub / "sudo.log").read_text().startswith(sudo_before))
@@ -755,7 +755,7 @@ class RoleTest(unittest.TestCase):
         result = self.run_role(context=context, context_host=context_host)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active) )", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active|dpkg-query) )", call)], [])
         self.assertNotIn("bootstrap", " ".join(self.calls()[len(before) :]))
 
     def test_a_second_run_changes_nothing(self) -> None:
