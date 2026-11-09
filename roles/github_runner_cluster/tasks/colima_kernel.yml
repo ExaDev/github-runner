@@ -15,42 +15,8 @@
           {{ key }} = {{ value }}
           {% endfor %}
 
-- name: Read the files in the VM
-  # A file the VM does not have reads as no content, which differs from the wanted one.
-  ansible.builtin.command:
-    argv: "{{ github_runner_cluster_colima_vm_command + ['cat', item.path] }}"
-  environment: "{{ github_runner_cluster_runtime_environment }}"
-  loop: "{{ github_runner_cluster_colima_vm_files }}"
-  loop_control:
-    label: "{{ item.path }}"
-  register: github_runner_cluster_colima_vm_file_state
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Write the files in the VM whose content differs
-  ansible.builtin.command:
-    argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'tee', item.item.path] }}"
-    stdin: "{{ item.item.content | trim }}"
-  environment: "{{ github_runner_cluster_runtime_environment }}"
-  loop: "{{ github_runner_cluster_colima_vm_file_state.results }}"
-  loop_control:
-    label: "{{ item.item.path }}"
-  changed_when: true
-  when:
-    - item.stdout | trim != item.item.content | trim
-    - not ansible_check_mode
-
-- name: Report the files in the VM a real run would write
-  ansible.builtin.debug:
-    msg: "write {{ item.item.path }} in the VM"
-  loop: "{{ github_runner_cluster_colima_vm_file_state.results }}"
-  loop_control:
-    label: "{{ item.item.path }}"
-  changed_when: true
-  when:
-    - item.stdout | trim != item.item.content | trim
-    - ansible_check_mode
+- name: Make the files in the VM exist
+  ansible.builtin.include_tasks: colima_vm_files.yml
 
 - name: Read whether the VM has loaded the module
   # The bridge sysctl directory is what the sysctls need and what the module's absence takes away, so it is the one thing read: it also holds for a kernel with the module built in, which modprobe would report as loaded every run.
