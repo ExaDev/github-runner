@@ -1,3 +1,14 @@
+## [3.1.1](https://github.com/ExaDev/github-runner/compare/v3.1.0...v3.1.1) (2026-11-09)
+
+### Bug Fixes
+
+* **cluster:** install the ping the route guard probes with in the Colima VM ([12ae7dc](https://github.com/ExaDev/github-runner/commit/12ae7dc4915631f9e63d32e75dcae12d57266f6d))
+* **cluster:** make the route guard timer fire on its interval ([a543793](https://github.com/ExaDev/github-runner/commit/a543793adb5a0773f7991ffbaa87787823936eee))
+
+### Tests
+
+* **cluster:** count the ping package read as a read-only call ([c4232ef](https://github.com/ExaDev/github-runner/commit/c4232efd11f0b9f4419a2d4317a35b26f2b0d0a8))
+
 ## [3.1.0](https://github.com/ExaDev/github-runner/compare/v3.0.0...v3.1.0) (2026-11-09)
 
 ### Features

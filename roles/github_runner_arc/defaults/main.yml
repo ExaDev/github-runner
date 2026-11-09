@@ -139,7 +139,7 @@ github_runner_arc_image_pull_secret_source: static
 github_runner_arc_image_pull_secret_renewal_schedule: "*/15 * * * *"
 
 # Image the renewal CronJob runs. Pulled without a pull Secret, so it must be public.
-github_runner_arc_image_pull_secret_renewer_image: "ghcr.io/exadev/github-runner-pull-secret-renewer:3.1.0"
+github_runner_arc_image_pull_secret_renewer_image: "ghcr.io/exadev/github-runner-pull-secret-renewer:3.1.1"
 
 # Before writing the pull Secret, prove the credential can read each image this host installs from that registry (with an App token, each org's own image, in the role and in every renewal): exchange it for a registry bearer token and fetch the image's manifest. A token that authenticates but lacks package access is otherwise only found later, as pods stuck in ImagePullBackOff. Uses the registry's /token endpoint, as GHCR provides.
 github_runner_arc_verify_image_pull: true
@@ -156,8 +156,8 @@ github_runner_arc_heartbeat_gist_consumer: ""
 
 # Namespace and images for the platform's own Deployments (see install_platform.yml).
 github_runner_arc_platform_namespace: "github-runner-platform"
-github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:3.1.0"
-github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:3.1.0"
+github_runner_arc_heartbeat_image: "ghcr.io/exadev/github-runner-heartbeat:3.1.1"
+github_runner_arc_autoscaler_image: "ghcr.io/exadev/github-runner-autoscaler:3.1.1"
 # Scheduling class and local-storage sizing for the platform's own long-running pods (heartbeat, autoscaler, node recovery). Without them the pods run at the default priority with no ephemeral-storage request, so under disk pressure the kubelet ranks them with, or ahead of, the runner pods it should evict first, and the watcher that recovers a node was itself evicted while a node had disk pressure. The priority value only has to sit above 0, the priority every runner pod runs at, and below 1000000000, the ceiling Kubernetes reserves for its own system classes. The storage request is above what these pods write (container logs and kubectl's small cache) so the kubelet never counts them as exceeding it; the limit stops a runaway log from becoming the pressure.
 github_runner_arc_platform_priority_class_name: "github-runner-platform"
 github_runner_arc_platform_priority_value: 1000000
@@ -189,13 +189,13 @@ github_runner_arc_node_recovery_prune_label: github-runner.exadev.io/removable
 # The label regrading puts on a server it has stepped down, with the level as its value, which the watcher never taints: the cluster role's github_runner_cluster_regrade_level_label when that is defined, else github-runner.exadev.com/regrade-level (held together with the role controller's by the same expression).
 github_runner_arc_node_recovery_level_label: "{{ github_runner_cluster_regrade_level_label | default('github-runner.exadev.com/regrade-level') }}"
 # Image the watcher runs. Pulled without a pull Secret, so it must be public.
-github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:3.1.0"
+github_runner_arc_node_recovery_image: "ghcr.io/exadev/github-runner-node-recovery:3.1.1"
 
 # The role controller (see tasks/install_fleet_role.yml, scripts/fleet-role.sh and scripts/fleet-role-probe.sh): a `fleet-role-probe` DaemonSet that measures, on every node with a kubelet, what decides whether a host is fit to hold an etcd vote, and a `fleet-role` Deployment that reads the measurements, reports which eligible hosts are fit and which swap of an unfit voter for a fit standby it would make, and carries a swap out (an eligible standby becomes a voter and the unfit voter an agent) when the owner asks for one by command (`fleet-role.sh swap OUT IN`) or, with github_runner_arc_role_controller_dry_run false, when it decides on one. Off by default, so a consumer that upgrades changes nothing.
 # The cluster role's github_runner_cluster_role_controller when it is defined, so one inventory setting turns it on; set this one to turn it on from a host that does not run the cluster role (playbooks/arc.yml against a kubeconfig).
 github_runner_arc_role_controller_enabled: "{{ github_runner_cluster_role_controller | default(false) }}"
 # Image the controller and the probe run, one image whose entrypoint is the controller. Pulled without a pull Secret, so it must be public.
-github_runner_arc_role_controller_image: "ghcr.io/exadev/github-runner-fleet-role:3.1.0"
+github_runner_arc_role_controller_image: "ghcr.io/exadev/github-runner-fleet-role:3.1.1"
 # Seconds between probe samples and between controller passes. A figure is read over a window of 100 samples (the fewest that give the 99th percentile a sample of its own), so this sets how long a window is: 1500 seconds at the default, node recovery's own poll.
 github_runner_arc_role_controller_sample_seconds: 15
 # The number of etcd voters the cluster is held at: odd, at least 3, and at most github_runner_arc_role_controller_max_servers minus one, which leaves a swap (the new voter joins before the old one leaves) one place of headroom.
@@ -282,4 +282,4 @@ github_runner_arc_app_setup_keep_private_key: false
 github_runner_arc_deployed_state_configmap: "deployed-state"
 
 # The collection version this role was released as, stamped by scripts/release/stamp_version.py. The role records it in the platform namespace's deployed-state ConfigMap once a run has applied everything, and the heartbeat publishes it in fleet-health.json. It is what was applied, not what is running.
-github_runner_arc_collection_version: "3.1.0"
+github_runner_arc_collection_version: "3.1.1"
