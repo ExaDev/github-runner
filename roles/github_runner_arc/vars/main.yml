@@ -73,3 +73,20 @@ github_runner_arc_node_cache_positive_integer_pattern: '^[1-9][0-9]*$'
 github_runner_arc_node_cache_max_limit_gib: 1073741824
 github_runner_arc_node_cache_max_hard_limit_factor: 1024
 github_runner_arc_node_cache_max_prune_seconds: 86400
+
+# The marker install_scale_set_profile.yml puts on every scale set's namespace, and remove_departed_scale_sets.yml finds them by: all three labels (so another software's namespace sharing one is never taken for the role's) and the release installed there. Only a namespace carrying the whole marker is ever removed.
+github_runner_arc_scale_set_namespace_labels:
+  app.kubernetes.io/component: runner-scale-set
+  app.kubernetes.io/part-of: github-runner
+  app.kubernetes.io/managed-by: exadev.github_runner
+github_runner_arc_scale_set_release_annotation: github-runner.exadev/scale-set-release
+
+# The chart every scale-set release is installed from, as `helm list` names it before the version. A departed namespace holding a release of any other chart, the controller's among them, is refused.
+github_runner_arc_scale_set_chart_name: gha-runner-scale-set
+
+# Namespaces the departed scale-set removal never touches, even carrying the marker: Kubernetes' own, and those the role installs its controller, platform and registry cache into.
+github_runner_arc_scale_set_protected_namespaces: >-
+  {{
+    ['default', 'kube-system', 'kube-public', 'kube-node-lease',
+     github_runner_arc_controller_namespace, github_runner_arc_platform_namespace, github_runner_arc_registry_cache_namespace]
+  }}

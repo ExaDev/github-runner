@@ -1,13 +1,16 @@
 ---
 # Included once per scale-set profile, with `org` and `profile` (the expanded profile from plugins/filter/arc.py) set by install_org.yml. Each profile gets its own namespace: the chart names some resources (the ServiceAccount, for one) after runnerScaleSetName rather than the release, so two releases in one namespace collide. Secrets are namespace-scoped, so each namespace needs its own copy of the org's.
 
-- name: Create the namespace for {{ profile.label }}
+# The marker (vars/main.yml) is what lets a later run remove this scale set once its profile leaves the inventory (remove_departed_scale_sets.yml): it is applied on every run, so a namespace created before the role marked anything gets it on the first run that installs its profile, and that run removes nothing it lacked a marker for. A namespace whose profile left before then never carries it and is left alone.
+- name: Create and mark the namespace for {{ profile.label }}
   kubernetes.core.k8s:
     definition:
       apiVersion: v1
       kind: Namespace
       metadata:
         name: "{{ profile.namespace }}"
+        labels: "{{ github_runner_arc_scale_set_namespace_labels }}"
+        annotations: "{{ {github_runner_arc_scale_set_release_annotation: profile.release} }}"
 
 - name: Create/update the GitHub App secret for {{ profile.label }}
   kubernetes.core.k8s:

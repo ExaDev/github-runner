@@ -1,4 +1,4 @@
-"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, placing their runner pods (on the eligible nodes, or overflowing onto burst nodes), deriving a runner ceiling from node capacity (uniform figures, or each node's measured free capacity), adding a profile's capabilities (tool-cache and system-library init containers and job-started hooks) to its Helm values, and splitting an image reference."""
+"""Filters for the github_runner_arc role: expanding orgs into scale-set profiles, placing their runner pods (on the eligible nodes, or overflowing onto burst nodes), deriving a runner ceiling from node capacity (uniform figures, or each node's measured free capacity), adding a profile's capabilities (tool-cache and system-library init containers and job-started hooks) to its Helm values, deciding which scale sets whose profiles have left the inventory to remove, and splitting an image reference."""
 
 from __future__ import annotations
 
@@ -2069,6 +2069,86 @@ def arc_upgrade_blocker(deployed_chart: str, desired_version: str, running_runne
     )
 
 
+# The phases after which an EphemeralRunner runs no job and never will. Any other phase, or none yet, is a runner that is starting, waiting for a job or running one.
+_FINISHED_RUNNER_PHASES = ("Succeeded", "Failed")
+
+
+def arc_departed_scale_sets(namespaces: Sequence[Mapping[str, Any]], profiles: Sequence[Mapping[str, Any]], labels: Mapping[str, str], release_annotation: str, protected: Sequence[str]) -> dict[str, Any]:
+    """Return the scale sets whose profiles have left the inventory, from the namespaces the role marked as a scale set's own, and the reasons any marked namespace cannot be acted on.
+
+    The role marks a scale set's namespace on every run that installs the profile (install_scale_set_profile.yml): it carries every one of labels, and release_annotation names the release installed there. A namespace is departed when it carries the whole marker and no profile of the cluster maps to it: profiles holds every host's, not this host's alone, so one host never removes a scale set another installs. A namespace without the whole marker is never departed, however its name looks, so one whose profile left before the role first marked it is never touched.
+
+    Invariants, each refused loudly rather than skipped: a protected namespace (Kubernetes' own, the controller's, the platform's, the registry cache's) is never departed, even marked; a marker without a release is an error, since what to remove would be a guess.
+
+    Args:
+        namespaces: the Namespaces carrying labels, as the cluster returned them. profiles: the cluster's expanded profiles (github_runner_arc_fleet.profiles). labels: the labels the role marks a scale set's namespace with. release_annotation: the annotation recording the release. protected: namespaces that are never removed.
+
+    Returns:
+        ``departed``, sorted by namespace, each with its ``namespace`` and the ``release`` the marker records; and ``errors``.
+    """
+    wanted = {profile["namespace"] for profile in profiles}
+    departed: list[dict[str, str]] = []
+    errors: list[str] = []
+    for namespace in namespaces:
+        metadata = namespace["metadata"]
+        name = metadata["name"]
+        if not all((metadata.get("labels") or {}).get(key) == value for key, value in labels.items()) or name in wanted:
+            continue
+        release = (metadata.get("annotations") or {}).get(release_annotation, "")
+        if name in protected:
+            errors.append(f"namespace {name} carries the scale-set marker but is one the role never removes; remove its labels {sorted(labels)} by hand")
+        elif not release:
+            errors.append(f"namespace {name} carries the scale-set marker without the {release_annotation} annotation naming its release, so what to remove is unknown; remove it by hand")
+        else:
+            departed.append({"namespace": name, "release": release})
+    return {"departed": sorted(departed, key=lambda item: item["namespace"]), "errors": errors}
+
+
+def _is_chart(chart: str, name: str) -> bool:
+    """Report whether a Helm release's chart, as `helm list` gives it (name and version joined by a dash), is the chart called name: the dash is followed by a version, so gha-runner-scale-set-controller-0.14.1 is not the chart gha-runner-scale-set."""
+    return re.match(rf"^{re.escape(name)}-v?\d", chart) is not None
+
+
+def arc_scale_set_removals(departed: Sequence[Mapping[str, Any]], releases: Sequence[Sequence[Mapping[str, Any]]], runners: Sequence[Sequence[Mapping[str, Any]]], chart: str, drain: bool) -> dict[str, Any]:
+    """Decide, for each departed scale set, whether to remove it now, drain it first, or refuse.
+
+    Invariants, each refused loudly naming the namespace: a namespace holding any Helm release other than the one its marker records, or that release from another chart than the scale-set chart, is refused whole, so neither the controller's release nor a release the role did not install is ever removed, and nor is the namespace holding it. A scale set with an unfinished ephemeral runner (starting, waiting for a job or running one) is refused unless drain is on, since removing it kills the job; with drain on it is drained instead (scaled to no runners) and removed by a later run once its runners have finished. A departed scale set whose release is already gone (a run that stopped between the uninstall and the namespace's deletion) has only its namespace left to delete.
+
+    Args:
+        departed: from arc_departed_scale_sets. releases: for each departed scale set, in the same order, the releases `helm list --all --output json` reports in its namespace. runners: for each, the EphemeralRunners in its namespace, as the cluster returned them. chart: the scale-set chart's name. drain: whether a busy scale set is drained rather than refused.
+
+    Returns:
+        ``remove``, each with its ``namespace`` and the ``release`` to uninstall (empty when it is already gone); ``drain``, each with its ``namespace`` and the ``runners`` still unfinished; and ``errors``.
+
+    Raises:
+        ValueError: when releases or runners does not hold one list per departed scale set.
+    """
+    if len(releases) != len(departed) or len(runners) != len(departed):
+        raise ValueError(f"expected one release list and one runner list per departed scale set ({len(departed)}), got {len(releases)} and {len(runners)}")
+    remove: list[dict[str, Any]] = []
+    draining: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for scale_set, found, present in zip(departed, releases, runners):
+        namespace = scale_set["namespace"]
+        foreign = [release for release in found if release.get("name") != scale_set["release"] or not _is_chart(str(release.get("chart", "")), chart)]
+        if foreign:
+            listed = ", ".join(f"{release.get('name')} (chart {release.get('chart')})" for release in foreign)
+            errors.append(f"namespace {namespace}, whose profile has left the inventory, holds Helm release(s) the role did not install there: {listed}; nothing in it is removed. Remove them, or the namespace, by hand")
+            continue
+        unfinished = sorted(runner["metadata"]["name"] for runner in present if (runner.get("status") or {}).get("phase") not in _FINISHED_RUNNER_PHASES)
+        if unfinished and drain:
+            draining.append({"namespace": namespace, "runners": unfinished})
+            continue
+        if unfinished:
+            errors.append(
+                f"scale set {scale_set['release']} in namespace {namespace}, whose profile has left the inventory, has unfinished ephemeral runner(s) {', '.join(unfinished)}; removing it would kill their jobs. "
+                "Run again once they finish, or set github_runner_arc_drain_departed_scale_sets to stop it taking new jobs and remove it on a later run"
+            )
+            continue
+        remove.append({"namespace": namespace, "release": scale_set["release"] if found else ""})
+    return {"remove": remove, "drain": draining, "errors": errors}
+
+
 def arc_helm_server_side(version: str) -> bool:
     """Report whether the Helm client applies releases with server-side apply, which decides whether the role forces field conflicts.
 
@@ -2104,6 +2184,8 @@ class FilterModule:
             "arc_measured_overlap_errors": arc_measured_overlap_errors,
             "arc_upgrade_blocker": arc_upgrade_blocker,
             "arc_helm_server_side": arc_helm_server_side,
+            "arc_departed_scale_sets": arc_departed_scale_sets,
+            "arc_scale_set_removals": arc_scale_set_removals,
             "arc_image_ref": arc_image_ref,
             "arc_runner_placement": arc_runner_placement,
             "arc_capability_errors": arc_capability_errors,

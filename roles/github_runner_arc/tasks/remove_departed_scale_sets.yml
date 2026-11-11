@@ -1,0 +1,141 @@
+---
+# Removes each scale set whose profile has left the inventory: its Helm release, then its namespace. Included by main.yml after every profile is installed, so a profile that moved to another namespace (a repository's runners moving to the organisation's, say) is serving there before the old one goes.
+#
+# What counts as departed is decided by plugins/filter/arc.py (arc_departed_scale_sets, arc_scale_set_removals), whose invariants these tasks rely on:
+# - Only a namespace carrying the role's whole marker (vars/main.yml, applied by install_scale_set_profile.yml on every run) is considered, and only when no profile of the cluster, from any host, maps to it. A namespace that was never marked is never touched.
+# - Kubernetes' own namespaces and the controller's, platform's and registry cache's are never removed, even marked.
+# - A namespace holding any Helm release but the one its marker records, or that release from another chart than the scale-set chart, is refused whole: the controller's release, and any release the role did not install, are never removed.
+# - A scale set with an unfinished ephemeral runner is refused, unless github_runner_arc_drain_departed_scale_sets drains it (scales it to no runners) for a later run to remove.
+# - A marked namespace is the scale set's own, whether the role derived its name or a profile's `namespace` named it, and is deleted with everything in it.
+# Every refusal fails the run before anything is removed; a drain fails it after the departed scale sets that are idle have been removed. In check mode the same decisions are made and reported, and nothing changes.
+#
+# Finding the marked namespaces needs the Ansible credential to be allowed to list Namespaces; removing needs Helm's uninstall rights in the namespace and delete on the Namespace.
+
+- name: "Departed scale sets: find the namespaces the role marked as a scale set's"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    label_selectors: "{{ github_runner_arc_scale_set_namespace_labels | exadev.github_runner.arc_label_selectors }}"
+  register: github_runner_arc_marked_namespaces
+
+- name: "Departed scale sets: find those whose profile has left the inventory"
+  ansible.builtin.set_fact:
+    github_runner_arc_departed: >-
+      {{
+        github_runner_arc_marked_namespaces.resources
+        | exadev.github_runner.arc_departed_scale_sets(
+            github_runner_arc_fleet.profiles, github_runner_arc_scale_set_namespace_labels, github_runner_arc_scale_set_release_annotation,
+            github_runner_arc_scale_set_protected_namespaces)
+      }}
+
+- name: "Departed scale sets: refuse a marked namespace that cannot be acted on"
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_departed.errors }}"
+  when: github_runner_arc_departed.errors | length > 0
+
+# Read in check mode too, since what is removed depends on them.
+- name: "Departed scale sets: list the Helm releases in each departed namespace"
+  ansible.builtin.command:
+    argv: [helm, list, --namespace, "{{ item.namespace }}", --all, --output, json]
+  environment: "{{ {'KUBECONFIG': github_runner_arc_kubeconfig_path} if github_runner_arc_kubeconfig_path | length > 0 else {} }}"
+  loop: "{{ github_runner_arc_departed.departed }}"
+  loop_control:
+    label: "{{ item.namespace }}"
+  changed_when: false
+  check_mode: false
+  register: github_runner_arc_departed_releases
+
+- name: "Departed scale sets: list the ephemeral runners in each departed namespace"
+  kubernetes.core.k8s_info:
+    api_version: actions.github.com/v1alpha1
+    kind: EphemeralRunner
+    namespace: "{{ item.namespace }}"
+  loop: "{{ github_runner_arc_departed.departed }}"
+  loop_control:
+    label: "{{ item.namespace }}"
+  register: github_runner_arc_departed_runners
+
+- name: "Departed scale sets: decide what to remove, drain or refuse"
+  ansible.builtin.set_fact:
+    github_runner_arc_departed_plan: >-
+      {{
+        github_runner_arc_departed.departed
+        | exadev.github_runner.arc_scale_set_removals(
+            github_runner_arc_departed_releases.results | map(attribute='stdout') | map('from_json') | list,
+            github_runner_arc_departed_runners.results | map(attribute='resources') | list,
+            github_runner_arc_scale_set_chart_name, github_runner_arc_drain_departed_scale_sets | bool)
+      }}
+
+- name: "Departed scale sets: refuse what cannot be removed safely"
+  ansible.builtin.fail:
+    msg: "{{ github_runner_arc_departed_plan.errors }}"
+  when: github_runner_arc_departed_plan.errors | length > 0
+
+- name: "Departed scale sets: report what is removed"
+  ansible.builtin.debug:
+    msg: "{{ ('Uninstalling release ' ~ item.release ~ ' and deleting') if item.release else 'Deleting' }} namespace {{ item.namespace }}, since no profile of the cluster maps to it any more"
+  loop: "{{ github_runner_arc_departed_plan.remove }}"
+  loop_control:
+    label: "{{ item.namespace }}"
+
+# Uninstalled and waited for before the namespace goes, so the controller removes the listener and runner set it owns while their namespace still exists.
+- name: "Departed scale sets: uninstall each departed release"
+  kubernetes.core.helm:
+    name: "{{ item.release }}"
+    release_namespace: "{{ item.namespace }}"
+    state: absent
+    wait: true
+  loop: "{{ github_runner_arc_departed_plan.remove | selectattr('release') | list }}"
+  loop_control:
+    label: "{{ item.namespace }}/{{ item.release }}"
+
+- name: "Departed scale sets: delete each departed namespace"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Namespace
+    name: "{{ item.namespace }}"
+    wait: true
+  loop: "{{ github_runner_arc_departed_plan.remove }}"
+  loop_control:
+    label: "{{ item.namespace }}"
+
+# Draining: no minimum and no maximum, so the scale set takes no new job and the controller deletes its idle runners, while a runner running a job finishes it. Removal is left to a later run, which finds no unfinished runner.
+- name: "Departed scale sets: find the runner sets of each scale set to drain"
+  kubernetes.core.k8s_info:
+    api_version: actions.github.com/v1alpha1
+    kind: AutoscalingRunnerSet
+    namespace: "{{ item.namespace }}"
+  loop: "{{ github_runner_arc_departed_plan.drain }}"
+  loop_control:
+    label: "{{ item.namespace }}"
+  register: github_runner_arc_draining_runner_sets
+
+- name: "Departed scale sets: scale each scale set to drain to no runners"
+  kubernetes.core.k8s:
+    state: patched
+    api_version: actions.github.com/v1alpha1
+    kind: AutoscalingRunnerSet
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+    merge_type: merge
+    definition:
+      spec:
+        minRunners: 0
+        maxRunners: 0
+  loop: "{{ github_runner_arc_draining_runner_sets.results | map(attribute='resources') | flatten }}"
+  loop_control:
+    label: "{{ item.metadata.namespace }}/{{ item.metadata.name }}"
+
+- name: "Departed scale sets: fail while a drained scale set still has runners finishing"
+  ansible.builtin.fail:
+    msg: >-
+      {{
+        github_runner_arc_departed_plan.drain
+        | map(attribute='namespace')
+        | zip(github_runner_arc_departed_plan.drain | map(attribute='runners') | map('join', ', '))
+        | map('join', ' is draining, still finishing: ')
+        | list
+        + ['Each takes no new job; run again once these finish and the run removes it.']
+      }}
+  when: github_runner_arc_departed_plan.drain | length > 0
