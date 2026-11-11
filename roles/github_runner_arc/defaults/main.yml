@@ -94,6 +94,9 @@ github_runner_arc_record_job_peaks: true
 # A controller chart version change deletes every scale set at the old version, with its running ephemeral runners, until the scale sets are upgraded, so the run refuses it while any runner is running. true accepts killing the jobs on them.
 github_runner_arc_allow_busy_controller_upgrade: false
 
+# A scale set whose profile has left the inventory is removed by the run (tasks/remove_departed_scale_sets.yml), but never while it has an unfinished ephemeral runner, since removing it kills the job: the run fails naming them. true drains it instead: the run scales it to no runners, so it takes no new job, fails naming the runners still finishing, and a later run removes it once they have.
+github_runner_arc_drain_departed_scale_sets: false
+
 # The ARC controller's Helm release name and namespace. The stale-listener check, the heartbeat's RBAC and the heartbeat itself look for the controller here too, so a cluster whose controller was installed under other names sets both to those names rather than getting a second controller.
 github_runner_arc_controller_release_name: "arc"
 github_runner_arc_controller_namespace: "actions-runner-controller"

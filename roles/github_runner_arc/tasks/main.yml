@@ -107,6 +107,10 @@
         loop_var: org
         label: "{{ org | exadev.github_runner.arc_scope }}"
 
+    # After every profile is installed, so a profile that moved namespace is serving in its new one before its old one goes. Not tied to this host's own orgs: the cluster's profiles decide what has departed, so a host left with no profile of its own removes its last one as long as it still installs the platform (a host with neither ends the role above).
+    - name: Remove the scale sets whose profiles have left the inventory
+      ansible.builtin.include_tasks: remove_departed_scale_sets.yml
+
     # Last, so the stamp says a run applied everything above, and only when the platform namespace exists. Records what was applied, not what is running: a pod that failed to start still leaves the stamp.
     - name: Record the collection version this run applied
       ansible.builtin.include_tasks: record_deployed_state.yml

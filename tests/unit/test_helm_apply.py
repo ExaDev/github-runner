@@ -48,12 +48,12 @@ def tasks(items: Any) -> Iterator[dict[str, Any]]:
 
 
 def helm_tasks() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
-    """Return every task in the roles that calls the helm module, as its file and name, the whole task (for keywords such as environment) and the module's arguments."""
+    """Return every task in the roles that installs or upgrades a release with the helm module, as its file and name, the whole task (for keywords such as environment) and the module's arguments. An uninstall (state absent) applies nothing, so neither server-side apply nor helm diff concerns it."""
     found = []
     for path in sorted(ROOT.glob("roles/*/tasks/**/*.yml")):
         for task in tasks(yaml.safe_load(path.read_text())):
             for module in HELM_MODULES:
-                if module in task:
+                if module in task and task[module].get("state", "present") != "absent":
                     found.append((f"{path.relative_to(ROOT)}: {task.get('name')}", task, task[module]))
     return found
 

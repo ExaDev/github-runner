@@ -872,5 +872,136 @@ class WorkVolumeTest(unittest.TestCase):
                 self.assertIs(result["values"], values)
 
 
+MARKER_LABELS = {"app.kubernetes.io/component": "runner-scale-set", "app.kubernetes.io/part-of": "github-runner", "app.kubernetes.io/managed-by": "exadev.github_runner"}
+RELEASE_ANNOTATION = "github-runner.exadev/scale-set-release"
+PROTECTED = ["default", "kube-system", "kube-public", "kube-node-lease", "actions-runner-controller", "github-runner-platform", "github-runner-registry-cache"]
+SCALE_SET_CHART = "gha-runner-scale-set"
+
+
+def marked(name: str, release: str | None = "old-runners", labels: dict[str, str] | None = None) -> dict[str, Any]:
+    """A Namespace as the cluster returns it, carrying the role's scale-set marker unless other labels are given, and recording release unless it is None."""
+    annotations = {} if release is None else {RELEASE_ANNOTATION: release}
+    return {"kind": "Namespace", "metadata": {"name": name, "labels": MARKER_LABELS if labels is None else labels, "annotations": annotations}}
+
+
+def departed(namespaces: list[dict[str, Any]], fleet_namespaces: tuple[str, ...] = ("arc-runners-example",)) -> dict[str, Any]:
+    """The departed scale sets among namespaces, for a cluster whose profiles map to fleet_namespaces."""
+    return arc.arc_departed_scale_sets(namespaces, [{"namespace": namespace} for namespace in fleet_namespaces], MARKER_LABELS, RELEASE_ANNOTATION, PROTECTED)
+
+
+class DepartedScaleSetsTest(unittest.TestCase):
+    """Which marked namespaces have lost their profile: each safety invariant has its own test."""
+
+    def test_a_marked_namespace_no_profile_maps_to_has_departed(self) -> None:
+        self.assertEqual(departed([marked("arc-runners-example--repo", "example--repo-runners")]), {"departed": [{"namespace": "arc-runners-example--repo", "release": "example--repo-runners"}], "errors": []})
+
+    def test_a_namespace_a_profile_of_any_host_still_maps_to_stays(self) -> None:
+        # The fleet holds every host's profiles, so a namespace another host installs into is kept however this host's own orgs changed.
+        self.assertEqual(departed([marked("arc-runners-example"), marked("arc-runners-other")], fleet_namespaces=("arc-runners-example", "arc-runners-other")), {"departed": [], "errors": []})
+
+    def test_an_unmarked_or_partly_marked_namespace_is_never_departed(self) -> None:
+        # Existing deployments carry no marker until the run that installs their profile: one whose profile left before then is never touched.
+        for labels in ({}, {"app.kubernetes.io/managed-by": "exadev.github_runner"}, {**MARKER_LABELS, "app.kubernetes.io/component": "something-else"}):
+            with self.subTest(labels=labels):
+                self.assertEqual(departed([marked("arc-runners-gone", labels=labels)]), {"departed": [], "errors": []})
+
+    def test_a_protected_namespace_is_refused_even_when_marked(self) -> None:
+        for name in PROTECTED:
+            with self.subTest(name=name):
+                result = departed([marked(name)])
+                self.assertEqual(result["departed"], [])
+                self.assertEqual(len(result["errors"]), 1)
+                self.assertIn(f"namespace {name} carries the scale-set marker but is one the role never removes", result["errors"][0])
+
+    def test_a_marker_without_a_release_is_refused_not_guessed(self) -> None:
+        for release in (None, ""):
+            with self.subTest(release=release):
+                result = departed([marked("arc-runners-gone", release)])
+                self.assertEqual(result["departed"], [])
+                self.assertEqual(len(result["errors"]), 1)
+                self.assertIn(f"without the {RELEASE_ANNOTATION} annotation", result["errors"][0])
+
+    def test_departed_scale_sets_are_sorted_by_namespace(self) -> None:
+        result = departed([marked("arc-b", "b"), marked("arc-a", "a")])
+        self.assertEqual([item["namespace"] for item in result["departed"]], ["arc-a", "arc-b"])
+
+
+def helm_release(name: str, chart: str = "gha-runner-scale-set-0.14.1") -> dict[str, Any]:
+    """A release as `helm list --output json` reports it."""
+    return {"name": name, "namespace": "arc-runners-gone", "revision": "3", "status": "deployed", "chart": chart, "app_version": "0.14.1"}
+
+
+def runner(name: str, phase: str | None) -> dict[str, Any]:
+    """An EphemeralRunner as the cluster returns it, in phase (no status at all when None)."""
+    return {"kind": "EphemeralRunner", "metadata": {"name": name}, **({} if phase is None else {"status": {"phase": phase}})}
+
+
+GONE = {"namespace": "arc-runners-gone", "release": "gone-runners"}
+
+
+def removals(releases: list[dict[str, Any]], runners: list[dict[str, Any]] | None = None, drain: bool = False) -> dict[str, Any]:
+    """The decision for the one departed scale set GONE, whose namespace holds releases and runners."""
+    return arc.arc_scale_set_removals([GONE], [releases], [runners or []], SCALE_SET_CHART, drain)
+
+
+class ScaleSetRemovalsTest(unittest.TestCase):
+    """What is done with each departed scale set: each safety invariant has its own test."""
+
+    def test_an_idle_departed_scale_set_is_removed(self) -> None:
+        self.assertEqual(removals([helm_release("gone-runners")]), {"remove": [{"namespace": "arc-runners-gone", "release": "gone-runners"}], "drain": [], "errors": []})
+
+    def test_finished_runners_do_not_hold_a_removal(self) -> None:
+        result = removals([helm_release("gone-runners")], [runner("done", "Succeeded"), runner("broke", "Failed")])
+        self.assertEqual((result["remove"], result["errors"]), ([{"namespace": "arc-runners-gone", "release": "gone-runners"}], []))
+
+    def test_the_controllers_release_is_never_removed_whatever_it_is_called(self) -> None:
+        for name in ("arc", "gone-runners"):
+            with self.subTest(name=name):
+                result = removals([helm_release(name, "gha-runner-scale-set-controller-0.14.1")])
+                self.assertEqual((result["remove"], result["drain"]), ([], []))
+                self.assertEqual(len(result["errors"]), 1)
+                self.assertIn(f"{name} (chart gha-runner-scale-set-controller-0.14.1)", result["errors"][0])
+
+    def test_a_release_the_role_did_not_install_holds_the_whole_namespace(self) -> None:
+        for releases in ([helm_release("gone-runners"), helm_release("someone-elses")], [helm_release("someone-elses")], [helm_release("gone-runners", "postgresql-15.2.0")]):
+            with self.subTest(releases=[release["name"] for release in releases]):
+                result = removals(releases)
+                self.assertEqual((result["remove"], result["drain"]), ([], []))
+                self.assertEqual(len(result["errors"]), 1)
+                self.assertIn("holds Helm release(s) the role did not install there", result["errors"][0])
+
+    def test_unfinished_runners_refuse_the_removal_by_name_without_drain(self) -> None:
+        result = removals([helm_release("gone-runners")], [runner("busy", "Running"), runner("starting", "Pending"), runner("new", None), runner("done", "Succeeded")])
+        self.assertEqual((result["remove"], result["drain"]), ([], []))
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("arc-runners-gone", result["errors"][0])
+        self.assertIn("busy, new, starting;", result["errors"][0])
+        self.assertIn("github_runner_arc_drain_departed_scale_sets", result["errors"][0])
+
+    def test_unfinished_runners_are_drained_not_removed_with_drain(self) -> None:
+        result = removals([helm_release("gone-runners")], [runner("busy", "Running"), runner("done", "Succeeded")], drain=True)
+        self.assertEqual(result, {"remove": [], "drain": [{"namespace": "arc-runners-gone", "runners": ["busy"]}], "errors": []})
+
+    def test_drain_never_overrides_a_foreign_release(self) -> None:
+        result = removals([helm_release("someone-elses")], [runner("busy", "Running")], drain=True)
+        self.assertEqual((result["remove"], result["drain"], len(result["errors"])), ([], [], 1))
+
+    def test_a_release_already_gone_leaves_only_the_namespace(self) -> None:
+        self.assertEqual(removals([]), {"remove": [{"namespace": "arc-runners-gone", "release": ""}], "drain": [], "errors": []})
+
+    def test_each_scale_set_is_decided_on_its_own(self) -> None:
+        other = {"namespace": "arc-runners-other", "release": "other-runners"}
+        result = arc.arc_scale_set_removals([GONE, other], [[helm_release("gone-runners")], [helm_release("other-runners")]], [[], [runner("busy", "Running")]], SCALE_SET_CHART, False)
+        self.assertEqual(result["remove"], [{"namespace": "arc-runners-gone", "release": "gone-runners"}])
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn("arc-runners-other", result["errors"][0])
+
+    def test_lists_that_do_not_match_the_departed_scale_sets_are_an_error(self) -> None:
+        with self.assertRaises(ValueError):
+            arc.arc_scale_set_removals([GONE], [], [[]], SCALE_SET_CHART, False)
+        with self.assertRaises(ValueError):
+            arc.arc_scale_set_removals([GONE], [[]], [], SCALE_SET_CHART, False)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,10 @@
+# Runs the github_runner_arc role's tasks/remove_departed_scale_sets.yml exactly as main.yml includes it, for tests/unit/test_departed_scale_sets.py to read the outcome of. Takes the cluster's profiles (github_runner_arc_fleet) and the role's settings as extra variables; the cluster is a stand-in for kubernetes.core and the helm client that the test puts first on the paths.
+- name: Remove the scale sets whose profiles have left the inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Include the role's own removal tasks
+      ansible.builtin.include_role:
+        name: exadev.github_runner.github_runner_arc
+        tasks_from: remove_departed_scale_sets

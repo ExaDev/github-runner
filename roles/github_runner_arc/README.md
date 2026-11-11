@@ -41,6 +41,7 @@ Upgrading ARC on a live fleet. The new controller deletes every scale set whose 
 
 Helm 4 and server-side apply. The role reads `helm version --short` and, on Helm 4 or later, installs and upgrades the controller and scale-set releases with `server_side: true` and `force_conflicts: true`, so a field another manager changed since the last upgrade, such as `maxRunners` after the autoscaler's patch, takes the chart's value instead of failing the upgrade. Only the conflicting fields the chart sets are taken over; a manager's other fields stay its own. A release first installed with client-side apply moves to server-side apply on its next upgrade. On Helm 3 neither option reaches the module. Both options need `kubernetes.core` 6.5.0 or later, which `galaxy.yml` requires. `tests/helm_apply/run.sh` covers it in a kind cluster with Helm 3 and Helm 4.
 
+- `github_runner_arc_drain_departed_scale_sets` (default `false`): drain a scale set whose profile has left the inventory while it has unfinished runners, instead of refusing to remove it (see [Profiles that leave the inventory](#profiles-that-leave-the-inventory)).
 - `github_runner_arc_controller_release_name`, `github_runner_arc_controller_namespace`: the controller's Helm release and namespace, default `arc` in `actions-runner-controller`. The stale-listener check, the heartbeat's RBAC and the heartbeat's controller check use them too.
 - `github_runner_arc_controller_replicas`: above 1, the chart turns on leader election and the role adds a preferred pod anti-affinity across nodes. `github_runner_arc_controller_extra_values` is merged over the role's controller values.
 - `github_runner_arc_metrics_enabled` (and the `_addr`/`_endpoint` settings): Prometheus metrics for the controller and every listener; the 0.14 chart only enables them together.
@@ -446,6 +447,25 @@ The entry's GitHub App needs the permissions ARC documents for the repository sc
 
 The App must be installed on `name` with `repository` among the repositories it can reach. When the role resolves the installation id (`github_runner_arc_manage_secrets` with no `installation_id` set) it asks GitHub for the repository's own installation (`GET /repos/{owner}/{repo}/installation`), so an App installed on the account but not on that repository fails the run then, rather than as a listener that cannot register. The [setup flow](#github-app-setup) creates such an App with `github_runner_arc_app_setup_repository`. Everything else works as for an organisation, `github_runner_arc_manage_secrets: false` included: the role then reads the App's id from the existing App Secret in each of the entry's namespaces under its `app_secret_name` or derived name. The runner reaper reads each run from the repository ARC recorded on the runner, which for a repository scale set is always that repository.
 
+## Profiles that leave the inventory
+
+Each run removes the scale set of a profile that is no longer in the inventory: it uninstalls the release, waits for the controller to remove the listener and runners it owns, and deletes the namespace with everything in it (the App and pull Secrets, the reaper, the hook ConfigMaps). A profile that moves, such as a repository's runners moving to its organisation's entry, is installed in its new namespace before the old one is removed, in the same run. `--check` reports what would be removed and changes nothing.
+
+What has left is decided from a marker, never from a namespace's name. Every run that installs a profile marks its namespace with three labels (`app.kubernetes.io/component: runner-scale-set`, `app.kubernetes.io/part-of: github-runner`, `app.kubernetes.io/managed-by: exadev.github_runner`) and the annotation `github-runner.exadev/scale-set-release` naming its release. A namespace carrying the whole marker that no profile of the cluster maps to has left: the cluster's profiles are every host's in its cluster group, as validation reads them, so one host never removes a scale set another host installs, and a host left with no profile of its own still removes its last one while it installs the platform (a host with neither ends the role before touching the cluster, so the last scale set of a host that installs nothing at all is removed by hand). Another host's `github_runner_arc_orgs` is read from its inventory variables, as validation reads it, so set a host's orgs in its inventory, never only as a play variable or `-e` on its own run, or another host's run will count its profiles as gone.
+
+A deployment from before the marker gets it on its next run, for every profile still in the inventory, and that run removes nothing. A namespace whose profile left before then never carries the marker and stays until removed by hand (`helm uninstall <release> -n <namespace>`, then `kubectl delete namespace <namespace>`).
+
+The removal refuses, failing the run before anything is removed and naming the namespace:
+
+- a marked namespace that is Kubernetes' own (`default`, `kube-system`, `kube-public`, `kube-node-lease`) or the controller's, platform's or registry cache's;
+- a marker without the release annotation;
+- a namespace holding any Helm release other than the one its marker records, or that release from another chart than `gha-runner-scale-set`, so the controller's release and a release the role did not install are never removed, nor the namespace that holds them;
+- a scale set with an unfinished ephemeral runner (any phase but `Succeeded` or `Failed`), since removing it kills the job, naming the runners. With `github_runner_arc_drain_departed_scale_sets` the run drains it instead: it sets the scale set's `minRunners` and `maxRunners` to 0, so it takes no new job and the controller deletes its idle runners, then fails naming the runners still finishing, and a later run removes it once none is left. A scale set whose `minRunners` (the profile's `min_runners`, or its values file's) is above 0 always has idle runners, so it needs the drain, or a run that sets it to 0 before the profile is dropped.
+
+A marked namespace is the scale set's own, whether the role derived its name or a profile's `namespace` named it, so never point a profile at a namespace that holds anything else. A profile with a node cache leaves its cache directory on each node: once the namespace has gone the node cache pruner reports it with `NODE_CACHE_UNPRUNABLE`, and it is safe to delete by hand (see [Capabilities](#capabilities)).
+
+Finding the marked namespaces needs the Ansible credential to be allowed to list Namespaces, and removing needs Helm's uninstall rights in the namespace and delete on Namespaces.
+
 ## Image pull Secret from the GitHub App
 
 When the runner image is a private package owned by the account the App is installed on, `github_runner_arc_image_pull_secret_source: app` pulls it with the runners' own GitHub App rather than a registry token tied to a person. The App needs the `packages: read` permission (add it to `github_runner_arc_app_setup_permissions` when creating the App, or to an existing App's settings), approved by the account on the App's installation. A repository entry of a personal account uses an App installed on that user; whether its installation token reads the user's own private packages is not covered by the GitHub documentation this role cites, so use `static`, or `none` with public images, until a run proves it.
@@ -577,7 +597,7 @@ github_runner_arc_orgs:
 
 ## Managing an existing install
 
-A cluster whose controller and scale set were installed under other names can be managed by setting those names, rather than getting a second controller and scale set beside them. The role then upgrades the existing releases in place.
+A cluster whose controller and scale set were installed under other names can be managed by setting those names, rather than getting a second controller and scale set beside them. The role then upgrades the existing releases in place, and marks each profile's namespace as its own (see [Profiles that leave the inventory](#profiles-that-leave-the-inventory)), so removing a profile later uninstalls its release and deletes that namespace with everything in it.
 
 ```yaml
 github_runner_arc_controller_release_name: "existing-controller"
