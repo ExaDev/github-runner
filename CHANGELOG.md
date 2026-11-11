@@ -1,3 +1,9 @@
+## [3.2.0](https://github.com/ExaDev/github-runner/compare/v3.1.2...v3.2.0) (2026-11-11)
+
+### Features
+
+* **arc:** remove the scale sets whose profiles have left the inventory ([f0f090a](https://github.com/ExaDev/github-runner/commit/f0f090a606cdb61f90e3dcb2876a886b3da6d58f))
+
 ## [3.1.2](https://github.com/ExaDev/github-runner/compare/v3.1.1...v3.1.2) (2026-11-09)
 
 ### Bug Fixes
