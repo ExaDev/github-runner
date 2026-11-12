@@ -264,7 +264,7 @@ github_runner_cluster_colima_kernel_module: br_netfilter
 github_runner_cluster_colima_sysctl_settings:
   net.bridge.bridge-nf-call-iptables: 1
   net.bridge.bridge-nf-call-ip6tables: 1
-# Not settings: the directory that exists in the VM exactly while the module is loaded (the bridge sysctls live under it), and the files in the VM that load the module and set the sysctls at boot. The module file keeps the name the repository README's note has long told people to create by hand, so a host that has one is adopted, not duplicated.
+# Not settings: the directory that exists in the VM exactly while the module is loaded (the bridge sysctls live under it), and the files in the VM that load the module and set the sysctls at boot. The module file keeps the name the note in docs/non-obvious-behaviour.md has long told people to create by hand, so a host that has one is adopted, not duplicated.
 github_runner_cluster_colima_bridge_proc_dir: /proc/sys/net/bridge
 github_runner_cluster_colima_modules_load_file: /etc/modules-load.d/br_netfilter.conf
 github_runner_cluster_colima_sysctl_file: /etc/sysctl.d/90-github-runner-br-netfilter.conf

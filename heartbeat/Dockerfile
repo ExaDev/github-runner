@@ -5,8 +5,8 @@
 # API), and bash. All available from Alpine's apk, so the image is
 # arch-agnostic (no gh binary to fetch per-arch) and small. Build context is
 # the repo root so it can COPY scripts/heartbeat.sh; built and pushed
-# multi-arch the same manual way as the main runner image (see the README's
-# Build/test section) so the image is pullable from whichever node the
+# multi-arch the same manual way as the main runner image (see
+# docs/build-and-test.md) so the image is pullable from whichever node the
 # scheduler places this pod on.
 FROM alpine:3.20
 

@@ -1,6 +1,6 @@
 name: Fleet alert
 
-# Copy this file to .github/workflows/ in a repository that is not served by the fleet, and set the repository variables and secrets listed below. It reads the heartbeat's fleet-health.json from its gist and announces an outage that has lasted longer than a window (see "Fleet-down notification" in the collection's README).
+# Copy this file to .github/workflows/ in a repository that is not served by the fleet, and set the repository variables and secrets listed below. It reads the heartbeat's fleet-health.json from its gist and announces an outage that has lasted longer than a window (see "Fleet-down notification" in docs/heartbeat.md).
 #
 # It runs on GitHub-hosted ubuntu-latest on purpose: a job routed to the fleet would not start when the fleet is down, which is exactly when this has to run. Do not change runs-on to the fleet's label or to runner-fallback-action's output.
 #

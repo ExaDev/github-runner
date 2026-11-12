@@ -26,7 +26,7 @@
         name: exadev.github_runner.github_runner_arc
         tasks_from: validate.yml
 
-# The host baseline is the operator's, applied before this play and never by it: Homebrew on a Mac (the pre_tasks below and the macOS runner role use it), a connecting user who can become root without a password or a play run with --ask-become-pass, a host that does not sleep while the node runs (a Mac on AC power with sleep off, a laptop that ignores its lid), and, where a native node asks for one, a Tailscale client on the host. The README's Prerequisites section lists what each kind of host must already have.
+# The host baseline is the operator's, applied before this play and never by it: Homebrew on a Mac (the pre_tasks below and the macOS runner role use it), a connecting user who can become root without a password or a play run with --ask-become-pass, a host that does not sleep while the node runs (a Mac on AC power with sleep off, a laptop that ignores its lid), and, where a native node asks for one, a Tailscale client on the host. The Prerequisites section of docs/ansible.md lists what each kind of host must already have.
 - name: GitHub Actions runner fleet
   # The cluster group, whose inventory order decides which hosts are k3s servers (see roles/github_runner_cluster/defaults/main.yml). bootstrap.sh sets github_runner_cluster_group to all, since its one-host inventory has no groups.
   hosts: "{{ github_runner_cluster_group | default('github_runner_cluster') }}"

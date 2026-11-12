@@ -21,5 +21,5 @@ all:
           github_runner_cluster_node_mode: native
           # The host is dedicated to the cluster, so the role may log its client out of the tailnet it was in.
           github_runner_cluster_native_tailscale_leave_other_tailnet: true
-          # The kernel modules and sysctls k3s needs, set by the cluster role. What else a laptop dedicated to the cluster needs of its host (no suspend when the lid closes, no Wi-Fi power save, a charge limit on its always-on battery, no desktop, security updates that never reboot it) is the operator's to provide before the play runs; see the README's Prerequisites.
+          # The kernel modules and sysctls k3s needs, set by the cluster role. What else a laptop dedicated to the cluster needs of its host (no suspend when the lid closes, no Wi-Fi power save, a charge limit on its always-on battery, no desktop, security updates that never reboot it) is the operator's to provide before the play runs; see the Prerequisites section of docs/ansible.md.
           github_runner_cluster_k3s_prerequisites: true

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage-driven maxRunners autoscaler. Runs inside the `autoscaler` in-cluster Deployment (see autoscaler/loop.sh for the poll loop). Never inspects job identity or the GitHub Actions queue: it only watches real, current memory usage and pressure, and adjusts spec.maxRunners across every AutoscalingRunnerSet named in AUTOSCALER_TARGETS, pooling them against one combined memory budget rather than budgeting each separately. See the project README's Autoscaler section for the full algorithm and rationale.
+# Usage-driven maxRunners autoscaler. Runs inside the `autoscaler` in-cluster Deployment (see autoscaler/loop.sh for the poll loop). Never inspects job identity or the GitHub Actions queue: it only watches real, current memory usage and pressure, and adjusts spec.maxRunners across every AutoscalingRunnerSet named in AUTOSCALER_TARGETS, pooling them against one combined memory budget rather than budgeting each separately. See docs/autoscaler.md for the full algorithm and rationale.
 #
 # Environment (provided by the Deployment - see roles/github_runner_arc/tasks/install_platform.yml):
 # - kubectl needs no KUBECONFIG here: running as a pod with a mounted ServiceAccount token, client-go auto-detects in-cluster config.

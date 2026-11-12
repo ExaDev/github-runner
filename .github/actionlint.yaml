@@ -1,6 +1,6 @@
 self-hosted-runner:
   labels:
-    # The ARC runner scale set label the fleet smoke tests (test-arc-runner.yml, test-autoscaler.yml) target - see the project README's Architecture section.
+    # The ARC runner scale set label the fleet smoke tests (test-arc-runner.yml, test-autoscaler.yml) target - see docs/architecture.md.
     - exadev-runners
 
 # Configuration variables in array of strings defined in your repository or
