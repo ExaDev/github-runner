@@ -1,3 +1,14 @@
+## [3.2.1](https://github.com/ExaDev/github-runner/compare/v3.2.0...v3.2.1) (2026-11-12)
+
+### Documentation
+
+* move operational detail out of the README into docs ([4bee0e5](https://github.com/ExaDev/github-runner/commit/4bee0e595e05b3485e811603cdd9281c08f46d86))
+* point section references at the docs files that hold them ([f8fbca9](https://github.com/ExaDev/github-runner/commit/f8fbca92fd01fb1154898dc3580a272649babf66))
+
+### Tests
+
+* read the Colima kernel note from its docs file ([c2a1f23](https://github.com/ExaDev/github-runner/commit/c2a1f237932b65e491aac3abb755161451cbd8ca))
+
 ## [3.2.0](https://github.com/ExaDev/github-runner/compare/v3.1.2...v3.2.0) (2026-11-11)
 
 ### Features
