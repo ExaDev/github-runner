@@ -1,6 +1,6 @@
 name: CI
 
-# Lints every shell script, workflow file, YAML file, and Dockerfile in the repo. There is no application test suite here (this repo is fleet infrastructure config, not application code) - these checks are its actual verification surface, matching the README's Build/test/lint section.
+# Lints every shell script, workflow file, YAML file, and Dockerfile in the repo. There is no application test suite here (this repo is fleet infrastructure config, not application code) - these checks are its actual verification surface, matching docs/build-and-test.md.
 #
 # Runs on GitHub-hosted runners, which are free for a public repository, so the checks of the fleet's own configuration don't depend on the fleet being up. The fleet's own behaviour is tested by test-arc-runner.yml and test-autoscaler.yml, which target it directly.
 #

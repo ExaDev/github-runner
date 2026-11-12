@@ -128,7 +128,7 @@ ip -6 route replace unreachable fd7a:115c:a1e0::/48
 
 # Only a self-hosted bootstrap server may start without a join key: its first start is what brings up the Headscale server that issues it.
 if [ -z "$join_key" ] && [ -z "$self_hosted_health_url" ]; then
-  echo "K3S_VPN_AUTH_JOIN_KEY must be set in .env: a reusable, pre-authorised join key for the mesh (see the README's Tailscale section for how it's provisioned)." >&2
+  echo "K3S_VPN_AUTH_JOIN_KEY must be set in .env: a reusable, pre-authorised join key for the mesh (see the Tailscale section of docs/architecture.md for how it's provisioned)." >&2
   exit 1
 fi
 

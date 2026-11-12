@@ -4,7 +4,7 @@
 #
 # Two roles, selected via Compose profiles rather than separate compose files:
 #  - `--profile server`: a control-plane/etcd member (`k3s` service, running
-# `k3s server`). Every server host runs the SAME service - whether it bootstraps the cluster (`--cluster-init`) or joins an existing one (`--server <url>`) is decided at runtime by whether it has a server to join (K3S_JOIN_SERVER_URL, or the role directory's join-url that docker-compose.fleet-role.yml mounts), not by a separate service/profile. See the project README's Architecture section for why 3 servers is the right minimum (etcd quorum math: 2 is worse than 1, not better) and why every server needs every server's own hostname on every server's own --tls-san list, not just its own - see K3S_TLS_SAN_LIST below.
+# `k3s server`). Every server host runs the SAME service - whether it bootstraps the cluster (`--cluster-init`) or joins an existing one (`--server <url>`) is decided at runtime by whether it has a server to join (K3S_JOIN_SERVER_URL, or the role directory's join-url that docker-compose.fleet-role.yml mounts), not by a separate service/profile. See docs/architecture.md for why 3 servers is the right minimum (etcd quorum math: 2 is worse than 1, not better) and why every server needs every server's own hostname on every server's own --tls-san list, not just its own - see K3S_TLS_SAN_LIST below.
 #  - `--profile agent`: a pure worker (`k3s-agent` service, running
 #    `k3s agent`) - schedulable capacity with no control-plane role at all.
 #
