@@ -108,7 +108,7 @@ class GuardTest(unittest.TestCase):
         self.assertIn("**Colima kernel.**", readme)
         self.assertIn(MODULES_FILE, readme)
         self.assertIn(SYSCTL_FILE, readme)
-        self.assertIn("colima_kernel.yml", (ROOT / "README.md").read_text())
+        self.assertIn("colima_kernel.yml", (ROOT / "docs" / "non-obvious-behaviour.md").read_text())
 
     def test_both_includes_run_on_macos_only(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
