@@ -128,7 +128,7 @@
               Colima lists profile {{ github_runner_cluster_effective_runtime.colima_profile }} as running, but docker info failed on {{ github_runner_cluster_runtime_probe_attempts }} tries
               {{ github_runner_cluster_runtime_probe_delay }} seconds apart; a command in the guest {{ 'failed' if github_runner_cluster_runtime_guest.rc != 0 else 'succeeded' }};
               the VM's host agent has been running {{ 'for more than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds ago' if github_runner_cluster_runtime_agent_age | int > github_runner_cluster_runtime_boot_grace | int
-              else ('within the last ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds' if github_runner_cluster_runtime_agent_age | int >= 0 else 'for a time that could not be read') }};
+              else ('for less than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds' if github_runner_cluster_runtime_agent_age | int >= 0 else 'for a time that could not be read') }};
               the Docker context {{ 'points at' if github_runner_cluster_runtime_context_socket_ok | bool else 'does not point at' }} the profile's own socket.
 
         - name: Say what a real run would do
