@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -80,9 +81,16 @@ class DefaultsTest(unittest.TestCase):
         self.assertIn("github_runner_cluster_container_name", template)
         self.assertIn("github_runner_cluster_agent_container_name", template)
 
+    def test_the_stop_of_a_silent_runtime_has_its_own_switch_and_bounded_probes(self) -> None:
+        self.assertIs(DEFAULTS["github_runner_cluster_runtime_force_stop_wedged"], True)
+        self.assertGreater(DEFAULTS["github_runner_cluster_runtime_probe_attempts"], 1)
+        self.assertGreater(DEFAULTS["github_runner_cluster_runtime_probe_timeout"], 0)
+        self.assertGreater(DEFAULTS["github_runner_cluster_runtime_kill_grace"], 0)
+        self.assertGreater(DEFAULTS["github_runner_cluster_runtime_boot_grace"], DEFAULTS["github_runner_cluster_runtime_probe_attempts"] * (DEFAULTS["github_runner_cluster_runtime_probe_timeout"] + DEFAULTS["github_runner_cluster_runtime_probe_delay"]))
+
     def test_every_new_variable_is_in_the_readme(self) -> None:
         readme = (ROLE / "README.md").read_text()
-        for name in ("github_runner_cluster_runtime_autostart", "github_runner_cluster_runtime_autostart_at", "github_runner_cluster_runtime_boot_profile", "github_runner_cluster_runtime", "github_runner_cluster_colima_profile", "github_runner_cluster_runtime_path"):
+        for name in ("github_runner_cluster_runtime_force_stop_wedged", "github_runner_cluster_runtime_probe_attempts", "github_runner_cluster_runtime_probe_delay", "github_runner_cluster_runtime_probe_timeout", "github_runner_cluster_runtime_boot_grace", "github_runner_cluster_runtime_kill_grace", "github_runner_cluster_runtime_clean_stop_timeout", "github_runner_cluster_runtime_autostart", "github_runner_cluster_runtime_autostart_at", "github_runner_cluster_runtime_boot_profile", "github_runner_cluster_runtime", "github_runner_cluster_colima_profile", "github_runner_cluster_runtime_path"):
             with self.subTest(name=name):
                 self.assertIn(f"`{name}`", readme)
 
@@ -295,6 +303,15 @@ with open(os.path.join(stub, "colima-home.log"), "a") as homes:
     homes.write(name + " " + " ".join(args) + " " + os.environ.get("COLIMA_HOME", "-") + "\\n")
 def exists(file):
     return os.path.exists(os.path.join(stub, file))
+def hang():
+    # A program that never answers and does not die on SIGALRM, as a Go binary does not; with ignore-term it ignores TERM as well, so only KILL ends it.
+    import signal, time
+    signal.signal(signal.SIGALRM, signal.SIG_IGN)
+    if exists("ignore-term"):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(os.path.join(stub, "hung.pids"), "a") as pids:
+        pids.write(str(os.getpid()) + "\\n")
+    time.sleep(300)
 def touch(file):
     open(os.path.join(stub, file), "w").close()
 def need_root():
@@ -306,6 +323,16 @@ if name == "docker" and args[:2] == ["context", "inspect"]:
         sys.exit("context inspect: no context-host file")
     print(open(os.path.join(stub, "context-host")).read(), end="")
 elif name == "docker":
+    if args[:1] == ["info"] and exists("docker-hangs"):
+        hang()
+    if not exists("runtime-up") and args[:1] == ["info"] and exists("docker-answers-after"):
+        # A daemon that fails its first tries and then answers, as one that is restarting or a loaded host does.
+        counter = os.path.join(stub, "docker-info-failures")
+        seen = int(open(counter).read()) if os.path.exists(counter) else 0
+        if seen >= int(open(os.path.join(stub, "docker-answers-after")).read()):
+            touch("runtime-up")
+        else:
+            open(counter, "w").write(str(seen + 1))
     if not exists("runtime-up"):
         sys.exit("Cannot connect to the Docker daemon")
     if args[0] == "info":
@@ -317,6 +344,10 @@ elif name == "docker":
     else:
         sys.exit("unexpected docker call: " + " ".join(args))
 elif name == "colima" and args[0] == "ssh":
+    if exists("guest-hangs") and args[args.index("--") + 1:] == ["true"]:
+        hang()
+    if exists("guest-answers") and args[args.index("--") + 1:] == ["true"]:
+        sys.exit(0)
     if not exists("runtime-up"):
         sys.exit("colima: the VM is not running")
     command = args[args.index("--") + 1:]
@@ -380,12 +411,39 @@ elif name == "colima" and args[0] == "ssh":
         print(content, end="")
     else:
         sys.exit("unexpected colima ssh call: " + " ".join(command))
+elif name == "colima" and args[0] == "list":
+    # One JSON object per profile, whatever profile is asked for: this host has the profile the test names and another one beside it, which is always running.
+    profile = os.environ.get("RUNTIME_PROFILE", "default")
+    print('{{"name":"other","status":"Running","runtime":"docker"}}')
+    print('{{"name":"' + profile + '","status":"' + ("Running" if exists("colima-listed-running") else "Stopped") + '","runtime":"docker"}}')
+elif name == "colima" and args[0] == "stop":
+    if args[:3] != ["stop", "--profile", os.environ.get("RUNTIME_PROFILE", "default")] or args[3:] not in ([], ["--force"]):
+        sys.exit("unexpected colima stop call: " + " ".join(args))
+    if args[3:] == [] and exists("clean-stop-hangs"):
+        hang()
+    if args[3:] == [] and exists("clean-stop-fails"):
+        sys.exit("colima: the VM does not stop")
+    for file in ("colima-listed-running", "runtime-up", "docker-hangs", "guest-hangs"):
+        if exists(file):
+            os.remove(os.path.join(stub, file))
 elif name == "colima":
     if args[0] != "start" or args[-1] != "--activate=false":
         sys.exit("unexpected colima call: " + " ".join(args))
     if exists("colima-start-fails"):
         sys.exit("colima: the VM did not start")
-    touch("runtime-up")
+    # Starting a profile Colima already lists as running does nothing, so a wedged VM stays wedged.
+    if not exists("colima-listed-running"):
+        touch("colima-listed-running")
+        touch("runtime-up")
+        # A VM that is started again answers.
+        for file in ("docker-hangs", "guest-hangs"):
+            if exists(file):
+                os.remove(os.path.join(stub, file))
+elif name == "ps":
+    # The host agent as ps shows it, from the file agent-ps ("<elapsed> <command>"); a pid that is not running prints nothing and fails.
+    if not exists("agent-ps"):
+        sys.exit(1)
+    print(open(os.path.join(stub, "agent-ps")).read(), end="")
 elif name == "launchctl":
     system = args[1] == "system" or args[1].startswith("system/")
     if args[0] == "print":
@@ -422,6 +480,55 @@ def failed_task(stdout: str) -> str | None:
     return None
 
 
+class BoundedRunTest(unittest.TestCase):
+    """files/run_bounded.pl, which gives probes, the guest command and the clean stop a deadline that holds whatever the command does with signals."""
+
+    SCRIPT = ROLE / "files" / "run_bounded.pl"
+
+    def run_bounded(self, deadline: float, grace: float, *command: str) -> tuple[subprocess.CompletedProcess[str], float]:
+        began = time.monotonic()
+        result = subprocess.run(["perl", str(self.SCRIPT), str(deadline), str(grace), *command], capture_output=True, text=True, check=False, timeout=60)
+        return result, time.monotonic() - began
+
+    def test_the_commands_status_and_output_pass_through(self) -> None:
+        result, _ = self.run_bounded(10, 1, "sh", "-c", "echo out; echo err >&2; exit 3")
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (3, "out\n", "err\n"))
+
+    def test_a_signal_that_ends_the_command_is_reported_as_the_shell_does(self) -> None:
+        result, _ = self.run_bounded(10, 1, "sh", "-c", "kill -9 $$")
+        self.assertEqual(result.returncode, 137)
+
+    def test_a_command_that_ignores_sigalrm_is_ended_at_the_deadline(self) -> None:
+        # What a Go program does with the timer a bare alarm would set.
+        result, elapsed = self.run_bounded(1, 1, sys.executable, "-c", "import signal, time; signal.signal(signal.SIGALRM, signal.SIG_IGN); time.sleep(60)")
+        self.assertEqual(result.returncode, 124)
+        self.assertLess(elapsed, 10)
+
+    def test_a_command_that_ignores_term_is_killed_after_the_grace(self) -> None:
+        result, elapsed = self.run_bounded(1, 1, sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)")
+        self.assertEqual(result.returncode, 124)
+        self.assertGreaterEqual(elapsed, 2)
+        self.assertLess(elapsed, 15)
+
+    def test_what_the_command_started_does_not_outlive_the_deadline(self) -> None:
+        marker = Path(tempfile.mkdtemp(prefix="bounded-")) / "pid"
+        self.addCleanup(shutil.rmtree, marker.parent, True)
+        result, _ = self.run_bounded(1, 1, "sh", "-c", f"trap '' TERM; sleep 60 & echo $! > {marker}; wait")
+        self.assertEqual(result.returncode, 124)
+        pid = int(marker.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        self.fail("a process the command started is still running")
+
+    def test_a_command_that_cannot_be_started_exits_127(self) -> None:
+        result, _ = self.run_bounded(5, 1, "/nonexistent/command")
+        self.assertEqual(result.returncode, 127)
+
+
 @unittest.skipIf(shutil.which(ANSIBLE_PLAYBOOK) is None, "ansible-playbook is not installed")
 class RoleTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -433,7 +540,7 @@ class RoleTest(unittest.TestCase):
         self.home.mkdir()
         self.bin = self.work / "bin"
         self.bin.mkdir()
-        for name in ("docker", "colima", "launchctl", "plutil", "sudo"):
+        for name in ("docker", "colima", "launchctl", "plutil", "sudo", "ps"):
             tool = self.bin / name
             tool.write_text(STUB.format(python=sys.executable))
             tool.chmod(0o755)
@@ -471,7 +578,7 @@ class RoleTest(unittest.TestCase):
         inventory = self.work / "inventory.yml"
         inventory.write_text(yaml.safe_dump({"all": {"hosts": {"node1": host}}}))
         # The stand-ins come first on the playbook's own PATH as well as the tasks', so a tool a task runs without the role's PATH still cannot reach this machine's real launchd, Colima or Docker.
-        env = ansible_env() | {"RUNTIME_STUB": str(self.stub), "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+        env = ansible_env() | {"RUNTIME_STUB": str(self.stub), "RUNTIME_PROFILE": profile, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
         return subprocess.run([ANSIBLE_PLAYBOOK, "-i", str(inventory), str(RUN), *extra], capture_output=True, text=True, check=False, env=env, cwd=self.work)
 
     def calls(self) -> list[str]:
@@ -523,6 +630,218 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"][3:5], ["--profile", "default"])
         self.assertEqual(self.plist.stat().st_mode & 0o777, 0o644)
         self.assertTrue((self.stub / "loaded").exists())
+
+    # A profile Colima lists as running while its runtime does not answer.
+
+    FAST = {"github_runner_cluster_runtime_probe_attempts": 3, "github_runner_cluster_runtime_probe_delay": 0, "github_runner_cluster_runtime_probe_timeout": 5}
+
+    def stops(self) -> list[str]:
+        return [call for call in self.calls() if re.match(r"\S+ colima stop", call)]
+
+    def starts(self) -> list[str]:
+        return [call for call in self.calls() if re.match(r"\S+ colima start", call)]
+
+    AGENT = "/usr/local/bin/limactl hostagent --pidfile /example/ha.pid --socket /example/ha.sock"
+
+    @staticmethod
+    def etime(seconds: int) -> str:
+        """ps's elapsed time, [[days-]hours:]minutes:seconds."""
+        days, rest = divmod(seconds, 86400)
+        hours, rest = divmod(rest, 3600)
+        minutes, secs = divmod(rest, 60)
+        return (f"{days}-" if days else "") + (f"{hours:02d}:" if days or hours else "") + f"{minutes:02d}:{secs:02d}"
+
+    def listed_running(self, agent_age: int | None = 7200, command: str | None = None, stale_file: bool = False) -> None:
+        """A VM Colima lists as running whose Docker daemon is silent, with a live host agent that has run for `agent_age` seconds (None for no pid file at all). `stale_file` leaves a pid file that is old but names no running process, as one from before a reboot does; `command` is what the process runs."""
+        self.state("session", "colima-listed-running")
+        if agent_age is None:
+            return
+        pid = self.home / ".colima" / "_lima" / "colima" / "ha.pid"
+        pid.parent.mkdir(parents=True, exist_ok=True)
+        pid.write_text("4242\n")
+        old = time.time() - 7 * 86400
+        os.utime(pid, (old, old))
+        if not stale_file:
+            (self.stub / "agent-ps").write_text(f"{self.etime(agent_age)} {command or self.AGENT}\n")
+
+    def hung_pids(self) -> list[int]:
+        log = self.stub / "hung.pids"
+        return [int(line) for line in log.read_text().split()] if log.exists() else []
+
+    def assert_all_ended(self) -> None:
+        for pid in self.hung_pids():
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail(f"the hung stand-in {pid} is still running")
+
+    def info_calls(self) -> list[str]:
+        return [call for call in self.calls() if re.match(r"\S+ docker info", call)]
+
+    def test_a_vm_whose_runtime_stays_silent_and_whose_guest_and_agent_confirm_it_is_stopped_cleanly_and_started_again(self) -> None:
+        self.listed_running()
+        result = self.run_role(**self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), ["colima colima stop --profile default"])
+        self.assertEqual(self.starts(), ["colima colima start --profile default --activate=false"])
+        self.assertLess(self.calls().index(self.stops()[0]), self.calls().index(self.starts()[0]))
+        # The first probe and every further try.
+        self.assertGreaterEqual(len(self.info_calls()), 4)
+        self.assertTrue((self.stub / "runtime-up").exists())
+
+    def test_a_clean_stop_that_fails_is_followed_by_a_forced_one(self) -> None:
+        self.listed_running()
+        self.state("clean-stop-fails")
+        result = self.run_role(**self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), ["colima colima stop --profile default", "colima colima stop --profile default --force"])
+        self.assertEqual(len(self.starts()), 1)
+
+    def test_only_the_hosts_own_profile_is_stopped_while_another_listed_profile_runs(self) -> None:
+        self.listed_running()
+        self.run_role(**self.FAST)
+        self.assertEqual([call for call in self.stops() if "--profile other" in call], [])
+        self.assertTrue(self.stops())
+
+    def test_a_daemon_that_answers_on_a_later_try_is_never_stopped(self) -> None:
+        # The first probe and one further try fail, as on a loaded host or while dockerd restarts, and the next answers.
+        self.listed_running()
+        (self.stub / "docker-answers-after").write_text("2")
+        result = self.run_role(**self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+        self.assertEqual(self.starts(), [])
+
+    def assert_left_alone(self, result: subprocess.CompletedProcess[str], *words: str) -> None:
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(failed_task(result.stdout), "Fail where the VM is not shown to be wedged or the stop is off")
+        self.assertEqual(self.stops(), [])
+        self.assertEqual(self.starts(), [])
+        self.assertIn("colima stop --profile default --force", result.stdout, "the recovery by hand is named")
+        for word in words:
+            self.assertIn(word, result.stdout)
+
+    def test_a_guest_that_answers_a_command_is_left_alone_although_docker_is_silent(self) -> None:
+        self.listed_running()
+        self.state("guest-answers")
+        self.assert_left_alone(self.run_role(**self.FAST), "a command in the guest succeeded")
+
+    def test_a_vm_whose_agent_started_moments_ago_is_left_alone_however_old_its_pid_file_is(self) -> None:
+        # The pid file is a week old, from a boot long gone, and the process it names started thirty seconds ago.
+        self.listed_running(agent_age=30)
+        self.assert_left_alone(self.run_role(**self.FAST), "for less than 600 seconds")
+
+    def test_a_pid_file_naming_no_running_process_leaves_the_age_unknown_and_nothing_is_stopped(self) -> None:
+        # An old pid file whose process is gone, as after a reboot: its date says the agent is old, and that must not count.
+        self.listed_running(stale_file=True)
+        self.assert_left_alone(self.run_role(**self.FAST), "could not be read")
+
+    def test_a_pid_file_naming_another_program_leaves_the_age_unknown(self) -> None:
+        self.listed_running(command="/usr/sbin/cron -f")
+        self.assert_left_alone(self.run_role(**self.FAST), "could not be read")
+
+    def test_an_agent_that_has_run_for_days_counts_as_old(self) -> None:
+        self.listed_running(agent_age=3 * 86400 + 3600 + 61)
+        result = self.run_role(**self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.stops()), 1)
+
+    def test_an_agent_whose_age_cannot_be_read_does_not_count_as_old(self) -> None:
+        self.listed_running(agent_age=None)
+        self.assert_left_alone(self.run_role(**self.FAST), "could not be read")
+
+    def test_a_colima_home_that_is_not_where_the_context_points_never_leads_to_a_stop(self) -> None:
+        # The variable names another Colima home than the one the Docker context's socket is in: the probes measured one runtime and a stop would act on another's profile. (A context whose endpoint is no Colima socket at all fails earlier, in the filter that reads the home from it.)
+        self.listed_running()
+        result = self.run_role(github_runner_cluster_colima_home="/elsewhere", **self.FAST)
+        self.assert_left_alone(result, "does not point at")
+
+    def test_with_the_stop_switched_off_a_confirmed_wedge_fails_naming_the_switch(self) -> None:
+        self.listed_running()
+        self.assert_left_alone(self.run_role(github_runner_cluster_runtime_force_stop_wedged=False, **self.FAST), "github_runner_cluster_runtime_force_stop_wedged is off")
+
+    def test_the_stop_switch_is_independent_of_autostart(self) -> None:
+        self.listed_running()
+        result = self.run_role(github_runner_cluster_runtime_force_stop_wedged=False, github_runner_cluster_runtime_autostart=True, **self.FAST)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.stops(), [])
+
+    def test_a_second_run_after_the_recovery_stops_and_starts_nothing(self) -> None:
+        self.listed_running()
+        self.run_role(**self.FAST)
+        before = len(self.calls())
+        result = self.run_role(**self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.calls()[before:] if re.match(r"\S+ colima (stop|start)", call)], [])
+
+    def test_a_stopped_profile_is_started_without_being_stopped_first(self) -> None:
+        self.state("session")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+
+    def test_a_running_runtime_is_neither_listed_nor_stopped(self) -> None:
+        self.state("session", "runtime-up", "colima-listed-running")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+        self.assertEqual([call for call in self.calls() if re.match(r"\S+ colima list", call)], [])
+
+    HANG = {"github_runner_cluster_runtime_probe_attempts": 2, "github_runner_cluster_runtime_probe_delay": 0, "github_runner_cluster_runtime_probe_timeout": 2, "github_runner_cluster_runtime_kill_grace": 1, "github_runner_cluster_runtime_clean_stop_timeout": 2}
+
+    def test_probes_that_never_reply_and_ignore_sigalrm_are_ended_and_the_vm_is_stopped_and_started(self) -> None:
+        # docker info and the guest command never reply and ignore SIGALRM, as Go programs do; the clean stop never ends and ignores TERM too.
+        self.listed_running()
+        self.state("docker-hangs", "guest-hangs", "clean-stop-hangs", "ignore-term")
+        began = time.monotonic()
+        result = self.run_role(**self.HANG)
+        elapsed = time.monotonic() - began
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), ["colima colima stop --profile default", "colima colima stop --profile default --force"])
+        self.assertEqual(len(self.starts()), 1)
+        # Unbounded, each stand-in sleeps for 300 seconds.
+        self.assertLess(elapsed, 120)
+        self.assertGreaterEqual(len(self.hung_pids()), 5)
+        self.assert_all_ended()
+
+    def test_a_hung_docker_with_a_guest_that_answers_fails_the_run_within_the_bound_and_stops_nothing(self) -> None:
+        self.listed_running()
+        self.state("docker-hangs", "guest-answers")
+        began = time.monotonic()
+        result = self.run_role(**self.HANG)
+        self.assertLess(time.monotonic() - began, 120)
+        self.assert_left_alone(result, "a command in the guest succeeded")
+        self.assert_all_ended()
+
+    def test_a_hung_first_probe_counts_as_the_runtime_not_answering(self) -> None:
+        # A stopped profile whose Docker socket accepts and never replies: the start follows, as for a socket that refuses.
+        self.state("session", "docker-hangs")
+        began = time.monotonic()
+        result = self.run_role(**self.HANG)
+        self.assertLess(time.monotonic() - began, 120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.starts()), 1)
+        self.assert_all_ended()
+
+    def test_check_mode_reads_everything_stops_nothing_and_says_what_a_real_run_would_do(self) -> None:
+        self.listed_running()
+        result = self.run_role("--check", **self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+        self.assertTrue((self.stub / "colima-listed-running").exists())
+        self.assertIn("A real run would stop the profile", result.stdout)
+
+    def test_check_mode_on_a_vm_that_is_not_shown_to_be_wedged_says_nothing_would_be_stopped(self) -> None:
+        self.listed_running()
+        self.state("guest-answers")
+        result = self.run_role("--check", **self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+        self.assertIn("A real run would stop nothing and fail here", result.stdout)
 
     def test_every_docker_call_uses_the_hosts_docker_context(self) -> None:
         self.state("session")
@@ -722,12 +1041,12 @@ class RoleTest(unittest.TestCase):
         self.assertEqual((self.node_daemon.read_text(), self.node_agent.read_text()), ("<plist/>", "<plist/>"))
         self.assertEqual(self.changes(), [])
 
-    def test_the_variable_wins_over_the_context_and_the_context_is_not_read(self) -> None:
+    def test_the_variable_wins_over_the_context_for_the_home_colima_runs_in(self) -> None:
+        # The context is still read, since a stop of a silent profile compares its socket with the home; here the runtime is down and nothing is listed as running, so the comparison is never used.
         self.state("session")
         result = self.run_role(context="colima-node", github_runner_cluster_colima_home="/elsewhere")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_colima_ran_in("/elsewhere")
-        self.assertFalse([call for call in self.calls() if " docker context " in call])
 
     def test_a_profile_in_the_default_home_runs_with_no_variable(self) -> None:
         self.state("session")

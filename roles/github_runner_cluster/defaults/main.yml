@@ -237,7 +237,20 @@ github_runner_cluster_server_ready_timeout: 600
 github_runner_cluster_runtime_autostart: true
 # When the role starts a Colima profile: login installs a per-user launchd agent (a property list in the connecting user's ~/Library/LaunchAgents, loaded into the user's login session), which runs only once that user has logged in; boot installs a launchd daemon (/Library/LaunchDaemons, owned by root, loaded into the system domain, run as the connecting user through UserName), which runs when the Mac starts, with nobody logged in, so a node recovers from a power loss or a reboot at the login window; auto is boot for the profile named by github_runner_cluster_runtime_boot_profile and login for any other. Only one of the two exists for a profile at a time: installing either removes the other's property list, and unloads it, so the profile is not started twice. A daemon takes root (become) to write and to load, which the agent never does.
 github_runner_cluster_runtime_autostart_at: auto
-# The Colima profile that runs this collection's k3s node, which must come back with no one logged in: the one github_runner_cluster_runtime_autostart_at auto starts at boot. Any other profile on the host (the mini's default profile for its own workloads, say) keeps the login agent.
+# Whether the role may stop a Colima profile that Colima lists as running while its container runtime does not answer, so that the start after it can boot it again. It does so only when tasks/runtime_wedged.yml has confirmed the failure (repeated probes, a failing guest command, a host agent older than the boot grace and a Docker context that points at that profile's socket). Off, such a profile fails the run with what was seen and the commands to recover by hand. Separate from github_runner_cluster_runtime_autostart, which starts a stopped profile and installs the launchd job.
+github_runner_cluster_runtime_force_stop_wedged: true
+# How many times docker info is tried, and the seconds between tries, before a profile listed as running with a silent runtime is looked into further. Together with the timeout they set the window in which a loaded host or a restarting Docker daemon can still answer.
+github_runner_cluster_runtime_probe_attempts: 5
+github_runner_cluster_runtime_probe_delay: 10
+# The seconds each docker info, and the command run in the guest, is given before it counts as failed (a run that does not end by then is ended by files/run_bounded.pl).
+github_runner_cluster_runtime_probe_timeout: 20
+# The seconds a VM's host agent process must have been running before a silent runtime counts as wedged rather than booting.
+github_runner_cluster_runtime_boot_grace: 600
+# The seconds a probe, a guest command or a clean stop that has passed its deadline is given to end after TERM before it is killed.
+github_runner_cluster_runtime_kill_grace: 5
+# The seconds colima stop is given before colima stop --force follows it.
+github_runner_cluster_runtime_clean_stop_timeout: 120
+# The Colima profile that runs this collection's k3s node, which must come back with no one logged in: the one github_runner_cluster_runtime_autostart_at auto starts at boot. Any other profile on the host (a `default` profile a host keeps for other workloads, say) keeps the login agent.
 github_runner_cluster_runtime_boot_profile: node
 # Which container runtime a macOS host runs: auto takes it from the Docker context the role drives (colima or colima-<profile> is Colima, desktop-linux is Docker Desktop, anything else is other), colima, docker_desktop and other say so for a host whose context does not tell (DOCKER_HOST set, a context with another name).
 github_runner_cluster_runtime: auto

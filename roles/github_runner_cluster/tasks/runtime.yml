@@ -31,7 +31,7 @@
          | exadev.github_runner.cluster_container_runtime(github_runner_cluster_runtime, github_runner_cluster_colima_profile) }}
 
 - name: Read the Docker host of the Colima profile's context
-  # Where the profile lives: Colima points the context at <COLIMA_HOME>/<profile>/docker.sock. Needed only when github_runner_cluster_colima_home does not say. Read-only and answered by the context file alone, so it works with the VM stopped and under --check. It runs with the environment of every other docker call, so it reads the same context store.
+  # Where the profile lives: Colima points the context at <COLIMA_HOME>/<profile>/docker.sock. Needed for the Colima home when github_runner_cluster_colima_home does not say, and by runtime_wedged.yml to prove that a profile it would stop is the one the Docker probe measured. Read-only and answered by the context file alone, so it works with the VM stopped and under --check. It runs with the environment of every other docker call, so it reads the same context store.
   ansible.builtin.command:
     argv: [docker, context, inspect, --format, "{{ '{{' }}.Endpoints.docker.Host{{ '}}' }}", "{{ github_runner_cluster_docker_cli_context }}"]
   environment: "{{ github_runner_cluster_docker_cli_environment | combine({'PATH': github_runner_cluster_runtime_path}) }}"
@@ -40,7 +40,6 @@
   check_mode: false
   when:
     - github_runner_cluster_effective_runtime.kind == 'colima'
-    - github_runner_cluster_colima_home | length == 0
 
 - name: Work out the Colima home the profile lives in
   # The variable when a host sets it, else the one its Docker context names, empty for Colima's own default. Nothing outside Colima has one.
@@ -72,6 +71,11 @@
     - github_runner_cluster_effective_runtime.kind == 'colima'
     - github_runner_cluster_runtime_autostart | bool
   block:
+    - name: Deal with a profile Colima lists as running while its runtime does not answer
+      # A start would find such a profile running and do nothing. See runtime_wedged.yml for what is required before the VM is stopped.
+      ansible.builtin.include_tasks: runtime_wedged.yml
+      when: not github_runner_cluster_runtime_up | bool
+
     - name: Start the Colima profile if it is stopped
       # --activate=false keeps the profile from making its Docker context the host's current one, which the role promises never to change (see Docker contexts in the README). Starting a profile that already runs would do nothing, but this only runs when the runtime did not answer. Skipped under --check, which reports the start as skipped, not as a failure.
       ansible.builtin.command:
