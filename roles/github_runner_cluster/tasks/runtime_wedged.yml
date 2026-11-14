@@ -1,0 +1,168 @@
+---
+# Reached on a Colima host whose container runtime did not answer. A profile that Colima lists as stopped is only started (runtime.yml). A profile it lists as running is either booting, slow, or stuck, and a start does nothing for it, so the VM could stay down for ever. This file ends such a VM with colima stop, and only when every one of these holds:
+#
+# 1. github_runner_cluster_runtime_force_stop_wedged is on;
+# 2. docker info still fails on every one of github_runner_cluster_runtime_probe_attempts further tries, each given github_runner_cluster_runtime_probe_timeout seconds and github_runner_cluster_runtime_probe_delay seconds apart, so a host that is only loaded or a dockerd that is restarting answers somewhere in that window and nothing is stopped;
+# 3. a command run in the guest (colima ssh -- true) fails within github_runner_cluster_runtime_probe_timeout seconds, so a guest that works while its Docker daemon does not is left alone;
+# 4. the VM's host agent was started more than github_runner_cluster_runtime_boot_grace seconds ago, read from the modification time of its pid file in the profile's Lima instance directory, so a VM that is still booting is left alone. An agent whose age cannot be read does not count as old;
+# 5. the Docker context the probes used points at the socket of the profile that would be stopped (<colima home>/<profile>/docker.sock), so a failing probe of one runtime never stops another's VM.
+#
+# The stop is first a clean one (colima stop), given github_runner_cluster_runtime_clean_stop_timeout seconds, and a forced one (colima stop --force, which ends the VM without a graceful shutdown) only when that fails. Either way the VM's disk is kept and nothing is removed, so the start that follows boots it from the same disk. When any condition fails, or the switch is off, the run fails here and says which signals it saw and how to recover. Under --check every read is made and nothing is stopped; the report says what a real run would do.
+#
+# Needs github_runner_cluster_runtime_environment, github_runner_cluster_runtime_colima_home and github_runner_cluster_runtime_context_host from runtime.yml.
+
+- name: Read whether Colima lists the profile as running
+  # colima list prints one JSON object per profile, whatever profile is asked for.
+  ansible.builtin.command:
+    argv: [colima, list, --json]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_colima_list
+  changed_when: false
+  check_mode: false
+
+- name: Note whether the profile is listed as running
+  ansible.builtin.set_fact:
+    github_runner_cluster_runtime_listed_running: >-
+      {{ github_runner_cluster_runtime_colima_list.stdout_lines | map('from_json')
+         | selectattr('name', 'equalto', github_runner_cluster_effective_runtime.colima_profile)
+         | selectattr('status', 'equalto', 'Running') | list | length > 0 }}
+
+- name: Look into a profile that is listed as running
+  when: github_runner_cluster_runtime_listed_running | bool
+  block:
+    - name: Ask the Docker daemon again, a bounded number of times
+      # perl's alarm bounds each try: macOS has no timeout command, and docker info has no timeout of its own.
+      ansible.builtin.command:
+        argv:
+          - perl
+          - -e
+          - alarm shift; exec @ARGV
+          - "{{ github_runner_cluster_runtime_probe_timeout }}"
+          - docker
+          - info
+          - --format
+          - "{{ '{{' }}.ServerVersion{{ '}}' }}"
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      register: github_runner_cluster_runtime_reprobe
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      until: github_runner_cluster_runtime_reprobe.rc == 0
+      retries: "{{ github_runner_cluster_runtime_probe_attempts | int - 1 }}"
+      delay: "{{ github_runner_cluster_runtime_probe_delay }}"
+
+    - name: Note that the runtime answered after all
+      ansible.builtin.set_fact:
+        github_runner_cluster_runtime_up: true
+      when: github_runner_cluster_runtime_reprobe.rc == 0
+
+    - name: Gather the other signals while the runtime stays silent
+      when: github_runner_cluster_runtime_reprobe.rc != 0
+      block:
+        - name: Run a command in the guest
+          ansible.builtin.command:
+            argv:
+              - perl
+              - -e
+              - alarm shift; exec @ARGV
+              - "{{ github_runner_cluster_runtime_probe_timeout }}"
+              - colima
+              - ssh
+              - --profile
+              - "{{ github_runner_cluster_effective_runtime.colima_profile }}"
+              - --
+              - "true"
+          environment: "{{ github_runner_cluster_runtime_environment }}"
+          register: github_runner_cluster_runtime_guest
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Find the VM's host agent pid file
+          # Colima keeps one Lima instance per profile under <colima home>/_lima: colima for the default profile, colima-<profile> for another.
+          ansible.builtin.stat:
+            path: >-
+              {{ (github_runner_cluster_runtime_colima_home if github_runner_cluster_runtime_colima_home | length > 0 else ansible_facts['env']['HOME'] ~ '/.colima')
+              ~ '/_lima/' ~ ('colima' if github_runner_cluster_effective_runtime.colima_profile == 'default' else 'colima-' ~ github_runner_cluster_effective_runtime.colima_profile)
+              ~ '/ha.pid' }}
+            get_checksum: false
+          register: github_runner_cluster_runtime_agent_pid
+
+        - name: Read the time on the host
+          ansible.builtin.command:
+            argv: [date, +%s]
+          register: github_runner_cluster_runtime_now
+          changed_when: false
+          check_mode: false
+
+        - name: Work out what the signals say
+          ansible.builtin.set_fact:
+            github_runner_cluster_runtime_agent_age: >-
+              {{ (github_runner_cluster_runtime_now.stdout | trim | int - github_runner_cluster_runtime_agent_pid.stat.mtime | int)
+                 if github_runner_cluster_runtime_agent_pid.stat.exists else -1 }}
+            github_runner_cluster_runtime_context_socket_ok: >-
+              {{ github_runner_cluster_runtime_context_host.stdout | trim
+                 == 'unix://' ~ (github_runner_cluster_runtime_colima_home if github_runner_cluster_runtime_colima_home | length > 0 else ansible_facts['env']['HOME'] ~ '/.colima')
+                    ~ '/' ~ github_runner_cluster_effective_runtime.colima_profile ~ '/docker.sock' }}
+
+        - name: Decide whether the VM is wedged
+          ansible.builtin.set_fact:
+            github_runner_cluster_runtime_wedged: >-
+              {{ github_runner_cluster_runtime_guest.rc != 0
+                 and github_runner_cluster_runtime_agent_age | int > github_runner_cluster_runtime_boot_grace | int
+                 and github_runner_cluster_runtime_context_socket_ok | bool }}
+            github_runner_cluster_runtime_wedged_report: >-
+              Colima lists profile {{ github_runner_cluster_effective_runtime.colima_profile }} as running, but docker info failed on {{ github_runner_cluster_runtime_probe_attempts }} tries
+              {{ github_runner_cluster_runtime_probe_delay }} seconds apart; a command in the guest {{ 'failed' if github_runner_cluster_runtime_guest.rc != 0 else 'succeeded' }};
+              the VM's host agent was started {{ 'more than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds ago' if github_runner_cluster_runtime_agent_age | int > github_runner_cluster_runtime_boot_grace | int
+              else ('within the last ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds' if github_runner_cluster_runtime_agent_age | int >= 0 else 'at a time that could not be read') }};
+              the Docker context {{ 'points at' if github_runner_cluster_runtime_context_socket_ok | bool else 'does not point at' }} the profile's own socket.
+
+        - name: Say what a real run would do
+          ansible.builtin.debug:
+            msg: >-
+              {{ github_runner_cluster_runtime_wedged_report }}
+              {{ 'A real run would stop the profile (colima stop, then colima stop --force if that fails) and start it again.'
+                 if github_runner_cluster_runtime_wedged | bool and github_runner_cluster_runtime_force_stop_wedged | bool
+                 else 'A real run would stop nothing and fail here.' }}
+          changed_when: github_runner_cluster_runtime_wedged | bool and github_runner_cluster_runtime_force_stop_wedged | bool
+          when: ansible_check_mode
+
+        - name: Fail where the VM is not shown to be wedged or the stop is off
+          ansible.builtin.fail:
+            msg: >-
+              {{ github_runner_cluster_runtime_wedged_report }}
+              {{ 'Nothing was stopped, because ' ~ ('github_runner_cluster_runtime_force_stop_wedged is off.'
+                 if github_runner_cluster_runtime_wedged | bool
+                 else 'the signals do not show a wedged VM (a VM that is still booting, or whose guest works, is left alone).') }}
+              To recover by hand: colima stop --profile {{ github_runner_cluster_effective_runtime.colima_profile }} --force, then colima start --profile {{ github_runner_cluster_effective_runtime.colima_profile }}.
+          when:
+            - not ansible_check_mode
+            - not (github_runner_cluster_runtime_wedged | bool and github_runner_cluster_runtime_force_stop_wedged | bool)
+
+        - name: Stop the wedged profile cleanly
+          ansible.builtin.command:
+            argv:
+              - perl
+              - -e
+              - alarm shift; exec @ARGV
+              - "{{ github_runner_cluster_runtime_clean_stop_timeout }}"
+              - colima
+              - stop
+              - --profile
+              - "{{ github_runner_cluster_effective_runtime.colima_profile }}"
+          environment: "{{ github_runner_cluster_runtime_environment }}"
+          register: github_runner_cluster_runtime_clean_stop
+          changed_when: true
+          failed_when: false
+          when: not ansible_check_mode
+
+        - name: Stop the wedged profile without a graceful shutdown, since the clean stop failed
+          # colima stop --force ends the VM without a graceful shutdown (colima stop --help: "stop without graceful shutdown"): every process in the guest, k3s and etcd included, is killed. The VM's disk and everything on it are kept.
+          ansible.builtin.command:
+            argv: [colima, stop, --profile, "{{ github_runner_cluster_effective_runtime.colima_profile }}", --force]
+          environment: "{{ github_runner_cluster_runtime_environment }}"
+          changed_when: true
+          when:
+            - not ansible_check_mode
+            - github_runner_cluster_runtime_clean_stop.rc != 0
