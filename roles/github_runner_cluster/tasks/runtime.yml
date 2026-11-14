@@ -72,6 +72,26 @@
     - github_runner_cluster_effective_runtime.kind == 'colima'
     - github_runner_cluster_runtime_autostart | bool
   block:
+    - name: Read whether Colima lists the profile as running
+      # colima list prints one JSON object per profile, whatever profile is asked for. Only read when the runtime did not answer.
+      ansible.builtin.command:
+        argv: [colima, list, --json]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      register: github_runner_cluster_runtime_colima_list
+      changed_when: false
+      check_mode: false
+      when: not github_runner_cluster_runtime_up | bool
+
+    - name: Stop a profile Colima lists as running while its runtime does not answer
+      # A VM that has gone into an error state (Lima's VZ driver reports it as "error", and the lima host agent logs `Invalid virtual machine state`) is still listed as running with its host agent alive, so the start below would find the profile running and do nothing, and its Docker socket never answers again. A forced stop (colima stop --force) ends the VM and its host agent, and the start then boots it from the same disk: nothing in the VM's disk, its containers or its volumes is removed.
+      ansible.builtin.command:
+        argv: [colima, stop, --profile, "{{ github_runner_cluster_effective_runtime.colima_profile }}", --force]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when:
+        - not github_runner_cluster_runtime_up | bool
+        - github_runner_cluster_runtime_colima_list.stdout_lines | map('from_json') | selectattr('name', 'equalto', github_runner_cluster_effective_runtime.colima_profile) | selectattr('status', 'equalto', 'Running') | list | length > 0
+
     - name: Start the Colima profile if it is stopped
       # --activate=false keeps the profile from making its Docker context the host's current one, which the role promises never to change (see Docker contexts in the README). Starting a profile that already runs would do nothing, but this only runs when the runtime did not answer. Skipped under --check, which reports the start as skipped, not as a failure.
       ansible.builtin.command:

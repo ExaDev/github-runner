@@ -380,12 +380,26 @@ elif name == "colima" and args[0] == "ssh":
         print(content, end="")
     else:
         sys.exit("unexpected colima ssh call: " + " ".join(command))
+elif name == "colima" and args[0] == "list":
+    # One JSON object per profile, whatever profile is asked for: this host has the profile the test names and another one beside it, which is always running.
+    profile = os.environ.get("RUNTIME_PROFILE", "default")
+    print('{{"name":"other","status":"Running","runtime":"docker"}}')
+    print('{{"name":"' + profile + '","status":"' + ("Running" if exists("colima-listed-running") else "Stopped") + '","runtime":"docker"}}')
+elif name == "colima" and args[0] == "stop":
+    if args != ["stop", "--profile", os.environ.get("RUNTIME_PROFILE", "default"), "--force"]:
+        sys.exit("unexpected colima stop call: " + " ".join(args))
+    for file in ("colima-listed-running", "runtime-up"):
+        if exists(file):
+            os.remove(os.path.join(stub, file))
 elif name == "colima":
     if args[0] != "start" or args[-1] != "--activate=false":
         sys.exit("unexpected colima call: " + " ".join(args))
     if exists("colima-start-fails"):
         sys.exit("colima: the VM did not start")
-    touch("runtime-up")
+    # Starting a profile Colima already lists as running does nothing, so a wedged VM stays wedged.
+    if not exists("colima-listed-running"):
+        touch("colima-listed-running")
+        touch("runtime-up")
 elif name == "launchctl":
     system = args[1] == "system" or args[1].startswith("system/")
     if args[0] == "print":
@@ -471,7 +485,7 @@ class RoleTest(unittest.TestCase):
         inventory = self.work / "inventory.yml"
         inventory.write_text(yaml.safe_dump({"all": {"hosts": {"node1": host}}}))
         # The stand-ins come first on the playbook's own PATH as well as the tasks', so a tool a task runs without the role's PATH still cannot reach this machine's real launchd, Colima or Docker.
-        env = ansible_env() | {"RUNTIME_STUB": str(self.stub), "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+        env = ansible_env() | {"RUNTIME_STUB": str(self.stub), "RUNTIME_PROFILE": profile, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
         return subprocess.run([ANSIBLE_PLAYBOOK, "-i", str(inventory), str(RUN), *extra], capture_output=True, text=True, check=False, env=env, cwd=self.work)
 
     def calls(self) -> list[str]:
@@ -523,6 +537,54 @@ class RoleTest(unittest.TestCase):
         self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"][3:5], ["--profile", "default"])
         self.assertEqual(self.plist.stat().st_mode & 0o777, 0o644)
         self.assertTrue((self.stub / "loaded").exists())
+
+    def stops(self) -> list[str]:
+        return [call for call in self.calls() if re.match(r"\S+ colima stop", call)]
+
+    def test_a_profile_listed_as_running_whose_runtime_does_not_answer_is_stopped_and_started_again(self) -> None:
+        # A wedged VM: the profile is listed as running, the Docker socket does not answer and a start would do nothing.
+        self.state("session", "colima-listed-running")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), ["colima colima stop --profile default --force"])
+        starts = [call for call in self.calls() if re.match(r"\S+ colima start", call)]
+        self.assertEqual(starts, ["colima colima start --profile default --activate=false"])
+        self.assertLess(self.calls().index(self.stops()[0]), self.calls().index(starts[0]))
+        self.assertTrue((self.stub / "runtime-up").exists())
+
+    def test_a_second_run_after_the_recovery_stops_and_starts_nothing(self) -> None:
+        self.state("session", "colima-listed-running")
+        self.run_role()
+        before = len(self.calls())
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call for call in self.calls()[before:] if re.match(r"\S+ colima (stop|start)", call)], [])
+
+    def test_a_stopped_profile_is_started_without_being_stopped_first(self) -> None:
+        self.state("session")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+
+    def test_a_running_runtime_is_neither_listed_nor_stopped(self) -> None:
+        self.state("session", "runtime-up", "colima-listed-running")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+        self.assertEqual([call for call in self.calls() if re.match(r"\S+ colima list", call)], [])
+
+    def test_only_the_hosts_own_profile_is_stopped_while_another_listed_profile_runs(self) -> None:
+        self.state("session")
+        result = self.run_role(context="colima-example", context_host=f"unix://{self.home}/.colima-example/example/docker.sock")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+
+    def test_check_mode_stops_nothing_in_a_wedged_profile(self) -> None:
+        self.state("session", "colima-listed-running")
+        result = self.run_role("--check")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.stops(), [])
+        self.assertTrue((self.stub / "colima-listed-running").exists())
 
     def test_every_docker_call_uses_the_hosts_docker_context(self) -> None:
         self.state("session")
