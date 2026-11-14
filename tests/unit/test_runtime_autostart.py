@@ -750,9 +750,10 @@ class RoleTest(unittest.TestCase):
         self.listed_running(agent_age=None)
         self.assert_left_alone(self.run_role(**self.FAST), "could not be read")
 
-    def test_a_docker_context_that_points_at_another_socket_never_leads_to_a_stop(self) -> None:
+    def test_a_colima_home_that_is_not_where_the_context_points_never_leads_to_a_stop(self) -> None:
+        # The variable names another Colima home than the one the Docker context's socket is in: the probes measured one runtime and a stop would act on another's profile. (A context whose endpoint is no Colima socket at all fails earlier, in the filter that reads the home from it.)
         self.listed_running()
-        result = self.run_role(context_host=f"unix://{self.home}/.elsewhere/default/docker.sock", **self.FAST)
+        result = self.run_role(github_runner_cluster_colima_home="/elsewhere", **self.FAST)
         self.assert_left_alone(result, "does not point at")
 
     def test_with_the_stop_switched_off_a_confirmed_wedge_fails_naming_the_switch(self) -> None:
@@ -1036,12 +1037,12 @@ class RoleTest(unittest.TestCase):
         self.assertEqual((self.node_daemon.read_text(), self.node_agent.read_text()), ("<plist/>", "<plist/>"))
         self.assertEqual(self.changes(), [])
 
-    def test_the_variable_wins_over_the_context_and_the_context_is_not_read(self) -> None:
+    def test_the_variable_wins_over_the_context_for_the_home_colima_runs_in(self) -> None:
+        # The context is still read, since a stop of a silent profile compares its socket with the home; here the runtime is down and nothing is listed as running, so the comparison is never used.
         self.state("session")
         result = self.run_role(context="colima-node", github_runner_cluster_colima_home="/elsewhere")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_colima_ran_in("/elsewhere")
-        self.assertFalse([call for call in self.calls() if " docker context " in call])
 
     def test_a_profile_in_the_default_home_runs_with_no_variable(self) -> None:
         self.state("session")
