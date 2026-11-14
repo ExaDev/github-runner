@@ -435,6 +435,10 @@ elif name == "colima":
     if not exists("colima-listed-running"):
         touch("colima-listed-running")
         touch("runtime-up")
+        # A VM that is started again answers.
+        for file in ("docker-hangs", "guest-hangs"):
+            if exists(file):
+                os.remove(os.path.join(stub, file))
 elif name == "ps":
     # The host agent as ps shows it, from the file agent-ps ("<elapsed> <command>"); a pid that is not running prints nothing and fails.
     if not exists("agent-ps"):
