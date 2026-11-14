@@ -2,9 +2,9 @@
 # Reached on a Colima host whose container runtime did not answer. A profile that Colima lists as stopped is only started (runtime.yml). A profile it lists as running is either booting, slow, or stuck, and a start does nothing for it, so the VM could stay down for ever. This file ends such a VM with colima stop, and only when every one of these holds:
 #
 # 1. github_runner_cluster_runtime_force_stop_wedged is on;
-# 2. docker info still fails on every one of github_runner_cluster_runtime_probe_attempts further tries, each given github_runner_cluster_runtime_probe_timeout seconds and github_runner_cluster_runtime_probe_delay seconds apart, so a host that is only loaded or a dockerd that is restarting answers somewhere in that window and nothing is stopped;
+# 2. docker info still fails on every one of github_runner_cluster_runtime_probe_attempts further tries, each given github_runner_cluster_runtime_probe_timeout seconds (files/run_bounded.pl ends one that has not finished, with TERM and then KILL after github_runner_cluster_runtime_kill_grace seconds, so a program that ignores signals cannot hold the run) and github_runner_cluster_runtime_probe_delay seconds apart, so a host that is only loaded or a dockerd that is restarting answers somewhere in that window and nothing is stopped;
 # 3. a command run in the guest (colima ssh -- true) fails within github_runner_cluster_runtime_probe_timeout seconds, so a guest that works while its Docker daemon does not is left alone;
-# 4. the VM's host agent was started more than github_runner_cluster_runtime_boot_grace seconds ago, read from the modification time of its pid file in the profile's Lima instance directory, so a VM that is still booting is left alone. An agent whose age cannot be read does not count as old;
+# 4. the VM's host agent has been running for more than github_runner_cluster_runtime_boot_grace seconds, read from the elapsed time of the live process the pid file in the profile's Lima instance directory names (and only if its command is Lima's host agent), so a VM that is still booting is left alone. A missing file, a dead pid, another program or an unreadable time means the agent's age is unknown and does not count as old, whatever the file's date;
 # 5. the Docker context the probes used points at the socket of the profile that would be stopped (<colima home>/<profile>/docker.sock), so a failing probe of one runtime never stops another's VM.
 #
 # The stop is first a clean one (colima stop), given github_runner_cluster_runtime_clean_stop_timeout seconds, and a forced one (colima stop --force, which ends the VM without a graceful shutdown) only when that fails. Either way the VM's disk is kept and nothing is removed, so the start that follows boots it from the same disk. When any condition fails, or the switch is off, the run fails here and says which signals it saw and how to recover. Under --check every read is made and nothing is stopped; the report says what a real run would do.
@@ -31,13 +31,14 @@
   when: github_runner_cluster_runtime_listed_running | bool
   block:
     - name: Ask the Docker daemon again, a bounded number of times
-      # perl's alarm bounds each try: macOS has no timeout command, and docker info has no timeout of its own.
+      # files/run_bounded.pl bounds each try: macOS has no timeout command, docker info has no timeout of its own, and a timer set before exec does not stop a Go program (docker, colima), which ignores SIGALRM.
       ansible.builtin.command:
         argv:
           - perl
           - -e
-          - alarm shift; exec @ARGV
+          - "{{ lookup('ansible.builtin.file', 'run_bounded.pl') }}"
           - "{{ github_runner_cluster_runtime_probe_timeout }}"
+          - "{{ github_runner_cluster_runtime_kill_grace }}"
           - docker
           - info
           - --format
@@ -64,8 +65,9 @@
             argv:
               - perl
               - -e
-              - alarm shift; exec @ARGV
+              - "{{ lookup('ansible.builtin.file', 'run_bounded.pl') }}"
               - "{{ github_runner_cluster_runtime_probe_timeout }}"
+              - "{{ github_runner_cluster_runtime_kill_grace }}"
               - colima
               - ssh
               - --profile
@@ -80,26 +82,37 @@
 
         - name: Find the VM's host agent pid file
           # Colima keeps one Lima instance per profile under <colima home>/_lima: colima for the default profile, colima-<profile> for another.
-          ansible.builtin.stat:
-            path: >-
+          ansible.builtin.slurp:
+            src: >-
               {{ (github_runner_cluster_runtime_colima_home if github_runner_cluster_runtime_colima_home | length > 0 else ansible_facts['env']['HOME'] ~ '/.colima')
               ~ '/_lima/' ~ ('colima' if github_runner_cluster_effective_runtime.colima_profile == 'default' else 'colima-' ~ github_runner_cluster_effective_runtime.colima_profile)
               ~ '/ha.pid' }}
-            get_checksum: false
           register: github_runner_cluster_runtime_agent_pid
+          failed_when: false
 
-        - name: Read the time on the host
+        - name: Read the live process the pid file names
+          # A pid file can outlive the process (a reboot, a crash), so the age is the running process's own: its elapsed time, and only when its command is Lima's host agent.
           ansible.builtin.command:
-            argv: [date, +%s]
-          register: github_runner_cluster_runtime_now
+            argv: [ps, -o, etime=, -o, command=, -p, "{{ (github_runner_cluster_runtime_agent_pid.content | b64decode | trim) if github_runner_cluster_runtime_agent_pid.content is defined else '0' }}"]
+          register: github_runner_cluster_runtime_agent_process
           changed_when: false
+          failed_when: false
           check_mode: false
 
         - name: Work out what the signals say
+          vars:
+            # ps prints [[days-]hours:]minutes:seconds, then the command. Anything else, a dead pid or another program leaves the age unknown (-1).
+            github_runner_cluster_runtime_agent_words: "{{ github_runner_cluster_runtime_agent_process.stdout | trim | split(None, 1) }}"
           ansible.builtin.set_fact:
             github_runner_cluster_runtime_agent_age: >-
-              {{ (github_runner_cluster_runtime_now.stdout | trim | int - github_runner_cluster_runtime_agent_pid.stat.mtime | int)
-                 if github_runner_cluster_runtime_agent_pid.stat.exists else -1 }}
+              {%- set words = github_runner_cluster_runtime_agent_words -%}
+              {%- if github_runner_cluster_runtime_agent_process.rc == 0 and words | length == 2 and 'hostagent' in words[1] and words[0] is match('^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9]+$') -%}
+              {%- set days_and_rest = words[0].split('-') -%}
+              {%- set days = days_and_rest[0] | int if days_and_rest | length > 1 else 0 -%}
+              {%- set parts = (days_and_rest[-1].split(':') | map('int') | list) -%}
+              {%- set clock = parts[-1] + 60 * parts[-2] + (3600 * parts[-3] if parts | length > 2 else 0) -%}
+              {{ days * 86400 + clock }}
+              {%- else -%}-1{%- endif -%}
             github_runner_cluster_runtime_context_socket_ok: >-
               {{ github_runner_cluster_runtime_context_host.stdout | trim
                  == 'unix://' ~ (github_runner_cluster_runtime_colima_home if github_runner_cluster_runtime_colima_home | length > 0 else ansible_facts['env']['HOME'] ~ '/.colima')
@@ -114,8 +127,8 @@
             github_runner_cluster_runtime_wedged_report: >-
               Colima lists profile {{ github_runner_cluster_effective_runtime.colima_profile }} as running, but docker info failed on {{ github_runner_cluster_runtime_probe_attempts }} tries
               {{ github_runner_cluster_runtime_probe_delay }} seconds apart; a command in the guest {{ 'failed' if github_runner_cluster_runtime_guest.rc != 0 else 'succeeded' }};
-              the VM's host agent was started {{ 'more than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds ago' if github_runner_cluster_runtime_agent_age | int > github_runner_cluster_runtime_boot_grace | int
-              else ('within the last ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds' if github_runner_cluster_runtime_agent_age | int >= 0 else 'at a time that could not be read') }};
+              the VM's host agent has been running {{ 'for more than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds ago' if github_runner_cluster_runtime_agent_age | int > github_runner_cluster_runtime_boot_grace | int
+              else ('within the last ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds' if github_runner_cluster_runtime_agent_age | int >= 0 else 'for a time that could not be read') }};
               the Docker context {{ 'points at' if github_runner_cluster_runtime_context_socket_ok | bool else 'does not point at' }} the profile's own socket.
 
         - name: Say what a real run would do
@@ -145,8 +158,9 @@
             argv:
               - perl
               - -e
-              - alarm shift; exec @ARGV
+              - "{{ lookup('ansible.builtin.file', 'run_bounded.pl') }}"
               - "{{ github_runner_cluster_runtime_clean_stop_timeout }}"
+              - "{{ github_runner_cluster_runtime_kill_grace }}"
               - colima
               - stop
               - --profile
