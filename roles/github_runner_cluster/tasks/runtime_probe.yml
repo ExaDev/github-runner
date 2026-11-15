@@ -20,6 +20,15 @@
   failed_when: false
   check_mode: false
 
+- name: Check that the supervisor could run docker info
+  # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a missing perl as exit 2 with the message "Error executing command". None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
+  ansible.builtin.assert:
+    that: not (github_runner_cluster_runtime_probe.rc in [127, 255] or (github_runner_cluster_runtime_probe.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_probe.msg | default(''))))
+    fail_msg: >-
+      files/run_bounded.pl could not run docker info on {{ inventory_hostname }} (exit {{ github_runner_cluster_runtime_probe.rc }}): {{ github_runner_cluster_runtime_probe.msg | default(github_runner_cluster_runtime_probe.stderr | default('')) | trim }}.
+      This is not a verdict on the runtime. perl must be on the PATH the role uses (github_runner_cluster_runtime_path), and the command must exist.
+    quiet: true
+
 - name: Publish whether the container runtime answers
   ansible.builtin.set_fact:
     github_runner_cluster_runtime_up: "{{ github_runner_cluster_runtime_probe.rc == 0 }}"

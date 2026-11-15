@@ -4,12 +4,12 @@
 # 1. github_runner_cluster_runtime_force_stop_wedged is on;
 # 2. docker info still fails on every one of github_runner_cluster_runtime_probe_attempts further tries, each given github_runner_cluster_runtime_probe_timeout seconds (files/run_bounded.pl ends one that has not finished, with TERM and then KILL after github_runner_cluster_runtime_kill_grace seconds, so a program that ignores signals cannot hold the run) and github_runner_cluster_runtime_probe_delay seconds apart, so a host that is only loaded or a dockerd that is restarting answers somewhere in that window and nothing is stopped;
 # 3. a command run in the guest (colima ssh -- true) fails within github_runner_cluster_runtime_probe_timeout seconds, so a guest that works while its Docker daemon does not is left alone;
-# 4. the VM's host agent has been running for more than github_runner_cluster_runtime_boot_grace seconds, read from the elapsed time of the live process the pid file in the profile's Lima instance directory names (and only if its command is Lima's host agent), so a VM that is still booting is left alone. A missing file, a dead pid, another program or an unreadable time means the agent's age is unknown and does not count as old, whatever the file's date;
-# 5. the Docker context the probes used points at the socket of the profile that would be stopped (<colima home>/<profile>/docker.sock), so a failing probe of one runtime never stops another's VM.
+# 4. the VM's host agent has been running for more than github_runner_cluster_runtime_boot_grace seconds, read from the elapsed time of the live process the pid file in the profile's Lima instance directory names (and only if the program it runs is Lima's host agent, named by the basename limactl and the argument hostagent), so a VM that is still booting is left alone. A missing file, a dead pid, another program or an unreadable time means the agent's age is unknown and does not count as old, whatever the file's date;
+# 5. the Docker context the probes used can be read and points at the socket of the profile that would be stopped (<colima home>/<profile>/docker.sock), so a failing probe of one runtime never stops another's VM and a context that cannot be read never proves anything.
 #
 # The stop is first a clean one (colima stop), given github_runner_cluster_runtime_clean_stop_timeout seconds, and a forced one (colima stop --force, which ends the VM without a graceful shutdown) only when that fails. Either way the VM's disk is kept and nothing is removed, so the start that follows boots it from the same disk. When any condition fails, or the switch is off, the run fails here and says which signals it saw and how to recover. Under --check every read is made and nothing is stopped; the report says what a real run would do.
 #
-# Needs github_runner_cluster_runtime_environment, github_runner_cluster_runtime_colima_home and github_runner_cluster_runtime_context_host from runtime.yml.
+# Needs github_runner_cluster_runtime_environment and github_runner_cluster_runtime_colima_home from runtime.yml; it reads the context's endpoint itself, because a host that names its Colima home may have no context to read.
 
 - name: Read whether Colima lists the profile as running
   # colima list prints one JSON object per profile, whatever profile is asked for.
@@ -48,9 +48,19 @@
       changed_when: false
       failed_when: false
       check_mode: false
-      until: github_runner_cluster_runtime_reprobe.rc == 0
+      # A supervisor that cannot run ends the loop at once: the check below fails the run.
+      until: github_runner_cluster_runtime_reprobe.rc == 0 or github_runner_cluster_runtime_reprobe.rc in [127, 255] or (github_runner_cluster_runtime_reprobe.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_reprobe.msg | default('')))
       retries: "{{ github_runner_cluster_runtime_probe_attempts | int - 1 }}"
       delay: "{{ github_runner_cluster_runtime_probe_delay }}"
+
+    - name: Check that the supervisor could run docker info
+      # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a missing perl as exit 2 with the message "Error executing command". None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
+      ansible.builtin.assert:
+        that: not (github_runner_cluster_runtime_reprobe.rc in [127, 255] or (github_runner_cluster_runtime_reprobe.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_reprobe.msg | default(''))))
+        fail_msg: >-
+          files/run_bounded.pl could not run docker info on {{ inventory_hostname }} (exit {{ github_runner_cluster_runtime_reprobe.rc }}): {{ github_runner_cluster_runtime_reprobe.msg | default(github_runner_cluster_runtime_reprobe.stderr | default('')) | trim }}.
+          This is not a verdict on the runtime. perl must be on the PATH the role uses (github_runner_cluster_runtime_path), and the command must exist.
+        quiet: true
 
     - name: Note that the runtime answered after all
       ansible.builtin.set_fact:
@@ -76,6 +86,25 @@
               - "true"
           environment: "{{ github_runner_cluster_runtime_environment }}"
           register: github_runner_cluster_runtime_guest
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Check that the supervisor could run a command in the guest
+          # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a missing perl as exit 2 with the message "Error executing command". None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
+          ansible.builtin.assert:
+            that: not (github_runner_cluster_runtime_guest.rc in [127, 255] or (github_runner_cluster_runtime_guest.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_guest.msg | default(''))))
+            fail_msg: >-
+              files/run_bounded.pl could not run a command in the guest on {{ inventory_hostname }} (exit {{ github_runner_cluster_runtime_guest.rc }}): {{ github_runner_cluster_runtime_guest.msg | default(github_runner_cluster_runtime_guest.stderr | default('')) | trim }}.
+              This is not a verdict on the runtime. perl must be on the PATH the role uses (github_runner_cluster_runtime_path), and the command must exist.
+            quiet: true
+
+        - name: Read the Docker host of the context the probes used
+          # On its own and allowed to fail: a host whose context says nothing about a Colima socket (DOCKER_HOST, an empty or unknown context) sets github_runner_cluster_colima_home and may have no context to read. An unreadable context means the socket is not proven to be this profile's, so nothing is stopped.
+          ansible.builtin.command:
+            argv: [docker, context, inspect, --format, "{{ '{{' }}.Endpoints.docker.Host{{ '}}' }}", "{{ github_runner_cluster_docker_cli_context }}"]
+          environment: "{{ github_runner_cluster_docker_cli_environment | combine({'PATH': github_runner_cluster_runtime_path}) }}"
+          register: github_runner_cluster_runtime_context_endpoint
           changed_when: false
           failed_when: false
           check_mode: false
@@ -106,7 +135,7 @@
           ansible.builtin.set_fact:
             github_runner_cluster_runtime_agent_age: >-
               {%- set words = github_runner_cluster_runtime_agent_words -%}
-              {%- if github_runner_cluster_runtime_agent_process.rc == 0 and words | length == 2 and 'hostagent' in words[1] and words[0] is match('^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9]+$') -%}
+              {%- if github_runner_cluster_runtime_agent_process.rc == 0 and words | length == 2 and words[1].split()[0].split('/')[-1] == 'limactl' and 'hostagent' in words[1].split()[1:] and words[0] is match('^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9]+$') -%}
               {%- set days_and_rest = words[0].split('-') -%}
               {%- set days = days_and_rest[0] | int if days_and_rest | length > 1 else 0 -%}
               {%- set parts = (days_and_rest[-1].split(':') | map('int') | list) -%}
@@ -114,7 +143,8 @@
               {{ days * 86400 + clock }}
               {%- else -%}-1{%- endif -%}
             github_runner_cluster_runtime_context_socket_ok: >-
-              {{ github_runner_cluster_runtime_context_host.stdout | trim
+              {{ github_runner_cluster_runtime_context_endpoint.rc == 0
+                 and github_runner_cluster_runtime_context_endpoint.stdout | trim
                  == 'unix://' ~ (github_runner_cluster_runtime_colima_home if github_runner_cluster_runtime_colima_home | length > 0 else ansible_facts['env']['HOME'] ~ '/.colima')
                     ~ '/' ~ github_runner_cluster_effective_runtime.colima_profile ~ '/docker.sock' }}
 
@@ -127,9 +157,9 @@
             github_runner_cluster_runtime_wedged_report: >-
               Colima lists profile {{ github_runner_cluster_effective_runtime.colima_profile }} as running, but docker info failed on {{ github_runner_cluster_runtime_probe_attempts }} tries
               {{ github_runner_cluster_runtime_probe_delay }} seconds apart; a command in the guest {{ 'failed' if github_runner_cluster_runtime_guest.rc != 0 else 'succeeded' }};
-              the VM's host agent has been running {{ 'for more than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds ago' if github_runner_cluster_runtime_agent_age | int > github_runner_cluster_runtime_boot_grace | int
+              the VM's host agent has been running {{ 'for more than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds' if github_runner_cluster_runtime_agent_age | int > github_runner_cluster_runtime_boot_grace | int
               else ('for less than ' ~ github_runner_cluster_runtime_boot_grace ~ ' seconds' if github_runner_cluster_runtime_agent_age | int >= 0 else 'for a time that could not be read') }};
-              the Docker context {{ 'points at' if github_runner_cluster_runtime_context_socket_ok | bool else 'does not point at' }} the profile's own socket.
+              the Docker context {{ 'points at the socket of the profile' if github_runner_cluster_runtime_context_socket_ok | bool else ('could not be read, so its socket is not proven to belong to the profile' if github_runner_cluster_runtime_context_endpoint.rc != 0 else 'does not point at the socket of the profile') }}.
 
         - name: Say what a real run would do
           ansible.builtin.debug:
@@ -169,6 +199,16 @@
           register: github_runner_cluster_runtime_clean_stop
           changed_when: true
           failed_when: false
+          when: not ansible_check_mode
+
+        - name: Check that the supervisor could run colima stop
+          # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a missing perl as exit 2 with the message "Error executing command". None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
+          ansible.builtin.assert:
+            that: not (github_runner_cluster_runtime_clean_stop.rc in [127, 255] or (github_runner_cluster_runtime_clean_stop.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_clean_stop.msg | default(''))))
+            fail_msg: >-
+              files/run_bounded.pl could not run colima stop on {{ inventory_hostname }} (exit {{ github_runner_cluster_runtime_clean_stop.rc }}): {{ github_runner_cluster_runtime_clean_stop.msg | default(github_runner_cluster_runtime_clean_stop.stderr | default('')) | trim }}.
+              This is not a verdict on the runtime. perl must be on the PATH the role uses (github_runner_cluster_runtime_path), and the command must exist.
+            quiet: true
           when: not ansible_check_mode
 
         - name: Stop the wedged profile without a graceful shutdown, since the clean stop failed
