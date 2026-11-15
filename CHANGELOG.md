@@ -1,3 +1,18 @@
+## [3.2.2](https://github.com/ExaDev/github-runner/compare/v3.2.1...v3.2.2) (2026-11-15)
+
+### Bug Fixes
+
+* **github_runner_cluster:** bound the wedge probes and read the agent's age live ([9e89d4c](https://github.com/ExaDev/github-runner/commit/9e89d4caf84ae4c588f44582f400392b9f6972dd))
+* **github_runner_cluster:** confirm a wedged Colima profile before stopping it ([64a54fb](https://github.com/ExaDev/github-runner/commit/64a54fb9dfd0514546cb2828f564fdfaee5824ab))
+* **github_runner_cluster:** keep the stop's context check from failing hosts ([1b7cc96](https://github.com/ExaDev/github-runner/commit/1b7cc967d55c9162046a26858f3fc10ad71130e3))
+* **github_runner_cluster:** recognise a supervisor that cannot run by its message ([919347d](https://github.com/ExaDev/github-runner/commit/919347dcd82c2ca1590ad23e163f0475d596b26d))
+* **github_runner_cluster:** say how young a booting agent is, and let a started VM answer ([88777a1](https://github.com/ExaDev/github-runner/commit/88777a1fc0a7a48f4dd5a7a99893ca82d228282f))
+* **github_runner_cluster:** stop a wedged Colima profile before starting it ([9d8f947](https://github.com/ExaDev/github-runner/commit/9d8f9474a917a51a99272aeaf138e16caeade2be))
+
+### Tests
+
+* **github_runner_cluster:** test the colima home against the context correctly ([9468971](https://github.com/ExaDev/github-runner/commit/9468971902b3237af5f342548ca4101173165ce4))
+
 ## [3.2.1](https://github.com/ExaDev/github-runner/compare/v3.2.0...v3.2.1) (2026-11-12)
 
 ### Documentation
