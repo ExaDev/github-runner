@@ -10,6 +10,7 @@ import plistlib
 import pwd
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -318,13 +319,17 @@ def need_root():
     if os.environ.get("RUNTIME_ROOT") != "1":
         sys.exit("launchctl: Operation not permitted while changing the system domain as a user")
 if name == "docker" and args[:2] == ["context", "inspect"]:
-    # Read from the context file alone, so it answers with the daemon down.
+    # Read from the context file alone, so it answers with the daemon down. An empty context name or an unknown one is an error, as docker's is.
+    if args[-1] == "" or exists("context-unknown"):
+        sys.exit("context " + repr(args[-1]) + ": context not found")
     if not exists("context-host"):
         sys.exit("context inspect: no context-host file")
     print(open(os.path.join(stub, "context-host")).read(), end="")
 elif name == "docker":
     if args[:1] == ["info"] and exists("docker-hangs"):
         hang()
+    if args[:1] == ["info"] and exists("docker-exit"):
+        sys.exit(int(open(os.path.join(stub, "docker-exit")).read()))
     if not exists("runtime-up") and args[:1] == ["info"] and exists("docker-answers-after"):
         # A daemon that fails its first tries and then answers, as one that is restarting or a loaded host does.
         counter = os.path.join(stub, "docker-info-failures")
@@ -423,7 +428,7 @@ elif name == "colima" and args[0] == "stop":
         hang()
     if args[3:] == [] and exists("clean-stop-fails"):
         sys.exit("colima: the VM does not stop")
-    for file in ("colima-listed-running", "runtime-up", "docker-hangs", "guest-hangs"):
+    for file in ("colima-listed-running", "runtime-up", "docker-hangs", "guest-hangs", "docker-exit"):
         if exists(file):
             os.remove(os.path.join(stub, file))
 elif name == "colima":
@@ -436,7 +441,7 @@ elif name == "colima":
         touch("colima-listed-running")
         touch("runtime-up")
         # A VM that is started again answers.
-        for file in ("docker-hangs", "guest-hangs"):
+        for file in ("docker-hangs", "guest-hangs", "docker-exit"):
             if exists(file):
                 os.remove(os.path.join(stub, file))
 elif name == "ps":
@@ -523,6 +528,39 @@ class BoundedRunTest(unittest.TestCase):
                 return
             time.sleep(0.1)
         self.fail("a process the command started is still running")
+
+    def test_a_supervisor_that_is_signalled_ends_its_command_and_what_it_started(self) -> None:
+        # Ansible or a person killing the supervisor must not leave the hung command (a colima stop mid-shutdown, say) running on its own.
+        for signal_name in ("TERM", "INT", "HUP"):
+            with self.subTest(signal=signal_name):
+                marker = Path(tempfile.mkdtemp(prefix="bounded-")) / "pids"
+                self.addCleanup(shutil.rmtree, marker.parent, True)
+                script = f"trap '' TERM INT HUP; sleep 60 & echo $$ $! > {marker}; wait"
+                supervisor = subprocess.Popen(["perl", str(self.SCRIPT), "60", "1", "sh", "-c", script])
+                for _ in range(100):
+                    if marker.exists() and marker.read_text().strip():
+                        break
+                    time.sleep(0.05)
+                pids = [int(word) for word in marker.read_text().split()]
+                os.kill(supervisor.pid, getattr(signal, "SIG" + signal_name))
+                self.assertEqual(supervisor.wait(timeout=30), 143)
+                for pid in pids:
+                    for _ in range(50):
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        self.fail(f"process {pid} survived the {signal_name} sent to the supervisor")
+
+    def test_a_command_that_ends_just_as_the_deadline_passes_reports_its_own_status(self) -> None:
+        # The deadline is checked after one last look at the child, so a command that has already ended is not reported as timed out.
+        result, _ = self.run_bounded(0.2, 1, "sh", "-c", "sleep 0.1; exit 5")
+        self.assertEqual(result.returncode, 5)
+
+    def test_the_deadline_is_measured_on_the_monotonic_clock(self) -> None:
+        self.assertIn("CLOCK_MONOTONIC", self.SCRIPT.read_text())
 
     def test_a_command_that_cannot_be_started_exits_127(self) -> None:
         result, _ = self.run_bounded(5, 1, "/nonexistent/command")
@@ -635,6 +673,15 @@ class RoleTest(unittest.TestCase):
 
     FAST = {"github_runner_cluster_runtime_probe_attempts": 3, "github_runner_cluster_runtime_probe_delay": 0, "github_runner_cluster_runtime_probe_timeout": 5}
 
+    def forget(self) -> None:
+        """Start a sub-case from a clean stub directory and a clean home."""
+        for entry in self.stub.iterdir():
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            elif entry.name not in ("context-host", "github-runner-k3s.state"):
+                entry.unlink()
+        shutil.rmtree(self.home / ".colima", ignore_errors=True)
+
     def stops(self) -> list[str]:
         return [call for call in self.calls() if re.match(r"\S+ colima stop", call)]
 
@@ -744,6 +791,78 @@ class RoleTest(unittest.TestCase):
         self.listed_running(command="/usr/sbin/cron -f")
         self.assert_left_alone(self.run_role(**self.FAST), "could not be read")
 
+    def test_a_pid_file_naming_a_program_whose_path_merely_contains_hostagent_leaves_the_age_unknown(self) -> None:
+        self.listed_running(command="/opt/hostagent/bin/cron -f")
+        self.assert_left_alone(self.run_role(**self.FAST), "could not be read")
+
+    def test_a_report_of_an_old_agent_does_not_say_ago_twice(self) -> None:
+        self.listed_running(command="/usr/local/bin/limactl hostagent x", agent_age=7200)
+        self.state("guest-answers")
+        result = self.run_role(**self.FAST)
+        self.assertIn("for more than 600 seconds;", result.stdout)
+        self.assertNotIn("seconds ago", result.stdout)
+
+    # The Docker context, which the stop reads for its socket check on its own.
+
+    def test_a_host_that_names_its_colima_home_and_has_no_readable_context_still_runs(self) -> None:
+        # The README's route for a host whose context does not say where the profile is (DOCKER_HOST, say): the variable gives the home and the context cannot be read. Nothing is listed as running, so the play starts the profile as before.
+        for label, variables in (("an empty context", {"context": ""}), ("an unknown context", {})):
+            with self.subTest(label=label):
+                self.forget()
+                self.state("session")
+                if not variables:
+                    self.state("context-unknown")
+                result = self.run_role(github_runner_cluster_colima_home="/elsewhere", github_runner_cluster_runtime="colima", **variables)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_colima_ran_in("/elsewhere")
+                self.assertEqual(self.stops(), [])
+
+    def test_a_context_that_cannot_be_read_never_leads_to_a_stop_and_the_report_says_so(self) -> None:
+        for label, variables in (("an empty context", {"context": ""}), ("an unknown context", {"unknown": True})):
+            with self.subTest(label=label):
+                self.forget()
+                self.listed_running()
+                if variables.get("unknown"):
+                    self.state("context-unknown")
+                result = self.run_role(github_runner_cluster_colima_home=f"{self.home}/.colima", github_runner_cluster_runtime="colima", **{k: v for k, v in variables.items() if k != "unknown"}, **self.FAST)
+                self.assert_left_alone(result, "so its socket is not proven to belong to the profile")
+
+    def test_a_context_whose_endpoint_is_another_runtime_never_leads_to_a_stop(self) -> None:
+        for endpoint in ("tcp://remote.example.invalid:2375", "unix:///var/run/docker.sock"):
+            with self.subTest(endpoint=endpoint):
+                self.forget()
+                self.listed_running()
+                result = self.run_role(context_host=endpoint, github_runner_cluster_colima_home=f"{self.home}/.colima", **self.FAST)
+                self.assert_left_alone(result, "does not point at the socket of the profile")
+
+    # The supervisor failing is not a failed probe.
+
+    def test_a_supervisor_that_cannot_run_the_command_fails_the_run_naming_it_and_is_not_evidence(self) -> None:
+        for code in (127, 255):
+            with self.subTest(code=code):
+                self.forget()
+                self.listed_running()
+                (self.stub / "docker-exit").write_text(str(code))
+                result = self.run_role(**self.FAST)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("run_bounded.pl", result.stdout)
+                self.assertEqual(self.stops(), [])
+
+    def test_a_host_without_perl_fails_the_run_naming_the_supervisor(self) -> None:
+        self.listed_running()
+        result = self.run_role(github_runner_cluster_runtime_path=str(self.bin), **self.FAST)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("run_bounded.pl", result.stdout)
+        self.assertEqual(self.stops(), [])
+
+    def test_a_tool_that_fails_by_itself_still_counts_as_a_failed_probe(self) -> None:
+        # docker exiting 1 (cannot connect) is the daemon's answer, not the supervisor's.
+        self.listed_running()
+        (self.stub / "docker-exit").write_text("1")
+        result = self.run_role(**self.FAST)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.stops()), 1)
+
     def test_an_agent_that_has_run_for_days_counts_as_old(self) -> None:
         self.listed_running(agent_age=3 * 86400 + 3600 + 61)
         result = self.run_role(**self.FAST)
@@ -758,7 +877,7 @@ class RoleTest(unittest.TestCase):
         # The variable names another Colima home than the one the Docker context's socket is in: the probes measured one runtime and a stop would act on another's profile. (A context whose endpoint is no Colima socket at all fails earlier, in the filter that reads the home from it.)
         self.listed_running()
         result = self.run_role(github_runner_cluster_colima_home="/elsewhere", **self.FAST)
-        self.assert_left_alone(result, "does not point at")
+        self.assert_left_alone(result, "does not point at the socket of the profile")
 
     def test_with_the_stop_switched_off_a_confirmed_wedge_fails_naming_the_switch(self) -> None:
         self.listed_running()
@@ -1041,12 +1160,13 @@ class RoleTest(unittest.TestCase):
         self.assertEqual((self.node_daemon.read_text(), self.node_agent.read_text()), ("<plist/>", "<plist/>"))
         self.assertEqual(self.changes(), [])
 
-    def test_the_variable_wins_over_the_context_for_the_home_colima_runs_in(self) -> None:
-        # The context is still read, since a stop of a silent profile compares its socket with the home; here the runtime is down and nothing is listed as running, so the comparison is never used.
+    def test_the_variable_wins_over_the_context_and_the_context_is_not_read(self) -> None:
+        # A profile that is stopped never reaches the stop's own read of the context, so the home comes from the variable alone.
         self.state("session")
         result = self.run_role(context="colima-node", github_runner_cluster_colima_home="/elsewhere")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_colima_ran_in("/elsewhere")
+        self.assertFalse([call for call in self.calls() if " docker context " in call])
 
     def test_a_profile_in_the_default_home_runs_with_no_variable(self) -> None:
         self.state("session")
