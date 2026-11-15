@@ -98,9 +98,28 @@ def cluster_colima_home(endpoint: Any, profile: Any, user_home: Any) -> str:
     return colima_home
 
 
+SUPERVISOR_FAILURE_STATUSES = (127, 255)
+SUPERVISOR_FAILURE_MESSAGE = "Error executing command"
+
+
+def cluster_supervisor_failed(result: Any) -> bool:
+    """Say whether the registered result of a command run under ``files/run_bounded.pl`` shows that the supervisor itself could not run, as opposed to the supervised command failing or timing out.
+
+    The supervisor exits 127 when it cannot start the command and 255 when it is misused (and the command module's own exit 127 is the same case for a missing interpreter). When the command module cannot start ``perl`` at all (not on the PATH, not executable) it reports the failure with the message ``Error executing command`` and an ``rc`` that is the OS error number (2 for a missing file, 13 for a permission error) or 257, so the message is what identifies it, whatever the ``rc``.
+
+    :param result: The registered result of the command task: a mapping with ``rc`` and, when the module could not start the command, ``msg``.
+    :returns: True when the run says nothing about the command, so it must fail the play and never count as the command failing.
+    :raises AnsibleFilterError: the value is not a mapping.
+    """
+    if not isinstance(result, dict):
+        raise AnsibleFilterError(f"The result of a supervised command must be a mapping, not {type(result).__name__}")
+    message = result.get("msg")
+    return result.get("rc") in SUPERVISOR_FAILURE_STATUSES or (isinstance(message, str) and SUPERVISOR_FAILURE_MESSAGE in message)
+
+
 class FilterModule:
-    """Registers the container runtime filter with Ansible."""
+    """Registers the container runtime filters with Ansible."""
 
     def filters(self) -> dict[str, Any]:
         """Return the filters this plugin provides."""
-        return {"cluster_container_runtime": cluster_container_runtime, "cluster_colima_home": cluster_colima_home}
+        return {"cluster_container_runtime": cluster_container_runtime, "cluster_colima_home": cluster_colima_home, "cluster_supervisor_failed": cluster_supervisor_failed}

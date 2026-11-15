@@ -49,14 +49,14 @@
       failed_when: false
       check_mode: false
       # A supervisor that cannot run ends the loop at once: the check below fails the run.
-      until: github_runner_cluster_runtime_reprobe.rc == 0 or github_runner_cluster_runtime_reprobe.rc in [127, 255] or (github_runner_cluster_runtime_reprobe.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_reprobe.msg | default('')))
+      until: github_runner_cluster_runtime_reprobe.rc == 0 or github_runner_cluster_runtime_reprobe | exadev.github_runner.cluster_supervisor_failed
       retries: "{{ github_runner_cluster_runtime_probe_attempts | int - 1 }}"
       delay: "{{ github_runner_cluster_runtime_probe_delay }}"
 
     - name: Check that the supervisor could run docker info
-      # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a missing perl as exit 2 with the message "Error executing command". None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
+      # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a perl it cannot start (missing, not executable) with the message "Error executing command" and an rc that is an OS error number. exadev.github_runner.cluster_supervisor_failed says which of these a result is. None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
       ansible.builtin.assert:
-        that: not (github_runner_cluster_runtime_reprobe.rc in [127, 255] or (github_runner_cluster_runtime_reprobe.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_reprobe.msg | default(''))))
+        that: not (github_runner_cluster_runtime_reprobe | exadev.github_runner.cluster_supervisor_failed)
         fail_msg: >-
           files/run_bounded.pl could not run docker info on {{ inventory_hostname }} (exit {{ github_runner_cluster_runtime_reprobe.rc }}): {{ github_runner_cluster_runtime_reprobe.msg | default(github_runner_cluster_runtime_reprobe.stderr | default('')) | trim }}.
           This is not a verdict on the runtime. perl must be on the PATH the role uses (github_runner_cluster_runtime_path), and the command must exist.
@@ -91,9 +91,9 @@
           check_mode: false
 
         - name: Check that the supervisor could run a command in the guest
-          # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a missing perl as exit 2 with the message "Error executing command". None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
+          # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a perl it cannot start (missing, not executable) with the message "Error executing command" and an rc that is an OS error number. exadev.github_runner.cluster_supervisor_failed says which of these a result is. None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
           ansible.builtin.assert:
-            that: not (github_runner_cluster_runtime_guest.rc in [127, 255] or (github_runner_cluster_runtime_guest.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_guest.msg | default(''))))
+            that: not (github_runner_cluster_runtime_guest | exadev.github_runner.cluster_supervisor_failed)
             fail_msg: >-
               files/run_bounded.pl could not run a command in the guest on {{ inventory_hostname }} (exit {{ github_runner_cluster_runtime_guest.rc }}): {{ github_runner_cluster_runtime_guest.msg | default(github_runner_cluster_runtime_guest.stderr | default('')) | trim }}.
               This is not a verdict on the runtime. perl must be on the PATH the role uses (github_runner_cluster_runtime_path), and the command must exist.
@@ -202,9 +202,9 @@
           when: not ansible_check_mode
 
         - name: Check that the supervisor could run colima stop
-          # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a missing perl as exit 2 with the message "Error executing command". None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
+          # files/run_bounded.pl exits 127 when it cannot start the command and 255 when it is misused, and the command module reports a perl it cannot start (missing, not executable) with the message "Error executing command" and an rc that is an OS error number. exadev.github_runner.cluster_supervisor_failed says which of these a result is. None of those is the command failing, so none counts as evidence about the VM: the run fails and names the supervisor.
           ansible.builtin.assert:
-            that: not (github_runner_cluster_runtime_clean_stop.rc in [127, 255] or (github_runner_cluster_runtime_clean_stop.rc == 2 and 'Error executing command' in (github_runner_cluster_runtime_clean_stop.msg | default(''))))
+            that: not (github_runner_cluster_runtime_clean_stop | exadev.github_runner.cluster_supervisor_failed)
             fail_msg: >-
               files/run_bounded.pl could not run colima stop on {{ inventory_hostname }} (exit {{ github_runner_cluster_runtime_clean_stop.rc }}): {{ github_runner_cluster_runtime_clean_stop.msg | default(github_runner_cluster_runtime_clean_stop.stderr | default('')) | trim }}.
               This is not a verdict on the runtime. perl must be on the PATH the role uses (github_runner_cluster_runtime_path), and the command must exist.

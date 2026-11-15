@@ -14,6 +14,7 @@ _spec.loader.exec_module(container_runtime)
 
 runtime = container_runtime.cluster_container_runtime
 colima_home = container_runtime.cluster_colima_home
+supervisor_failed = container_runtime.cluster_supervisor_failed
 AnsibleFilterError = container_runtime.AnsibleFilterError
 HOME = "/Users/example"
 
@@ -89,6 +90,7 @@ class InvalidInputTest(unittest.TestCase):
     def test_the_filter_is_registered(self) -> None:
         self.assertIs(container_runtime.FilterModule().filters()["cluster_container_runtime"], runtime)
         self.assertIs(container_runtime.FilterModule().filters()["cluster_colima_home"], colima_home)
+        self.assertIs(container_runtime.FilterModule().filters()["cluster_supervisor_failed"], supervisor_failed)
 
 
 class ColimaHomeTest(unittest.TestCase):
@@ -133,3 +135,29 @@ class ColimaHomeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SupervisorFailedTest(unittest.TestCase):
+    def test_the_supervisors_own_statuses_say_it_could_not_run_the_command(self) -> None:
+        for rc in (127, 255):
+            with self.subTest(rc=rc):
+                self.assertTrue(supervisor_failed({"rc": rc, "stdout": "", "stderr": ""}))
+
+    def test_the_command_module_failing_to_start_perl_does_so_whatever_the_rc(self) -> None:
+        # rc is the OS error number (2 missing, 13 not executable) or 257 for another OS error; the message is what they share.
+        for rc in (2, 13, 257, 1):
+            with self.subTest(rc=rc):
+                self.assertTrue(supervisor_failed({"rc": rc, "msg": "Error executing command", "cmd": ["perl"]}))
+
+    def test_a_supervised_command_that_failed_or_timed_out_is_not_a_supervisor_failure(self) -> None:
+        for rc in (0, 1, 2, 13, 124, 137, 143):
+            with self.subTest(rc=rc):
+                self.assertFalse(supervisor_failed({"rc": rc, "stdout": "", "stderr": "Cannot connect to the Docker daemon"}))
+
+    def test_a_message_that_is_not_the_start_failure_does_not_count(self) -> None:
+        self.assertFalse(supervisor_failed({"rc": 1, "msg": "non-zero return code"}))
+
+    def test_a_value_that_is_not_a_result_is_refused(self) -> None:
+        for value in (None, "rc", 127, ["rc"]):
+            with self.subTest(value=value), self.assertRaises(AnsibleFilterError):
+                supervisor_failed(value)
