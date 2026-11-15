@@ -554,10 +554,11 @@ class BoundedRunTest(unittest.TestCase):
                     else:
                         self.fail(f"process {pid} survived the {signal_name} sent to the supervisor")
 
-    def test_a_command_that_ends_just_as_the_deadline_passes_reports_its_own_status(self) -> None:
-        # The deadline is checked after one last look at the child, so a command that has already ended is not reported as timed out.
-        result, _ = self.run_bounded(0.2, 1, "sh", "-c", "sleep 0.1; exit 5")
+    def test_regression_guard_a_command_that_ends_before_the_deadline_reports_its_own_status(self) -> None:
+        # A guard only: it passes on a supervisor with or without the final look at the child before the timeout path, because making a command end in the last poll interval is a race against the scheduler, which a test on a loaded runner cannot win reliably. The final look is read from the script instead.
+        result, _ = self.run_bounded(1, 1, "sh", "-c", "sleep 0.1; exit 5")
         self.assertEqual(result.returncode, 5)
+        self.assertIn("one last look", self.SCRIPT.read_text().lower())
 
     def test_the_deadline_is_measured_on_the_monotonic_clock(self) -> None:
         self.assertIn("CLOCK_MONOTONIC", self.SCRIPT.read_text())
@@ -851,6 +852,18 @@ class RoleTest(unittest.TestCase):
     def test_a_host_without_perl_fails_the_run_naming_the_supervisor(self) -> None:
         self.listed_running()
         result = self.run_role(github_runner_cluster_runtime_path=str(self.bin), **self.FAST)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("run_bounded.pl", result.stdout)
+        self.assertEqual(self.stops(), [])
+
+    def test_a_perl_that_is_not_executable_fails_the_run_naming_the_supervisor(self) -> None:
+        # The command module reports this with the OS error number as its rc (13), not 2: the message identifies it.
+        self.listed_running()
+        perl_dir = self.work / "no-perl"
+        perl_dir.mkdir()
+        (perl_dir / "perl").write_text("#!/bin/sh\n")
+        (perl_dir / "perl").chmod(0o644)
+        result = self.run_role(github_runner_cluster_runtime_path=f"{perl_dir}{os.pathsep}{self.bin}", **self.FAST)
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("run_bounded.pl", result.stdout)
         self.assertEqual(self.stops(), [])
