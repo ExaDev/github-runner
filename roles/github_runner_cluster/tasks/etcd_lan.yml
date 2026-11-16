@@ -53,19 +53,17 @@
       when: github_runner_cluster_etcd_lan_problems | length > 0
 
     - name: Fail if the LAN address is not one of the Docker host's own
-      # host_network.yml read the Docker host's addresses from a throwaway container on its network, which is the namespace etcd listens in on the host network.
+      # host_network.yml read the Docker host's addresses from a throwaway container on its network, which is the namespace etcd listens in on the host network; they are parsed here as its own LAN check parses them.
       vars:
-        github_runner_cluster_etcd_lan_own: >-
-          {{ github_runner_cluster_host_network.stdout.split('\n--\n') | first | split('\n')
-             | exadev.github_runner.addresses_in_network(github_runner_cluster_etcd_lan_address | trim ~ '/32') }}
+        github_runner_cluster_etcd_lan_own: "{{ github_runner_cluster_host_network.stdout.split('\n--\n') | first | split('\n') | exadev.github_runner.addresses_in_network(github_runner_cluster_lan_cidr) }}"
       ansible.builtin.fail:
         msg: >-
           github_runner_cluster_etcd_lan_address is {{ github_runner_cluster_etcd_lan_address | trim }} for {{ inventory_hostname }}, which is not
-          an address of the Docker host its node runs on, so etcd could not listen on it. Set it to the host network's address in
-          {{ github_runner_cluster_lan_cidr }}. Nothing was changed.
+          an address of the Docker host its node runs on (its addresses in {{ github_runner_cluster_lan_cidr }}: {{ github_runner_cluster_etcd_lan_own | join(', ') or 'none' }}),
+          so etcd could not listen on it. Set it to one of those. Nothing was changed.
       when:
         - github_runner_cluster_etcd_lan_wanted | bool
-        - github_runner_cluster_etcd_lan_own | length == 0
+        - (github_runner_cluster_etcd_lan_address | trim) not in github_runner_cluster_etcd_lan_own
 
     - name: Read etcd's members, through this server's container and then every other server's
       ansible.builtin.include_tasks: etcd_members_read.yml
