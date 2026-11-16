@@ -1,0 +1,7 @@
+# Merged after docker-compose.yml by the github_runner_cluster role when github_runner_cluster_etcd_lan_address is set for the host (see github_runner_cluster_compose_file_list in defaults/main.yml): tells the server's entrypoint the host's address on the LAN, which it adds to the certificates' names, and, once the host's etcd member has moved onto that address, the address k3s is to start etcd on (see "etcd peers over the LAN" in the role README). A separate file rather than entries in docker-compose.yml, because any entry there, even an empty one, changes the configuration hash Compose compares and so would recreate every running server when the collection is upgraded. The agent runs no etcd and takes neither.
+services:
+  k3s:
+    environment:
+      - K3S_ETCD_LAN_ADDRESS=${K3S_ETCD_LAN_ADDRESS:?K3S_ETCD_LAN_ADDRESS must be set in .env - this host's own address on the LAN the servers share}
+      # Empty while the host's etcd member is on the mesh address.
+      - K3S_ETCD_PEER_ADDRESS=${K3S_ETCD_PEER_ADDRESS:-}

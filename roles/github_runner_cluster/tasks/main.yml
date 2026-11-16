@@ -90,6 +90,10 @@
   # Before anything changes on the host, and so before the mesh step, which starts the bootstrap server's Compose project itself with the headscale_in_cluster provider.
   ansible.builtin.include_tasks: host_network.yml
 
+- name: Decide whether this host's etcd member uses its LAN address, and which member of the play moves in this run
+  # After host_network.yml, whose reads of the node's container and the Docker host's addresses it uses, and before anything changes on the host or .env is templated. See tasks/etcd_lan.yml.
+  ansible.builtin.include_tasks: etcd_lan.yml
+
 - name: Size this host's Colima VM from the inventory, one node at a time through the quorum guard
   # After the runtime is up and the topology decided, both of which the resize reads. See tasks/colima_size.yml.
   ansible.builtin.include_tasks: colima_size.yml
@@ -130,6 +134,7 @@
     - {src: docker-compose.api-port.yml, mode: "0644"}
     - {src: docker-compose.node-labels.yml, mode: "0644"}
     - {src: docker-compose.fleet-role.yml, mode: "0644"}
+    - {src: docker-compose.etcd-lan.yml, mode: "0644"}
     - {src: docker-compose.host-network.yml, mode: "0644"}
     - {src: k3s/Dockerfile, mode: "0644"}
     - {src: k3s/node-entrypoint.sh, mode: "0755"}

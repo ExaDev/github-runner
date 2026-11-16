@@ -1,0 +1,11 @@
+---
+# Starts this server's k3s with Docker Compose, from the files and .env on the host: recreating its container when its configuration changed, as Compose decides. tasks/start_server.yml checks first whether that is safe; tasks/etcd_lan_move.yml starts a server here after moving its etcd member, and again to move it back.
+
+- name: Start k3s via docker compose (bootstrapping or joining, per this host's own .env)
+  community.docker.docker_compose_v2:
+    project_src: "{{ github_runner_cluster_dir }}"
+    project_name: "{{ github_runner_cluster_compose_project }}"
+    profiles: ["server"]
+    cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
+    files: "{{ github_runner_cluster_compose_files_in_use if github_runner_cluster_compose_files_in_use | length > 1 else omit }}"
+    state: present
