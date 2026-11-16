@@ -776,7 +776,7 @@ scenario_etcd_lan() {
     # Each run moves the first server of the play still on the mesh, node ${expected}, whose own API server is down while it is recreated; the writes go through the next server, which keeps running, so that what they measure is etcd's quorum.
     api_node=$((expected % node_count + 1))
     rm -f "$stop"
-    write_throughout "$writes" "$stop" &
+    write_throughout "$writes" "$stop" "lan${expected}-" &
     # The role refuses a move while any server logged an etcd read that could not reach a quorum within the quiet window, which the recreates just before can leave; a minute's window, waited out, keeps the runs apart without waiting the default ten.
     sleep 65
     output=$(run_role -e github_runner_cluster_etcd_peers_over_lan=true -e github_runner_cluster_etcd_lan_quiet_minutes=1 2>&1) || { echo "$output"; fail "the role failed to move member ${expected} onto the LAN"; }
@@ -1196,14 +1196,14 @@ node_is_voter() {
   [ "$(kubectl_on "$api_node" get node "${1:-$native_host}" -o 'jsonpath={.status.conditions[?(@.type=="EtcdIsVoter")].status}' 2>/dev/null)" = True ]
 }
 
-# Writes to the cluster through node 1 once a second until the stop file appears, recording each write as ok, or as failed with the time and what kubectl said. Each write is a ConfigMap named by its sequence number, so no two writes share a name: write_marker's random suffix repeats often enough over a promotion's worth of writes that a refusal for a name already taken would read as a lost write.
+# Writes to the cluster through node $api_node once a second until the stop file appears (with $3, when given, before each name, so that writers started one after another do not collide), recording each write as ok, or as failed with the time and what kubectl said. Each write is a ConfigMap named by its sequence number, so no two writes share a name: write_marker's random suffix repeats often enough over a promotion's worth of writes that a refusal for a name already taken would read as a lost write.
 write_throughout() {
-  local log="$1" stop="$2" sequence=0 error
+  local log="$1" stop="$2" prefix="${3:-}" sequence=0 error
   : > "$log"
   : > "${log}.times"
   until [ -e "$stop" ]; do
     sequence=$((sequence + 1))
-    if error=$(kubectl_on "$api_node" create configmap "grtest-native-write-${sequence}" --from-literal=a=1 2>&1 >/dev/null </dev/null); then
+    if error=$(kubectl_on "$api_node" create configmap "grtest-native-write-${prefix}${sequence}" --from-literal=a=1 2>&1 >/dev/null </dev/null); then
       echo ok >> "$log"
       echo "$(date +%s) ok" >> "${log}.times"
     else
