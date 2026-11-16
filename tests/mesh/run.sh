@@ -780,7 +780,7 @@ scenario_etcd_lan() {
     output=$(run_role -e github_runner_cluster_etcd_peers_over_lan=true -e github_runner_cluster_etcd_lan_quiet_minutes=1 2>&1) || { echo "$output"; fail "the role failed to move member ${expected} onto the LAN"; }
     echo "$output" | grep -E 'etcd member|^(PLAY RECAP|grtest)' || true
     [ "$(members_on_lan)" = "$expected" ] || fail "after run ${expected}, $(members_on_lan) members are on the LAN, not ${expected}"
-    if [ "$expected" -lt "$node_count" ]; then echo "$output" | grep -q "another server's member moves in this run" || fail "run ${expected} did not report the members that wait"; fi
+    if [ "$expected" -lt "$node_count" ]; then grep -F "another server's member moves in this run" <<< "$output" >/dev/null || fail "run ${expected} did not report the members that wait"; fi
   done
   touch "$stop"
   wait
