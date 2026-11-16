@@ -725,8 +725,12 @@ members_on_lan() { etcd_on 1 member list -w simple | grep -c ", https://${subnet
 # Whether every etcd member answers, asked through node $1: each member's client URL, which is where its peer URL is.
 all_members_healthy_from() { [ "$(etcd_on "$1" endpoint health --cluster -w json 2>/dev/null | jq '[.[] | select(.health | not)] | length' 2>/dev/null)" = 0 ]; }
 
-# Whether node $2's member does not answer when asked through node $1.
-member_unhealthy_from() { etcd_on "$1" endpoint health --cluster -w json 2>/dev/null | jq -e --arg ip "$(node_ip "$2")" --arg mesh "$3" '[.[] | select(.health | not) | .endpoint | select(contains($mesh) or contains($ip))] | length > 0' >/dev/null 2>&1; }
+# Whether node $2's member (at its LAN address or the mesh address $3) does not answer when asked through node $1. etcdctl exits non-zero whenever a member is unhealthy, which is the case looked for, so its output is read whatever its status.
+member_unhealthy_from() {
+  local health
+  health=$(etcd_on "$1" endpoint health --cluster -w json 2>/dev/null || true)
+  jq -e --arg ip "$(node_ip "$2")" --arg mesh "$3" '[.[] | select(.health | not) | .endpoint | select(contains($mesh) or contains($ip))] | length > 0' <<< "$health" >/dev/null 2>&1
+}
 
 # Cuts node $1 off the mesh, as an expired node key does, and only the mesh: every packet in or out of its Tailscale interface is dropped in its VM's namespace, which on the host network is the node's, while the test network (its LAN) stays up.
 cut_mesh() { docker exec "$(vm "$1")" sh -c 'iptables -I INPUT 1 -i tailscale0 -j DROP && iptables -I OUTPUT 1 -o tailscale0 -j DROP'; }
