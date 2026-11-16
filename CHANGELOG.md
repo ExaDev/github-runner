@@ -1,3 +1,22 @@
+## [3.3.0](https://github.com/ExaDev/github-runner/compare/v3.2.2...v3.3.0) (2026-11-16)
+
+### Features
+
+* **cluster:** move etcd's peer traffic onto the servers' LAN addresses ([ac906ff](https://github.com/ExaDev/github-runner/commit/ac906ff637e73957fdf975c9f1290ccf72db2605))
+
+### Bug Fixes
+
+* **cluster:** check the etcd LAN address against the host's LAN addresses ([f53461e](https://github.com/ExaDev/github-runner/commit/f53461e32a33c60715cfbbf19a760f61b5f47c3c))
+* **role-controller:** probe each voter at its etcd member's address ([1bf6a1b](https://github.com/ExaDev/github-runner/commit/1bf6a1b0d29138248204569b5e8c8350e17693c2))
+* **test:** give each run's writer names of its own ([d7dface](https://github.com/ExaDev/github-runner/commit/d7dface8d78aa7ef6ff0ea54f1909522314965c9))
+* **test:** read etcd's health of a member that does not answer ([59731f5](https://github.com/ExaDev/github-runner/commit/59731f546b8e6b34d71e3f96e8048efa466b785a))
+* **test:** read the role's report without grep -q under pipefail ([587c863](https://github.com/ExaDev/github-runner/commit/587c8632b6260548df94e5bbbb0d2264a624c6ea))
+* **test:** write through a server that is not moving its etcd member ([32e84b0](https://github.com/ExaDev/github-runner/commit/32e84b0bdcd16a2b87ee706aad777f8dff8b7718))
+
+### Tests
+
+* **mesh:** move etcd's members onto the LAN and cut a server off the mesh ([70ae7a1](https://github.com/ExaDev/github-runner/commit/70ae7a13783508fa4241b8801a6b85324eedaa2e))
+
 ## [3.2.2](https://github.com/ExaDev/github-runner/compare/v3.2.1...v3.2.2) (2026-11-15)
 
 ### Bug Fixes
