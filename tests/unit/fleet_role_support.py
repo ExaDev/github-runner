@@ -369,6 +369,7 @@ def node(
     ready_for: float = 24 * 3600,
     level: str | None = None,
     address: str | None = None,
+    etcd_address: str | None = None,
     link: str | None = None,
 ) -> dict[str, Any]:
     """A Node as `kubectl get nodes -o json` lists it; a voter carries the etcd label and the EtcdIsVoter condition, a learner the label alone (k3s labels a member when it joins and sets the condition when it votes), ready_for is how long ago its Ready condition last changed, and link the medium the cluster role labelled it with, none when it has no such label."""
@@ -387,7 +388,8 @@ def node(
     if voter:
         conditions.append({"type": VOTER_CONDITION, "status": "True", "lastTransitionTime": transition_time(ready_for)})
     return {
-        "metadata": {"name": name, "labels": labels},
+        # k3s keeps the address an etcd server's member listens on for peers in this annotation, which the probe dials: the InternalIP while etcd uses the mesh address, unless etcd_address says the member moved.
+        "metadata": {"name": name, "labels": labels, "annotations": {"etcd.k3s.cattle.io/node-address": etcd_address or address or "127.0.0.1"} if voter or learner else {}},
         "spec": {"unschedulable": True} if cordoned else {},
         "status": {
             "conditions": conditions,

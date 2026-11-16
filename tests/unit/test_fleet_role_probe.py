@@ -378,6 +378,13 @@ class ConnectTest(ProbeCase):
         self.assertEqual(self.newest()["tcp"]["peer"], 400)
         self.assertLess(time.monotonic() - started, 5)
 
+    def test_the_peer_is_dialled_at_its_etcd_member_s_address_not_its_node_ip(self) -> None:
+        # A voter whose member moved onto its LAN address (github_runner_cluster_etcd_peers_over_lan) listens for peers there and not on its InternalIP, which stays the mesh address; an address reserved for documentation stands in for that InternalIP, where nothing answers.
+        with listener() as port:
+            completed = self.probe(voters=[node("peer", voter=True, address="192.0.2.1", etcd_address="127.0.0.1"), node("me", eligible=True)], ETCD_PEER_PORT=str(port), ELECTION_TIMEOUT_MS="400")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(self.newest()["tcp"]["peer"], 400)
+
     def test_an_ipv6_peer_address_is_bracketed(self) -> None:
         try:
             with listener("::1") as port:
