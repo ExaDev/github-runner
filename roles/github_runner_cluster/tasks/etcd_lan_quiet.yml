@@ -1,0 +1,39 @@
+---
+# Fails unless no server of the inventory logged, since github_runner_cluster_etcd_lan_since (a duration such as 10m, or a UTC timestamp), an etcd read that could not reach a quorum: one of github_runner_cluster_etcd_read_index_messages, which etcd logs when a member cannot get a read index from its leader in time, the symptom of a voter cut off from its peers. Each server's k3s container log is read on its own host, with its pinned Docker context, and only the matching lines leave it. A server whose log cannot be read fails the check too, since its etcd cannot be vouched for.
+
+- name: Read each server's log for etcd reads that could not reach a quorum
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker logs --since "$since" "$container" > /dev/null
+    docker logs --since "$since" "$container" 2>&1 | grep -F {% for message in github_runner_cluster_etcd_read_index_messages %}-e {{ message | quote }} {% endfor %}|| true
+  args:
+    executable: /bin/bash
+  environment: >-
+    {{ ({'DOCKER_CONTEXT': github_runner_cluster_etcd_quiet_context} if github_runner_cluster_etcd_quiet_context | length > 0 else {})
+       | combine({'container': github_runner_cluster_etcd_quiet_container, 'since': github_runner_cluster_etcd_lan_since}) }}
+  delegate_to: "{{ item }}"
+  loop: >-
+    {{ [inventory_hostname] + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
+                               | map(attribute='key') | reject('equalto', inventory_hostname) | list) }}
+  vars:
+    github_runner_cluster_etcd_quiet_container: >-
+      {{ github_runner_cluster_container_name if item == inventory_hostname
+         else hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s') }}
+    github_runner_cluster_etcd_quiet_context: >-
+      {{ (github_runner_cluster_docker_context | default('') if item == inventory_hostname
+          else hostvars[item].github_runner_cluster_docker_context | default('')) | trim }}
+  register: github_runner_cluster_etcd_quiet_reads
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+
+- name: Fail if a server logged such a read, or its log could not be read
+  vars:
+    github_runner_cluster_etcd_quiet_problems: >-
+      {% set rows = [] %}{% for read in github_runner_cluster_etcd_quiet_reads.results %}{% if read.rc is not defined or read.rc != 0 %}{% set _ = rows.append(read.item ~ "'s log could not be read") %}{% elif read.stdout | trim | length > 0 %}{% set _ = rows.append(read.item ~ ' logged ' ~ (read.stdout_lines | length) ~ ' (last: ' ~ (read.stdout_lines | last | truncate(300)) ~ ')') %}{% endif %}{% endfor %}{{ rows }}
+  ansible.builtin.fail:
+    msg: >-
+      etcd reads could not reach a quorum since {{ github_runner_cluster_etcd_lan_since }}: {{ github_runner_cluster_etcd_quiet_problems | join('; ') }}.
+  when: github_runner_cluster_etcd_quiet_problems | length > 0

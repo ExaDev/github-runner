@@ -1,0 +1,55 @@
+---
+# Moves this server's etcd member back to the peer URL it had before tasks/etcd_lan_move.yml moved it: through this server's own etcd, and, when that does not answer (the server did not come back), through every other server of the inventory on its own host. An update to the URL a member already has changes nothing, so asking every other server is safe. Fails unless one of them made it.
+
+- name: Update the member's peer URL back through this server
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_etcdctl_argv + ['member', 'update', github_runner_cluster_etcd_lan_member.id, github_runner_cluster_etcd_lan_back] }}"
+  environment: "{{ github_runner_cluster_docker_cli_environment }}"
+  register: github_runner_cluster_etcd_lan_back_here
+  changed_when: github_runner_cluster_etcd_lan_back_here.rc == 0
+  failed_when: false
+
+- name: Update it back through the other servers when this one did not answer
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "container:{{ hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s') }}"
+      - --volume
+      - "{{ hostvars[item].github_runner_cluster_compose_project | default('github-runner') }}_k3s-data:/var/lib/rancher/k3s:ro"
+      - --entrypoint
+      - etcdctl
+      - "{{ github_runner_cluster_etcdctl_image }}"
+      - --endpoints=https://127.0.0.1:2379
+      - --cacert=/var/lib/rancher/k3s/server/tls/etcd/server-ca.crt
+      - --cert=/var/lib/rancher/k3s/server/tls/etcd/client.crt
+      - --key=/var/lib/rancher/k3s/server/tls/etcd/client.key
+      - "--command-timeout={{ github_runner_cluster_cluster_read_timeout | int }}s"
+      - member
+      - update
+      - "{{ github_runner_cluster_etcd_lan_member.id }}"
+      - "{{ github_runner_cluster_etcd_lan_back }}"
+  environment: >-
+    {{ {'DOCKER_CONTEXT': hostvars[item].github_runner_cluster_docker_context} if hostvars[item].github_runner_cluster_docker_context | default('') | length > 0 else {} }}
+  delegate_to: "{{ item }}"
+  loop: >-
+    {{ github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
+       | map(attribute='key') | reject('equalto', inventory_hostname) | list }}
+  register: github_runner_cluster_etcd_lan_back_there
+  changed_when: github_runner_cluster_etcd_lan_back_there.rc | default(1) == 0
+  failed_when: false
+  ignore_unreachable: true
+  when: github_runner_cluster_etcd_lan_back_here.rc != 0
+
+- name: Fail if no server could move the member back
+  ansible.builtin.fail:
+    msg: >-
+      etcd still lists {{ inventory_hostname }}'s member {{ github_runner_cluster_etcd_lan_member.name }} at its new address: no server could update it
+      back to {{ github_runner_cluster_etcd_lan_back }} ({{ github_runner_cluster_etcd_lan_back_here.stderr | default('') }}). Update it by hand with
+      `etcdctl member update {{ github_runner_cluster_etcd_lan_member.id }} {{ github_runner_cluster_etcd_lan_back }}` through a healthy server
+      (the role README's etcdctl runbook) before anything else.
+  when:
+    - github_runner_cluster_etcd_lan_back_here.rc != 0
+    - github_runner_cluster_etcd_lan_back_there.results | default([]) | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | list | length == 0

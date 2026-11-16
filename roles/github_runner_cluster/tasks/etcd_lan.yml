@@ -1,0 +1,171 @@
+---
+# Decides, before the role changes anything on the host, where this host's etcd member is to be reached: its mesh address, as always, or its LAN address (github_runner_cluster_etcd_lan_address, moved onto by github_runner_cluster_etcd_peers_over_lan; see "etcd peers over the LAN" in the role README). Sets github_runner_cluster_etcd_peer_on_lan, which env.j2 reads, and github_runner_cluster_etcd_lan_switch, which a server's turn (tasks/start_server.yml) acts on: empty, or to_lan or to_mesh for the one server of the play whose running member moves in this run. With no address set it reads nothing but whether the host's .env already starts etcd on a LAN address, so a host that never sets one runs exactly as before.
+
+- name: Note what this host asks of etcd's addresses
+  ansible.builtin.set_fact:
+    github_runner_cluster_etcd_lan_wanted: "{{ github_runner_cluster_etcd_lan_address | trim | length > 0 }}"
+    github_runner_cluster_etcd_peer_on_lan: false
+    github_runner_cluster_etcd_lan_switch: ""
+    github_runner_cluster_etcd_lan_candidate: ""
+
+- name: Read whether this host's .env starts etcd on a LAN address
+  # Only when no address is set: the address is what the role needs to move a member back, so removing it while the member is on the LAN would start k3s on its mesh address, which etcd no longer lists for it ("membershipError" in k3s's log), and the server would not come back. grep -c prints a count and nothing of the file, which holds secrets.
+  ansible.builtin.shell: |
+    set -eu
+    if [ -e "$env_file" ]; then grep -c '^K3S_ETCD_PEER_ADDRESS=.' "$env_file" || true; else echo 0; fi
+  environment:
+    env_file: "{{ github_runner_cluster_dir }}/.env"
+  register: github_runner_cluster_etcd_lan_left
+  changed_when: false
+  check_mode: false
+  when: not github_runner_cluster_etcd_lan_wanted | bool
+
+- name: Fail if the LAN address was removed while etcd still uses it
+  ansible.builtin.fail:
+    msg: >-
+      {{ inventory_hostname }}'s .env starts etcd on its LAN address, but github_runner_cluster_etcd_lan_address is no longer set.
+      Started without it, k3s would look for its member under the mesh address, which etcd no longer lists, and the server would not
+      come back. Set the address again with github_runner_cluster_etcd_peers_over_lan false, and run once per server to move each
+      member back to its mesh address; then remove the address. Nothing was changed.
+  when:
+    - not github_runner_cluster_etcd_lan_wanted | bool
+    - (github_runner_cluster_etcd_lan_left.stdout | trim | int) > 0
+
+- name: Check etcd's LAN addresses and decide this host's
+  when: github_runner_cluster_etcd_lan_wanted | bool or github_runner_cluster_etcd_peers_over_lan | bool
+  block:
+    - name: Fail if the inventory's LAN addresses cannot carry etcd's peer traffic
+      vars:
+        github_runner_cluster_etcd_lan_hosts: >-
+          {% set rows = [] %}{% for name, host in github_runner_cluster_topology.hosts.items() %}{% set settings = hostvars[name] %}{% set _ = rows.append({
+            'name': name, 'node_name': host.node_name, 'role': host.role,
+            'eligible': settings.github_runner_cluster_voter_eligible | default(false) | bool,
+            'node_mode': settings.github_runner_cluster_node_mode | default('compose'),
+            'network_mode': settings.github_runner_cluster_network_mode | default('bridge'),
+            'lan_cidr': settings.github_runner_cluster_lan_cidr | default(''),
+            'mesh': settings.github_runner_cluster_mesh | default(github_runner_cluster_mesh),
+            'address': settings.github_runner_cluster_etcd_lan_address | default(''),
+            'peers_over_lan': settings.github_runner_cluster_etcd_peers_over_lan | default(false) | bool}) %}{% endfor %}{{ rows }}
+        github_runner_cluster_etcd_lan_problems: >-
+          {{ github_runner_cluster_etcd_lan_hosts | exadev.github_runner.cluster_etcd_lan_problems(github_runner_cluster_etcd_peers_over_lan | bool) }}
+      ansible.builtin.fail:
+        msg: "Not changing etcd's addresses: {{ github_runner_cluster_etcd_lan_problems | join(' ') }} Nothing was changed."
+      when: github_runner_cluster_etcd_lan_problems | length > 0
+
+    - name: Fail if the LAN address is not one of the Docker host's own
+      # host_network.yml read the Docker host's addresses from a throwaway container on its network, which is the namespace etcd listens in on the host network.
+      vars:
+        github_runner_cluster_etcd_lan_own: >-
+          {{ github_runner_cluster_host_network.stdout.split('\n--\n') | first | split('\n')
+             | exadev.github_runner.addresses_in_network(github_runner_cluster_etcd_lan_address | trim ~ '/32') }}
+      ansible.builtin.fail:
+        msg: >-
+          github_runner_cluster_etcd_lan_address is {{ github_runner_cluster_etcd_lan_address | trim }} for {{ inventory_hostname }}, which is not
+          an address of the Docker host its node runs on, so etcd could not listen on it. Set it to the host network's address in
+          {{ github_runner_cluster_lan_cidr }}. Nothing was changed.
+      when:
+        - github_runner_cluster_etcd_lan_wanted | bool
+        - github_runner_cluster_etcd_lan_own | length == 0
+
+    - name: Read etcd's members, through this server's container and then every other server's
+      ansible.builtin.include_tasks: etcd_members_read.yml
+      when: github_runner_cluster_etcd_lan_wanted | bool
+
+    - name: Work out where this host's member is and where it is to be
+      vars:
+        github_runner_cluster_etcd_lan_found: >-
+          {{ (github_runner_cluster_etcd_members | exadev.github_runner.cluster_etcd_member_of(github_runner_cluster_effective_node_name))
+             if github_runner_cluster_etcd_members is not none else none }}
+      ansible.builtin.set_fact:
+        github_runner_cluster_etcd_lan_member: "{{ github_runner_cluster_etcd_lan_found }}"
+        github_runner_cluster_etcd_lan_live_on_lan: >-
+          {{ github_runner_cluster_etcd_lan_found is not none
+             and (github_runner_cluster_etcd_lan_found.peer_hosts | first | default('')) == (github_runner_cluster_etcd_lan_address | trim) }}
+      when: github_runner_cluster_etcd_lan_wanted | bool
+
+    - name: Fail if etcd cannot be read while it may have a member for this host
+      # A host none of whose servers answers may still have a member, on either address, and starting it on the wrong one would keep it out of etcd. A host that has never run a server (no datastore on its data volume) has none to find.
+      ansible.builtin.fail:
+        msg: >-
+          Not deciding {{ inventory_hostname }}'s etcd address: etcd's member list could not be read through any server
+          ({{ github_runner_cluster_etcd_members_problem }}), so whether {{ github_runner_cluster_effective_node_name }} already has a member,
+          and on which address, cannot be told. Bring a server back and run again. Nothing was changed.
+      when:
+        - github_runner_cluster_etcd_lan_wanted | bool
+        - github_runner_cluster_etcd_members is none
+        - github_runner_cluster_etcd_members_needed | bool
+
+    - name: Fail if this host's member is stopped where its address would change
+      # Moving a member's address is an update in etcd and a restart of the member on the new one; a stopped container would start on the address .env gives it while etcd still lists the other.
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }}'s etcd member is on its {{ 'LAN' if github_runner_cluster_etcd_lan_live_on_lan | bool else 'mesh' }} address and
+          github_runner_cluster_etcd_peers_over_lan asks for the {{ 'LAN' if github_runner_cluster_etcd_peers_over_lan | bool else 'mesh' }} one,
+          but its k3s container is not running. Start it as it is (`docker compose up -d` in {{ github_runner_cluster_dir }}, with no change to
+          .env) and run again. Nothing was changed.
+      when:
+        - github_runner_cluster_etcd_lan_wanted | bool
+        - github_runner_cluster_etcd_lan_member is not none
+        - github_runner_cluster_etcd_lan_live_on_lan | bool != github_runner_cluster_etcd_peers_over_lan | bool
+        - github_runner_cluster_docker_role == 'server'
+        - not github_runner_cluster_network_running | bool
+
+    - name: Note the move this host's member would make
+      ansible.builtin.set_fact:
+        github_runner_cluster_etcd_lan_candidate: >-
+          {{ '' if not (github_runner_cluster_etcd_lan_wanted | bool) or github_runner_cluster_etcd_lan_member is none
+                   or github_runner_cluster_etcd_lan_live_on_lan | bool == github_runner_cluster_etcd_peers_over_lan | bool
+             else ('to_lan' if github_runner_cluster_etcd_peers_over_lan | bool else 'to_mesh') }}
+
+    - name: Read this host's mesh address, which a member moving back to the mesh returns to
+      # The address k3s's own --node-ip took before the move (node-entrypoint.sh's mesh_ip), from the container's own Tailscale client.
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ github_runner_cluster_container_name }}", tailscale, ip, "-4"]
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
+      register: github_runner_cluster_etcd_lan_mesh_ip
+      changed_when: false
+      check_mode: false
+      when: github_runner_cluster_etcd_lan_candidate == 'to_mesh'
+
+    - name: Note the address this host's member would move to
+      ansible.builtin.set_fact:
+        github_runner_cluster_etcd_lan_target: >-
+          {{ github_runner_cluster_etcd_lan_address | trim if github_runner_cluster_etcd_lan_candidate == 'to_lan'
+             else github_runner_cluster_etcd_lan_mesh_ip.stdout | trim }}
+      when: github_runner_cluster_etcd_lan_candidate | length > 0
+
+    - name: Check every other server is ready for this member to move onto its LAN address
+      ansible.builtin.include_tasks: etcd_lan_ready.yml
+      vars:
+        github_runner_cluster_etcd_lan_others: >-
+          {{ github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
+             | map(attribute='key') | reject('equalto', inventory_hostname) | list }}
+      when: github_runner_cluster_etcd_lan_candidate == 'to_lan'
+
+- name: Choose the one member of the play that moves in this run
+  # Each host has noted its own move above, which every host's facts now hold; the first in play order moves, and the others are reported and wait for a later run.
+  vars:
+    github_runner_cluster_etcd_lan_movers: >-
+      {% set rows = [] %}{% for host in ansible_play_hosts %}{% set _ = rows.append({'name': host, 'switch': hostvars[host].github_runner_cluster_etcd_lan_candidate | default('')}) %}{% endfor %}{{ rows }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_etcd_lan_switch: >-
+      {{ github_runner_cluster_etcd_lan_candidate
+         if inventory_hostname in (github_runner_cluster_etcd_lan_movers | exadev.github_runner.cluster_etcd_lan_switches) else '' }}
+
+- name: Report a member that waits for a later run
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}'s etcd member would move to its {{ 'LAN' if github_runner_cluster_etcd_lan_candidate == 'to_lan' else 'mesh' }} address,
+      but another server's member moves in this run, and a member's move stops it until its container is back. Run again to move this one.
+  when:
+    - github_runner_cluster_etcd_lan_candidate | length > 0
+    - github_runner_cluster_etcd_lan_switch | length == 0
+
+- name: Note whether this host's k3s starts etcd on its LAN address
+  # A running member keeps the address etcd lists for it unless it moves in this run. A host with no member (an agent eligible for a vote, a server that has not joined yet) starts on the address the group asks for, since it joins with it.
+  ansible.builtin.set_fact:
+    github_runner_cluster_etcd_peer_on_lan: >-
+      {{ github_runner_cluster_etcd_lan_wanted | bool
+         and ((github_runner_cluster_etcd_lan_switch == 'to_lan')
+              or (github_runner_cluster_etcd_lan_switch == '' and github_runner_cluster_etcd_lan_member is not none and github_runner_cluster_etcd_lan_live_on_lan | bool)
+              or (github_runner_cluster_etcd_lan_member is none and github_runner_cluster_etcd_peers_over_lan | bool)) }}

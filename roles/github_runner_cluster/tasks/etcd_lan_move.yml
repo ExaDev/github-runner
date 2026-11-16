@@ -1,0 +1,134 @@
+---
+# Moves this server's etcd member to its LAN address (github_runner_cluster_etcd_lan_switch to_lan) or back to its mesh address (to_mesh), in its turn of starting the servers (tasks/start_server.yml), which has already refused unless every other server is Ready. etcd keeps each member's peer URL in its membership, and k3s rewrites it only for a cluster of one member (pkg/etcd/etcd.go, "failed to update peer url: etcd still has more than one member"), so the move is the one etcd documents for a member of a running cluster: `etcdctl member update` to the new URL, then the member restarted listening on it, which k3s does when it starts with --node-ip at the new address (.env's K3S_ETCD_PEER_ADDRESS, which this run has already written). Between the two the other members dial the new URL, where nothing listens yet, so the member is away for as long as its container's recreate, as any recreated server is.
+#
+# Before the update: every member reports healthy, and no server logged an etcd read that could not reach a quorum in the last github_runner_cluster_etcd_lan_quiet_minutes. After the recreate: the node is Ready on a heartbeat from the new container (tasks/server_ready.yml), etcd lists the member at the new address, every member reports healthy, and no server logs such a read over the next github_runner_cluster_etcd_lan_settle_seconds. Anything that fails moves the member back to the address it had, starts the server there again, waits for it, and fails the run.
+
+- name: Report the move under --check
+  ansible.builtin.debug:
+    msg: >-
+      Would move {{ inventory_hostname }}'s etcd member {{ github_runner_cluster_etcd_lan_member.name }} from
+      https://{{ github_runner_cluster_etcd_lan_member.peer_hosts | first }}:2380 to https://{{ github_runner_cluster_etcd_lan_target }}:2380 and recreate its
+      container to listen there.
+  changed_when: true
+  when: ansible_check_mode
+
+- name: Move the member, start the server on its new address and check the cluster
+  when: not ansible_check_mode
+  vars:
+    github_runner_cluster_etcd_lan_poll_seconds: 10
+    github_runner_cluster_etcd_lan_poll_retries: "{{ ((github_runner_cluster_server_ready_timeout | int) / 10) | round(0, 'ceil') | int }}"
+  block:
+    - name: Read the health of every etcd member before the move
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_etcdctl_argv + ['endpoint', 'health', '--cluster', '--write-out=json'] }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
+      register: github_runner_cluster_etcd_lan_health_before
+      changed_when: false
+      failed_when: >-
+        github_runner_cluster_etcd_lan_health_before.rc != 0
+        or (github_runner_cluster_etcd_lan_health_before.stdout | from_json | rejectattr('health') | list | length > 0)
+
+    - name: Read every server's log for etcd reads that could not reach a quorum
+      ansible.builtin.include_tasks: etcd_lan_quiet.yml
+      vars:
+        github_runner_cluster_etcd_lan_since: "{{ github_runner_cluster_etcd_lan_quiet_minutes | int }}m"
+
+    - name: Update the member's peer URL in etcd
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_etcdctl_argv + ['member', 'update', github_runner_cluster_etcd_lan_member.id, '--peer-urls=https://' ~ github_runner_cluster_etcd_lan_target ~ ':2380'] }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
+      changed_when: true
+
+    - name: Note that etcd lists the member at its new address
+      ansible.builtin.set_fact:
+        github_runner_cluster_etcd_lan_updated: true
+
+    - name: Recreate the server with k3s on the new address
+      ansible.builtin.include_tasks: server_compose_up.yml
+
+    - name: Wait for the server's node to report Ready from the new container
+      ansible.builtin.include_tasks: server_ready.yml
+
+    - name: Read etcd's member list until it lists this member at its new address
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_etcdctl_argv + ['member', 'list', '--write-out=json'] }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
+      register: github_runner_cluster_etcd_lan_members_after
+      changed_when: false
+      until: >-
+        github_runner_cluster_etcd_lan_members_after.rc == 0
+        and (github_runner_cluster_etcd_lan_members_after.stdout | exadev.github_runner.cluster_etcd_members
+             | exadev.github_runner.cluster_etcd_member_of(github_runner_cluster_effective_node_name)).peer_hosts == [github_runner_cluster_etcd_lan_target]
+      retries: "{{ github_runner_cluster_etcd_lan_poll_retries }}"
+      delay: "{{ github_runner_cluster_etcd_lan_poll_seconds }}"
+
+    - name: Read the health of every etcd member until all are healthy
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_etcdctl_argv + ['endpoint', 'health', '--cluster', '--write-out=json'] }}"
+      environment: "{{ github_runner_cluster_docker_cli_environment }}"
+      register: github_runner_cluster_etcd_lan_health_after
+      changed_when: false
+      failed_when: false
+      until: >-
+        github_runner_cluster_etcd_lan_health_after.rc == 0
+        and (github_runner_cluster_etcd_lan_health_after.stdout | from_json | rejectattr('health') | list | length == 0)
+      retries: "{{ github_runner_cluster_etcd_lan_poll_retries }}"
+      delay: "{{ github_runner_cluster_etcd_lan_poll_seconds }}"
+
+    - name: Fail if a member is not healthy after the move
+      ansible.builtin.fail:
+        msg: "etcd's members are not all healthy after the move: {{ github_runner_cluster_etcd_lan_health_after.stdout | default('') }} {{ github_runner_cluster_etcd_lan_health_after.stderr | default('') }}"
+      when: >-
+        github_runner_cluster_etcd_lan_health_after.rc != 0
+        or (github_runner_cluster_etcd_lan_health_after.stdout | from_json | rejectattr('health') | list | length > 0)
+
+    - name: Read the time on this host, from which the logs are watched
+      ansible.builtin.command: date -u +%Y-%m-%dT%H:%M:%SZ
+      register: github_runner_cluster_etcd_lan_settled_from
+      changed_when: false
+
+    - name: Watch the cluster settle with the member on its new address
+      ansible.builtin.wait_for:
+        timeout: "{{ github_runner_cluster_etcd_lan_settle_seconds | int }}"
+
+    - name: Read every server's log since then for etcd reads that could not reach a quorum
+      ansible.builtin.include_tasks: etcd_lan_quiet.yml
+      vars:
+        github_runner_cluster_etcd_lan_since: "{{ github_runner_cluster_etcd_lan_settled_from.stdout | trim }}"
+
+  rescue:
+    - name: Keep what failed, for the message below
+      ansible.builtin.set_fact:
+        github_runner_cluster_etcd_lan_failure: "{{ ansible_failed_task.name }}: {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('')) }}"
+
+    - name: Write .env as it was before the move
+      # This run wrote .env for the new address before the server's turn; the container still runs on the old one unless the move got as far as recreating it.
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ github_runner_cluster_dir }}/.env"
+        mode: "0600"
+      vars:
+        github_runner_cluster_etcd_peer_on_lan: "{{ github_runner_cluster_etcd_lan_switch == 'to_mesh' }}"
+      no_log: true
+
+    - name: Move the member back to the address it had, and start the server there again
+      when: github_runner_cluster_etcd_lan_updated | default(false) | bool
+      block:
+        - name: Update the member's peer URL back, through this server or any other
+          ansible.builtin.include_tasks: etcd_lan_update_back.yml
+          vars:
+            github_runner_cluster_etcd_lan_back: "--peer-urls=https://{{ github_runner_cluster_etcd_lan_member.peer_hosts | first }}:2380"
+
+        - name: Recreate the server on the address it had
+          ansible.builtin.include_tasks: server_compose_up.yml
+
+        - name: Wait for the server's node to report Ready again
+          ansible.builtin.include_tasks: server_ready.yml
+
+    - name: Fail the run, naming what went wrong
+      ansible.builtin.fail:
+        msg: >-
+          Moving {{ inventory_hostname }}'s etcd member to https://{{ github_runner_cluster_etcd_lan_target }}:2380 failed at
+          {{ github_runner_cluster_etcd_lan_failure }}.
+          {% if github_runner_cluster_etcd_lan_updated | default(false) | bool %}The member was moved back to
+          https://{{ github_runner_cluster_etcd_lan_member.peer_hosts | first }}:2380 and the server started there again.{% else %}etcd was not changed, and .env was written back as it was.{% endif %}

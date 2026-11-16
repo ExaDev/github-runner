@@ -1,0 +1,61 @@
+---
+# Reads etcd's member list with a throwaway etcdctl (github_runner_cluster_etcdctl_image) that shares a server's k3s container's network and reads the client certificate from its data volume, mounted read-only: through this host's container when it runs as a server, then through every other server of the inventory on its own host, and keeps the first answer. Sets github_runner_cluster_etcd_members (cluster_etcd_members' list, or none when no server answered), github_runner_cluster_etcd_members_problem (why not) and github_runner_cluster_etcd_members_needed (whether this host's k3s container exists, so that it may have a member etcd could not be asked about). Each read is bounded by github_runner_cluster_cluster_read_timeout, as a whole and as etcdctl's own command timeout.
+
+- name: Read etcd's member list through each server
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "container:{{ github_runner_cluster_etcd_read_container }}"
+      - --volume
+      - "{{ github_runner_cluster_etcd_read_project }}_k3s-data:/var/lib/rancher/k3s:ro"
+      - --entrypoint
+      - etcdctl
+      - "{{ github_runner_cluster_etcdctl_image }}"
+      - --endpoints=https://127.0.0.1:2379
+      - --cacert=/var/lib/rancher/k3s/server/tls/etcd/server-ca.crt
+      - --cert=/var/lib/rancher/k3s/server/tls/etcd/client.crt
+      - --key=/var/lib/rancher/k3s/server/tls/etcd/client.key
+      - "--command-timeout={{ github_runner_cluster_cluster_read_timeout | int }}s"
+      - member
+      - list
+      - --write-out=json
+  environment: >-
+    {{ {'DOCKER_CONTEXT': github_runner_cluster_etcd_read_context} if github_runner_cluster_etcd_read_context | length > 0 else {} }}
+  delegate_to: "{{ item }}"
+  loop: >-
+    {{ ([inventory_hostname] if github_runner_cluster_docker_role == 'server' and github_runner_cluster_network_running | bool else [])
+       + (github_runner_cluster_topology.hosts | dict2items | selectattr('value.role', 'equalto', 'server')
+          | map(attribute='key') | reject('equalto', inventory_hostname) | list) }}
+  vars:
+    github_runner_cluster_etcd_read_container: >-
+      {{ github_runner_cluster_container_name if item == inventory_hostname
+         else hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s') }}
+    github_runner_cluster_etcd_read_project: >-
+      {{ github_runner_cluster_compose_project if item == inventory_hostname
+         else hostvars[item].github_runner_cluster_compose_project | default('github-runner') }}
+    github_runner_cluster_etcd_read_context: >-
+      {{ (github_runner_cluster_docker_context | default('') if item == inventory_hostname
+          else hostvars[item].github_runner_cluster_docker_context | default('')) | trim }}
+  register: github_runner_cluster_etcd_member_reads
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+
+- name: Keep the first member list a server gave
+  vars:
+    github_runner_cluster_etcd_member_answers: >-
+      {{ github_runner_cluster_etcd_member_reads.results | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | list }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_etcd_members: >-
+      {{ (github_runner_cluster_etcd_member_answers | first).stdout | exadev.github_runner.cluster_etcd_members
+         if github_runner_cluster_etcd_member_answers | length > 0 else none }}
+    github_runner_cluster_etcd_members_problem: >-
+      {{ github_runner_cluster_etcd_member_reads.results
+         | map(attribute='item') | zip(github_runner_cluster_etcd_member_reads.results | map(attribute='stderr', default='unreachable'))
+         | map('join', ': ') | join('; ') if github_runner_cluster_etcd_member_answers | length == 0 else '' }}
+    github_runner_cluster_etcd_members_needed: "{{ github_runner_cluster_network_node_container.stdout | trim | length > 0 }}"

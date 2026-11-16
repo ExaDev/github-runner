@@ -1,0 +1,65 @@
+---
+# Before this host's member may move onto its LAN address (tasks/etcd_lan.yml, github_runner_cluster_etcd_lan_candidate to_lan), on every other server of the inventory, on its own host: its live etcd peer certificate must name that server's own LAN address, since once this member listens on the LAN the others dial it from their LAN addresses and etcd checks each peer's certificate against where its connection comes from (checkCertSAN in etcd's client/pkg/transport/listener_tls.go); and it must reach this host's LAN address, from a throwaway container on its host network, which is the namespace its etcd dials from. A certificate that lacks its name leaves this member where it is until a later run (the run that sets an address recreates that server with the name); a server that does not reach the address leaves this member on the mesh, the fallback, and the run says so. The certificate is public; openssl on that host prints its names.
+
+- name: Read the IP addresses each other server's etcd peer certificate names
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec "$container" cat /var/lib/rancher/k3s/server/tls/etcd/peer-server-client.crt | openssl x509 -noout -text | grep -Eo 'IP Address:[0-9.]+' | sed 's/^IP Address://'
+  args:
+    executable: /bin/bash
+  environment: >-
+    {{ ({'DOCKER_CONTEXT': hostvars[item].github_runner_cluster_docker_context} if hostvars[item].github_runner_cluster_docker_context | default('') | length > 0 else {})
+       | combine({'container': hostvars[item].github_runner_cluster_container_name | default('github-runner-k3s')}) }}
+  delegate_to: "{{ item }}"
+  loop: "{{ github_runner_cluster_etcd_lan_others }}"
+  register: github_runner_cluster_etcd_lan_certificates
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+
+- name: Ask each other server whether it reaches this host's LAN address
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network, host, "{{ github_runner_cluster_network_probe_image }}", ping, -c, "3", -W, "2", "{{ github_runner_cluster_etcd_lan_address | trim }}"]
+  environment: >-
+    {{ {'DOCKER_CONTEXT': hostvars[item].github_runner_cluster_docker_context} if hostvars[item].github_runner_cluster_docker_context | default('') | length > 0 else {} }}
+  delegate_to: "{{ item }}"
+  loop: "{{ github_runner_cluster_etcd_lan_others }}"
+  register: github_runner_cluster_etcd_lan_reach
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+  check_mode: false
+  timeout: "{{ github_runner_cluster_cluster_read_timeout | int }}"
+
+- name: Work out what keeps this member on the mesh
+  vars:
+    github_runner_cluster_etcd_lan_addresses: >-
+      {{ dict(github_runner_cluster_etcd_lan_others | zip(github_runner_cluster_etcd_lan_others | map('extract', hostvars, 'github_runner_cluster_etcd_lan_address') | map('trim'))) }}
+  ansible.builtin.set_fact:
+    github_runner_cluster_etcd_lan_readiness: >-
+      {{ github_runner_cluster_etcd_lan_certificates.results
+         | exadev.github_runner.cluster_etcd_lan_readiness(github_runner_cluster_etcd_lan_reach.results, github_runner_cluster_etcd_lan_addresses) }}
+
+- name: Report a member that waits for the other servers' certificates
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}'s etcd member stays on its mesh address in this run: {{ github_runner_cluster_etcd_lan_readiness.unnamed | join(', ') }}
+      {{ 'does' if github_runner_cluster_etcd_lan_readiness.unnamed | length == 1 else 'do' }} not yet name {{ 'its' if github_runner_cluster_etcd_lan_readiness.unnamed | length == 1 else 'their' }}
+      own LAN address in the etcd peer certificate (or could not be read), and would be refused by this member's etcd once it listens on the LAN.
+      The run that sets a server's address recreates it with the name; run again once every server has been.
+  when: github_runner_cluster_etcd_lan_readiness.unnamed | length > 0
+
+- name: Report a member that stays on the mesh because the LAN does not reach it
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}'s etcd member stays on its mesh address: {{ github_runner_cluster_etcd_lan_readiness.unreached | join(', ') }}
+      could not reach {{ github_runner_cluster_etcd_lan_address | trim }} (three pings from {{ 'its' if github_runner_cluster_etcd_lan_readiness.unreached | length == 1 else 'their' }}
+      host network), so etcd's peer traffic keeps to the mesh, which reaches every server. Check the LAN and run again.
+  when: github_runner_cluster_etcd_lan_readiness.unreached | length > 0
+
+- name: Keep this member on the mesh when another server is not ready for it
+  ansible.builtin.set_fact:
+    github_runner_cluster_etcd_lan_candidate: ""
+  when: (github_runner_cluster_etcd_lan_readiness.unnamed + github_runner_cluster_etcd_lan_readiness.unreached) | length > 0

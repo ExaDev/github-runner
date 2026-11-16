@@ -498,8 +498,9 @@ class TaskStructureTest(unittest.TestCase):
     def test_a_turn_checks_before_it_starts_and_waits_only_afterwards(self) -> None:
         tasks = role_tasks("start_server.yml")
         order = [task.get("ansible.builtin.include_tasks") or next(key for key in task if key.startswith(("community.docker", "ansible.builtin."))) for task in tasks]
-        self.assertEqual(order, ["server_recreate_check.yml", "ansible.builtin.stat", "ansible.builtin.debug", "community.docker.docker_compose_v2", "server_ready.yml"])
-        self.assertEqual(tasks[3]["community.docker.docker_compose_v2"]["profiles"], ["server"])
+        self.assertEqual(order, ["server_recreate_check.yml", "ansible.builtin.stat", "ansible.builtin.debug", "server_compose_up.yml", "server_ready.yml", "etcd_lan_move.yml"])
+        (start,) = role_tasks("server_compose_up.yml")
+        self.assertEqual(start["community.docker.docker_compose_v2"]["profiles"], ["server"])
         self.assertIn("not ansible_check_mode", tasks[4]["when"])
 
     def test_the_turns_loop_over_the_servers_in_the_play_and_run_for_one_host_each(self) -> None:

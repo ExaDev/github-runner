@@ -1,0 +1,24 @@
+---
+# Runs the cluster role's tasks/etcd_lan.yml on its own, for tests/unit/test_cluster_etcd_lan_role.py, against a stand-in docker command the test puts first on PATH, on the hosts of an inventory the test writes (all on a local connection, so a task delegated to another server runs here too). The role's defaults come from the inventory's group variables, which the test copies from defaults/main.yml so that each host's own settings override them as host variables do. Sets what tasks/host_network.yml would have read about each host's container and addresses from the inventory's stand_in_* variables, and writes the decision each host reaches to <output_dir>/<host>.json.
+- name: Decide etcd's addresses
+  hosts: all
+  connection: local
+  gather_facts: false
+  vars:
+    github_runner_cluster_docker_cli_environment: "{{ {'DOCKER_CONTEXT': github_runner_cluster_docker_context} if github_runner_cluster_docker_context | length > 0 else {} }}"
+    github_runner_cluster_docker_role: server
+    github_runner_cluster_effective_node_name: "{{ inventory_hostname }}"
+    github_runner_cluster_network_running: "{{ stand_in_running | default(true) }}"
+    github_runner_cluster_network_node_container: {stdout: "{{ 'running host' if stand_in_running | default(true) else stand_in_container_state | default('') }}"}
+    github_runner_cluster_host_network: {stdout: "{{ stand_in_addresses | default('') }}\n--\n1: lo: <LOOPBACK>"}
+  tasks:
+    - name: Include the role's etcd address decision
+      ansible.builtin.include_tasks: ../../roles/github_runner_cluster/tasks/etcd_lan.yml
+
+    - name: Write the decision this host reached
+      ansible.builtin.copy:
+        content: >-
+          {{ {'peer_on_lan': github_runner_cluster_etcd_peer_on_lan | bool, 'switch': github_runner_cluster_etcd_lan_switch,
+              'candidate': github_runner_cluster_etcd_lan_candidate, 'target': github_runner_cluster_etcd_lan_target | default('')} | to_json }}
+        dest: "{{ output_dir }}/{{ inventory_hostname }}.json"
+        mode: "0644"

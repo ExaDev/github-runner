@@ -22,14 +22,10 @@
     - not github_runner_cluster_dir_state.stat.exists
 
 - name: Start k3s via docker compose (bootstrapping or joining, per this host's own .env)
-  when: not (ansible_check_mode and not github_runner_cluster_dir_state.stat.exists)
-  community.docker.docker_compose_v2:
-    project_src: "{{ github_runner_cluster_dir }}"
-    project_name: "{{ github_runner_cluster_compose_project }}"
-    profiles: ["server"]
-    cli_context: "{{ github_runner_cluster_docker_cli_context or omit }}"
-    files: "{{ github_runner_cluster_compose_files_in_use if github_runner_cluster_compose_files_in_use | length > 1 else omit }}"
-    state: present
+  ansible.builtin.include_tasks: server_compose_up.yml
+  when:
+    - not (ansible_check_mode and not github_runner_cluster_dir_state.stat.exists)
+    - github_runner_cluster_etcd_lan_switch == ''
 
 - name: Wait for this server's node to report Ready again after its container was recreated
   # Only after a recreate of a running server that other servers are registered with: a first start waits for nothing here, a bootstrap server restarted before anything has joined it has no quorum to hand back and may not be Ready until the mesh steps after it have run, and a server Compose only started was not part of the quorum.
@@ -39,3 +35,9 @@
     - github_runner_cluster_recreate_running | bool
     - github_runner_cluster_recreate_held | bool
     - not ansible_check_mode
+    - github_runner_cluster_etcd_lan_switch == ''
+
+- name: Move this server's etcd member to its other address, start it there and check the cluster, or move it back
+  # Only for the one server whose running member this run moves (tasks/etcd_lan.yml). The check above has already refused unless every other server is Ready; see tasks/etcd_lan_move.yml for the rest.
+  ansible.builtin.include_tasks: etcd_lan_move.yml
+  when: github_runner_cluster_etcd_lan_switch | length > 0

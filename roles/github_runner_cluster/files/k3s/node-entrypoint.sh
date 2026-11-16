@@ -1,7 +1,7 @@
 #!/bin/sh
 # Entry point for the k3s and k3s-agent services in docker-compose.yml: starts Tailscale inside the node's own container, then k3s with its --vpn-auth integration, so each node joins the mesh as its own device. Bind-mounted from the Compose project directory the role manages (github_runner_cluster_dir) rather than baked into the k3s image, so a host picks up a change to it with the Compose file that uses it, without rebuilding an image Compose would not otherwise rebuild.
 #
-# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST, K3S_DATASTORE, K3S_API_PORT, K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT (server), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below); and, when docker-compose.fleet-role.yml mounts it, the role directory's `role` and `join-url` (fleet_role_dir below).
+# Usage: node-entrypoint.sh server|agent. Reads, from the container's environment (docker-compose.yml, from .env): K3S_VPN_AUTH_JOIN_KEY, K3S_VPN_AUTH_CONTROL_SERVER_URL (empty for Tailscale's own control plane, a Headscale URL otherwise), K3S_JOIN_SERVER_URL, K3S_TLS_SAN_LIST, K3S_DATASTORE, K3S_API_PORT, K3S_ETCD_HEARTBEAT_INTERVAL and K3S_ETCD_ELECTION_TIMEOUT (server), K3S_ETCD_LAN_ADDRESS and K3S_ETCD_PEER_ADDRESS (server, both unset unless docker-compose.etcd-lan.yml passes them), and K3S_MESH_SELF_HOSTED_HEALTH_URL (the bootstrap server of a cluster that runs its own Headscale, see supervise_self_hosted below); and, when docker-compose.fleet-role.yml mounts it, the role directory's `role` and `join-url` (fleet_role_dir below).
 # No set -e: a failed `tailscale up` falls through to waiting for an address, as it always has, rather than exiting and restarting the container.
 set -u
 
@@ -210,6 +210,10 @@ install_tailscale_up_wait() {
 #
 # --disable-network-policy: this fleet has no use for Kubernetes NetworkPolicy, and kube-router's enforcement chains sit directly in the FORWARD path every cross-node pod packet takes.
 #
+# --node-ip is K3S_ETCD_PEER_ADDRESS when set (docker-compose.etcd-lan.yml passes it, for a server whose etcd moved onto its LAN address; see "etcd peers over the LAN" in the role README), and otherwise the mesh IP. With --vpn-auth, k3s takes only etcd's address and the certificates' extra names from it: the kubelet's node IP is replaced by the mesh address ("VPN provider overrides configured node-ip parameter", pkg/agent/config/config.go) and so is the API server's advertise address (pkg/cli/server/server.go), which k3s also adds to every certificate's names, so the node, flannel and the API stay on the mesh.
+#
+# --tls-san K3S_ETCD_LAN_ADDRESS, when set, puts the LAN address into the certificates k3s writes at start, the etcd peer certificate among them (genETCDCerts and fieldsChanged in pkg/daemons/control/deps/deps.go, which regenerate a certificate missing a name). etcd checks a peer's certificate against the address its connection comes from (checkCertSAN in client/pkg/transport/listener_tls.go), and a server that dials a peer's LAN address does so from its own LAN address, so every server needs its own in its certificate before any server's etcd moves onto the LAN.
+#
 # --node-ip forces etcd's peer-advertise address onto this node's mesh IP. k3s builds etcd's --initial-cluster from config.PrivateIP, which is populated from --node-ip before --vpn-auth's own executor code rebuilds NodeIP from its Tailscale detection (traced through pkg/cli/server/server.go and pkg/executor/embed/embed.go). Without it PrivateIP stays the container's bridge IP, which no other machine can reach, and joining a second server failed with "MemberAdd request timed out". An --etcd-arg override is not a substitute: it also applies to the temporary etcd k3s starts on every restart to reconcile with its datastore, which has no TLS certificates for a 0.0.0.0:2380 listener and failed with "cannot listen on TLS for [::]:2380: KeyFile and CertFile are not presented".
 #
 # --cluster-init (only when join_url, set by set_join_url above, is empty, and K3S_DATASTORE is not sqlite) bootstraps embedded etcd, or converts an existing single-node SQLite datastore to it, the one migration k3s documents; once initialised, k3s ignores it on restart, so it stays in place permanently. refuse_second_cluster above has already stopped a former member with no join URL, so here it is a first bootstrap or a datastore k3s reuses. A host with a join URL passes --server <url> instead and joins as another control-plane/etcd member.
@@ -225,14 +229,14 @@ mesh_server_args() {
   set -- --disable=traefik --disable-network-policy --write-kubeconfig-mode=644 \
     --vpn-auth="$vpn_auth" \
     --resolv-conf=/etc/k3s-resolv.conf \
-    --node-ip="$mesh_ip"
+    --node-ip="${K3S_ETCD_PEER_ADDRESS:-$mesh_ip}"
   for flag in $api_port_flags; do set -- "$@" "$flag"; done
   if [ -n "$join_url" ]; then
     set -- "$@" --server "$join_url"
   elif [ "${K3S_DATASTORE:-etcd}" != sqlite ]; then
     set -- "$@" --cluster-init
   fi
-  for san in ${K3S_TLS_SAN_LIST:-}; do set -- "$@" --tls-san "$san"; done
+  for san in ${K3S_TLS_SAN_LIST:-} ${K3S_ETCD_LAN_ADDRESS:-}; do set -- "$@" --tls-san "$san"; done
   for flag in $etcd_timing_flags; do set -- "$@" "$flag"; done
   for flag in $regrade_flags; do set -- "$@" "$flag"; done
   server_args="$*"
