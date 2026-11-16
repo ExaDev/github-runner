@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). native_server  three Docker servers and a native host (a privileged systemd container, tests/mesh/native/Dockerfile, managed over Ansible's docker connection) that joins as an agent, is then made a server by the inventory and promoted in place: it must join etcd as a learner, be promoted to a voter with its mesh address as its peer URL, and keep the cluster writable throughout, and a rerun must not restart it. role_controller  four hosts (three servers and a standby agent, with etcd's data on memory so the machine's disk does not decide): the role controller's probe and controller run in the cluster from the image built from this checkout, with the manifests the ARC role renders; every host is reported fit from a full window of real samples, with the link the cluster role labelled its node with, a voter made slow with tc netem on its mesh interface is reported unfit with the swap named and every unfit verdict attributed to it, a paused voter makes the controller report that it would not act, and the controller changes nothing (not in the default set; needs jq, and takes a window of 100 samples before it can judge). role_actuator  three Docker servers and a native standby, every host eligible and the role controller on, with the test acting as the controller (holding the regrade Lease and writing the Node's desired-role label and swap annotations by hand): the native host's role actuator promotes it (a learner, then a voter, with writes succeeding throughout), steps it down (its etcd serving at etcd-only with no pod's shim left), and, once its member is removed through k3s's annotation, finishes it as an agent with the same node password and Tailscale address and its datastore moved aside, the two k3s units never running together. role_swap  three Docker servers and an eligible native standby, with the role controller's probe and controller running from this checkout's image and none pinned: the controller's own `swap` command takes the Docker bootstrap host out and the native host in as one swap under the regrade Lease, with writes succeeding throughout, three voters at the end, the demoted node's labels and annotations gone, its datastore moved aside and its identity kept, and a second swap brings the former bootstrap host back into the same etcd cluster. role_swap_paused  the outgoing voter's k3s is paused once the new voter votes: the removal still completes with three voters, and on unpause the tombstone keeps the removed server out of etcd for a learner stall time while its actuator finishes it as an agent. role_swap_blocked_peer  the candidate's etcd peer port is dropped, so its learner never catches up: the controller rolls the promotion back and leaves the members, the voters and the host as they were. role_swap_refused  a voter is paused before the swap is asked for: the command exits 1 naming it and nothing is set. The role_controller scenario also turns the dry run off after the slow voter is reported unfit, and the controller swaps it for the Docker standby. rejoin  three Docker servers whose hosts the inventory marks eligible, so the role mounts each one's role directory: the bootstrap server's etcd member is removed through another server, and restarted on its tombstone it idles instead of joining again; with its datastore moved aside and no server to join it refuses to start rather than bootstrap a second cluster; given a join URL naming another server in its role directory it joins the existing cluster as a learner and is promoted, with the same cluster ID before and after; and a role file naming the agent leaves its server container idle with no k3s. compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
+# Mesh integration test for the github_runner_cluster role: stands up three k3s nodes in Docker on one machine, each in its own copy of the Compose project, and has the role join them through Headscale. Scenarios: hosted      headscale_hosted: the role runs Headscale under Compose beside the first node. in_cluster  headscale_in_cluster: the role runs Headscale inside the cluster, on the bootstrap server. existing    headscale_existing: the policy check fails, with the entry to add, against a server whose policy lacks autoApprovers, and passes once it has one. Every scenario uses automatic server selection (three hosts, no overrides, so three servers). native_server  three Docker servers and a native host (a privileged systemd container, tests/mesh/native/Dockerfile, managed over Ansible's docker connection) that joins as an agent, is then made a server by the inventory and promoted in place: it must join etcd as a learner, be promoted to a voter with its mesh address as its peer URL, and keep the cluster writable throughout, and a rerun must not restart it. role_controller  four hosts (three servers and a standby agent, with etcd's data on memory so the machine's disk does not decide): the role controller's probe and controller run in the cluster from the image built from this checkout, with the manifests the ARC role renders; every host is reported fit from a full window of real samples, with the link the cluster role labelled its node with, a voter made slow with tc netem on its mesh interface is reported unfit with the swap named and every unfit verdict attributed to it, a paused voter makes the controller report that it would not act, and the controller changes nothing (not in the default set; needs jq, and takes a window of 100 samples before it can judge). role_actuator  three Docker servers and a native standby, every host eligible and the role controller on, with the test acting as the controller (holding the regrade Lease and writing the Node's desired-role label and swap annotations by hand): the native host's role actuator promotes it (a learner, then a voter, with writes succeeding throughout), steps it down (its etcd serving at etcd-only with no pod's shim left), and, once its member is removed through k3s's annotation, finishes it as an agent with the same node password and Tailscale address and its datastore moved aside, the two k3s units never running together. role_swap  three Docker servers and an eligible native standby, with the role controller's probe and controller running from this checkout's image and none pinned: the controller's own `swap` command takes the Docker bootstrap host out and the native host in as one swap under the regrade Lease, with writes succeeding throughout, three voters at the end, the demoted node's labels and annotations gone, its datastore moved aside and its identity kept, and a second swap brings the former bootstrap host back into the same etcd cluster. role_swap_paused  the outgoing voter's k3s is paused once the new voter votes: the removal still completes with three voters, and on unpause the tombstone keeps the removed server out of etcd for a learner stall time while its actuator finishes it as an agent. role_swap_blocked_peer  the candidate's etcd peer port is dropped, so its learner never catches up: the controller rolls the promotion back and leaves the members, the voters and the host as they were. role_swap_refused  a voter is paused before the swap is asked for: the command exits 1 naming it and nothing is set. The role_controller scenario also turns the dry run off after the slow voter is reported unfit, and the controller swaps it for the Docker standby. rejoin  three Docker servers whose hosts the inventory marks eligible, so the role mounts each one's role directory: the bootstrap server's etcd member is removed through another server, and restarted on its tombstone it idles instead of joining again; with its datastore moved aside and no server to join it refuses to start rather than bootstrap a second cluster; given a join URL naming another server in its role directory it joins the existing cluster as a learner and is promoted, with the same cluster ID before and after; and a role file naming the agent leaves its server container idle with no k3s. compose_faulty  the role refuses a Docker Compose release that recreates the containers it has just built, before writing anything (run it under such a release; it is not in the default set). host_network  each node runs in a Docker daemon of its own (a docker:dind container standing in for a VM with an address on the LAN, on the shared test network) with github_runner_cluster_network_mode host, joined through a Headscale server the test runs (headscale_existing); the nodes' Tailscale clients must then reach each other directly at those daemons' addresses, and the role must not publish any port; then the role must refuse to move two running nodes to the bridge network in one run, and move one there and back through its guard, the node keeping its mesh address and etcd membership. Linux only, since the control node reaches each daemon at its address on the test network. etcd_lan  three servers as in host_network: cutting one off the mesh (its Tailscale interface's traffic dropped) takes its etcd member out; then setting each server's github_runner_cluster_etcd_lan_address moves no member, github_runner_cluster_etcd_peers_over_lan moves exactly one member onto its LAN address per run with writes succeeding throughout, a rerun restarts nothing, the same cut then leaves every member healthy and the cut server writable, and turning the setting off moves one member back per run. Linux only, as host_network. The cluster scenarios assert that etcd has three members, that every node is Ready, and that pods on different nodes reach each other over the mesh.
 #
 # With GRTEST_PIN_CONTEXT=1, the cluster scenarios run the role, and the in_cluster recovery playbook, with github_runner_cluster_docker_context pinned while the current Docker context they see points at nothing (tests/lib/docker_context.sh), so any docker call that ignored the pin fails the run; afterwards the current context must be unchanged. context_checks  the role refuses a pinned context that does not exist, and a pinned context alongside DOCKER_HOST, before writing anything (not in the default set).
 #
@@ -22,6 +22,9 @@ etcd_image=gcr.io/etcd-development/etcd:v3.5.21
 dind_image=docker:27.5.1-dind
 # Set by scenario_host_network: every node's containers are then on that node's own daemon, reached through a Docker context per node.
 host_network=0
+# Set by scenario_etcd_lan: whether write_host_network_inventory gives every node its daemon's address as github_runner_cluster_etcd_lan_address, and whether assert_cluster expects etcd's members on those addresses rather than on the mesh.
+etcd_lan_addresses=0
+etcd_peers_on_lan=0
 busybox_image=busybox:1.37
 # The native_server scenario's native host: its container, image, address and data volume. Unset (empty native_role) in every other scenario, which then has no native host.
 native_host=grtest-native
@@ -358,8 +361,10 @@ assert_cluster() {
   echo "$members"
   expected_members=$(echo "$members" | grep -c ', started, ')
   [ "$expected_members" = "$node_count" ] || fail "expected ${node_count} started etcd members, found ${expected_members}"
-  # Every member's peer address must be its mesh (100.64.0.0/10) address, not a container bridge address.
-  if echo "$members" | grep -v 'https://100\.' | grep -q ', started, '; then fail "an etcd member advertises a peer address outside the mesh"; fi
+  # Every member's peer address must be its mesh (100.64.0.0/10) address, not a container bridge address; or, once the etcd_lan scenario has moved them, its daemon's address on the test network, which stands in for the LAN.
+  if [ "$etcd_peers_on_lan" = 1 ]; then
+    if echo "$members" | grep -v "https://${subnet_prefix}\\." | grep -q ', started, '; then fail "an etcd member advertises a peer address outside the LAN"; fi
+  elif echo "$members" | grep -v 'https://100\.' | grep -q ', started, '; then fail "an etcd member advertises a peer address outside the mesh"; fi
 
   log "Checking pods on different nodes reach each other over the mesh"
   kubectl_on 1 apply -f - <<EOF
@@ -621,6 +626,7 @@ write_host_network_inventory() {
       echo "          github_runner_cluster_compose_project: $(node_name "$index")"
       echo "          github_runner_cluster_container_name: $(container "$index")"
       echo "          github_runner_cluster_docker_context: $(vm "$index")"
+      if [ "$etcd_lan_addresses" = 1 ]; then echo "          github_runner_cluster_etcd_lan_address: $(node_ip "$index")"; fi
     done
   } > "${work}/inventory.yml"
 }
@@ -704,6 +710,108 @@ move_between_networks() {
   assert_cluster
   assert_direct_paths
   [ "$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)" = "$mesh_address" ] || fail "$(node_name 3) changed its mesh address when it moved back to the host network"
+}
+
+# etcdctl against node $1's etcd, from a throwaway container in its network namespace with its certificates, on its own daemon.
+etcd_on() {
+  docker_on "$1" run --rm --network "container:$(container "$1")" --volumes-from "$(container "$1")" --entrypoint etcdctl "$etcd_image" \
+    --endpoints https://127.0.0.1:2379 --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt \
+    --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key --command-timeout=10s "${@:2}" </dev/null
+}
+
+# How many of etcd's members, as node 1 lists them, have their peer URL on the test network (the stand-in LAN).
+members_on_lan() { etcd_on 1 member list -w simple | grep -c ", https://${subnet_prefix}\\.[0-9]*:2380, " || true; }
+
+# Whether every etcd member answers, asked through node $1: each member's client URL, which is where its peer URL is.
+all_members_healthy_from() { [ "$(etcd_on "$1" endpoint health --cluster -w json 2>/dev/null | jq '[.[] | select(.health | not)] | length' 2>/dev/null)" = 0 ]; }
+
+# Whether node $2's member does not answer when asked through node $1.
+member_unhealthy_from() { etcd_on "$1" endpoint health --cluster -w json 2>/dev/null | jq -e --arg ip "$(node_ip "$2")" --arg mesh "$3" '[.[] | select(.health | not) | .endpoint | select(contains($mesh) or contains($ip))] | length > 0' >/dev/null 2>&1; }
+
+# Cuts node $1 off the mesh, as an expired node key does, and only the mesh: every packet in or out of its Tailscale interface is dropped in its VM's namespace, which on the host network is the node's, while the test network (its LAN) stays up.
+cut_mesh() { docker exec "$(vm "$1")" sh -c 'iptables -I INPUT 1 -i tailscale0 -j DROP && iptables -I OUTPUT 1 -o tailscale0 -j DROP'; }
+restore_mesh() { docker exec "$(vm "$1")" sh -c 'iptables -D INPUT -i tailscale0 -j DROP && iptables -D OUTPUT -o tailscale0 -j DROP'; }
+
+# Whether node $1's live etcd peer certificate names its daemon's address.
+peer_certificate_names_lan() {
+  docker_on "$1" exec "$(container "$1")" cat /var/lib/rancher/k3s/server/tls/etcd/peer-server-client.crt </dev/null | openssl x509 -noout -text | grep -Fq "IP Address:$(node_ip "$1")"
+}
+
+# Moves every server's etcd member from the mesh onto its LAN address through the role and back, on three Docker servers on the host network of daemons that share the test network: the addresses alone move nothing; with github_runner_cluster_etcd_peers_over_lan each run moves exactly one member, with writes succeeding throughout, and a rerun changes nothing. With every member on the LAN, a server cut off the mesh keeps its member healthy, where on the mesh the same cut takes it out of etcd (checked first, so the test can fail). Turning the setting off moves each member back, one per run.
+scenario_etcd_lan() {
+  local keys api_key join_key expected output before after writes stop mesh3 index
+  [ "$(uname -s)" = Linux ] || fail "the etcd_lan scenario reaches each node's Docker daemon at its address on the test network, which only Linux routes to"
+  host_network=1
+  reset_environment
+  start_vms
+  keys=$(start_headscale_for_host_network)
+  api_key=$(echo "$keys" | sed -n 1p)
+  join_key=$(echo "$keys" | sed -n 2p)
+  write_host_network_inventory "$api_key" "$join_key"
+  run_role
+  assert_cluster
+  mesh3=$(docker_on 3 exec "$(container 3)" tailscale ip -4 </dev/null)
+
+  log "With etcd on the mesh, cutting $(node_name 3) off the mesh takes its member out of etcd"
+  cut_mesh 3
+  wait_for "$(node_name 3)'s member to stop answering over the mesh" 120 member_unhealthy_from 1 3 "$mesh3"
+  restore_mesh 3
+  wait_for "every member to answer again" 300 all_members_healthy_from 1
+
+  log "Setting every server's LAN address, which names it in the certificates and moves no member"
+  etcd_lan_addresses=1
+  write_host_network_inventory "$api_key" "$join_key"
+  run_role || fail "the role failed to set the servers' LAN addresses"
+  [ "$(members_on_lan)" = 0 ] || fail "setting the addresses moved a member onto the LAN"
+  for index in $(seq 1 "$node_count"); do peer_certificate_names_lan "$index" || fail "$(node_name "$index")'s etcd peer certificate does not name $(node_ip "$index")"; done
+
+  log "Moving the members onto the LAN, one per run, with writes throughout"
+  writes="${work}/etcd-lan-writes"
+  stop="${work}/etcd-lan-stop"
+  rm -f "$stop"
+  write_throughout "$writes" "$stop" &
+  for expected in 1 2 3; do
+    # The role refuses a move while any server logged an etcd read that could not reach a quorum within the quiet window, which the recreates just before can leave; a minute's window, waited out, keeps the runs apart without waiting the default ten.
+    sleep 65
+    output=$(run_role -e github_runner_cluster_etcd_peers_over_lan=true -e github_runner_cluster_etcd_lan_quiet_minutes=1 2>&1) || { echo "$output"; fail "the role failed to move member ${expected} onto the LAN"; }
+    echo "$output" | grep -E 'etcd member|^(PLAY RECAP|grtest)' || true
+    [ "$(members_on_lan)" = "$expected" ] || fail "after run ${expected}, $(members_on_lan) members are on the LAN, not ${expected}"
+    if [ "$expected" -lt "$node_count" ]; then echo "$output" | grep -q "another server's member moves in this run" || fail "run ${expected} did not report the members that wait"; fi
+  done
+  touch "$stop"
+  wait
+  assert_writes_recovered "$writes" || fail "writes did not recover within a leader election while the members moved"
+  etcd_peers_on_lan=1
+  for index in $(seq 1 "$node_count"); do replace_echo_pod "$index"; done
+  assert_cluster
+
+  log "Rerunning the role, which must not restart any node"
+  before=$(started_at)
+  run_role -e github_runner_cluster_etcd_peers_over_lan=true || fail "a rerun with every member on the LAN failed"
+  after=$(started_at)
+  [ "$before" = "$after" ] || fail "rerunning the role restarted a node container: ${before} -> ${after}"
+
+  log "With every member on the LAN, cutting $(node_name 3) off the mesh leaves its member in etcd"
+  cut_mesh 3
+  # Longer than etcd's election timeout several times over, so a member that had lost its peers would have been reported.
+  for _ in $(seq 1 12); do
+    sleep 5
+    all_members_healthy_from 1 || { restore_mesh 3; fail "a member stopped answering with $(node_name 3) off the mesh"; }
+    all_members_healthy_from 3 || { restore_mesh 3; fail "$(node_name 3) lost its peers when cut off the mesh"; }
+  done
+  kubectl_on 3 create configmap "grtest-etcd-lan-${RANDOM}" --from-literal=a=1 </dev/null >/dev/null || { restore_mesh 3; fail "a write through $(node_name 3)'s API server failed with it off the mesh"; }
+  restore_mesh 3
+  log "$(node_name 3)'s member kept its peers over the LAN while it was off the mesh"
+
+  log "Moving the members back to the mesh, one per run"
+  for expected in 2 1 0; do
+    sleep 65
+    output=$(run_role -e github_runner_cluster_etcd_lan_quiet_minutes=1 2>&1) || { echo "$output"; fail "the role failed to move a member back to the mesh"; }
+    [ "$(members_on_lan)" = "$expected" ] || fail "$(members_on_lan) members are on the LAN, not ${expected}"
+  done
+  etcd_peers_on_lan=0
+  for index in $(seq 1 "$node_count"); do replace_echo_pod "$index"; done
+  assert_cluster
 }
 
 # One node and only the settings the role reads before its first check fails, for the scenarios that expect it to stop before touching the host.
@@ -2187,6 +2295,7 @@ for scenario in "${scenarios[@]}"; do
     role_swap_blocked_peer) scenario_role_swap_blocked_peer ;;
     role_swap_refused) scenario_role_swap_refused ;;
     host_network) scenario_host_network ;;
+    etcd_lan) scenario_etcd_lan ;;
     compose_faulty) scenario_compose_faulty ;;
     context_checks) scenario_context_checks ;;
     # Re-checks a cluster a previous run kept with GRTEST_KEEP=1 and the same GRTEST_WORK, without rebuilding it.
