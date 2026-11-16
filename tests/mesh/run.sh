@@ -772,19 +772,22 @@ scenario_etcd_lan() {
   log "Moving the members onto the LAN, one per run, with writes throughout"
   writes="${work}/etcd-lan-writes"
   stop="${work}/etcd-lan-stop"
-  rm -f "$stop"
-  write_throughout "$writes" "$stop" &
   for expected in 1 2 3; do
+    # Each run moves the first server of the play still on the mesh, node ${expected}, whose own API server is down while it is recreated; the writes go through the next server, which keeps running, so that what they measure is etcd's quorum.
+    api_node=$((expected % node_count + 1))
+    rm -f "$stop"
+    write_throughout "$writes" "$stop" &
     # The role refuses a move while any server logged an etcd read that could not reach a quorum within the quiet window, which the recreates just before can leave; a minute's window, waited out, keeps the runs apart without waiting the default ten.
     sleep 65
     output=$(run_role -e github_runner_cluster_etcd_peers_over_lan=true -e github_runner_cluster_etcd_lan_quiet_minutes=1 2>&1) || { echo "$output"; fail "the role failed to move member ${expected} onto the LAN"; }
     echo "$output" | grep -E 'etcd member|^(PLAY RECAP|grtest)' || true
     [ "$(members_on_lan)" = "$expected" ] || fail "after run ${expected}, $(members_on_lan) members are on the LAN, not ${expected}"
     if [ "$expected" -lt "$node_count" ]; then grep -F "another server's member moves in this run" <<< "$output" >/dev/null || fail "run ${expected} did not report the members that wait"; fi
+    touch "$stop"
+    wait
+    assert_writes_recovered "$writes" || fail "writes through $(node_name "$api_node") did not recover within a leader election while $(node_name "$expected")'s member moved"
   done
-  touch "$stop"
-  wait
-  assert_writes_recovered "$writes" || fail "writes did not recover within a leader election while the members moved"
+  api_node=1
   etcd_peers_on_lan=1
   for index in $(seq 1 "$node_count"); do replace_echo_pod "$index"; done
   assert_cluster
