@@ -186,6 +186,12 @@ class EtcdLanRoleTest(unittest.TestCase):
         self.assertIn("with github_runner_cluster_network_mode bridge", result.stdout)
         self.assertEqual(self.calls(), [])
 
+    def test_an_address_the_docker_host_does_not_have_is_refused_naming_the_ones_it_has(self) -> None:
+        result = self.run_tasks(limit="node1", stand_in_addresses="3: col0    inet 192.0.2.50/24 brd 192.0.2.255 scope global col0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("its addresses in 192.0.2.0/24: 192.0.2.50", result.stdout)
+        self.assertEqual(self.calls(), [])
+
     def test_a_cluster_no_server_can_be_read_through_refuses(self) -> None:
         (self.work / "etcd-down").touch()
         result = self.run_tasks(github_runner_cluster_etcd_peers_over_lan=True)
