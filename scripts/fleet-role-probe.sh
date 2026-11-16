@@ -80,9 +80,9 @@ fsync_ms() {
     | jq -r --arg percentile "${tail_percentile}.000000" '.jobs[0].sync.lat_ns.percentile[$percentile] / 1000000'
 }
 
-# The nodes JSON's voters, as a JSON array of name and InternalIP.
+# The nodes JSON's voters, as a JSON array of name and the address their etcd member listens on for peers: the etcd.k3s.cattle.io/node-address annotation, which k3s's etcd metadata controller keeps on every etcd server's Node at the address it builds the member's peer URL from (pkg/etcd/metadata_controller.go at v1.34.1+k3s1). That is the node's InternalIP while etcd uses the mesh address, and its LAN address once github_runner_cluster_etcd_peers_over_lan has moved it, when nothing listens for peers on the InternalIP.
 voters_of() {
-  jq -c --arg label "${VOTER_LABEL%%=*}" --arg value "${VOTER_LABEL#*=}" '[.items[] | select((.metadata.labels // {})[$label] == $value) | {name: .metadata.name, ip: ([.status.addresses[]? | select(.type == "InternalIP") | .address] | .[0])}]' <<< "$1"
+  jq -c --arg label "${VOTER_LABEL%%=*}" --arg value "${VOTER_LABEL#*=}" '[.items[] | select((.metadata.labels // {})[$label] == $value) | {name: .metadata.name, ip: .metadata.annotations["etcd.k3s.cattle.io/node-address"]}]' <<< "$1"
 }
 
 # Whether this node is among the voters (a JSON array from voters_of).
