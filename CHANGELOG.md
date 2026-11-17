@@ -1,3 +1,9 @@
+## [3.6.0](https://github.com/ExaDev/github-runner/compare/v3.5.0...v3.6.0) (2026-11-17)
+
+### Features
+
+* **arc:** give the listener container resources ([1b11740](https://github.com/ExaDev/github-runner/commit/1b11740905303c2039c73dce4743d5587e70c7b7)), closes [#261](https://github.com/ExaDev/github-runner/issues/261)
+
 ## [3.5.0](https://github.com/ExaDev/github-runner/compare/v3.4.0...v3.5.0) (2026-11-17)
 
 ### Features
