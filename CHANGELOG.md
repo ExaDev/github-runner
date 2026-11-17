@@ -1,3 +1,9 @@
+## [3.4.0](https://github.com/ExaDev/github-runner/compare/v3.3.0...v3.4.0) (2026-11-17)
+
+### Features
+
+* **cluster:** restart a Colima VM whose runtime stops answering between runs ([d99991d](https://github.com/ExaDev/github-runner/commit/d99991d9e74b30a6220e97490d09810a3f18de0e))
+
 ## [3.3.0](https://github.com/ExaDev/github-runner/compare/v3.2.2...v3.3.0) (2026-11-16)
 
 ### Features
