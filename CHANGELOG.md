@@ -1,3 +1,9 @@
+## [3.5.0](https://github.com/ExaDev/github-runner/compare/v3.4.0...v3.5.0) (2026-11-17)
+
+### Features
+
+* **tool-images:** add a static strace tool-cache image ([b1740b5](https://github.com/ExaDev/github-runner/commit/b1740b550392b71bcdec3ca4f4369f244c705af2))
+
 ## [3.4.0](https://github.com/ExaDev/github-runner/compare/v3.3.0...v3.4.0) (2026-11-17)
 
 ### Features
