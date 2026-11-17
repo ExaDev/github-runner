@@ -1,4 +1,4 @@
-{# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With node eligibility, probes, max_runners, sizing and burst all off it holds only the profile's nodeSelector. A measured sizing's result is read from github_runner_arc_measured_sizing, which tasks/measure_sizing.yml fills in. `profile` is the expanded profile from plugins/filter/arc.py. #}
+{# The values the role itself owns on every scale-set release, rendered on the control node and merged over the profile's values (nested mappings merge, lists are replaced, as Helm does). With node eligibility, probes, listener resources, max_runners, sizing and burst all off it holds only the profile's nodeSelector. A measured sizing's result is read from github_runner_arc_measured_sizing, which tasks/measure_sizing.yml fills in. `profile` is the expanded profile from plugins/filter/arc.py. #}
 {% set eligibility = {github_runner_arc_node_label_key: github_runner_arc_node_label_value | string} if github_runner_arc_node_label_key | length > 0 else {} %}
 {% if profile.burst is not none and profile.burst.exclusive %}
 # Burst nodes only: the runners the burst nodes hold, the profile's burst.max_runners.
@@ -23,7 +23,8 @@ template:
     # The backstop for a pod that outlives its job: the kubelet stops it this long after it starts.
     activeDeadlineSeconds: {{ github_runner_arc_runner_active_deadline_seconds | int }}
 {% endif %}
-{% if github_runner_arc_node_label_key | length > 0 or github_runner_arc_listener_probes_enabled | bool or github_runner_arc_control_pods_priority_enabled | bool %}
+{% if github_runner_arc_node_label_key | length > 0 or github_runner_arc_listener_probes_enabled | bool or github_runner_arc_control_pods_priority_enabled | bool or github_runner_arc_listener_resources | length > 0 %}
+{# The chart gives the listener no resources either; github_runner_arc_listener_resources alone builds the listener container when nothing else does, and this comment stays out of the render so the overlay is unchanged without it. #}
 # The chart puts no nodeSelector, no probe and no priority class on the listener. The AutoscalingRunnerSet needs containers whenever listenerTemplate.spec is set, and a container named listener is merged into the real listener rather than added as a sidecar.
 listenerTemplate:
   spec:
@@ -35,6 +36,10 @@ listenerTemplate:
 {% endif %}
     containers:
       - name: listener
+{% if github_runner_arc_listener_resources | length > 0 %}
+        # This list replaces the values file's listener containers, so the role's variable is the one place the listener's resources can come from.
+        resources: {{ github_runner_arc_listener_resources | to_json }}
+{% endif %}
 {% if github_runner_arc_listener_probes_enabled | bool %}
         # An HTTP probe on the metrics endpoint: the listener image has no shell, so an exec probe can never succeed. A 200 means the process has got past its startup and authentication, not just that it has not exited.
         readinessProbe:

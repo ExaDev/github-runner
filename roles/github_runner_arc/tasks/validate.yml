@@ -131,6 +131,8 @@
         }}
     - msg: github_runner_arc_controller_extra_values must be a mapping.
       failed: "{{ github_runner_arc_controller_extra_values is not mapping }}"
+    - msg: github_runner_arc_listener_resources must be a mapping (a container's resources field).
+      failed: "{{ github_runner_arc_listener_resources is not mapping }}"
     - msg: github_runner_arc_listener_probes_enabled needs github_runner_arc_metrics_enabled, since the probes poll the listener's metrics endpoint.
       failed: "{{ github_runner_arc_listener_probes_enabled | bool and not (github_runner_arc_metrics_enabled | bool) }}"
     - msg: github_runner_arc_listener_probe_port must match the port in github_runner_arc_listener_metrics_addr.
