@@ -288,6 +288,21 @@ github_runner_cluster_runtime_boot_grace: 600
 github_runner_cluster_runtime_kill_grace: 5
 # The seconds colima stop is given before colima stop --force follows it.
 github_runner_cluster_runtime_clean_stop_timeout: 120
+# Whether the role installs a launchd job that restarts a Colima profile whose container runtime stops answering between runs (files/colima-watchdog.sh, run every github_runner_cluster_runtime_watchdog_interval seconds, as a daemon for a profile started at boot and as an agent for any other). Only for a host with github_runner_cluster_runtime_autostart on. Off removes the job. A restart stops every container on the host until the VM is back, so it acts only on the evidence tasks/runtime_wedged.yml asks for and is bounded by a cap and a backoff (below).
+github_runner_cluster_runtime_watchdog: true
+# The seconds between the watchdog's runs, and how many consecutive runs must find docker info failing before it looks further. Together with github_runner_cluster_runtime_probe_timeout they set how long a runtime can stay silent before anything happens.
+github_runner_cluster_runtime_watchdog_interval: 60
+github_runner_cluster_runtime_watchdog_failures: 3
+# The most restarts the watchdog makes in an hour, and the least seconds between two of them (doubled for every further restart in that hour, so a VM that wedges again soon after a restart waits longer). A restart that fails counts. The boot grace (github_runner_cluster_runtime_boot_grace) also keeps a VM that was just restarted from being restarted again until its host agent is older than that.
+github_runner_cluster_runtime_watchdog_max_restarts: 3
+github_runner_cluster_runtime_watchdog_min_gap: 600
+# The seconds a restart's start may take before the watchdog ends it.
+github_runner_cluster_runtime_watchdog_start_timeout: 900
+# Derived, never set directly: the watchdog's launchd label (one per profile), and the directory under the connecting user's home that holds its script, the supervisor beside it and its state (the consecutive failures, the restart log).
+github_runner_cluster_runtime_watchdog_label: "com.exadev.github-runner.colima-watchdog.{{ github_runner_cluster_effective_runtime.colima_profile }}"
+github_runner_cluster_runtime_watchdog_dir: "{{ ansible_facts['env']['HOME'] }}/.local/share/exadev-github-runner/colima-watchdog-{{ github_runner_cluster_effective_runtime.colima_profile }}"
+github_runner_cluster_runtime_watchdog_agent_plist: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ github_runner_cluster_runtime_watchdog_label }}.plist"
+github_runner_cluster_runtime_watchdog_daemon_plist: "/Library/LaunchDaemons/{{ github_runner_cluster_runtime_watchdog_label }}.plist"
 # The Colima profile that runs this collection's k3s node, which must come back with no one logged in: the one github_runner_cluster_runtime_autostart_at auto starts at boot. Any other profile on the host (a `default` profile a host keeps for other workloads, say) keeps the login agent.
 github_runner_cluster_runtime_boot_profile: node
 # Which container runtime a macOS host runs: auto takes it from the Docker context the role drives (colima or colima-<profile> is Colima, desktop-linux is Docker Desktop, anything else is other), colima, docker_desktop and other say so for a host whose context does not tell (DOCKER_HOST set, a context with another name).

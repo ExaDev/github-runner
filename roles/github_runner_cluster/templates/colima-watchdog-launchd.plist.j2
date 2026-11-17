@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Managed by the github_runner_cluster role of the exadev.github_runner collection: changes are overwritten on its next run. Runs files/colima-watchdog.sh every {{ github_runner_cluster_runtime_watchdog_interval }} seconds, which restarts the Colima profile when its container runtime has stopped answering; a run that finds the runtime healthy does nothing. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ github_runner_cluster_runtime_watchdog_label | e }}</string>
+{% if github_runner_cluster_runtime_at_boot | bool %}
+  <key>UserName</key>
+  <string>{{ ansible_facts['user_id'] | e }}</string>
+{% endif %}
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>{{ github_runner_cluster_runtime_watchdog_dir | e }}/colima-watchdog.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+{% for name, value in (github_runner_cluster_runtime_environment | combine({'HOME': ansible_facts['env']['HOME'], 'WATCHDOG_PROFILE': github_runner_cluster_effective_runtime.colima_profile, 'WATCHDOG_STATE_DIR': github_runner_cluster_runtime_watchdog_dir ~ '/state', 'WATCHDOG_FAILURES': github_runner_cluster_runtime_watchdog_failures | string, 'WATCHDOG_PROBE_TIMEOUT': github_runner_cluster_runtime_probe_timeout | string, 'WATCHDOG_KILL_GRACE': github_runner_cluster_runtime_kill_grace | string, 'WATCHDOG_BOOT_GRACE': github_runner_cluster_runtime_boot_grace | string, 'WATCHDOG_CLEAN_STOP_TIMEOUT': github_runner_cluster_runtime_clean_stop_timeout | string, 'WATCHDOG_START_TIMEOUT': github_runner_cluster_runtime_watchdog_start_timeout | string, 'WATCHDOG_MAX_RESTARTS': github_runner_cluster_runtime_watchdog_max_restarts | string, 'WATCHDOG_MIN_GAP': github_runner_cluster_runtime_watchdog_min_gap | string})).items() | sort %}
+    <key>{{ name | e }}</key>
+    <string>{{ value | e }}</string>
+{% endfor %}
+  </dict>
+  <key>StartInterval</key>
+  <integer>{{ github_runner_cluster_runtime_watchdog_interval | int }}</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>{{ ansible_facts['env']['HOME'] | e }}/Library/Logs/{{ github_runner_cluster_runtime_watchdog_label | e }}.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{ ansible_facts['env']['HOME'] | e }}/Library/Logs/{{ github_runner_cluster_runtime_watchdog_label | e }}.log</string>
+</dict>
+</plist>
