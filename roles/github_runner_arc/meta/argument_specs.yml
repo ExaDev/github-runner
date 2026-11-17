@@ -209,6 +209,10 @@ argument_specs:
         type: int
         default: 8080
         description: Port the listener probes poll.
+      github_runner_arc_listener_resources:
+        type: dict
+        default: {}
+        description: Resources (a container's resources field) for each listener's container, so a memory request keeps the listener from being the kubelet's first eviction under node memory pressure. Empty leaves the chart's listener without any.
       github_runner_arc_control_pods_priority_enabled:
         type: bool
         default: false

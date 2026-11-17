@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugins" / "filter" / "arc.py"
 RENDER = ROOT / "tests" / "scale_set_overlay" / "render.yml"
 RENDER_CONTROLLER = ROOT / "tests" / "scale_set_overlay" / "render_controller.yml"
+RENDER_VALUES = ROOT / "tests" / "capabilities" / "render.yml"
 _spec = importlib.util.spec_from_file_location("arc_filters", PLUGIN)
 assert _spec is not None and _spec.loader is not None
 arc = importlib.util.module_from_spec(_spec)
@@ -46,6 +47,18 @@ def render(profile: dict[str, Any], **role_vars: Any) -> dict[str, Any]:
         subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(RENDER), "-e", f"@{extra}"], check=True, env=env, cwd=work, capture_output=True, text=True)
         rendered: dict[str, Any] = yaml.safe_load(output.read_text())
         return rendered
+
+
+def render_values(profile: dict[str, Any], **role_vars: Any) -> dict[str, Any]:
+    """Render the release's values for profile through the role's own tasks/render_scale_set_values.yml, with no capabilities, and return them parsed."""
+    with tempfile.TemporaryDirectory() as work:
+        output = Path(work) / "rendered.json"
+        extra = Path(work) / "extra.json"
+        extra.write_text(json.dumps({"profile": profile, "github_runner_arc_capabilities": {}, "render_output": str(output), **role_vars}))
+        env = {**os.environ, "ANSIBLE_COLLECTIONS_PATH": str(ROOT / "playbooks" / "collections"), "ANSIBLE_LOCALHOST_WARNING": "false", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "false", "ANSIBLE_HOME": work, "ANSIBLE_LOCAL_TEMP": work}
+        subprocess.run([os.environ.get("ANSIBLE_PLAYBOOK", "ansible-playbook"), str(RENDER_VALUES), "-e", f"@{extra}"], check=True, env=env, cwd=work, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        values: dict[str, Any] = json.loads(output.read_text())["values"]
+        return values
 
 
 def render_controller(**role_vars: Any) -> dict[str, Any]:
@@ -120,6 +133,50 @@ class ActiveDeadlineTest(unittest.TestCase):
         overlay = render(profile, github_runner_arc_node_label_key=ELIGIBLE, github_runner_arc_node_label_value="true", github_runner_arc_runner_active_deadline_seconds=21600)
         self.assertEqual(overlay["template"]["spec"].pop("activeDeadlineSeconds"), 21600)
         self.assertEqual(overlay, without)
+
+
+
+class ListenerResourcesTest(unittest.TestCase):
+    RESOURCES = {"requests": {"memory": "32Mi", "cpu": "10m"}, "limits": {"memory": "64Mi"}}
+    # Each setting that makes the overlay build the listener container, and none of them.
+    CASES: dict[str, dict[str, Any]] = {
+        "nothing else": {},
+        "the node label key": {"github_runner_arc_node_label_key": ELIGIBLE, "github_runner_arc_node_label_value": "true"},
+        "the probes": {"github_runner_arc_listener_probes_enabled": True},
+        "the priority class": {"github_runner_arc_control_pods_priority_enabled": True},
+    }
+
+    def test_empty_adds_no_listener_container_and_no_resources(self) -> None:
+        profile = expanded({"sizing": SIZING})
+        self.assertNotIn("listenerTemplate", render(profile, github_runner_arc_listener_resources={}))
+        for case, role_vars in self.CASES.items():
+            if not role_vars:
+                continue
+            with self.subTest(case):
+                containers = render(profile, github_runner_arc_listener_resources={}, **role_vars)["listenerTemplate"]["spec"]["containers"]
+                self.assertEqual([container["name"] for container in containers], ["listener"])
+                self.assertNotIn("resources", containers[0])
+
+    def test_set_puts_them_on_the_listener_container_and_nothing_else(self) -> None:
+        profile = expanded({"sizing": SIZING})
+        for case, role_vars in self.CASES.items():
+            with self.subTest(case):
+                overlay = render(profile, github_runner_arc_listener_resources=self.RESOURCES, **role_vars)
+                containers = overlay["listenerTemplate"]["spec"]["containers"]
+                self.assertEqual([container["name"] for container in containers], ["listener"])
+                self.assertEqual(containers[0].pop("resources"), self.RESOURCES)
+                without = render(profile, **role_vars)
+                # With no other listener setting the overlay has no listenerTemplate of its own, so the listener container is all it adds.
+                without.setdefault("listenerTemplate", {"spec": {"containers": [{"name": "listener"}]}})
+                self.assertEqual(overlay, without)
+
+    def test_set_reaches_the_release_values_over_a_values_file_listener(self) -> None:
+        # The overlay's containers list replaces the values file's, so the resources the variable sets are the ones the listener pod gets.
+        with tempfile.TemporaryDirectory() as work:
+            values_file = Path(work) / "values.yaml"
+            values_file.write_text(yaml.safe_dump({"listenerTemplate": {"spec": {"containers": [{"name": "listener", "resources": {"requests": {"memory": "1Mi"}}}]}}, "template": {"spec": {"containers": [{"name": "runner", "image": "ghcr.io/example/runner:1", "command": ["/home/runner/run.sh"]}]}}}))
+            values = render_values(expanded({"max_runners": 2, "values_file": str(values_file)}), github_runner_arc_listener_resources=self.RESOURCES)
+        self.assertEqual(values["listenerTemplate"]["spec"]["containers"], [{"name": "listener", "resources": self.RESOURCES}])
 
 
 if __name__ == "__main__":
