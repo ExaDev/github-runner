@@ -7,6 +7,10 @@
     - ../../roles/github_runner_cluster/defaults/main.yml
   vars:
     docker_context: colima
+    # The template to render: the job that starts the profile, or the watchdog's.
+    plist_template: colima-launchd.plist.j2
+    # What tasks/runtime.yml works out for the watchdog's template, which passes the environment on to the script.
+    github_runner_cluster_runtime_environment: {PATH: "{{ github_runner_cluster_runtime_path }}"}
     # What tasks/runtime.yml works out; a test passes its own.
     github_runner_cluster_runtime_colima_home: ""
     ansible_facts:
@@ -18,6 +22,6 @@
   tasks:
     - name: Write the property list
       ansible.builtin.copy:
-        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_cluster/templates/colima-launchd.plist.j2') }}"
+        content: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../../roles/github_runner_cluster/templates/' ~ plist_template) }}"
         dest: "{{ plist_output }}"
         mode: "0644"

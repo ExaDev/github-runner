@@ -96,6 +96,49 @@ class DefaultsTest(unittest.TestCase):
                 self.assertIn(f"`{name}`", readme)
 
 
+class WatchdogDefaultsTest(unittest.TestCase):
+    def test_the_watchdog_is_on_with_a_cap_and_a_backoff(self) -> None:
+        self.assertIs(DEFAULTS["github_runner_cluster_runtime_watchdog"], True)
+        self.assertGreaterEqual(DEFAULTS["github_runner_cluster_runtime_watchdog_failures"], 2)
+        self.assertGreaterEqual(DEFAULTS["github_runner_cluster_runtime_watchdog_max_restarts"], 1)
+        self.assertGreater(DEFAULTS["github_runner_cluster_runtime_watchdog_min_gap"], 0)
+
+    def test_the_watchdog_has_a_label_per_profile_and_a_directory_under_the_home(self) -> None:
+        self.assertIn("{{ github_runner_cluster_effective_runtime.colima_profile }}", DEFAULTS["github_runner_cluster_runtime_watchdog_label"])
+        self.assertNotEqual(DEFAULTS["github_runner_cluster_runtime_watchdog_label"], DEFAULTS["github_runner_cluster_runtime_launchd_label"])
+        self.assertTrue(DEFAULTS["github_runner_cluster_runtime_watchdog_dir"].startswith("{{ ansible_facts['env']['HOME'] }}/"))
+
+
+class WatchdogPlistTest(unittest.TestCase):
+    @staticmethod
+    def render(**role_vars: Any) -> dict[str, Any]:
+        return plistlib.loads(render_plist(plist_template="colima-watchdog-launchd.plist.j2", **role_vars))
+
+    def test_it_runs_the_script_every_interval_and_once_at_load_without_keeping_it_alive(self) -> None:
+        plist = self.render()
+        self.assertEqual(plist["Label"], "com.exadev.github-runner.colima-watchdog.default")
+        self.assertEqual(plist["ProgramArguments"], ["/bin/bash", f"{HOME}/.local/share/exadev-github-runner/colima-watchdog-default/colima-watchdog.sh"])
+        self.assertEqual(plist["StartInterval"], DEFAULTS["github_runner_cluster_runtime_watchdog_interval"])
+        self.assertIs(plist["RunAtLoad"], True)
+        self.assertNotIn("KeepAlive", plist)
+        # The VM a restart starts is detached from the job and must outlive it.
+        self.assertIs(plist["AbandonProcessGroup"], True)
+        self.assertEqual(plist["StandardOutPath"], f"{HOME}/Library/Logs/com.exadev.github-runner.colima-watchdog.default.log")
+
+    def test_it_hands_the_script_its_profile_state_directory_and_limits(self) -> None:
+        environment = self.render(github_runner_cluster_runtime_watchdog_max_restarts=2, github_runner_cluster_runtime_environment={"PATH": "/p", "DOCKER_CONTEXT": "colima-node", "COLIMA_HOME": "/c"}, docker_context="colima-node")["EnvironmentVariables"]
+        self.assertEqual(environment["WATCHDOG_PROFILE"], "node")
+        self.assertEqual(environment["WATCHDOG_STATE_DIR"], f"{HOME}/.local/share/exadev-github-runner/colima-watchdog-node/state")
+        self.assertEqual(environment["WATCHDOG_MAX_RESTARTS"], "2")
+        self.assertEqual((environment["PATH"], environment["DOCKER_CONTEXT"], environment["COLIMA_HOME"], environment["HOME"]), ("/p", "colima-node", "/c", HOME))
+        for name in ("FAILURES", "PROBE_TIMEOUT", "KILL_GRACE", "BOOT_GRACE", "CLEAN_STOP_TIMEOUT", "START_TIMEOUT", "MIN_GAP"):
+            self.assertRegex(environment[f"WATCHDOG_{name}"], r"^[0-9]+$")
+
+    def test_the_boot_profile_gets_a_daemon_that_runs_as_the_connecting_user(self) -> None:
+        self.assertEqual(self.render(docker_context="colima-node")["UserName"], "example")
+        self.assertNotIn("UserName", self.render())
+
+
 class GuardTest(unittest.TestCase):
     def test_the_vm_needs_the_module_and_both_bridge_sysctls_on(self) -> None:
         self.assertEqual(DEFAULTS["github_runner_cluster_colima_kernel_module"], "br_netfilter")
@@ -451,18 +494,21 @@ elif name == "ps":
     print(open(os.path.join(stub, "agent-ps")).read(), end="")
 elif name == "launchctl":
     system = args[1] == "system" or args[1].startswith("system/")
+    # Each job is loaded or not on its own: the watchdog's has a flag of its own beside the start job's.
+    def flag(target):
+        return ("watchdog-" if "watchdog" in target else "") + ("daemon-loaded" if system else "loaded")
     if args[0] == "print":
-        sys.exit(0 if exists("daemon-loaded" if system else "loaded" if args[1].count("/") == 2 else "session") else 113)
+        sys.exit(0 if exists(flag(args[1]) if system or args[1].count("/") == 2 else "session") else 113)
     elif args[0] == "bootstrap":
         if not os.path.exists(args[2]):
             sys.exit("Bootstrap failed: no such plist")
         if system:
             need_root()
-        touch("daemon-loaded" if system else "loaded")
+        touch(flag(args[2]))
     elif args[0] == "bootout":
         if system:
             need_root()
-        os.remove(os.path.join(stub, "daemon-loaded" if system else "loaded"))
+        os.remove(os.path.join(stub, flag(args[1])))
     else:
         sys.exit("unexpected launchctl call: " + " ".join(args))
 elif name == "plutil":
@@ -612,6 +658,9 @@ class RoleTest(unittest.TestCase):
             "github_runner_cluster_runtime_daemon_plist": f"{self.daemons}/{{{{ github_runner_cluster_runtime_launchd_label }}}}.plist",
             "github_runner_cluster_runtime_daemon_owner": pwd.getpwuid(os.getuid()).pw_name,
             "github_runner_cluster_runtime_daemon_group": grp.getgrgid(os.getgid()).gr_name,
+            "github_runner_cluster_runtime_watchdog_daemon_plist": f"{self.daemons}/{{{{ github_runner_cluster_runtime_watchdog_label }}}}.plist",
+            # Off unless a test turns it on, so that the exact launchctl calls the tests of the start job assert are the start job's alone.
+            "github_runner_cluster_runtime_watchdog": False,
             **variables,
         }
         inventory = self.work / "inventory.yml"
@@ -1495,6 +1544,57 @@ class RoleTest(unittest.TestCase):
         (self.stub / "example-k3s.state").write_text("running")
         result = self.run_role(github_runner_cluster_runtime_autostart=False, github_runner_cluster_container_name="example-k3s")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    # The watchdog's launchd job.
+
+    def watchdog_calls(self) -> list[str]:
+        """The launchctl calls that load or unload the watchdog, without the Docker context each is logged under. """
+        return [call.split(" ", 1)[1] for call in self.calls() if re.match(r"\S+ launchctl (bootstrap|bootout)", call) and "watchdog" in call]
+
+    def test_the_watchdog_is_installed_beside_the_agent_and_loaded_into_the_login_session(self) -> None:
+        self.state("session", "runtime-up")
+        result = self.run_role(github_runner_cluster_runtime_watchdog=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        job = self.home / "Library" / "LaunchAgents" / "com.exadev.github-runner.colima-watchdog.default.plist"
+        self.assertEqual(plistlib.loads(job.read_bytes())["StartInterval"], DEFAULTS["github_runner_cluster_runtime_watchdog_interval"])
+        directory = self.home / ".local" / "share" / "exadev-github-runner" / "colima-watchdog-default"
+        for name in ("colima-watchdog.sh", "run_bounded.pl"):
+            self.assertTrue(os.access(directory / name, os.X_OK), name)
+        self.assertTrue((directory / "state").is_dir())
+        self.assertEqual(self.watchdog_calls(), [f"launchctl bootstrap gui/{UID} {job}"])
+
+    def test_the_node_profile_gets_the_watchdog_as_a_daemon(self) -> None:
+        self.state("runtime-up")
+        result = self.run_role(context="colima-node", github_runner_cluster_runtime_watchdog=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        job = self.daemons / "com.exadev.github-runner.colima-watchdog.node.plist"
+        self.assertEqual(plistlib.loads(job.read_bytes())["UserName"], "example")
+        self.assertEqual(self.watchdog_calls(), [f"launchctl bootstrap system {job}"])
+
+    def test_a_second_run_changes_nothing_and_a_changed_job_is_unloaded_before_it_is_loaded_again(self) -> None:
+        self.state("session", "runtime-up")
+        self.assertEqual(self.run_role(github_runner_cluster_runtime_watchdog=True).returncode, 0)
+        before = self.watchdog_calls()
+        self.assertEqual(self.run_role(github_runner_cluster_runtime_watchdog=True).returncode, 0)
+        self.assertEqual(self.watchdog_calls(), before)
+        result = self.run_role(github_runner_cluster_runtime_watchdog=True, github_runner_cluster_runtime_watchdog_interval=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([call.split()[1] for call in self.watchdog_calls()[len(before):]], ["bootout", "bootstrap"])
+
+    def test_off_installs_nothing(self) -> None:
+        self.state("session", "runtime-up")
+        result = self.run_role()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.watchdog_calls(), [])
+        self.assertFalse((self.home / "Library" / "LaunchAgents" / "com.exadev.github-runner.colima-watchdog.default.plist").exists())
+
+    def test_turning_it_off_unloads_and_removes_an_installed_job(self) -> None:
+        self.state("session", "runtime-up")
+        self.assertEqual(self.run_role(github_runner_cluster_runtime_watchdog=True).returncode, 0)
+        job = self.home / "Library" / "LaunchAgents" / "com.exadev.github-runner.colima-watchdog.default.plist"
+        self.assertEqual(self.run_role().returncode, 0)
+        self.assertFalse(job.exists())
+        self.assertEqual(self.watchdog_calls()[-1], f"launchctl bootout gui/{UID}/com.exadev.github-runner.colima-watchdog.default")
 
 
 if __name__ == "__main__":

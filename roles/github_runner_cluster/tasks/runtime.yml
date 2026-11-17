@@ -93,6 +93,10 @@
       ansible.builtin.include_tasks: runtime_daemon.yml
       when: github_runner_cluster_runtime_at_boot | bool
 
+    - name: Keep the Colima profile restarted when its runtime stops answering between runs
+      # Installed before the check that the runtime is up, so that a host whose runtime is down gets it too.
+      ansible.builtin.include_tasks: runtime_watchdog.yml
+
     - name: Read whether the container runtime is up now
       ansible.builtin.include_tasks: runtime_probe.yml
 

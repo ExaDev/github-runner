@@ -1,0 +1,114 @@
+---
+# Colima hosts with github_runner_cluster_runtime_autostart on (runtime.yml includes it). With github_runner_cluster_runtime_watchdog on, installs files/colima-watchdog.sh and the supervisor it needs under the connecting user's home, and the launchd job that runs it every github_runner_cluster_runtime_watchdog_interval seconds: a daemon for a profile started at boot (the system domain, root's, so these tasks use become, and the daemon runs as the connecting user), an agent for any other. With it off, removes the job and leaves its files and state in place. The script's own state (the failure count, the restart log) is under <dir>/state and survives a reinstall.
+
+- name: Work out which launchd domain and property list the watchdog uses
+  ansible.builtin.set_fact:
+    github_runner_cluster_runtime_watchdog_domain: "{{ 'system' if github_runner_cluster_runtime_at_boot | bool else 'gui/' ~ ansible_facts['user_uid'] }}"
+    github_runner_cluster_runtime_watchdog_plist: "{{ github_runner_cluster_runtime_watchdog_daemon_plist if github_runner_cluster_runtime_at_boot | bool else github_runner_cluster_runtime_watchdog_agent_plist }}"
+
+- name: Read whether that launchd domain exists
+  # gui/<uid> exists only while the user is logged in at the console; the system domain always does. Without it an agent cannot be loaded now, and launchd loads it at the next login.
+  ansible.builtin.command:
+    argv: [launchctl, print, "{{ github_runner_cluster_runtime_watchdog_domain }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_watchdog_session
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read whether the watchdog is loaded
+  ansible.builtin.command:
+    argv: [launchctl, print, "{{ github_runner_cluster_runtime_watchdog_domain }}/{{ github_runner_cluster_runtime_watchdog_label }}"]
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_runtime_watchdog_loaded
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install the watchdog
+  when: github_runner_cluster_runtime_watchdog | bool
+  block:
+    - name: Create the watchdog's directory
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_runtime_watchdog_dir }}/state"
+        state: directory
+        mode: "0755"
+
+    - name: Create the connecting user's LaunchAgents directory
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents"
+        state: directory
+        mode: "0755"
+      when: not github_runner_cluster_runtime_at_boot | bool
+
+    - name: Install the watchdog script and the supervisor it runs commands with
+      # run_bounded.pl is the one the probes use, so the watchdog's deadlines hold the same way.
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ github_runner_cluster_runtime_watchdog_dir }}/{{ item }}"
+        mode: "0755"
+      loop:
+        - colima-watchdog.sh
+        - run_bounded.pl
+
+    - name: Install the watchdog's launchd job
+      # plutil rejects a malformed property list before it replaces the installed one, since launchd would otherwise fail to load the job with nobody watching. The label is per profile.
+      become: "{{ github_runner_cluster_runtime_at_boot | bool }}"
+      ansible.builtin.template:
+        src: colima-watchdog-launchd.plist.j2
+        dest: "{{ github_runner_cluster_runtime_watchdog_plist }}"
+        owner: "{{ github_runner_cluster_runtime_daemon_owner if github_runner_cluster_runtime_at_boot | bool else omit }}"
+        group: "{{ github_runner_cluster_runtime_daemon_group if github_runner_cluster_runtime_at_boot | bool else omit }}"
+        mode: "0644"
+        validate: plutil -lint %s
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      register: github_runner_cluster_runtime_watchdog_job
+
+    - name: Unload the watchdog so that its new definition is read
+      # launchd keeps the definition it loaded, whatever the file says now.
+      become: "{{ github_runner_cluster_runtime_at_boot | bool }}"
+      ansible.builtin.command:
+        argv: [launchctl, bootout, "{{ github_runner_cluster_runtime_watchdog_domain }}/{{ github_runner_cluster_runtime_watchdog_label }}"]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_runtime_watchdog_job is changed
+        - github_runner_cluster_runtime_watchdog_session.rc == 0
+        - github_runner_cluster_runtime_watchdog_loaded.rc == 0
+
+    - name: Load the watchdog
+      # Loading runs it once (RunAtLoad), which finds a healthy runtime and does nothing.
+      become: "{{ github_runner_cluster_runtime_at_boot | bool }}"
+      ansible.builtin.command:
+        argv: [launchctl, bootstrap, "{{ github_runner_cluster_runtime_watchdog_domain }}", "{{ github_runner_cluster_runtime_watchdog_plist }}"]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_runtime_watchdog_session.rc == 0
+        - github_runner_cluster_runtime_watchdog_loaded.rc != 0 or github_runner_cluster_runtime_watchdog_job is changed
+
+    - name: Say that the watchdog waits for the next login
+      ansible.builtin.debug:
+        msg: >-
+          The connecting user has no login session on {{ inventory_hostname }}, so launchd cannot load
+          {{ github_runner_cluster_runtime_watchdog_label }} now. It is installed and loads at the next login.
+      when: github_runner_cluster_runtime_watchdog_session.rc != 0
+
+- name: Remove the watchdog
+  when: not github_runner_cluster_runtime_watchdog | bool
+  block:
+    - name: Unload the watchdog
+      become: "{{ github_runner_cluster_runtime_at_boot | bool }}"
+      ansible.builtin.command:
+        argv: [launchctl, bootout, "{{ github_runner_cluster_runtime_watchdog_domain }}/{{ github_runner_cluster_runtime_watchdog_label }}"]
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_runtime_watchdog_session.rc == 0
+        - github_runner_cluster_runtime_watchdog_loaded.rc == 0
+
+    - name: Remove the watchdog's property list
+      become: "{{ github_runner_cluster_runtime_at_boot | bool }}"
+      ansible.builtin.file:
+        path: "{{ github_runner_cluster_runtime_watchdog_plist }}"
+        state: absent
