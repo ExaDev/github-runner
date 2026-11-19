@@ -1,3 +1,10 @@
+## [3.6.1](https://github.com/ExaDev/github-runner/compare/v3.6.0...v3.6.1) (2026-11-19)
+
+### Bug Fixes
+
+* **arc:** let an unreadable listener list fail the heartbeat instead of reading as no listener ([0c5499b](https://github.com/ExaDev/github-runner/commit/0c5499bb75d1d21d63ba99f867141df6dc228f6c))
+* **arc:** withhold the heartbeat until a scale set's listener has settled ([52357e0](https://github.com/ExaDev/github-runner/commit/52357e0283fa185f0abf4d58daa23541aaf8816d))
+
 ## [3.6.0](https://github.com/ExaDev/github-runner/compare/v3.5.0...v3.6.0) (2026-11-17)
 
 ### Features
