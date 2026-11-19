@@ -72,13 +72,13 @@ for target in $HEARTBEAT_EXPECTED_SCALE_SETS; do
     -l "actions.github.com/scale-set-name=${release},actions.github.com/scale-set-namespace=${namespace}" \
     -o json 2>/dev/null || true)"
   # The listener holds the scale set's one session with GitHub, and the controller deletes and re-creates it whenever the scale set's spec changes (the autoscaler's every maxRunners patch does), which drops that session. A job queued while the session was being replaced can sit unassigned for hours although the listener is Running again and runners start for other jobs, so a listener counts only once it has outlived one heartbeat interval: a scale set whose listener keeps being replaced is then not vouched for, and runner-fallback-action routes its jobs to GitHub-hosted runners instead of queueing them.
-  listeners="$(jq '[.items[]? | select(.status.phase == "Running")] | length' <<< "${listener_pods:-null}" 2>/dev/null || echo 0)"
+  listeners="$(jq '[.items[]? | select(.status.phase == "Running")] | length' <<< "${listener_pods:-null}")"
   settled="$(jq --argjson now "$(date +%s)" --argjson settle "$HEARTBEAT_LISTENER_SETTLE_SECONDS" \
-    '[.items[]? | select(.status.phase == "Running" and ($now - (.metadata.creationTimestamp | fromdateiso8601)) >= $settle)] | length' <<< "${listener_pods:-null}" 2>/dev/null || echo 0)"
-  if [ "${listeners:-0}" -lt 1 ]; then
+    '[.items[]? | select(.status.phase == "Running" and ($now - (.metadata.creationTimestamp | fromdateiso8601)) >= $settle)] | length' <<< "${listener_pods:-null}")"
+  if [ "$listeners" -lt 1 ]; then
     reasons+=("scale set ${target} has no running listener")
     healthy=false
-  elif [ "${settled:-0}" -lt 1 ]; then
+  elif [ "$settled" -lt 1 ]; then
     reasons+=("scale set ${target} has no listener older than ${HEARTBEAT_LISTENER_SETTLE_SECONDS}s")
     healthy=false
   fi

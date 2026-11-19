@@ -36,6 +36,9 @@ FAKE_KUBECTL = textwrap.dedent(
         selector = args[args.index("-l") + 1]
         release = next(part.split("=")[1] for part in selector.split(",") if part.startswith("actions.github.com/scale-set-name"))
         ages = state["listeners"].get(release, [])
+        if isinstance(ages, str):
+            sys.stdout.write(ages)
+            sys.exit(0)
         ages = [10000] * ages if isinstance(ages, int) else ages
         import datetime
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -96,7 +99,7 @@ class HeartbeatTest(unittest.TestCase):
         pods: list[dict[str, object]] | None = None,
         controller_replicas: int = 1,
         scale_sets: tuple[str, ...] = ("runners-a", "runners-b"),
-        listeners: dict[str, int | list[int]] | None = None,
+        listeners: dict[str, int | list[int] | str] | None = None,
         configmap: dict[str, str] | None = None,
         nodes: list[dict[str, object]] | None = None,
         previous: dict[str, object] | None = None,
@@ -189,6 +192,13 @@ class HeartbeatTest(unittest.TestCase):
         result, files = self.tick(listeners={"runners-a": 1, "runners-b": [0, LISTENER_SETTLE_SECONDS + 1]})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(TIMESTAMP_FILE, files)
+
+    def test_unreadable_listener_pods_fail_loudly_instead_of_reading_as_no_listener(self) -> None:
+        result, files = self.tick(listeners={"runners-a": 1, "runners-b": "not json"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("has no running listener", result.stderr)
+        self.assertIn("parse error", result.stderr)
+        self.assertNotIn(TIMESTAMP_FILE, files)
 
     def test_a_fleet_of_nothing_but_not_ready_nodes_withholds_the_refresh(self) -> None:
         result, files = self.tick(nodes=[self.node("a", None, ready=False), self.node("b", None, ready=False)])
