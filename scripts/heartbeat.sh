@@ -17,6 +17,7 @@
 # - HEARTBEAT_DEPLOYED_VERSION_ANNOTATION: the node annotation holding the collection version the cluster role last applied on that node's host
 # - HEARTBEAT_CONTROLLER_NAMESPACE: namespace of the ARC controller's Deployment, when it is not the default actions-runner-controller
 # - HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS: how long a runner pod may stay unschedulable before the heartbeat stops refreshing (default: one heartbeat interval)
+# - HEARTBEAT_LISTENER_SETTLE_SECONDS: how long a scale set's listener must have been running before the scale set is vouched for (default: one heartbeat interval)
 set -euo pipefail
 
 HEARTBEAT_GH_TOKEN="${HEARTBEAT_GH_TOKEN:?HEARTBEAT_GH_TOKEN must be set (a PAT with gist scope)}"
@@ -38,6 +39,8 @@ HEARTBEAT_WINDOW_SECONDS="${HEARTBEAT_WINDOW_SECONDS:-600}"
 HEARTBEAT_CONTROLLER_NAMESPACE="${HEARTBEAT_CONTROLLER_NAMESPACE:-actions-runner-controller}"
 # How long a runner pod may sit unschedulable before the fleet counts as unable to take work: one heartbeat interval (the loop's own, see heartbeat/loop.sh), so the condition has been seen on at least two consecutive ticks and a pod that is merely being placed never trips it.
 HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS="${HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS:-${HEARTBEAT_INTERVAL_SECONDS:-180}}"
+# How long a scale set's listener must have been running before it counts: one heartbeat interval, so a listener the controller has just re-created has been seen on at least two ticks before the scale set is vouched for again.
+HEARTBEAT_LISTENER_SETTLE_SECONDS="${HEARTBEAT_LISTENER_SETTLE_SECONDS:-${HEARTBEAT_INTERVAL_SECONDS:-180}}"
 
 healthy=true
 reasons=()
@@ -56,7 +59,7 @@ if ! kubectl get deployment -n "$HEARTBEAT_CONTROLLER_NAMESPACE" -l app.kubernet
   healthy=false
 fi
 
-# A scale set that is missing, or whose listener is not running, takes no jobs however healthy the nodes and controller look: a failed Helm upgrade once left every scale set deleted while this heartbeat kept vouching for the fleet, so jobs queued on runners that did not exist.
+# A scale set that is missing, or whose listener is not running or was only just re-created, takes no jobs however healthy the nodes and controller look: a failed Helm upgrade once left every scale set deleted while this heartbeat kept vouching for the fleet, so jobs queued on runners that did not exist.
 for target in $HEARTBEAT_EXPECTED_SCALE_SETS; do
   namespace="${target%%/*}"
   release="${target#*/}"
@@ -65,11 +68,18 @@ for target in $HEARTBEAT_EXPECTED_SCALE_SETS; do
     healthy=false
     continue
   fi
-  listeners="$(kubectl get pods -n "$HEARTBEAT_CONTROLLER_NAMESPACE" \
+  listener_pods="$(kubectl get pods -n "$HEARTBEAT_CONTROLLER_NAMESPACE" \
     -l "actions.github.com/scale-set-name=${release},actions.github.com/scale-set-namespace=${namespace}" \
-    -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -c '^Running$' || true)"
-  if [ "$listeners" -lt 1 ]; then
+    -o json 2>/dev/null || true)"
+  # The listener holds the scale set's one session with GitHub, and the controller deletes and re-creates it whenever the scale set's spec changes (the autoscaler's every maxRunners patch does), which drops that session. A job queued while the session was being replaced can sit unassigned for hours although the listener is Running again and runners start for other jobs, so a listener counts only once it has outlived one heartbeat interval: a scale set whose listener keeps being replaced is then not vouched for, and runner-fallback-action routes its jobs to GitHub-hosted runners instead of queueing them.
+  listeners="$(jq '[.items[]? | select(.status.phase == "Running")] | length' <<< "${listener_pods:-null}" 2>/dev/null || echo 0)"
+  settled="$(jq --argjson now "$(date +%s)" --argjson settle "$HEARTBEAT_LISTENER_SETTLE_SECONDS" \
+    '[.items[]? | select(.status.phase == "Running" and ($now - (.metadata.creationTimestamp | fromdateiso8601)) >= $settle)] | length' <<< "${listener_pods:-null}" 2>/dev/null || echo 0)"
+  if [ "${listeners:-0}" -lt 1 ]; then
     reasons+=("scale set ${target} has no running listener")
+    healthy=false
+  elif [ "${settled:-0}" -lt 1 ]; then
+    reasons+=("scale set ${target} has no listener older than ${HEARTBEAT_LISTENER_SETTLE_SECONDS}s")
     healthy=false
   fi
 done
