@@ -14,6 +14,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "heartbeat.sh"
 UNSCHEDULABLE_AFTER_SECONDS = 180
+LISTENER_SETTLE_SECONDS = 180
 EXPECTED = ("arc-runners-a/runners-a", "arc-runners-b/runners-b")
 
 # Answers the reads heartbeat.sh makes from FAKE_STATE (a JSON file): whether a node is Ready, whether the controller has a ready replica, and the runner pods.
@@ -34,7 +35,12 @@ FAKE_KUBECTL = textwrap.dedent(
     if args[:2] == ["get", "pods"] and "-A" not in args:
         selector = args[args.index("-l") + 1]
         release = next(part.split("=")[1] for part in selector.split(",") if part.startswith("actions.github.com/scale-set-name"))
-        sys.stdout.write("Running\\n" * state["listeners"].get(release, 0))
+        ages = state["listeners"].get(release, [])
+        ages = [10000] * ages if isinstance(ages, int) else ages
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        created = lambda age: (now - datetime.timedelta(seconds=age)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sys.stdout.write(json.dumps({"items": [{"status": {"phase": "Running"}, "metadata": {"creationTimestamp": created(age)}} for age in ages]}))
         sys.exit(0)
     if args[:2] == ["get", "pods"]:
         sys.stdout.write(json.dumps({"items": state["pods"]}))
@@ -90,7 +96,7 @@ class HeartbeatTest(unittest.TestCase):
         pods: list[dict[str, object]] | None = None,
         controller_replicas: int = 1,
         scale_sets: tuple[str, ...] = ("runners-a", "runners-b"),
-        listeners: dict[str, int] | None = None,
+        listeners: dict[str, int | list[int]] | None = None,
         configmap: dict[str, str] | None = None,
         nodes: list[dict[str, object]] | None = None,
         previous: dict[str, object] | None = None,
@@ -124,6 +130,7 @@ class HeartbeatTest(unittest.TestCase):
             "HEARTBEAT_GH_TOKEN": "test-token",
             "HEARTBEAT_GIST_ID": "test-gist",
             "HEARTBEAT_UNSCHEDULABLE_AFTER_SECONDS": str(UNSCHEDULABLE_AFTER_SECONDS),
+            "HEARTBEAT_LISTENER_SETTLE_SECONDS": str(LISTENER_SETTLE_SECONDS),
             "HEARTBEAT_EXPECTED_SCALE_SETS": " ".join(EXPECTED),
             **(env or {}),
         }
@@ -166,6 +173,22 @@ class HeartbeatTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("arc-runners-b/runners-b has no running listener", result.stderr)
         self.assertWithheld(files)
+
+    def test_a_listener_recreated_within_the_settle_time_withholds_the_refresh(self) -> None:
+        result, files = self.tick(listeners={"runners-a": 1, "runners-b": [LISTENER_SETTLE_SECONDS - 1]})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("arc-runners-b/runners-b has no listener older than", result.stderr)
+        self.assertWithheld(files)
+
+    def test_a_listener_older_than_the_settle_time_does_not_withhold_the_refresh(self) -> None:
+        result, files = self.tick(listeners={"runners-a": 1, "runners-b": [LISTENER_SETTLE_SECONDS + 1]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(TIMESTAMP_FILE, files)
+
+    def test_an_old_listener_vouches_for_the_scale_set_beside_a_new_one(self) -> None:
+        result, files = self.tick(listeners={"runners-a": 1, "runners-b": [0, LISTENER_SETTLE_SECONDS + 1]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(TIMESTAMP_FILE, files)
 
     def test_a_fleet_of_nothing_but_not_ready_nodes_withholds_the_refresh(self) -> None:
         result, files = self.tick(nodes=[self.node("a", None, ready=False), self.node("b", None, ready=False)])
