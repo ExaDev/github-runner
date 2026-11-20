@@ -234,7 +234,7 @@ github_runner_arc_role_controller_lease_name: "{{ github_runner_cluster_regrade_
 # The ConfigMaps in the platform namespace that the probes publish to (a key per node) and that the controller publishes its status to, which the heartbeat republishes beside the autoscaler's.
 github_runner_arc_role_controller_probe_configmap: fleet-role-probe
 github_runner_arc_role_controller_status_configmap: fleet-role-status
-# Where the probe writes its fdatasync reading on a node that is not a voter: a directory on the filesystem k3s keeps its data on, which the pod mounts from the node, created by the kubelet and owned by root.
+# Where the probe keeps its window of samples (window.json) and, on a node that is not a voter, writes its fdatasync reading: a directory on the filesystem k3s keeps its data on, which the pod mounts from the node, created by the kubelet and owned by root.
 github_runner_arc_role_controller_data_dir: /var/lib/rancher/k3s/fleet-role-probe
 
 # Runner reaper (see the role README's Runner reaper section, tasks/install_runner_reaper.yml and files/reap-runners.sh): a CronJob in each runner namespace that deletes an EphemeralRunner whose job's workflow run is completed or cancelled, whose own job is completed, or whose job has been running for longer than github_runner_arc_runner_reaper_max_job_seconds; the scale set replaces it. It reads the runs with an installation token from the org's GitHub App restricted to actions: read, so the App needs the Actions repository permission (read) on every repository whose jobs the runners take, approved on its installation. It never deletes a runner that has not been assigned a job, and deletes nothing when GitHub or the token is unavailable. false removes the CronJob, its RBAC and its ConfigMap.

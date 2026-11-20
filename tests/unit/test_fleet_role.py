@@ -39,6 +39,7 @@ from fleet_role_support import (
     histogram,
     node,
     sample,
+    summarise,
     times,
 )
 
@@ -127,7 +128,8 @@ def populate(cluster: Cluster, hosts: list[Host]) -> None:
                 )
             )
         entries[h.name] = entry(built, etcd_id(h.name) if h.voter else None)
-    cluster.set_probes(entries)
+    cluster.windows = entries
+    cluster.set_probes(summarise(entries))
 
 
 def healthy(**changes: Any) -> list[Host]:
@@ -331,10 +333,10 @@ class MemoryAndStabilityTest(ControllerCase):
 
     def test_one_sample_over_the_limit_anywhere_in_the_window_is_enough(self) -> None:
         populate(self.cluster, healthy())
-        entries = self.cluster.probes()
+        windows = self.cluster.windows
         # Under the floor share of the total but above etcd's quota, so only the regrade limit can fail it.
-        entries["a"]["samples"][10].update(psi=PRESSURE_THRESHOLD + 5, avail_kb=TOTAL_KB * AVAILABLE_FLOOR_PERCENT // 100 - 1)
-        self.cluster.set_probes(entries)
+        windows["a"]["samples"][10].update(psi=PRESSURE_THRESHOLD + 5, avail_kb=TOTAL_KB * AVAILABLE_FLOOR_PERCENT // 100 - 1)
+        self.cluster.set_probes(summarise(windows))
         completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         host = self.cluster.status()["hosts"]["a"]
@@ -537,9 +539,9 @@ class GateTest(ControllerCase):
 
     def test_no_swap_while_a_voters_etcd_metrics_could_not_be_read(self) -> None:
         populate(self.cluster, healthy(a={"tcp": UNFIT_RTT_MS + 50}))
-        entries = self.cluster.probes()
-        entries["b"]["samples"][-1]["etcd"] = None
-        self.cluster.set_probes(entries)
+        windows = self.cluster.windows
+        windows["b"]["samples"][-1]["etcd"] = None
+        self.cluster.set_probes(summarise(windows))
         completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("etcd's state on voter b is unknown", self.cluster.status()["decision"]["because"])
@@ -630,12 +632,19 @@ class GateTest(ControllerCase):
         self.assertEqual(COOLDOWN_SECONDS - WINDOW_SECONDS, 300)
         self.assertGreater(COOLDOWN_SECONDS, WINDOW_SECONDS)
 
-    def test_readings_from_before_a_membership_change_are_not_counted(self) -> None:
+    def test_a_window_that_began_before_a_membership_change_is_not_judged(self) -> None:
+        # The probe publishes its window's summary, so a window holding readings from before the change cannot be judged until it has rolled past the change.
         changed_at = int(time.time()) - (WINDOW_SECONDS // 2)
         self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": changed_at, "cooldown_until": changed_at + COOLDOWN_SECONDS}})
         status = self.pass_(healthy())
         self.assertEqual(status["hosts"]["a"]["verdict"], "unknown")
-        self.assertEqual(status["hosts"]["a"]["samples"], WINDOW_SAMPLES // 2 + 1)
+        self.assertIn(f"the probe's window began before the last membership change at {changed_at}", status["hosts"]["a"]["reasons"])
+
+    def test_a_window_that_began_after_a_membership_change_is_judged(self) -> None:
+        changed_at = int(time.time()) - WINDOW_SECONDS - SAMPLE_SECONDS
+        self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": changed_at, "cooldown_until": changed_at + COOLDOWN_SECONDS}})
+        status = self.pass_(healthy())
+        self.assertEqual(status["hosts"]["a"]["verdict"], "fit")
 
     def test_fewer_eligible_hosts_than_the_target_is_reported_and_refuses_a_swap(self) -> None:
         status = self.pass_(healthy(a={"tcp": UNFIT_RTT_MS + 50}, b={"eligible": False}, c={"eligible": False}))

@@ -38,6 +38,8 @@ ELECTION_TIMEOUT_MS = 1000
 SAMPLE_SECONDS = 15
 TARGET = 3
 MAX_SERVERS = 5
+# etcd's FAQ: the largest cluster it recommends has seven members, the most voters a probe measures.
+MAX_VOTERS = 7
 PRESSURE_THRESHOLD = 10
 AVAILABLE_FLOOR_PERCENT = 15
 TAIL_PERCENTILE = 99
@@ -268,6 +270,8 @@ class Cluster:
         self.calls = self.dir / "calls.log"
         self.calls.touch()
         self.nodes: list[dict[str, Any]] = []
+        # The windows the probes would keep in their data directories, by node, from which the published summaries are made.
+        self.windows: dict[str, dict[str, Any]] = {}
         self.configmaps: dict[str, dict[str, Any]] = {
             f"{NAMESPACE}/{PROBE_CONFIGMAP}": {"data": {}},
             f"{NAMESPACE}/{STATUS_CONFIGMAP}": {"data": {"status.json": ""}},
@@ -462,6 +466,17 @@ def sample(
 
 def entry(samples: list[dict[str, Any]], etcd_id: str | None = None) -> dict[str, Any]:
     return {"etcd_id": etcd_id, "last": None, "fsync_at": None, "samples": samples}
+
+
+def summarise(windows: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """What the probe publishes for each of these windows (an entry as `entry` builds it, by node name): the window's summary, by the shared module's own function and at the regrade limit the tests' controller is given."""
+    completed = subprocess.run(
+        ["jq", "-c", "-L", str(SCRIPTS), "--argjson", "limit", json.dumps({"pressure_threshold": PRESSURE_THRESHOLD, "available_floor_percent": AVAILABLE_FLOOR_PERCENT}),
+         'include "fleet-role-stats"; map_values(window_summary($limit))'],
+        input=json.dumps(windows), capture_output=True, text=True, check=True,
+    )
+    summaries: dict[str, dict[str, Any]] = json.loads(completed.stdout)
+    return summaries
 
 
 def times(count: int, now: float | None = None) -> list[float]:

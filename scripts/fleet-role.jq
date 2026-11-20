@@ -3,10 +3,10 @@
 # Inputs, as jq named arguments:
 # - $config: the controller's settings (see scripts/fleet-role.sh for each), with `now` the time of the pass in epoch seconds, `expected_voters` the number of voters the cluster should hold at this moment (the target, or one more while a swap holds a new voter beside the old) and `ignored_voters`, optional, the voters a swap in progress is taking out, which the gates do not hold to their health (a voter stepped down to etcd-only, or one that is down), and whose connections the others may lack.
 # - $nodes_file: the output of `kubectl get nodes -o json`, as --slurpfile gives it (a one-element array).
-# - $probes_file: each node's probe entry (scripts/fleet-role-probe.sh), by node name, likewise.
+# - $probes_file: each node's probe entry (scripts/fleet-role-probe.sh), by node name, likewise: the summary of the probe's window of samples (window_summary in scripts/fleet-role-stats.jq), which the probe keeps to itself.
 # - $previous_file: the status this program published on the last pass, or null on the first, likewise.
 #
-# Every threshold is derived, and every constant below is a fact about etcd or k3s with its source. The figures are read over a window of tail_window samples per peer pair; a host with fewer is "unknown", never fit or unfit.
+# Every threshold is derived, and every constant below is a fact about etcd or k3s with its source. The figures are read over a window of window_samples samples per peer pair, every one taken since the last membership change; a host with fewer, or whose window began before the change, is "unknown", never fit or unfit.
 
 include "fleet-role-stats";
 
@@ -37,15 +37,14 @@ def ready_condition: ((.status.conditions // []) | map(select(.type == "Ready"))
 
 def condition_true($type): ((.status.conditions // []) | map(select(.type == $type)) | .[0].status) == "True";
 
-# The pair figure of one observer towards one peer over a window: the worse of the TCP connect tail and etcd's own round trip tail (only a voter has the latter, keyed by the peer's etcd id), in milliseconds, with how many TCP readings it rests on.
-def pair($window; $peer; $peer_id):
-  ([$window[] | .tcp[$peer] | select(. != null)]) as $tcp
-  | (if $peer_id == null then null else ([$window[] | .etcd.rtt[$peer_id] | select(. != null)] | sum_buckets | histogram_quantile(tail_percentile)) end) as $etcd
-  | ($tcp | nearest_rank(tail_percentile)) as $tcp_tail
-  | {peer: $peer, readings: ($tcp | length),
-     tcp_ms: $tcp_tail,
-     etcd_ms: (if $etcd == null then null else $etcd * 1000 end),
-     ms: ([$tcp_tail, (if $etcd == null then null else $etcd * 1000 end)] | map(select(. != null)) | max)};
+# The pair figure of one observer towards one peer over the observer's window ($summary, its probe's entry): the worse of the TCP connect tail and etcd's own round trip tail (only a voter has the latter, keyed by the peer's etcd id), in milliseconds, with how many TCP readings it rests on.
+def pair($summary; $peer; $peer_id):
+  ($summary.tcp[$peer] // {p99_ms: null, readings: 0}) as $tcp
+  | (if $peer_id == null then null else $summary.etcd_rtt_p99_ms[$peer_id] end) as $etcd_ms
+  | {peer: $peer, readings: $tcp.readings,
+     tcp_ms: $tcp.p99_ms,
+     etcd_ms: $etcd_ms,
+     ms: ([$tcp.p99_ms, $etcd_ms] | map(select(. != null)) | max)};
 
 $config as $c
 | $nodes_file[0] as $nodes
@@ -83,53 +82,44 @@ $config as $c
 | (if $changed_at == null then null else $changed_at + $cooldown_seconds end) as $cooldown_until
 
 # The storage quota a voter's etcd reports, the largest of them, or etcd's own default when no voter reports one.
-| ([$voters[] | $probes[.name].samples[-1].etcd.quota_bytes | select(. != null)] | max // $c.default_quota_bytes) as $quota_bytes
+| ([$voters[] | $probes[.name].etcd.quota_bytes | select(. != null)] | max // $c.default_quota_bytes) as $quota_bytes
 
-| def window($name): ($probes[$name].samples // []) | map(select(.t >= ($changed_at // 0))) | .[-window_samples:];
-
-  def measure($node):
+| def measure($node):
     $node.name as $name
-    | $probes[$name] as $entry
-    | window($name) as $w
-    | ($entry.samples[-1].t // null) as $last_at
+    | ($probes[$name] // ({} | window_summary($c))) as $s
+    # A window that began before the last membership change holds readings of the old membership; it is not judged until it has rolled past the change, which a full window does once window_samples samples have been taken since.
+    | ($changed_at != null and $s.since != null and $s.since < $changed_at) as $predates
     | (if $node.voter then ($voter_names | map(select(. != $name))) else $voter_names end) as $peers
-    | [$peers[] as $peer | pair($w; $peer; $probes[$peer].etcd_id)] as $pairs
+    | [$peers[] as $peer | pair($s; $peer; $probes[$peer].etcd_id)] as $pairs
     | ($pairs | map(.ms) | map(select(. != null)) | max) as $rtt_ms
     | ($pairs | max_by(.ms // 0) | .peer) as $rtt_peer
-    | ($w | map(.etcd) | map(select(. != null))) as $etcd
-    | ([$etcd[].wal] | sum_buckets | histogram_quantile(tail_percentile)) as $wal
-    | ([$etcd[].commit] | sum_buckets | histogram_quantile(tail_percentile)) as $commit
-    | ([$w[] | .fsync_ms | select(. != null)] | max) as $fsync
-    | ($w | map(select(.psi != null and over_regrade_limit($c))) | length) as $over
-    | ($w | map(.psi | select(. != null))) as $pressures
-    | ($w | map(.avail_kb | select(. != null)) | min) as $min_avail_kb
-    | ($w | map(select(.restarted == true)) | length) as $restarts
     | ($node.ready | not) as $not_ready
     | ($node.ready_since != null and $node.ready_since >= ($now - $window_seconds)) as $spell
     | {
         node: $node,
-        reported_at: $last_at,
-        fresh: ($last_at != null and $last_at >= ($now - $stale_seconds)),
-        samples: ($w | length),
-        link: ($w[-1].link // "unknown"),
-        link_source: ($w[-1].link_source // null),
-        interface: ($w[-1].iface // null),
+        reported_at: $s.t,
+        fresh: ($s.t != null and $s.t >= ($now - $stale_seconds)),
+        samples: $s.samples,
+        predates_change: $predates,
+        link: ($s.link // "unknown"),
+        link_source: $s.link_source,
+        interface: $s.iface,
         pairs: $pairs,
         rtt_ms: $rtt_ms,
         rtt_peer: $rtt_peer,
         pairs_complete: ($pairs | all(.readings >= window_samples)),
-        wal_p99_ms: (if $wal == null then null else $wal * 1000 end),
-        commit_p99_ms: (if $commit == null then null else $commit * 1000 end),
-        fsync_p99_ms: $fsync,
-        over_limit_samples: $over,
-        pressure_max: ($pressures | max),
-        pressure_samples: ($pressures | length),
-        min_available_bytes: (if $min_avail_kb == null then null else $min_avail_kb * kib end),
-        restarts: $restarts,
+        wal_p99_ms: $s.wal_p99_ms,
+        commit_p99_ms: $s.commit_p99_ms,
+        fsync_p99_ms: $s.fsync_p99_ms,
+        over_limit_samples: $s.over_limit_samples,
+        pressure_max: $s.pressure_max,
+        pressure_samples: $s.pressure_samples,
+        min_available_bytes: (if $s.min_avail_kb == null then null else $s.min_avail_kb * kib end),
+        restarts: $s.restarts,
         not_ready: $not_ready,
         not_ready_spell: $spell,
-        leader_changes: ($etcd | map(.leader_changes) | add // 0),
-        etcd: ($entry.samples[-1].etcd // null)
+        leader_changes: $s.leader_changes,
+        etcd: $s.etcd
       };
 
   # What makes a measured host unfit, as sentences carrying their numbers; empty when nothing does. A voter is judged by the unfit round trip limit and the disk it serves etcd from, a candidate by the stricter fit limit and a disk probe. The round trip is a link's, and another node may be at fault for it; every other fault is the host's own.
@@ -166,7 +156,8 @@ $config as $c
     $m.node as $node
     | [
         (if $m.reported_at == null then "no probe report" elif ($m.fresh | not) then "the probe's last report is \($now - $m.reported_at) s old" else empty end),
-        (if $m.samples < window_samples then "\($m.samples) of \(window_samples) samples since the last membership change" else empty end),
+        (if $m.predates_change then "the probe's window began before the last membership change at \($changed_at)"
+         elif $m.samples < window_samples then "\($m.samples) of \(window_samples) samples since the last membership change" else empty end),
         (if ($m.pairs | length) == 0 then "no voter to measure against"
          elif ($m.pairs_complete | not) then "fewer than \(window_samples) round trip readings to some voter" else empty end),
         (if $node.voter and ($m.wal_p99_ms == null or $m.commit_p99_ms == null) then "no etcd disk readings" else empty end),
@@ -239,7 +230,7 @@ $config as $c
 
 # Why no swap may start now whatever the hosts' fitness: the epic's conditions on the cluster as a whole, as `gates`, which hold for a swap by command as well as by decision, and the cooldown after a membership change, which only a decision waits out. A voter a swap in progress is taking out (`ignored_voters`) is held to none of the gates on its own health, and its peers may lack their connection to it. It is still an etcd member until k3s removes it, whether or not its Node still says EtcdIsVoter (a server stepped down to etcd-only runs no kubelet), so the members etcd lists include it.
 # How many members each voter's fresh probe report says etcd lists, by voter, null for a voter with no fresh report or no reading: a rollback is settled once every voter lists the target and no more.
-| ($voter_names | map({key: ., value: (if ($probes[.].samples[-1].t // 0) >= ($now - $stale_seconds) then $probes[.].samples[-1].etcd.known_members else null end)}) | from_entries) as $known_members
+| ($voter_names | map({key: ., value: (if ($probes[.].t // 0) >= ($now - $stale_seconds) then $probes[.].etcd.known_members else null end)}) | from_entries) as $known_members
 | ($c.ignored_voters // []) as $ignored
 | ($voter_names | map(select(. as $v | $ignored | index($v) | not))) as $judged
 # A voter a swap is taking out that no longer says EtcdIsVoter has left etcd once every voter it does not ignore reports, fresh, that etcd lists as many members as there are voters: each voter is a member, so those members are the voters and nothing else. Its Node's etcd label and the absence of k3s's removed-node-name annotation say nothing then, since a server that is still running sets the label again and k3s clears the annotation when a server rejoins under a new name (pkg/etcd/metadata_controller.go and member_controller.go); counting it there would expect a member etcd does not have, for ever.
@@ -256,8 +247,8 @@ $config as $c
     ($all[] | select(.name as $n | $ignored | index($n) | not) | select(.labelled and (.voter | not)) | if .removed then "node \(.name) is a member k3s has removed: it still carries the etcd label" else "node \(.name) is a member but not a voter: it carries the etcd label without \(voter_condition)=True" end),
     ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.regrade_level != null) | "voter \(.name) is at regrade level \(.regrade_level), below full"),
     ($voter_nodes[] | select(.name as $n | $ignored | index($n) | not) | select(.ready | not) | "voter \(.name) is not Ready"),
-    ($judged[] as $v | $probes[$v].samples[-1] as $last | $last.etcd as $e
-       | if $last == null or $last.t < ($now - $stale_seconds) then "voter \($v) has no probe report in the last \($stale_seconds) s"
+    ($judged[] as $v | $probes[$v] as $last | $last.etcd as $e
+       | if $last == null or $last.t == null or $last.t < ($now - $stale_seconds) then "voter \($v) has no probe report in the last \($stale_seconds) s"
          elif $e == null then "etcd's state on voter \($v) is unknown"
          elif ($e.has_leader | not) then "voter \($v) reports no leader"
          elif $e.is_learner then "voter \($v) is a learner"

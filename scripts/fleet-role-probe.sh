@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The role controller's per-node probe (see roles/github_runner_arc/templates/fleet-role.yaml.j2): the `fleet-role-probe` DaemonSet runs this on every node that is an etcd voter or marked eligible and has a kubelet, with host networking, so it measures the path the node's own etcd and kubelet use. Every REPORT_SECONDS it takes one sample and appends it to this node's entry in the shared probe ConfigMap, which scripts/fleet-role.sh reads. An entry keeps the last window of samples, so it survives this pod being replaced.
+# The role controller's per-node probe (see roles/github_runner_arc/templates/fleet-role.yaml.j2): the `fleet-role-probe` DaemonSet runs this on every node that is an etcd voter or marked eligible and has a kubelet, with host networking, so it measures the path the node's own etcd and kubelet use. Every REPORT_SECONDS it takes one sample, appends it to the window of the last window_samples samples it keeps in its data directory on the node (FSYNC_DIR, so the window survives this pod being replaced), and publishes the window's summary (window_summary in scripts/fleet-role-stats.jq) as this node's entry in the shared probe ConfigMap, which scripts/fleet-role.sh reads. The window itself is never published: every patch of the ConfigMap rewrites the whole object in the datastore, so an entry is held to probe_entry_limit_bytes, and a summary over it is refused and not published.
 #
-# Only a node the controller judges is measured: a voter, or a host the owner marks eligible (ELIGIBLE_LABEL, with the value true). The DaemonSet schedules a pod on no other node, and a pod that finds its node is neither (a label removed while it runs) records nothing and removes the entry it has from when it was one, as does a pod that is stopped on a node that is neither any more or is gone, so the ConfigMap, which holds at most a mebibyte, grows with the hosts that decide the cluster's control plane and not with the fleet.
+# Only a node the controller judges is measured: a voter, or a host the owner marks eligible (ELIGIBLE_LABEL, with the value true). The DaemonSet schedules a pod on no other node, and a pod that finds its node is neither (a label removed while it runs) records nothing and removes the entry and the window it has from when it was one, as does a pod that is stopped on a node that is neither any more or is gone, so the ConfigMap, which holds at most a mebibyte, grows with the hosts that decide the cluster's control plane and not with the fleet.
 #
 # A sample holds, per node: the TCP connect time to every voter's etcd peer port (a connect that does not complete within the election timeout is recorded as the election timeout, so loss shows as tail latency); on a voter, what etcd's own metrics gained since the last sample (the WAL fsync and backend commit histograms, the round trip to each peer, leader changes) and whether it has a leader, is a learner and is connected to its peers; on a node that is not a voter, an fdatasync probe in the k3s data directory once per window, with the write size etcd's own fio check uses; the memory pressure and MemAvailable the regrade core reads; and the medium of the node's link: the value of its LINK_LABEL Node label when it has one, which the cluster role reads on the host itself (the medium of the interface a Mac's Colima VM is bridged to, or of the interface a Linux host's default route leaves by), and otherwise the medium of the interface this pod's default route leaves by. The label decides when the node has it because a node in a container or a VM sees only its own virtual interface: a k3s container's veth, which reads unknown, or a VM's virtio NIC, which reads wired whatever the Mac beneath it uses.
 #
@@ -19,7 +19,8 @@
 # - VOTER_LABEL: the Node label that marks an etcd member (default node-role.kubernetes.io/etcd=true).
 # - ETCD_METRICS_URL: where a voter's etcd serves its metrics (default http://127.0.0.1:2381/metrics, the listener k3s keeps).
 # - ETCD_PEER_PORT: etcd's peer port (default 2380).
-# - FSYNC_DIR: a directory on the filesystem k3s keeps its data on, which the fdatasync probe writes in (default /var/lib/rancher/k3s/fleet-role-probe).
+# - PRESSURE_THRESHOLD, AVAILABLE_FLOOR_PERCENT: the regrade core's limit (the controller's FLEET_ROLE_PRESSURE_THRESHOLD and FLEET_ROLE_AVAILABLE_FLOOR_PERCENT), which the summary counts the samples over. Required.
+# - FSYNC_DIR: a directory on the filesystem k3s keeps its data on, which the fdatasync probe writes in and the window is kept in, as window.json (default /var/lib/rancher/k3s/fleet-role-probe).
 # - NODE_LINK: the link reader the cluster role runs on the host too (roles/github_runner_cluster/files/node-link.sh), whose default_route_interface and link_type read this pod's own (default /app/node-link.sh). SYS_CLASS_NET and PROC_NET_ROUTE, which it reads, are where the host's /sys/class/net and /proc/net/route are (the defaults).
 # - FLEET_REGRADE_CORE: the regrade core (roles/github_runner_cluster/files/regrade/fleet-regrade-core.sh), whose own psi_avg300 and meminfo_kb read the memory signals (default /app/fleet-regrade-core.sh). PSI_FILE and MEMINFO_FILE, which it reads, default here to /proc/pressure/memory and /proc/meminfo, which a pod's own procfs serves for the whole node as it does /proc/meminfo, so nothing is mounted for them. A kernel without pressure stall information (built or booted without it) has no /proc/pressure or, on older kernels, has the files and refuses to read them (EOPNOTSUPP); the sample then has no pressure reading and the memory figures from /proc/meminfo alone, which the controller judges by MemAvailable alone and reports with the pressure unknown.
 set -euo pipefail
@@ -35,6 +36,7 @@ NODE_LINK="${NODE_LINK:-/app/node-link.sh}"
 FLEET_REGRADE_CORE="${FLEET_REGRADE_CORE:-/app/fleet-regrade-core.sh}"
 PSI_FILE="${PSI_FILE:-/proc/pressure/memory}"
 MEMINFO_FILE="${MEMINFO_FILE:-/proc/meminfo}"
+WINDOW_FILE="${FSYNC_DIR}/window.json"
 # The core reads its settings from an environment file when there is one; the probe has none, and must not pick up another by the core's default path.
 # shellcheck disable=SC2034 # read by the sourced core
 FLEET_REGRADE_ENV=/nonexistent
@@ -100,13 +102,13 @@ labelled_link_in() {
   jq -r --arg node "$NODE_NAME" --arg label "$LINK_LABEL" '[.items[] | select(.metadata.name == $node) | (.metadata.labels // {})[$label] | strings] | first // ""' <<< "$1"
 }
 
-# Removes this node's entry from the ConfigMap. A key set to null in a merge patch is removed.
+# Removes this node's entry from the ConfigMap, and then its window, which a node measured again starts afresh. A key set to null in a merge patch is removed.
 remove_entry() {
   local patch
   patch="$(mktemp)"
   jq -n --arg node "$NODE_NAME" '{data: {($node): null}}' > "$patch"
   kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null || { rm -f "$patch"; return 1; }
-  rm -f "$patch"
+  rm -f "$patch" "$WINDOW_FILE"
 }
 
 # What the pod does when it is stopped: if its node is neither a voter nor eligible any more (the DaemonSet stops the pod of a node that has lost both labels) or is gone, its entry is removed, so the ConfigMap holds only the hosts that decide the control plane; a pod stopped for any other reason (a new image, the node shutting down) leaves the entry for the pod that follows it to extend. The API can fail here, and a pod that is going away has nothing to retry it with.
@@ -122,11 +124,11 @@ retire() {
 # Takes one sample and publishes it. $1 is "true" on the first pass of this process, which for a node that is not a voter is the only sign this probe has of k3s having restarted (a voter sees it in etcd's counters going backwards).
 report() {
   local first=$1 now entry voters is_voter eligible tcp='{}' peer_name peer_ip ms etcd='null' restarted=false cumulative='null' etcd_id='null'
-  local iface link link_source fsync='null' fsync_at patch metrics reading change psi=''
+  local iface link link_source fsync='null' fsync_at patch metrics reading change psi='' new_entry summary size limit_bytes
   now="$(date +%s)"
-  # This node's entry is read from the ConfigMap once, when the process starts, and kept from then on: the probe is the only writer of its key, and two API calls a sample (the nodes, then the patch) are all a probe on a poor path can be asked to make in a period.
+  # This node's window is read from its data directory once, when the process starts, and kept from then on, so a sample costs two API calls (the nodes, then the patch), which are all a probe on a poor path can be asked to make in a period.
   if [ "$entry_loaded" != true ]; then
-    entry="$(kubectl get configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" -o json | jq -c --arg node "$NODE_NAME" '(.data[$node] // "null") | fromjson')" || return 1
+    if [ -e "$WINDOW_FILE" ]; then entry="$(jq -c . "$WINDOW_FILE")" || return 1; else entry=null; fi
     entry_loaded=true
   else
     entry="$kept_entry"
@@ -136,7 +138,7 @@ report() {
   is_voter="$(is_voter_in "$voters")"
   eligible="$(is_eligible_in "$nodes_json")"
   if [ "$is_voter" != true ] && [ "$eligible" != true ]; then
-    if [ "$entry" != null ]; then
+    if [ "$entry" != null ] || [ -e "$WINDOW_FILE" ]; then
       remove_entry
       kept_entry=null
     fi
@@ -180,7 +182,7 @@ report() {
 
   psi="$(pressure_reading)"
 
-  # The entry goes in on standard input, never as an argument: it holds a window of samples, and one argument is limited to a fraction of the argument space (128 KiB on Linux).
+  # The window goes in on standard input, never as an argument: it holds a window of samples, and one argument is limited to a fraction of the argument space (128 KiB on Linux).
   new_entry="$(jq -c -L "$MODULES" --argjson now "$now" --argjson tcp "$tcp" --argjson etcd "$etcd" \
     --argjson restarted "$restarted" --argjson cumulative "$cumulative" --argjson etcd_id "$etcd_id" --argjson fsync "$fsync" --argjson fsync_at "$fsync_at" \
     --arg psi "$psi" --arg avail "$(meminfo_kb MemAvailable)" --arg total "$(meminfo_kb MemTotal)" --arg iface "$iface" --arg link "$link" --arg link_source "$link_source" '
@@ -190,11 +192,19 @@ report() {
     | {t: $now, tcp: $tcp, etcd: $etcd, restarted: $restarted, psi: ($psi | number), avail_kb: ($avail | number), total_kb: ($total | number),
      link: $link, link_source: $link_source, iface: (if $iface == "" then null else $iface end), fsync_ms: $fsync} as $sample
     | {etcd_id: $etcd_id, last: $cumulative, fsync_at: $fsync_at, samples: ((($entry.samples // []) + [$sample]) | .[-window_samples:])}' <<< "$entry")" || return 1
+  summary="$(jq -c -L "$MODULES" --argjson limit "$regrade_limit" 'include "fleet-role-stats"; window_summary($limit)' <<< "$new_entry")" || return 1
+  size="$(printf '%s' "$summary" | wc -c | tr -d ' ')"
+  limit_bytes="$(jq -n -L "$MODULES" 'include "fleet-role-stats"; probe_entry_limit_bytes')"
+  if [ "$size" -gt "$limit_bytes" ]; then
+    log "this node's summary is ${size} bytes, over the limit of ${limit_bytes} bytes for an entry; it is not published"
+    return 1
+  fi
   patch="$(mktemp)"
-  jq --arg node "$NODE_NAME" '{data: {($node): tojson}}' <<< "$new_entry" > "$patch"
+  jq --arg node "$NODE_NAME" '{data: {($node): tojson}}' <<< "$summary" > "$patch"
   kubectl patch configmap "$PROBE_CONFIGMAP" -n "$NAMESPACE" --type merge --patch-file "$patch" > /dev/null || { rm -f "$patch"; return 1; }
   rm -f "$patch"
-  # Kept only once published, so a patch that failed is read again from the ConfigMap and not taken as written.
+  # Kept only once its summary is published, so a sample whose patch failed is not in the window; the file is replaced whole by a rename, so a reader never sees half of it.
+  printf '%s\n' "$new_entry" > "${WINDOW_FILE}.new" && mv "${WINDOW_FILE}.new" "$WINDOW_FILE" || return 1
   kept_entry="$new_entry"
 }
 
@@ -223,10 +233,13 @@ fi
 : "${ELECTION_TIMEOUT_MS:?ELECTION_TIMEOUT_MS is required}"
 : "${ELIGIBLE_LABEL:?ELIGIBLE_LABEL is required}"
 : "${LINK_LABEL:?LINK_LABEL is required}"
+: "${PRESSURE_THRESHOLD:?PRESSURE_THRESHOLD is required}"
+: "${AVAILABLE_FLOOR_PERCENT:?AVAILABLE_FLOOR_PERCENT is required}"
+regrade_limit="$(jq -nc --argjson pressure_threshold "$PRESSURE_THRESHOLD" --argjson available_floor_percent "$AVAILABLE_FLOOR_PERCENT" '{pressure_threshold: $pressure_threshold, available_floor_percent: $available_floor_percent}')"
 
 trap retire TERM INT
 
-# This node's entry as the ConfigMap holds it, read once and then kept (see report).
+# This node's window as its data directory holds it, read once and then kept (see report).
 entry_loaded=false
 kept_entry=null
 first=true

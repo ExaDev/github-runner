@@ -28,11 +28,14 @@ from pathlib import Path
 from typing import Any
 
 from fleet_role_support import (
+    AVAILABLE_FLOOR_PERCENT,
     ELECTION_TIMEOUT_MS,
     ELIGIBLE_LABEL,
+    MAX_VOTERS,
     NAMESPACE,
     LINK_LABEL,
     NODE_LINK,
+    PRESSURE_THRESHOLD,
     REGRADE_CORE,
     SAMPLE_SECONDS,
     TARGET,
@@ -42,6 +45,7 @@ from fleet_role_support import (
     entry,
     node,
     sample,
+    summarise,
 )
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh"
@@ -177,15 +181,28 @@ class ProbeCase(unittest.TestCase):
             "LINK_LABEL": LINK_LABEL,
             "PSI_FILE": str(self.psi),
             "MEMINFO_FILE": str(self.meminfo),
+            "PRESSURE_THRESHOLD": str(PRESSURE_THRESHOLD),
+            "AVAILABLE_FLOOR_PERCENT": str(AVAILABLE_FLOOR_PERCENT),
         }
         return self.cluster.run("fleet-role-probe.sh", **{**base, **env})
 
-    def newest(self, name: str = "me") -> dict[str, Any]:
-        return self.cluster.probes()[name]["samples"][-1]
+    @property
+    def state_file(self) -> Path:
+        """Where the probe keeps its window, in the data directory the DaemonSet mounts from the node."""
+        return self.fsync_dir / "window.json"
 
-    def settled(self, name: str = "me") -> None:
-        """Gives this node an entry whose fdatasync probe ran just now, so that a pass does not run fio."""
-        self.cluster.set_probes({**self.cluster.probes(), name: {**entry([]), "fsync_at": int(time.time())}})
+    def state(self) -> dict[str, Any]:
+        return json.loads(self.state_file.read_text())
+
+    def set_state(self, state: dict[str, Any]) -> None:
+        self.state_file.write_text(json.dumps(state))
+
+    def newest(self) -> dict[str, Any]:
+        return self.state()["samples"][-1]
+
+    def settled(self) -> None:
+        """Gives this node a window whose fdatasync probe ran just now, so that a pass does not run fio."""
+        self.set_state({**entry([]), "fsync_at": int(time.time())})
 
 
 class SysfsTree:
@@ -247,7 +264,7 @@ class LinkTest(ProbeCase):
         self.tree = SysfsTree(self.sys)
         self.settled_node = node("me", eligible=True)
         self.nodes = [self.settled_node]
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
 
     def link_via(self, *routes: str) -> str:
         self.route.write_text(ROUTE_HEADER + "".join(routes))
@@ -419,7 +436,7 @@ class EtcdReadingTest(ProbeCase):
         )
         self.assertEqual((etcd["wal"], etcd["commit"]), ({}, {}))
         self.assertFalse(self.newest()["restarted"])
-        self.assertEqual(self.cluster.probes()["me"]["etcd_id"], FIXTURE_SERVER_ID)
+        self.assertEqual(self.state()["etcd_id"], FIXTURE_SERVER_ID)
 
     def test_the_next_sample_holds_what_each_histogram_gained_as_a_real_etcd_counted_it(self) -> None:
         before, after = page("before"), page("after")
@@ -438,7 +455,7 @@ class EtcdReadingTest(ProbeCase):
             self.assertEqual(etcd["rtt"][peer], gained(rtt_before[peer], rtt_after[peer]), peer)
         self.assertFalse(self.newest()["restarted"])
         # Cumulative as etcd reports it, so the sample after this one has something to subtract from.
-        self.assertEqual(self.cluster.probes()["me"]["last"]["wal"], cumulative(after, "etcd_disk_wal_fsync_duration_seconds")[""])
+        self.assertEqual(self.state()["last"]["wal"], cumulative(after, "etcd_disk_wal_fsync_duration_seconds")[""])
 
     def test_a_peer_with_two_active_streams_counts_once_as_k3ss_etcd_reports_it(self) -> None:
         # A page from a follower of a three-server k3s cluster (etcd 3.6.4): its gauge for the leader is 2, one for each kind of stream, and for the other follower 1.
@@ -474,13 +491,13 @@ class EtcdReadingTest(ProbeCase):
     def test_a_voter_whose_metrics_cannot_be_read_still_records_the_rest_and_keeps_its_baseline(self) -> None:
         with metrics_server([page("before")]) as url:
             self.pass_with(url)
-        baseline = self.cluster.probes()["me"]["last"]
+        baseline = self.state()["last"]
         completed = self.pass_with(f"http://127.0.0.1:{closed_port()}/metrics")
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("could not read", completed.stderr)
         self.assertIsNone(self.newest()["etcd"])
-        self.assertEqual(self.cluster.probes()["me"]["last"], baseline)
-        self.assertEqual(self.cluster.probes()["me"]["etcd_id"], FIXTURE_SERVER_ID)
+        self.assertEqual(self.state()["last"], baseline)
+        self.assertEqual(self.state()["etcd_id"], FIXTURE_SERVER_ID)
 
     def test_a_node_that_is_not_a_voter_reads_no_etcd_metrics(self) -> None:
         self.nodes = [node("me", eligible=True), node("p1", voter=True)]
@@ -488,7 +505,7 @@ class EtcdReadingTest(ProbeCase):
         with metrics_server([page("before")]) as url:
             self.assertEqual(self.pass_with(url).returncode, 0)
         self.assertIsNone(self.newest()["etcd"])
-        self.assertIsNone(self.cluster.probes()["me"]["etcd_id"])
+        self.assertIsNone(self.state()["etcd_id"])
 
     @unittest.skipUnless(ETCD_BINARY, "needs an etcd binary (on the PATH, or named by ETCD_BINARY)")
     def test_a_live_three_member_cluster_gives_the_readings_the_fixtures_were_captured_from(self) -> None:
@@ -502,7 +519,7 @@ class EtcdReadingTest(ProbeCase):
             etcd = self.newest()["etcd"]
             self.assertEqual((etcd["known_members"], etcd["active_peers"], etcd["has_leader"], etcd["is_learner"]), (TARGET, TARGET - 1, True, False))
             self.assertGreater(sum(etcd["wal"].values()), 0)
-            self.assertEqual(self.cluster.probes()["me"]["etcd_id"], cluster_.member_id(0))
+            self.assertEqual(self.state()["etcd_id"], cluster_.member_id(0))
             cluster_.add_learner()
             time.sleep(2)
             self.assertEqual(self.pass_with(url).returncode, 0)
@@ -599,22 +616,24 @@ class MeasuredNodesTest(ProbeCase):
         self.assertEqual(list(self.fsync_dir.iterdir()), [], "and runs no disk probe")
 
     def test_a_node_that_stopped_being_either_has_its_entry_removed_and_no_other(self) -> None:
-        self.cluster.set_probes({"other": entry([sample(5)], "other-id"), "me": entry([sample(6)])})
+        self.cluster.set_probes({"other": entry([sample(5)], "other-id"), "me": summarise({"me": entry([sample(6)])})["me"]})
+        self.set_state(entry([sample(6)]))
         completed = self.probe(voters=[node("me"), node("peer", voter=True)])
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(sorted(self.cluster.probes()), ["other"])
+        self.assertFalse(self.state_file.exists(), "and its window goes with it")
 
     def test_an_eligible_node_is_measured(self) -> None:
         self.settled()
         completed = self.probe(voters=[node("me", eligible=True), node("peer", voter=True)])
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(len(self.cluster.probes()["me"]["samples"]), 1)
+        self.assertEqual(self.cluster.probes()["me"]["samples"], 1)
 
     def test_a_voter_is_measured_whether_or_not_it_is_eligible(self) -> None:
         with metrics_server([page("before")]) as url:
             completed = self.probe(voters=[node("me", voter=True), node("peer", voter=True)], ETCD_METRICS_URL=url)
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(len(self.cluster.probes()["me"]["samples"]), 1)
+        self.assertEqual(self.cluster.probes()["me"]["samples"], 1)
 
 
 class MemoryTest(ProbeCase):
@@ -676,9 +695,9 @@ class RingTest(ProbeCase):
 
     def test_a_sample_is_appended_and_the_entry_keeps_the_last_window_of_them(self) -> None:
         old = [sample(1000 + i, fsync_ms=None) for i in range(WINDOW_SAMPLES)]
-        self.cluster.set_probes({"me": {**entry(old), "fsync_at": int(time.time())}})
+        self.set_state({**entry(old), "fsync_at": int(time.time())})
         self.assertEqual(self.probe().returncode, 0)
-        kept = self.cluster.probes()["me"]["samples"]
+        kept = self.state()["samples"]
         self.assertEqual(len(kept), WINDOW_SAMPLES)
         self.assertEqual(kept[0]["t"], 1001, "the oldest was dropped")
         self.assertGreater(kept[-1]["t"], 1000 + WINDOW_SAMPLES)
@@ -687,11 +706,11 @@ class RingTest(ProbeCase):
         # One argument to a process is limited to 128 KiB on Linux; an entry of a voter in a large cluster, with a connect time to every other voter in each sample, passes that.
         peers = {f"peer-with-a-long-node-name-{i:03d}": 1.234 for i in range(60)}
         big = [sample(1000 + i, tcp=peers) for i in range(WINDOW_SAMPLES)]
-        self.cluster.set_probes({"me": {**entry(big), "fsync_at": int(time.time())}})
-        self.assertGreater(len(json.dumps(self.cluster.probes()["me"])), 128 * 1024)
+        self.set_state({**entry(big), "fsync_at": int(time.time())})
+        self.assertGreater(len(json.dumps(self.state())), 128 * 1024)
         completed = self.probe()
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        kept = self.cluster.probes()["me"]["samples"]
+        kept = self.state()["samples"]
         self.assertEqual(len(kept), WINDOW_SAMPLES)
         self.assertEqual(kept[0]["t"], 1001)
         self.assertEqual(kept[0]["tcp"], peers)
@@ -699,7 +718,8 @@ class RingTest(ProbeCase):
 
     def test_each_node_patches_only_its_own_key(self) -> None:
         other = entry([sample(5)], "other-id")
-        self.cluster.set_probes({"other": other, "me": {**entry([]), "fsync_at": int(time.time())}})
+        self.cluster.set_probes({"other": other})
+        self.settled()
         self.assertEqual(self.probe().returncode, 0)
         self.assertEqual(self.cluster.probes()["other"], other)
         patches = [json.loads(line) for line in self.cluster.calls.read_text().splitlines() if '"patch"' in line]
@@ -708,9 +728,10 @@ class RingTest(ProbeCase):
     def recorded(self) -> list[dict[str, Any]]:
         for _ in range(50):
             try:
-                return json.loads(self.cluster.read_store()["configmaps"][f"{NAMESPACE}/fleet-role-probe"]["data"].get("me", "{}")).get("samples", [])
+                # A sample is kept in the window only once its summary is published.
+                return self.state()["samples"] if self.state_file.exists() else []
             except json.JSONDecodeError:
-                time.sleep(0.1)  # the stand-in kubectl was rewriting the store
+                time.sleep(0.1)  # the probe was replacing the file
         raise AssertionError("the store could not be read")
 
     def loop(self, wanted: int, **env: str) -> list[dict[str, Any]]:
@@ -721,7 +742,8 @@ class RingTest(ProbeCase):
             [str(Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh")],
             env=self.cluster.env(
                 NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), ELIGIBLE_LABEL=ELIGIBLE_LABEL, REPORT_SECONDS="1", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
-                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), NODE_LINK=str(NODE_LINK), LINK_LABEL=LINK_LABEL, PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
+                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), NODE_LINK=str(NODE_LINK), LINK_LABEL=LINK_LABEL, PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo),
+                PRESSURE_THRESHOLD=str(PRESSURE_THRESHOLD), AVAILABLE_FLOOR_PERCENT=str(AVAILABLE_FLOOR_PERCENT), **env,
             ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -736,19 +758,19 @@ class RingTest(ProbeCase):
         return self.recorded()
 
     def test_a_node_that_is_not_a_voter_marks_its_first_sample_as_a_restart_and_a_later_one_as_none(self) -> None:
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         samples = self.loop(2)
         self.assertGreaterEqual(len(samples), 2)
         self.assertEqual([s["restarted"] for s in samples[:2]], [True, False])
 
     def test_a_sample_after_the_first_costs_two_api_calls_the_nodes_and_the_patch(self) -> None:
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         samples = self.loop(3)
         calls = [json.loads(line) for line in self.cluster.calls.read_text().splitlines()]
         self.assertGreaterEqual(len(samples), 3)
         reads = [c[:2] for c in calls if c[0] == "get"]
         patches = [c for c in calls if c[0] == "patch"]
-        self.assertEqual(reads.count(["get", "configmap"]), 1, "this node's entry is read once, when the process starts")
+        self.assertEqual(reads.count(["get", "configmap"]), 0, "the window is read from the data directory, never from the ConfigMap")
         # The process may have been stopped between a sample's read of the nodes and its patch, and it reads the nodes once more as it stops (to see whether its entry is to go), so the nodes were read once for each patch and at most twice more.
         self.assertIn(reads.count(["get", "nodes"]) - len(patches), (0, 1, 2), reads)
         self.assertGreaterEqual(len(patches), len(samples))
@@ -761,7 +783,8 @@ class RingTest(ProbeCase):
             [str(SCRIPT)],
             env=self.cluster.env(
                 NODE_NAME="me", NAMESPACE=NAMESPACE, ELECTION_TIMEOUT_MS=str(ELECTION_TIMEOUT_MS), ELIGIBLE_LABEL=ELIGIBLE_LABEL, REPORT_SECONDS="600", ETCD_PEER_PORT="1", FSYNC_DIR=str(self.fsync_dir),
-                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), NODE_LINK=str(NODE_LINK), LINK_LABEL=LINK_LABEL, PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo), **env,
+                SYS_CLASS_NET=str(self.sys / "class" / "net"), PROC_NET_ROUTE=str(self.route), FLEET_REGRADE_CORE=str(REGRADE_CORE), NODE_LINK=str(NODE_LINK), LINK_LABEL=LINK_LABEL, PSI_FILE=str(self.psi), MEMINFO_FILE=str(self.meminfo),
+                PRESSURE_THRESHOLD=str(PRESSURE_THRESHOLD), AVAILABLE_FLOOR_PERCENT=str(AVAILABLE_FLOOR_PERCENT), **env,
             ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -791,27 +814,30 @@ class RingTest(ProbeCase):
         self.assertLess(time.monotonic() - started, 20, "the signal waited for the sleep between samples")
 
     def test_a_pod_stopped_on_a_node_that_lost_both_labels_removes_its_entry_and_no_other(self) -> None:
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}, "other": entry([sample(5)], "other-id")})
+        self.cluster.set_probes({"other": entry([sample(5)], "other-id")})
+        self.settled()
         process = self.stop_loop()
         self.change_nodes([node("me")])
         self.stop(process)
         self.assertEqual(sorted(self.stored_probes()), ["other"])
+        self.assertFalse(self.state_file.exists(), "and its window goes with it")
 
     def test_a_pod_stopped_on_a_node_that_is_gone_removes_its_entry(self) -> None:
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         process = self.stop_loop()
         self.change_nodes([])
         self.stop(process)
         self.assertEqual(self.stored_probes(), {})
 
     def test_a_pod_stopped_on_a_node_that_is_still_eligible_keeps_its_entry_for_the_pod_that_follows(self) -> None:
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         process = self.stop_loop()
         self.stop(process)
-        self.assertEqual(len(self.stored_probes()["me"]["samples"]), 1)
+        self.assertEqual(self.stored_probes()["me"]["samples"], 1)
+        self.assertEqual(len(self.state()["samples"]), 1, "and its window stays for the pod that follows")
 
     def test_a_pod_stopped_on_a_node_that_is_a_voter_keeps_its_entry(self) -> None:
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         self.nodes = [node("me", voter=True)]
         process = self.stop_loop(ETCD_METRICS_URL="http://127.0.0.1:1/metrics")
         self.stop(process)
@@ -820,7 +846,7 @@ class RingTest(ProbeCase):
     def test_a_pod_stopped_when_the_api_refuses_the_removal_exits_and_leaves_the_entry(self) -> None:
         refusals = self.cluster.dir / "refusals"
         refusals.write_text("0")
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         process = self.stop_loop(FAKE_FAIL_PATCHES=str(refusals))
         self.change_nodes([node("me")])
         refusals.write_text("1")
@@ -830,7 +856,7 @@ class RingTest(ProbeCase):
     def test_a_patch_the_api_refuses_is_retried_next_period_without_the_process_exiting_and_the_first_sample_still_marks_the_restart(self) -> None:
         refusals = self.cluster.dir / "refusals"
         refusals.write_text("2")
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         samples = self.loop(2, FAKE_FAIL_PATCHES=str(refusals))
         self.assertEqual(refusals.read_text(), "0")
         self.assertGreaterEqual(len(samples), 2, "the probe went on after the refusals")
@@ -841,10 +867,64 @@ class RingTest(ProbeCase):
     def test_a_patch_the_api_refuses_fails_a_single_sample_run(self) -> None:
         refusals = self.cluster.dir / "refusals"
         refusals.write_text("1")
-        self.cluster.set_probes({"me": {**entry([]), "fsync_at": int(time.time())}})
+        self.settled()
         completed = self.probe(FAKE_FAIL_PATCHES=str(refusals))
         self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(self.cluster.probes()["me"]["samples"], [])
+        self.assertEqual(self.state()["samples"], [], "a sample that was not published is not kept")
+        self.assertNotIn("me", self.cluster.probes())
+
+
+def entry_limit_bytes() -> int:
+    """The bound on one published entry, from the module the probe and the controller share."""
+    return int(subprocess.run(["jq", "-n", "-L", str(SCRIPT.parent), 'include "fleet-role-stats"; probe_entry_limit_bytes'], capture_output=True, text=True, check=True).stdout)
+
+
+def long_name(i: int) -> str:
+    """A Node name of the longest length Kubernetes allows (a DNS subdomain, 253 characters)."""
+    return f"{i:03d}-" + "n" * 249
+
+
+class PublishedEntryTest(ProbeCase):
+    """The probe publishes its window's summary, never the window: every patch of the shared ConfigMap is a rewrite of the whole object in the datastore, so the size of what one node publishes is the size of every node's write."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.voters = [node(long_name(i), voter=True) for i in range(MAX_VOTERS)]
+
+    def full_window(self) -> dict[str, Any]:
+        peers = {n["metadata"]["name"]: 1.234 for n in self.voters}
+        return {**entry([sample(int(time.time()) - (WINDOW_SAMPLES - i) * SAMPLE_SECONDS, tcp=peers, fsync_ms=2.5 if i == 0 else None) for i in range(WINDOW_SAMPLES - 1)]), "fsync_at": int(time.time())}
+
+    def test_a_full_window_to_the_most_voters_publishes_its_summary_inside_the_entry_limit(self) -> None:
+        self.set_state(self.full_window())
+        completed = self.probe(voters=[node("me", eligible=True), *self.voters])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        published = self.cluster.configmaps[f"{NAMESPACE}/fleet-role-probe"]["data"]["me"]
+        self.assertLessEqual(len(published.encode()), entry_limit_bytes())
+        self.assertEqual(json.loads(published), summarise({"me": self.state()})["me"], "the entry is the summary of the window the probe keeps")
+        self.assertEqual(len(self.state()["samples"]), WINDOW_SAMPLES)
+        self.assertEqual(json.loads(published)["samples"], WINDOW_SAMPLES)
+
+    def test_the_published_entry_does_not_grow_with_the_window(self) -> None:
+        nodes = [node("me", eligible=True), *self.voters]
+        self.settled()
+        self.assertEqual(self.probe(voters=nodes).returncode, 0)
+        one = len(self.cluster.configmaps[f"{NAMESPACE}/fleet-role-probe"]["data"]["me"])
+        self.set_state(self.full_window())
+        self.assertEqual(self.probe(voters=nodes).returncode, 0)
+        full = len(self.cluster.configmaps[f"{NAMESPACE}/fleet-role-probe"]["data"]["me"])
+        # The figures' digits may differ, and the fdatasync reading is in the window only once, never a sample's worth per sample.
+        self.assertLess(abs(full - one), 64)
+
+    def test_an_entry_over_the_limit_is_refused_loudly_and_not_published(self) -> None:
+        # More voters than etcd supports, each with the longest name, so the summary cannot fit.
+        crowd = [node(long_name(i), voter=True) for i in range(entry_limit_bytes() // 200)]
+        self.settled()
+        completed = self.probe(voters=[node("me", eligible=True), *crowd])
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("over the limit", completed.stderr)
+        self.assertNotIn("me", self.cluster.probes())
+        self.assertEqual(self.state()["samples"], [], "a sample that was not published is not kept")
 
 
 @unittest.skipUnless(FIO, "needs fio, which the probe's fdatasync reading is taken with")
@@ -859,18 +939,16 @@ class FsyncTest(ProbeCase):
         reading = self.newest()["fsync_ms"]
         self.assertIsInstance(reading, float)
         self.assertGreater(reading, 0)
-        self.assertEqual(list(self.fsync_dir.iterdir()), [])
-        self.assertIsNotNone(self.cluster.probes()["me"]["fsync_at"])
+        self.assertEqual(list(self.fsync_dir.iterdir()), [self.state_file], "only the window is left")
+        self.assertIsNotNone(self.state()["fsync_at"])
 
     def test_the_reading_is_taken_once_per_window_not_every_sample(self) -> None:
         self.assertEqual(self.probe().returncode, 0)
-        first_at = self.cluster.probes()["me"]["fsync_at"]
+        first_at = self.state()["fsync_at"]
         self.assertEqual(self.probe().returncode, 0)
         self.assertIsNone(self.newest()["fsync_ms"])
-        self.assertEqual(self.cluster.probes()["me"]["fsync_at"], first_at)
-        entries = self.cluster.probes()
-        entries["me"]["fsync_at"] = int(time.time()) - WINDOW_SECONDS
-        self.cluster.set_probes(entries)
+        self.assertEqual(self.state()["fsync_at"], first_at)
+        self.set_state({**self.state(), "fsync_at": int(time.time()) - WINDOW_SECONDS})
         self.assertEqual(self.probe().returncode, 0)
         self.assertIsNotNone(self.newest()["fsync_ms"])
 
@@ -900,6 +978,8 @@ class CheckTest(ProbeCase):
             "NODE_LINK": str(NODE_LINK),
             "PSI_FILE": str(self.psi),
             "MEMINFO_FILE": str(self.meminfo),
+            "PRESSURE_THRESHOLD": str(PRESSURE_THRESHOLD),
+            "AVAILABLE_FLOOR_PERCENT": str(AVAILABLE_FLOOR_PERCENT),
         }
         completed = subprocess.run(
             [str(Path(__file__).resolve().parents[2] / "scripts" / "fleet-role-probe.sh"), "check", *args],
