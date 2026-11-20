@@ -95,3 +95,35 @@ def etcd_sample($previous; $now):
 
 # The part of a probe sample's memory reading the regrade core calls over the limit (fleet-regrade-core.sh, is_over): pressure at or above the threshold and MemAvailable below the floor share of MemTotal, both. tests/unit/test_fleet_role.py holds this to the core's own function. $c is the controller's settings (pressure_threshold, available_floor_percent).
 def over_regrade_limit($c): .psi >= $c.pressure_threshold and (.avail_kb * 100) < (.total_kb * $c.available_floor_percent);
+
+# The most bytes one probe's published entry may hold. Every patch of the shared probe ConfigMap rewrites the whole object in the datastore, so the size of each entry is part of every node's write. A summary holds a fixed set of figures and two per voter (the TCP tail and its count by Node name, and etcd's round trip tail by member id); at etcd's largest recommended cluster of seven members, each with a Node name of the longest Kubernetes allows (253 characters), it is under 3 KiB, so a summary over this is a fault, never a larger cluster.
+def probe_entry_limit_bytes: 4096;
+
+# What a probe publishes of its window of samples (an object with etcd_id and samples, as the probe keeps it): every figure the controller (scripts/fleet-role.jq) judges a host by, over the whole window, and the last sample's readings that are taken as they are. The window itself stays with the probe. $c is the regrade core's limit (pressure_threshold, available_floor_percent), which the samples over it are counted against.
+# - t, since: the times of the newest and the oldest sample, null for an empty window; samples: how many the window holds.
+# - tcp: by peer Node name, the nearest-rank tail of the TCP connect times in milliseconds (p99_ms) and how many readings it rests on (readings).
+# - etcd_rtt_p99_ms: by peer etcd member id, the tail of etcd's own round trip in milliseconds, from the histograms the window gained.
+# - wal_p99_ms, commit_p99_ms: the tails of the WAL fsync and backend commit histograms the window gained, in milliseconds, null without readings; fsync_p99_ms: the worst fdatasync reading.
+# - over_limit_samples, pressure_max, pressure_samples, min_avail_kb: the memory readings; restarts, leader_changes: how many samples saw k3s restart and how many leader changes etcd saw.
+# - etcd: the last sample's etcd gauges (has_leader, is_learner, known_members, active_peers, quota_bytes), null when it has none.
+def window_summary($c):
+  def ms: if . == null then null else . * 1000 end;
+  (.samples // []) as $w
+  | ($w | map(.etcd) | map(select(. != null))) as $etcd
+  | ($w | map(.psi | select(. != null))) as $pressures
+  | {etcd_id: .etcd_id,
+     t: ($w[-1].t // null), since: ($w[0].t // null), samples: ($w | length),
+     link: ($w[-1].link // null), link_source: ($w[-1].link_source // null), iface: ($w[-1].iface // null),
+     tcp: ([$w[] | .tcp // {} | keys[]] | unique
+           | map(. as $peer | [$w[] | .tcp[$peer] | select(. != null)] | {key: $peer, value: {p99_ms: nearest_rank(tail_percentile), readings: length}}) | from_entries),
+     etcd_rtt_p99_ms: ([$etcd[] | .rtt // {} | keys[]] | unique
+                       | map(. as $id | {key: $id, value: ([$etcd[] | .rtt[$id] | select(. != null)] | sum_buckets | histogram_quantile(tail_percentile) | ms)}) | from_entries),
+     wal_p99_ms: ([$etcd[].wal] | sum_buckets | histogram_quantile(tail_percentile) | ms),
+     commit_p99_ms: ([$etcd[].commit] | sum_buckets | histogram_quantile(tail_percentile) | ms),
+     fsync_p99_ms: ([$w[] | .fsync_ms | select(. != null)] | max),
+     over_limit_samples: ($w | map(select(.psi != null and over_regrade_limit($c))) | length),
+     pressure_max: ($pressures | max), pressure_samples: ($pressures | length),
+     min_avail_kb: ($w | map(.avail_kb | select(. != null)) | min),
+     restarts: ($w | map(select(.restarted == true)) | length),
+     leader_changes: ($etcd | map(.leader_changes) | add // 0),
+     etcd: ($w[-1].etcd // null | if . == null then null else {has_leader, is_learner, known_members, active_peers, quota_bytes} end)};

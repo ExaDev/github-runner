@@ -477,6 +477,38 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("old|wf|job", self.recorded())
 
+    def test_each_job_record_is_held_to_its_share_of_the_configmap_newest_first(self) -> None:
+        # Every patch rewrites the whole ConfigMap in the datastore, so the records are bounded in bytes, not entries: an entry's size depends on the names in it. The bound is read from the script, where it derives from the ConfigMap limit.
+        script = SCRIPT.read_text()
+        limit_match = re.search(r"^CONFIGMAP_LIMIT_BYTES=(\d+)$", script, re.M)
+        share_match = re.search(r"^JOB_RECORDS_MAX_BYTES=\$\(\( CONFIGMAP_LIMIT_BYTES / (\d+) \)\)$", script, re.M)
+        assert limit_match is not None and share_match is not None, "the script's bounds were not found"
+        limit = int(limit_match.group(1))
+        self.assertEqual(limit, 1024 * 1024, "Kubernetes' limit on a ConfigMap's data")
+        budget = limit // int(share_match.group(1))
+        now = int(time.time())
+        name = "n" * 200
+        # Each entry is over 300 bytes, so this many hold several times the budget.
+        many = {
+            f"org/{name}-{i}|wf|job": {"repo": f"org/{name}-{i}", "workflow": "wf", "job": "job", "peak_mib": 100, "samples": 1, "last_seen": now - 60 - i}
+            for i in range(budget * 4 // 300)
+        }
+        self.assertGreater(len(json.dumps(many).encode()), budget * 3)
+        peak_event = json.dumps({"repo": "org/repo", "workflow": "wf", "job": "measured", "peak_bytes": 1024 * 1024 * 1024})
+        result = self.poll({}, top={"ns-a": {"runner-1": 600}}, runners={"runner-1": JOB_A}, job_memory=json.dumps(many), job_peak=json.dumps(many), events={"ns-a": [peak_event]})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for out, newest in ((self.job_memory_out, "org/repo|.github/workflows/ci.yml@refs/heads/main|Build"), (self.job_peak_out, "org/repo|wf|measured")):
+            with self.subTest(key=out.name):
+                text = out.read_text()
+                self.assertLessEqual(len(text.encode()), budget)
+                kept = json.loads(text)
+                self.assertIn(newest, kept, "the job seen this poll is kept")
+                self.assertIn(f"org/{name}-0|wf|job", kept, "the newest of the older entries is kept")
+                self.assertNotIn(f"org/{name}-{len(many) - 1}|wf|job", kept, "the oldest goes first")
+        # The whole object, which each patch rewrites: the two records' shares and the status keys stay inside an eighth of the limit.
+        stored = json.loads((self.dir / "state.json.configmap").read_text())
+        self.assertLessEqual(sum(len(value.encode()) for value in stored.values()), limit // 8)
+
     def test_failing_to_record_does_not_stop_the_capacity_decision(self) -> None:
         result = self.poll({"ns-a": [UNSCHEDULABLE_POD]}, top={"ns-a": {"runner-1": 600}}, runners={"runner-1": JOB_A}, job_memory_patch_fails=True)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -677,20 +709,21 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.patched_maximums(result), {"ns-a": 1, "ns-b": 5})
 
-    def test_a_record_larger_than_one_argument_may_be_is_still_stored(self) -> None:
-        # More bytes than the kernel accepts for all arguments together (and far more than one argument may hold), so it can reach kubectl only through a file.
+    def test_a_stored_record_larger_than_one_argument_may_be_is_read_whole_and_trimmed(self) -> None:
+        # More bytes than the kernel accepts for all arguments together (and far more than one argument may hold), as a record written before the byte bound can be, so it can be read only through a file; it is written back inside the bound.
         entry_bytes = 4096
         count = min(2000, os.sysconf("SC_ARG_MAX") * 2 // entry_bytes + 1)
         stored = {
-            f"org/repo|wf|job-{n}": {"repo": "org/repo", "workflow": "wf", "job": f"job-{n}-" + "x" * entry_bytes, "peak_mib": 1, "samples": 1, "last_seen": 4102444800}
+            f"org/repo|wf|job-{n}": {"repo": "org/repo", "workflow": "wf", "job": f"job-{n}-" + "x" * entry_bytes, "peak_mib": 1, "samples": 1, "last_seen": int(time.time()) - 60}
             for n in range(count)
         }
         result = self.poll({}, top={"ns-a": {"runner-1": 600}}, runners={"runner-1": JOB_A}, job_memory=json.dumps(stored))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("could not record", result.stderr)
         kept = self.recorded()
-        self.assertEqual(len(kept), count + 1)
         self.assertIn("org/repo|.github/workflows/ci.yml@refs/heads/main|Build", kept)
+        self.assertLess(len(kept), count + 1)
+        self.assertLessEqual(len(self.job_memory_out.read_text().encode()), 1024 * 1024 // 32)
 
 
     # Two nodes runner pods may use, as a fleet's might be: a large one where cpu is the limit at the template's request (four by cpu, five by memory), and a small one where a system pod's requests leave memory for one. Five runners in all.

@@ -458,7 +458,7 @@ argument_specs:
       github_runner_arc_role_controller_data_dir:
         type: str
         default: /var/lib/rancher/k3s/fleet-role-probe
-        description: The directory on the node, on the filesystem k3s keeps its data on, where the probe takes its fdatasync reading.
+        description: The directory on the node, on the filesystem k3s keeps its data on, where the probe keeps its window of samples and takes its fdatasync reading.
       github_runner_arc_runner_reaper_enabled:
         type: bool
         default: false
