@@ -72,11 +72,11 @@ rules:
     resourceNames: {{ [actuator_configmap] | to_json }}
     verbs: ["get"]
 {% else %}
-{# Patch alone: a probe keeps its window on its own node and never reads the ConfigMap, so it cannot read the other nodes' entries. #}
+{# Get as well as patch, though the probe keeps its window on its own node and reads no entry: `kubectl patch` reads the object before it patches it, and is refused without get. #}
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: {{ [probe_configmap] | to_json }}
-    verbs: ["patch"]
+    verbs: ["get", "patch"]
 {% endif %}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

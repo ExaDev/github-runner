@@ -131,7 +131,7 @@ class ManifestTest(unittest.TestCase):
                 {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["fleet-role-actuators"], "verbs": ["get"]},
             ],
         )
-        self.assertEqual(probe, [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["fleet-role-probe"], "verbs": ["patch"]}])
+        self.assertEqual(probe, [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["fleet-role-probe"], "verbs": ["get", "patch"]}])
         for rule in controller + probe:
             self.assertNotIn("create", rule["verbs"])
             self.assertNotIn("delete", rule["verbs"])
