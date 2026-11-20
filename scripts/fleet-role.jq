@@ -48,7 +48,8 @@ def pair($summary; $peer; $peer_id):
 
 $config as $c
 | $nodes_file[0] as $nodes
-| $probes_file[0] as $probes
+# An entry that is not a summary (one a probe from before summaries published, holding its raw samples) is no report: its host is unknown and a voter's gates do not hold until its probe publishes a summary.
+| ($probes_file[0] | map_values(select(type == "object" and (.samples | type) == "number"))) as $probes
 | $previous_file[0] as $previous
 | $c.now as $now
 | ($c.sample_seconds * window_samples) as $window_seconds

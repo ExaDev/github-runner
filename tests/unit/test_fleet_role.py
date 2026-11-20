@@ -639,6 +639,19 @@ class GateTest(ControllerCase):
         self.assertEqual(status["hosts"]["a"]["verdict"], "unknown")
         self.assertIn(f"the probe's window began before the last membership change at {changed_at}", status["hosts"]["a"]["reasons"])
 
+    def test_an_entry_of_raw_samples_from_an_older_probe_is_no_report_never_unfit(self) -> None:
+        hosts = healthy(a={"tcp": UNFIT_RTT_MS + 50})
+        populate(self.cluster, hosts)
+        summaries = self.cluster.probes()
+        self.cluster.set_probes({**summaries, "a": self.cluster.windows["a"]})
+        completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        status = self.cluster.status()
+        self.assertEqual(status["hosts"]["a"]["verdict"], "unknown")
+        self.assertIn("no probe report", status["hosts"]["a"]["reasons"])
+        self.assertIn(f"voter a has no probe report in the last {STALE_AFTER_SAMPLES * SAMPLE_SECONDS} s", status["gates"])
+        self.assertEqual(status["decision"]["action"], "none")
+
     def test_a_window_that_began_after_a_membership_change_is_judged(self) -> None:
         changed_at = int(time.time()) - WINDOW_SECONDS - SAMPLE_SECONDS
         self.cluster.set_status({"membership": {"voters": ["a", "b", "c"], "changed_at": changed_at, "cooldown_until": changed_at + COOLDOWN_SECONDS}})
