@@ -709,8 +709,8 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.patched_maximums(result), {"ns-a": 1, "ns-b": 5})
 
-    def test_a_record_larger_than_one_argument_may_be_is_still_stored(self) -> None:
-        # More bytes than the kernel accepts for all arguments together (and far more than one argument may hold), so it can reach kubectl only through a file.
+    def test_a_stored_record_larger_than_one_argument_may_be_is_read_whole_and_trimmed(self) -> None:
+        # More bytes than the kernel accepts for all arguments together (and far more than one argument may hold), as a record written before the byte bound can be, so it can be read only through a file; it is written back inside the bound.
         entry_bytes = 4096
         count = min(2000, os.sysconf("SC_ARG_MAX") * 2 // entry_bytes + 1)
         stored = {
@@ -721,8 +721,9 @@ class AutoscalerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("could not record", result.stderr)
         kept = self.recorded()
-        self.assertEqual(len(kept), count + 1)
         self.assertIn("org/repo|.github/workflows/ci.yml@refs/heads/main|Build", kept)
+        self.assertLess(len(kept), count + 1)
+        self.assertLessEqual(len(self.job_memory_out.read_text().encode()), 1024 * 1024 // 32)
 
 
     # Two nodes runner pods may use, as a fleet's might be: a large one where cpu is the limit at the template's request (four by cpu, five by memory), and a small one where a system pod's requests leave memory for one. Five runners in all.

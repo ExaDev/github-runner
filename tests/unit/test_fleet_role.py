@@ -12,7 +12,6 @@ from typing import Any
 
 from fleet_role_support import (
     AVAILABLE_FLOOR_PERCENT,
-    ARGUMENT_LIMIT_BYTES,
     AVAILABLE_KB,
     COMMIT_LIMIT_MS,
     CONTROLLER_ENV,
@@ -653,16 +652,16 @@ class GateTest(ControllerCase):
 
 
 class SizeTest(ControllerCase):
-    # The probes' entries together can fill a ConfigMap, a mebibyte, and no one argument to a process may pass 128 KiB on Linux (the stand-in jq of tests/unit/fleet_role_support.py refuses one here).
-    CONFIGMAP_LIMIT_BYTES = 1024 * 1024
+    # The probes publish summaries, each within the shared module's probe_entry_limit_bytes, so the probes' ConfigMap is bounded by that times the measured hosts whatever their windows hold; no one argument to a process may pass 128 KiB on Linux (the stand-in jq of tests/unit/fleet_role_support.py refuses one here), and the inputs reach jq in files.
+    ENTRY_LIMIT_BYTES = 4096
 
-    def test_inputs_the_size_of_a_full_configmap_are_read_whole(self) -> None:
+    def test_the_probes_inputs_stay_inside_the_entry_limit_and_are_read_whole(self) -> None:
         standbys = [Host(f"standby-with-a-long-node-name-{i:02d}", eligible=True) for i in range(14)]
         hosts = healthy() + standbys
         populate(self.cluster, hosts)
-        size = sum(len(json.dumps(entry_)) for entry_ in self.cluster.probes().values())
-        self.assertGreater(size, 3 * ARGUMENT_LIMIT_BYTES)
-        self.assertLessEqual(size, self.CONFIGMAP_LIMIT_BYTES)
+        self.assertEqual(int(subprocess.run(["jq", "-n", "-L", str(SCRIPTS), 'include "fleet-role-stats"; probe_entry_limit_bytes'], capture_output=True, text=True, check=True).stdout), self.ENTRY_LIMIT_BYTES)
+        for name, entry_ in self.cluster.probes().items():
+            self.assertLessEqual(len(json.dumps(entry_).encode()), self.ENTRY_LIMIT_BYTES, name)
         completed = self.cluster.run("fleet-role.sh", **CONTROLLER_ENV)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         status = self.cluster.status()
