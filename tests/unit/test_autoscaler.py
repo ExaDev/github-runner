@@ -714,7 +714,7 @@ class AutoscalerTest(unittest.TestCase):
         entry_bytes = 4096
         count = min(2000, os.sysconf("SC_ARG_MAX") * 2 // entry_bytes + 1)
         stored = {
-            f"org/repo|wf|job-{n}": {"repo": "org/repo", "workflow": "wf", "job": f"job-{n}-" + "x" * entry_bytes, "peak_mib": 1, "samples": 1, "last_seen": 4102444800}
+            f"org/repo|wf|job-{n}": {"repo": "org/repo", "workflow": "wf", "job": f"job-{n}-" + "x" * entry_bytes, "peak_mib": 1, "samples": 1, "last_seen": int(time.time()) - 60}
             for n in range(count)
         }
         result = self.poll({}, top={"ns-a": {"runner-1": 600}}, runners={"runner-1": JOB_A}, job_memory=json.dumps(stored))

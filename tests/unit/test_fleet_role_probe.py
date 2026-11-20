@@ -415,7 +415,7 @@ class ConnectTest(ProbeCase):
         with listener() as port:
             completed = self.probe("peer", voters=self.peers(), ETCD_PEER_PORT=str(port))
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(self.newest("peer")["tcp"], {})
+        self.assertEqual(self.newest()["tcp"], {})
 
 
 class EtcdReadingTest(ProbeCase):
@@ -703,8 +703,8 @@ class RingTest(ProbeCase):
         self.assertGreater(kept[-1]["t"], 1000 + WINDOW_SAMPLES)
 
     def test_an_entry_too_large_for_one_argument_is_read_and_extended_whole(self) -> None:
-        # One argument to a process is limited to 128 KiB on Linux; an entry of a voter in a large cluster, with a connect time to every other voter in each sample, passes that.
-        peers = {f"peer-with-a-long-node-name-{i:03d}": 1.234 for i in range(60)}
+        # One argument to a process is limited to 128 KiB on Linux; the window of a node measuring the most voters, each with the longest Node name, with a connect time to each in every sample, passes that.
+        peers = {long_name(i): 1.234 for i in range(MAX_VOTERS)}
         big = [sample(1000 + i, tcp=peers) for i in range(WINDOW_SAMPLES)]
         self.set_state({**entry(big), "fsync_at": int(time.time())})
         self.assertGreater(len(json.dumps(self.state())), 128 * 1024)
