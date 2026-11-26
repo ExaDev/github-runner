@@ -1,3 +1,13 @@
+## [3.7.2](https://github.com/ExaDev/github-runner/compare/v3.7.1...v3.7.2) (2026-11-26)
+
+### Continuous Integration
+
+* raise the unit test timeout above the heaviest shard ([e88c747](https://github.com/ExaDev/github-runner/commit/e88c7472ce46d67481959f8fbe3eb3a66d21c42c))
+
+### Miscellaneous Chores
+
+* **deps-dev:** update vulnerable release tooling dependencies ([34cfa02](https://github.com/ExaDev/github-runner/commit/34cfa02e2e41d827a43d418e5119bb727a921076))
+
 ## [3.7.1](https://github.com/ExaDev/github-runner/compare/v3.7.0...v3.7.1) (2026-11-26)
 
 ### Continuous Integration
