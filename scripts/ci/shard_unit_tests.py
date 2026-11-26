@@ -1,327 +1,55 @@
 #!/usr/bin/env python3
-"""Deal the unit-test modules of a directory out to CI shards by the work each module does, and print one shard's modules.
+"""Deal the unit-test modules of a directory out to CI shards by how long earlier runs measured each to take, run a shard's modules while measuring them, and carry the measurements from run to run.
 
-    shard_unit_tests.py SHARD SHARDS [DIRECTORY]
+    shard_unit_tests.py fetch TIMINGS
+    shard_unit_tests.py plan SHARDS TIMINGS [--directory DIRECTORY]
+    shard_unit_tests.py run MEASURED MODULE... [--directory DIRECTORY]
+    shard_unit_tests.py merge TIMINGS MEASURED_DIRECTORY MERGED [--directory DIRECTORY]
 
-SHARD is the zero-based index of the shard asked for and SHARDS how many there are. The modules (``test_*.py`` directly in DIRECTORY, which defaults to ``tests/unit`` of this repository) are printed one path per line in the order they should run. The shards partition the modules: every module is in exactly one, and the same tree always gives the same assignment.
+A timings file is a JSON object from module name to the seconds its run took. DIRECTORY holds the modules (``test_*.py`` directly in it) and defaults to ``tests/unit`` of this repository.
 
-The work of a module is counted from its tests, not stored, in units of one Ansible task. A test's time is spent in the processes it starts, chiefly ``ansible-playbook`` runs, so a module's work is that of the process launches (``subprocess.run`` and its siblings) that each of its tests reaches, plus the one that runs the module: through the test's own body, the helpers, base-class methods and ``super()`` calls it makes, and ``setUp``, ``tearDown`` and, once per class, ``setUpClass``. Every launch costs ``TASKS_PER_PROCESS_START``, and a launch of a playbook costs in addition the tasks that playbook reaches: its own, those of each role it includes (the task file the include names, each file of a literal loop over ``item``, the average task file of the role where the name is any other variable, and ``main.yml`` where it names none) and those of each task file it includes by a literal name, every task file counted with the task files and roles it includes in turn, as Ansible would run them. A launch site counts once however many times a loop runs it, and of the two branches of a conditional the dearer counts. A skipped test or class does no work.
+``fetch`` writes the newest ``unit-timings`` artifact that a run of this repository (never of a fork) uploaded, or an empty object when there is none; it reads the repository from ``GITHUB_REPOSITORY`` and calls ``gh``. ``plan`` prints the shard matrix as JSON, ``{"include": [{"shard": 0, "modules": "test_a test_b"}, ...]}``. ``run`` runs each module in a process of its own, rewriting MEASURED after each one that passes, and fails after the last when any failed. ``merge`` writes the earlier timings with every ``*.json`` under MEASURED_DIRECTORY laid over them, dropping modules the directory no longer holds.
 
-The modules are then dealt by longest-processing-time first: the heaviest module goes to whichever shard has the least work so far, ties going to the lower shard index, and equal modules in path order. Dealing to the lightest shard keeps the heaviest shard within ``mean + (1 - 1/SHARDS) * heaviest module`` of the mean (Graham's list-scheduling bound), which a dealing by position in a list cannot promise.
+Nothing is estimated from the source and no duration is stored in the repository: what a test costs (playbook runs, loops, deliberate hangs) shows only when it runs. A module no run has measured weighs the mean of the measured ones, so with no measurements the modules are dealt by count.
+
+The modules are dealt by longest-processing-time first: the heaviest module goes to whichever shard has the least so far, ties going to the lower shard index, and equal modules in name order. Dealing to the lightest shard keeps the heaviest shard within ``mean + (1 - 1/SHARDS) * heaviest module`` of the mean (Graham's list-scheduling bound).
 """
 
 from __future__ import annotations
 
-import ast
-import builtins
-import inspect
+import argparse
+import io
+import json
 import os
 import subprocess
 import sys
-import unittest
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+import time
+import zipfile
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from types import FunctionType, MethodType
-from typing import Any
-
-import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DIRECTORY = REPO_ROOT / "tests" / "unit"
-
-# The unit of work is one Ansible task. Starting a process costs about as much as this many tasks run: the ratio was fitted by least squares of each module's duration in CI logs against its process starts and its playbook tasks, and what the dealing needs of it is only that a playbook start is not negligible beside a task and that a start of any process is not free.
-TASKS_PER_PROCESS_START = 64
-
-# Every way the standard library starts a process that the tests use.
-LAUNCHERS: tuple[object, ...] = (subprocess.run, subprocess.Popen, subprocess.check_output, subprocess.check_call, subprocess.call)
-
-FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
-INCLUDE_ROLE = ("ansible.builtin.include_role", "ansible.builtin.import_role", "include_role", "import_role")
-INCLUDE_TASKS = ("ansible.builtin.include_tasks", "ansible.builtin.import_tasks", "include_tasks", "import_tasks")
+# The artifact a run uploads its merged timings as, and the file inside it. The workflow names both.
+ARTIFACT = "unit-timings"
+ARTIFACT_FILE = "timings.json"
 
 
-def count_tasks(tasks: object) -> int:
-    """The tasks of a task list, those inside its blocks, rescues and always sections included."""
-    if not isinstance(tasks, list):
-        return 0
-    total = 0
-    for task in tasks:
-        if isinstance(task, dict):
-            total += 1 + sum(count_tasks(task.get(section)) for section in ("block", "rescue", "always"))
-    return total
+def weights(modules: Sequence[str], timings: Mapping[str, float]) -> dict[str, float]:
+    """What each of ``modules`` weighs in the dealing: its measured seconds, or the mean of the measured modules when it has none (1 when no module has any)."""
+    measured = [timings[name] for name in modules if name in timings]
+    unmeasured = sum(measured) / len(measured) if measured else 1.0
+    return {name: timings.get(name, unmeasured) for name in modules}
 
 
-class PlaybookTasks:
-    """How many tasks a playbook reaches, read from the YAML of the playbook and of the roles and task files it names."""
-
-    def __init__(self, repository: Path) -> None:
-        self.repository = repository
-        self.playbooks: dict[Path, int] = {}
-        self.task_files: dict[Path, int] = {}
-        self.reading: set[Path] = set()
-
-    def task_file(self, path: Path, role_tasks: Path | None = None) -> int:
-        """The tasks of a task file and of the task files and roles it includes by a literal name, which Ansible looks for beside the file and then in its role's tasks directory."""
-        path = path.resolve()
-        if path in self.task_files:
-            return self.task_files[path]
-        if path in self.reading:
-            # A file that includes itself, however indirectly, adds its own tasks once, not once per level.
-            return 0
-        self.reading.add(path)
-        tasks = yaml.safe_load(path.read_text())
-        total = count_tasks(tasks) + self.includes(tasks, path.parent, role_tasks)
-        self.reading.discard(path)
-        self.task_files[path] = total
-        return total
-
-    def role(self, name: str, tasks_from: object, loop: object = None) -> int:
-        """The tasks of a role as an include of it reaches them: the task file ``tasks_from`` names (each of a literal ``loop``'s items when it names ``item``), the average task file of the role when it is any other variable, and ``main.yml`` when there is none, each with what it includes."""
-        directory = self.repository / "roles" / name.rsplit(".", 1)[-1] / "tasks"
-
-        def named(file: str) -> int:
-            return self.task_file(directory / f"{file.removesuffix('.yml')}.yml", directory)
-
-        if tasks_from is None:
-            return named("main")
-        if isinstance(tasks_from, str) and "{{" not in tasks_from:
-            return named(tasks_from)
-        if isinstance(tasks_from, str) and tasks_from.replace(" ", "") == "{{item}}" and isinstance(loop, list) and all(isinstance(item, str) for item in loop):
-            return sum(named(item) for item in loop)
-        files = list(directory.rglob("*.yml"))
-        return -(-sum(self.task_file(file, directory) for file in files) // len(files))
-
-    def includes(self, tasks: object, base: Path, role_tasks: Path | None) -> int:
-        """The tasks that the includes among a task list reach, without those of the list itself: a task file named by a literal path is looked for under ``base``, then under ``role_tasks``."""
-        if not isinstance(tasks, list):
-            return 0
-        total = 0
-        for task in tasks:
-            if not isinstance(task, dict):
-                continue
-            total += sum(self.includes(task.get(section), base, role_tasks) for section in ("block", "rescue", "always"))
-            for key in INCLUDE_ROLE:
-                if key in task:
-                    total += self.role(task[key]["name"], task[key].get("tasks_from"), task.get("loop"))
-            for key in INCLUDE_TASKS:
-                if key in task:
-                    target = task[key] if isinstance(task[key], str) else task[key]["file"]
-                    if "{{" in target:
-                        continue
-                    candidates = [base / target] + ([role_tasks / target] if role_tasks is not None else [])
-                    found = next((candidate for candidate in candidates if candidate.is_file()), None)
-                    if found is not None:
-                        total += self.task_file(found, role_tasks)
-        return total
-
-    def playbook(self, path: Path) -> int:
-        """The tasks of a playbook and of what it includes."""
-        if path not in self.playbooks:
-            total = 0
-            for play in yaml.safe_load(path.read_text()):
-                for section in ("pre_tasks", "tasks", "post_tasks"):
-                    total += count_tasks(play.get(section)) + self.includes(play.get(section), path.parent, None)
-                for role in play.get("roles", []):
-                    total += self.role(role if isinstance(role, str) else role["role"], None)
-            self.playbooks[path] = total
-        return self.playbooks[path]
-
-
-def resolve(node: ast.expr, scope: Mapping[str, Any], receiver: type | None, receiver_name: str | None) -> object | None:
-    """The object a name or dotted attribute chain denotes in ``scope``, or None when the expression is anything else or names nothing."""
-    if isinstance(node, ast.Name):
-        if receiver is not None and node.id == receiver_name:
-            return receiver
-        if node.id in scope:
-            value: object = scope[node.id]
-            return value
-        return getattr(builtins, node.id, None)
-    if isinstance(node, ast.Attribute):
-        base = resolve(node.value, scope, receiver, receiver_name)
-        return getattr(base, node.attr, None) if base is not None else None
-    return None
-
-
-def path_of(node: ast.expr, scope: Mapping[str, Any]) -> Path | None:
-    """The path an expression of names, string constants, ``/``, ``+`` and ``str()`` or ``Path()`` of those denotes, or None for any other expression."""
-    if isinstance(node, ast.Constant):
-        return Path(node.value) if isinstance(node.value, str) else None
-    if isinstance(node, ast.Name):
-        value = scope.get(node.id)
-        return Path(value) if isinstance(value, (str, os.PathLike)) else None
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        left, right = path_of(node.left, scope), path_of(node.right, scope)
-        return left / right if left is not None and right is not None else None
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("str", "Path") and len(node.args) == 1:
-        return path_of(node.args[0], scope)
-    return None
-
-
-@dataclass(frozen=True)
-class Frame:
-    """The function being read and what a name in it can mean."""
-
-    function: FunctionType
-    receiver: type | None
-    receiver_name: str | None
-    # Whether the function names ANSIBLE_PLAYBOOK or ansible-playbook, which makes the processes it starts playbook runs.
-    runs_playbooks: bool
-    # What each local name is assigned, for the argument list a process is started with.
-    assignments: Mapping[str, ast.expr]
-
-
-class LaunchCounter:
-    """Counts the work of the process launches a function reaches, following the calls that resolve to functions defined under ``directory``."""
-
-    def __init__(self, directory: Path, repository: Path) -> None:
-        self.directory = directory.resolve()
-        self.playbooks = PlaybookTasks(repository)
-        self.definitions: dict[str, dict[int, FunctionNode]] = {}
-        self.memo: dict[tuple[FunctionType, type | None], int] = {}
-        self.active: set[tuple[FunctionType, type | None]] = set()
-
-    def definition(self, function: FunctionType) -> FunctionNode | None:
-        """The syntax tree of a function's definition when its source file is under the directory."""
-        file = Path(function.__code__.co_filename)
-        if not file.is_absolute() or not file.resolve().is_relative_to(self.directory):
-            return None
-        key = str(file)
-        if key not in self.definitions:
-            found: dict[int, FunctionNode] = {}
-            for node in ast.walk(ast.parse(file.read_text())):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    # co_firstlineno is the first decorator's line when there are decorators, and the ``def`` line otherwise.
-                    found[min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])] = node
-            self.definitions[key] = found
-        return self.definitions[key].get(function.__code__.co_firstlineno)
-
-    def work(self, function: object, receiver: type | None) -> int:
-        """The work of one call of ``function``, as a method of ``receiver`` when that is a class (so that ``self.name`` resolves through its MRO)."""
-        if isinstance(function, MethodType):
-            # A bound method runs on whatever it is bound to: a class for a classmethod, an instance's class otherwise.
-            receiver = function.__self__ if isinstance(function.__self__, type) else type(function.__self__)
-            function = function.__func__
-        if not isinstance(function, FunctionType):
-            return 0
-        function = inspect.unwrap(function)
-        if not isinstance(function, FunctionType):
-            return 0
-        key = (function, receiver)
-        if key in self.memo:
-            return self.memo[key]
-        if key in self.active:
-            # A recursive helper adds its own work once, not once per level.
-            return 0
-        node = self.definition(function)
-        if node is None:
-            return 0
-        self.active.add(key)
-        parameters = [argument.arg for argument in node.args.posonlyargs + node.args.args]
-        mentions = {name.id for name in ast.walk(node) if isinstance(name, ast.Name)} | {text.value for text in ast.walk(node) if isinstance(text, ast.Constant) and isinstance(text.value, str)}
-        frame = Frame(
-            function=function,
-            receiver=receiver,
-            receiver_name=parameters[0] if receiver is not None and parameters else None,
-            runs_playbooks=any("ANSIBLE_PLAYBOOK" in mention or "ansible-playbook" in mention for mention in mentions),
-            assignments={target.id: assignment.value for assignment in ast.walk(node) if isinstance(assignment, ast.Assign) for target in assignment.targets if isinstance(target, ast.Name)},
-        )
-        total = self.statements(node.body, frame)
-        self.active.discard(key)
-        self.memo[key] = total
-        return total
-
-    def statements(self, nodes: list[ast.stmt], frame: Frame) -> int:
-        return sum(self.node(node, frame) for node in nodes)
-
-    def node(self, node: ast.AST, frame: Frame) -> int:
-        # A nested definition starts nothing until it is called, and calls to it do not resolve.
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-            return 0
-        if isinstance(node, ast.If):
-            return self.node(node.test, frame) + max(self.statements(node.body, frame), self.statements(node.orelse, frame))
-        total = sum(self.node(child, frame) for child in ast.iter_child_nodes(node))
-        if isinstance(node, ast.Call):
-            total += self.call(node, frame)
-        return total
-
-    def call(self, node: ast.Call, frame: Frame) -> int:
-        """What the call itself adds: the work of a launch, or of the function it runs."""
-        callee = node.func
-        if isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Call) and isinstance(callee.value.func, ast.Name) and callee.value.func.id == "super" and frame.receiver is not None:
-            return self.work_after(frame, callee.attr)
-        target = resolve(callee, frame.function.__globals__, frame.receiver, frame.receiver_name)
-        if any(target is launcher for launcher in LAUNCHERS):
-            return TASKS_PER_PROCESS_START + (self.playbook_tasks(node, frame) if frame.runs_playbooks else 0)
-        return self.work(target, frame.receiver)
-
-    def playbook_tasks(self, launch: ast.Call, frame: Frame) -> int:
-        """The tasks of the playbook a launch runs: the first element of its argument list that is the path of a YAML file, or none when no element is."""
-        arguments = launch.args[0] if launch.args else None
-        if isinstance(arguments, ast.Name):
-            arguments = frame.assignments.get(arguments.id)
-        if not isinstance(arguments, ast.List):
-            return 0
-        for element in arguments.elts:
-            path = path_of(element, frame.function.__globals__)
-            if path is not None and path.suffix == ".yml" and path.is_file():
-                return self.playbooks.playbook(path)
-        return 0
-
-    def work_after(self, frame: Frame, name: str) -> int:
-        """The work of ``super().name()`` called from the frame's function: the next definition of ``name`` in the receiver's MRO after the class that defines the function."""
-        assert frame.receiver is not None
-        owner = frame.function.__globals__.get(frame.function.__qualname__.split(".")[0])
-        mro = frame.receiver.__mro__
-        if owner not in mro:
-            return 0
-        for cls in mro[mro.index(owner) + 1 :]:
-            if name in vars(cls):
-                inherited = vars(cls)[name]
-                return self.work(inherited.__func__ if isinstance(inherited, (classmethod, staticmethod)) else inherited, frame.receiver)
-        return 0
-
-def flatten(suite: unittest.TestSuite) -> Iterator[unittest.TestCase]:
-    """The test cases of a suite, whatever its nesting."""
-    for item in suite:
-        if isinstance(item, unittest.TestSuite):
-            yield from flatten(item)
-        else:
-            yield item
-
-
-def skipped(candidate: object) -> bool:
-    return bool(getattr(candidate, "__unittest_skip__", False))
-
-
-def module_work(counter: LaunchCounter, module: str) -> int:
-    """The work of one importable test module: the start of the process that runs it, plus the work of each test it would run."""
-    loader = unittest.TestLoader()
-    suite = loader.loadTestsFromName(module)
-    if loader.errors:
-        raise RuntimeError(f"{module} cannot be loaded:\n" + "\n".join(str(error) for error in loader.errors))
-    total = TASKS_PER_PROCESS_START
-    classes: set[type] = set()
-    for case in flatten(suite):
-        cls = type(case)
-        method = getattr(cls, case._testMethodName)
-        if skipped(cls) or skipped(method):
-            continue
-        total += sum(counter.work(step, cls) for step in (cls.setUp, method, cls.tearDown))
-        if cls not in classes:
-            classes.add(cls)
-            total += counter.work(cls.setUpClass, cls)
-    return total
-
-
-def deal(work: Mapping[str, int], shards: int) -> list[list[str]]:
+def deal(work: Mapping[str, float], shards: int) -> list[list[str]]:
     """Assign every module to one of ``shards`` shards, the heaviest first to the shard with the least work so far.
 
     Modules of equal work are taken in name order and ties between shards go to the lower index, so the same modules and work always give the same shards. Each shard lists its modules in name order.
     """
     if shards < 1:
         raise ValueError(f"at least one shard is needed, not {shards}")
-    loads = [0] * shards
+    loads = [0.0] * shards
     dealt: list[list[str]] = [[] for _ in range(shards)]
     for name, amount in sorted(work.items(), key=lambda item: (-item[1], item[0])):
         index = min(range(shards), key=lambda shard: (loads[shard], shard))
@@ -335,31 +63,120 @@ def modules_of(directory: Path) -> list[str]:
     return sorted(path.stem for path in directory.glob("test_*.py"))
 
 
-def work_of(directory: Path) -> dict[str, int]:
-    """The work of every test module directly in a directory, importing them the way unittest discovery does from it."""
-    directory = directory.resolve()
-    if str(directory) not in sys.path:
-        sys.path.insert(0, str(directory))
-    counter = LaunchCounter(directory, REPO_ROOT)
-    return {module: module_work(counter, module) for module in modules_of(directory)}
+def read_timings(path: Path) -> dict[str, float]:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or not all(isinstance(seconds, (int, float)) for seconds in value.values()):
+        raise ValueError(f"{path} is not an object from module name to seconds")
+    return {str(name): float(seconds) for name, seconds in value.items()}
 
 
-def main(arguments: list[str]) -> int:
-    if len(arguments) not in (2, 3):
-        print(__doc__, file=sys.stderr)
-        return 2
-    shard, shards = int(arguments[0]), int(arguments[1])
-    directory = Path(arguments[2]) if len(arguments) == 3 else DEFAULT_DIRECTORY
-    if not 0 <= shard < shards:
-        print(f"shard {shard} is not one of the {shards} shards", file=sys.stderr)
-        return 2
-    modules = deal(work_of(directory), shards)[shard]
-    if not modules:
-        print(f"shard {shard} of {shards} has no modules: there are fewer modules than shards", file=sys.stderr)
-        return 1
-    for module in modules:
-        print(directory / f"{module}.py")
+def write_timings(path: Path, timings: Mapping[str, float]) -> None:
+    path.write_text(json.dumps(dict(sorted(timings.items())), indent=2) + "\n")
+
+
+def latest_artifact(artifacts: Sequence[Mapping[str, object]]) -> int | None:
+    """The id of the newest unexpired artifact of ``artifacts`` (as the REST API lists them) that a run on a branch of the repository itself uploaded, or None. A fork's run lists its artifacts under the base repository, and its figures are not the repository's to trust."""
+    own: list[tuple[str, int]] = []
+    for artifact in artifacts:
+        run = artifact["workflow_run"]
+        if artifact["expired"] or not isinstance(run, Mapping) or run["head_repository_id"] != run["repository_id"]:
+            continue
+        created, identity = artifact["created_at"], artifact["id"]
+        assert isinstance(created, str) and isinstance(identity, int)
+        own.append((created, identity))
+    return max(own)[1] if own else None
+
+
+def gh_api(path: str) -> bytes:
+    return subprocess.run(["gh", "api", path], check=True, capture_output=True).stdout
+
+
+def fetch(output: Path) -> int:
+    repository = os.environ["GITHUB_REPOSITORY"]
+    # The API lists the newest first, so one page holds the newest of the repository's own unless a page of forks' uploads sits above it.
+    listing = json.loads(gh_api(f"repos/{repository}/actions/artifacts?name={ARTIFACT}&per_page=100"))
+    identity = latest_artifact(listing["artifacts"])
+    if identity is None:
+        print("No earlier run has uploaded timings: the modules will be dealt by count.")
+        write_timings(output, {})
+        return 0
+    with zipfile.ZipFile(io.BytesIO(gh_api(f"repos/{repository}/actions/artifacts/{identity}/zip"))) as archive:
+        output.write_bytes(archive.read(ARTIFACT_FILE))
+    print(f"Read the timings of {len(read_timings(output))} module(s) from artifact {identity}.")
     return 0
+
+
+def plan(shards: int, timings: Path, directory: Path) -> int:
+    modules = modules_of(directory)
+    if not 1 <= shards <= len(modules):
+        print(f"{len(modules)} module(s) cannot fill {shards} shard(s)", file=sys.stderr)
+        return 1
+    dealt = deal(weights(modules, read_timings(timings)), shards)
+    print(json.dumps({"include": [{"shard": index, "modules": " ".join(names)} for index, names in enumerate(dealt)]}))
+    return 0
+
+
+def run(output: Path, modules: Sequence[str], directory: Path) -> int:
+    measured: dict[str, float] = {}
+    failed: list[str] = []
+    write_timings(output, measured)
+    # Every module runs whatever an earlier one did, so one failure never hides another's.
+    for module in modules:
+        if not (directory / f"{module}.py").is_file():
+            failed.append(module)
+            continue
+        sys.stdout.flush()
+        began = time.monotonic()
+        result = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", str(directory), "-p", f"{module}.py", "-v"], check=False)
+        if result.returncode != 0:
+            # A module that failed may have stopped early, so its time says nothing about a run that passes.
+            failed.append(module)
+            continue
+        measured[module] = round(time.monotonic() - began, 3)
+        write_timings(output, measured)
+    if failed:
+        print(f"::error::Failed module(s): {' '.join(failed)}")
+        return 1
+    return 0
+
+
+def merge(previous: Path, measured: Path, output: Path, directory: Path) -> int:
+    timings = read_timings(previous)
+    for path in sorted(measured.rglob("*.json")):
+        timings.update(read_timings(path))
+    present = set(modules_of(directory))
+    write_timings(output, {name: seconds for name, seconds in timings.items() if name in present})
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    top = argparse.ArgumentParser(description="Deal, run and measure the unit-test modules.")
+    commands = top.add_subparsers(dest="command", required=True)
+    commands.add_parser("fetch").add_argument("timings", type=Path)
+    planning = commands.add_parser("plan")
+    planning.add_argument("shards", type=int)
+    planning.add_argument("timings", type=Path)
+    running = commands.add_parser("run")
+    running.add_argument("measured", type=Path)
+    running.add_argument("modules", nargs="+")
+    merging = commands.add_parser("merge")
+    merging.add_argument("timings", type=Path)
+    merging.add_argument("measured", type=Path)
+    merging.add_argument("merged", type=Path)
+    for command in (planning, running, merging):
+        command.add_argument("--directory", type=Path, default=DEFAULT_DIRECTORY)
+    return top
+
+
+def main(arguments: Sequence[str]) -> int:
+    options = parser().parse_args(arguments)
+    if options.command == "fetch":
+        return fetch(options.timings)
+    if options.command == "plan":
+        return plan(options.shards, options.timings, options.directory)
+    if options.command == "run":
+        return run(options.measured, options.modules, options.directory)
+    return merge(options.timings, options.measured, options.merged, options.directory)
 
 
 if __name__ == "__main__":
