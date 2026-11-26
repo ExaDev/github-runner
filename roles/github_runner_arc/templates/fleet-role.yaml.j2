@@ -72,6 +72,7 @@ rules:
     resourceNames: {{ [actuator_configmap] | to_json }}
     verbs: ["get"]
 {% else %}
+{# Get as well as patch, though the probe keeps its window on its own node and reads no entry: `kubectl patch` reads the object before it patches it, and is refused without get. #}
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: {{ [probe_configmap] | to_json }}
@@ -271,6 +272,10 @@ spec:
               value: {{ probe_configmap | to_json }}
             - name: REPORT_SECONDS
               value: {{ github_runner_arc_role_controller_sample_seconds | string | to_json }}
+            - name: PRESSURE_THRESHOLD
+              value: {{ github_runner_arc_role_controller_pressure_threshold | string | to_json }}
+            - name: AVAILABLE_FLOOR_PERCENT
+              value: {{ github_runner_arc_role_controller_available_floor_percent | string | to_json }}
             - name: FSYNC_DIR
               value: /fsync
             # kubectl's cache goes to the in-memory volume, since the root filesystem is read-only.

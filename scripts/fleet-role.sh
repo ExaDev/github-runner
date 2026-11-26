@@ -83,7 +83,7 @@ trap 'rm -rf "$work"' EXIT
 # One kubectl call whose output is not wanted. The actions chain these with `|| return 1`, since errexit is off inside a function that is called as the condition of an `if`.
 kube() { kubectl_ "$@" > /dev/null; }
 
-# --- Reading the cluster. The inputs go to jq in files, never as arguments: a probe entry holds a window of samples, the entries together can fill a ConfigMap, and one argument is limited to a fraction of the argument space (128 KiB on Linux), which a fleet's nodes and probes pass. ---
+# --- Reading the cluster. The inputs go to jq in files, never as arguments: the Nodes of a fleet, and one argument is limited to a fraction of the argument space (128 KiB on Linux), which they pass. ---
 
 # The ConfigMap's data key $2 as JSON, null when the ConfigMap or the key has none.
 read_status_key() {
