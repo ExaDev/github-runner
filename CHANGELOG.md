@@ -1,3 +1,9 @@
+## [3.6.2](https://github.com/ExaDev/github-runner/compare/v3.6.1...v3.6.2) (2026-11-26)
+
+### Bug Fixes
+
+* **cluster:** run 32-bit x86 programs natively in an x86_64 Colima VM ([1840071](https://github.com/ExaDev/github-runner/commit/18400711e48cf45083d4ebf657e175086195fd63))
+
 ## [3.6.1](https://github.com/ExaDev/github-runner/compare/v3.6.0...v3.6.1) (2026-11-19)
 
 ### Bug Fixes
