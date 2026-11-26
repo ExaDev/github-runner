@@ -1,3 +1,9 @@
+## [3.7.1](https://github.com/ExaDev/github-runner/compare/v3.7.0...v3.7.1) (2026-11-26)
+
+### Continuous Integration
+
+* split the runtime autostart tests so shards can share them ([046ef9d](https://github.com/ExaDev/github-runner/commit/046ef9d5f61a6d0a4a8029fbae62f5b220b6da16))
+
 ## [3.7.0](https://github.com/ExaDev/github-runner/compare/v3.6.2...v3.7.0) (2026-11-26)
 
 ### Features
