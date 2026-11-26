@@ -1,0 +1,69 @@
+---
+# Colima hosts only (runtime.yml includes it once the runtime answers). Makes an x86_64 VM run 32-bit x86 programs natively, now and after every `colima start`. With Colima's binfmt setting on, every start registers qemu-i386 in the VM (github_runner_cluster_colima_i386_binfmt_off in defaults/main.yml), and a binfmt_misc handler takes precedence over the kernel's own loader, so each 32-bit program in a pod on the node runs under qemu user emulation, where Wine's 32-bit side never finishes creating a prefix. Only that entry is switched off: the handler for the foreign architecture (qemu-aarch64 in an x86_64 VM) stays as Colima set it. An aarch64 VM is left alone, since 32-bit x86 is foreign there.
+#
+# After every start: an after-boot provision script in the profile's colima.yaml, which Colima runs after its own binfmt setup (colimaApp.Start in abiosoft/colima app/app.go: the VM's post-start actions, then the after-boot scripts, then the container runtime). Now: the entry switched off in the VM directly, which needs no restart of the VM, Docker or k3s. Under --check each change is reported and none is made.
+
+- name: Read the VM's architecture
+  ansible.builtin.command:
+    argv: "{{ github_runner_cluster_colima_vm_command + ['uname', '-m'] }}"
+  environment: "{{ github_runner_cluster_runtime_environment }}"
+  register: github_runner_cluster_colima_binfmt_arch
+  changed_when: false
+  check_mode: false
+
+- name: Switch off the 32-bit x86 handler in an x86_64 VM
+  when: github_runner_cluster_colima_binfmt_arch.stdout | trim == 'x86_64'
+  vars:
+    github_runner_cluster_colima_binfmt_config_path: >-
+      {{ github_runner_cluster_runtime_colima_home or (ansible_facts['env']['HOME'] ~ '/.colima') }}/{{ github_runner_cluster_effective_runtime.colima_profile }}/colima.yaml
+    github_runner_cluster_colima_binfmt_provision:
+      mode: after-boot
+      script: "{{ github_runner_cluster_colima_i386_binfmt_off }}"
+  block:
+    - name: Read the profile's configuration
+      # <COLIMA_HOME>/<profile>/colima.yaml, the file colima start reads, as in tasks/link.yml.
+      ansible.builtin.slurp:
+        src: "{{ github_runner_cluster_colima_binfmt_config_path }}"
+      register: github_runner_cluster_colima_binfmt_config
+      check_mode: false
+
+    - name: Add the provision script that switches the handler off after every start
+      # Colima writes `provision: null` for a profile with none. The file is written back without its comments; Colima writes it again from its own commented template at the next start (yamlutil.Save in abiosoft/colima util/yamlutil/yaml.go), keeping the script. A running VM reads the file only at its next start, so writing it restarts nothing.
+      vars:
+        github_runner_cluster_colima_binfmt_settings: "{{ github_runner_cluster_colima_binfmt_config.content | b64decode | from_yaml }}"
+        github_runner_cluster_colima_binfmt_scripts: "{{ github_runner_cluster_colima_binfmt_settings.provision or [] }}"
+      ansible.builtin.copy:
+        dest: "{{ github_runner_cluster_colima_binfmt_config_path }}"
+        content: "{{ github_runner_cluster_colima_binfmt_settings | combine({'provision': github_runner_cluster_colima_binfmt_scripts | union([github_runner_cluster_colima_binfmt_provision])}) | to_nice_yaml(indent=2) }}"
+        mode: "0644"
+        backup: true
+      when: github_runner_cluster_colima_binfmt_provision not in github_runner_cluster_colima_binfmt_scripts
+
+    - name: Read whether the handler is on in the VM
+      # The entry's first line is `enabled` or `disabled`; a VM with no such entry fails the read, which reads as neither.
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_colima_vm_command + ['cat', github_runner_cluster_colima_i386_binfmt_entry] }}"
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      register: github_runner_cluster_colima_binfmt_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Switch the handler off in the VM
+      # A 32-bit program already running under qemu keeps running there; every one started after this runs natively.
+      ansible.builtin.command:
+        argv: "{{ github_runner_cluster_colima_vm_command + ['sudo', 'tee', github_runner_cluster_colima_i386_binfmt_entry] }}"
+        stdin: "0"
+      environment: "{{ github_runner_cluster_runtime_environment }}"
+      changed_when: true
+      when:
+        - github_runner_cluster_colima_binfmt_state.stdout_lines[:1] == ['enabled']
+        - not ansible_check_mode
+
+    - name: Report the handler a real run would switch off in the VM
+      ansible.builtin.debug:
+        msg: "echo 0 > {{ github_runner_cluster_colima_i386_binfmt_entry }} in the VM"
+      changed_when: true
+      when:
+        - github_runner_cluster_colima_binfmt_state.stdout_lines[:1] == ['enabled']
+        - ansible_check_mode

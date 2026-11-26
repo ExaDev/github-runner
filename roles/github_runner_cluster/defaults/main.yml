@@ -336,6 +336,9 @@ github_runner_cluster_colima_modules_load_file: /etc/modules-load.d/br_netfilter
 github_runner_cluster_colima_sysctl_file: /etc/sysctl.d/90-github-runner-br-netfilter.conf
 # Derived, never set directly: the command that runs another command in the profile's VM as the VM's user, which has passwordless sudo.
 github_runner_cluster_colima_vm_command: "{{ ['colima', 'ssh', '--profile', github_runner_cluster_effective_runtime.colima_profile, '--'] }}"
+# Not settings: the binfmt_misc entry Colima registers for 32-bit x86 programs, and the command that switches it off (tasks/colima_binfmt.yml). Colima's binfmt setting runs `binfmt --install 386,<foreign architecture>` at every start (core.SetupBinfmt in abiosoft/colima core/core.go), so an x86_64 VM also gets a qemu-i386 handler for its own architecture's 32-bit programs, which binfmt_misc then runs under emulation instead of natively. The command is the after-boot provision script the role adds to the profile, which Colima runs as the VM's user.
+github_runner_cluster_colima_i386_binfmt_entry: /proc/sys/fs/binfmt_misc/qemu-i386
+github_runner_cluster_colima_i386_binfmt_off: "test ! -e {{ github_runner_cluster_colima_i386_binfmt_entry }} || echo 0 | sudo tee {{ github_runner_cluster_colima_i386_binfmt_entry }} > /dev/null"
 # The default route guard the role installs in a Colima VM (tasks/colima_route_guard.yml): how often it runs, and the names of its script and its systemd unit. The interval is a setting; the names are constants, variables only so the tests can narrow them.
 github_runner_cluster_colima_route_guard_interval_seconds: 30
 github_runner_cluster_colima_route_guard_script: /usr/local/sbin/github-runner-route-guard

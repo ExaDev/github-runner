@@ -33,6 +33,8 @@ HOME = "/Users/example"
 DARWIN_ONLY = "ansible_facts['system'] == 'Darwin'"
 MODULES_FILE = "/etc/modules-load.d/br_netfilter.conf"
 SYSCTL_FILE = "/etc/sysctl.d/90-github-runner-br-netfilter.conf"
+I386_ENTRY = "/proc/sys/fs/binfmt_misc/qemu-i386"
+I386_OFF = f"test ! -e {I386_ENTRY} || echo 0 | sudo tee {I386_ENTRY} > /dev/null"
 
 
 def ansible_env() -> dict[str, str]:
@@ -150,8 +152,8 @@ class GuardTest(unittest.TestCase):
     def test_the_vm_is_prepared_last_in_the_runtime_tasks_and_only_for_colima_once_it_answers(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "runtime.yml").read_text())
         names = [task.get("ansible.builtin.include_tasks") or ("fail" if "ansible.builtin.fail" in task else None) for task in tasks]
-        self.assertEqual(names[-3:], ["fail", "colima_kernel.yml", "colima_route_guard.yml"])
-        for task in tasks[-2:]:
+        self.assertEqual(names[-4:], ["fail", "colima_kernel.yml", "colima_binfmt.yml", "colima_route_guard.yml"])
+        for task in tasks[-3:]:
             self.assertEqual(task["when"], ["github_runner_cluster_effective_runtime.kind == 'colima'", "github_runner_cluster_runtime_up | bool"])
             self.assertNotIn("github_runner_cluster_runtime_autostart", json.dumps(task))
 
@@ -161,6 +163,9 @@ class GuardTest(unittest.TestCase):
         self.assertIn(MODULES_FILE, readme)
         self.assertIn(SYSCTL_FILE, readme)
         self.assertIn("colima_kernel.yml", (ROOT / "docs" / "non-obvious-behaviour.md").read_text())
+        self.assertIn("**Colima 32-bit programs.**", readme)
+        self.assertIn("colima_binfmt.yml", readme)
+        self.assertIn("colima_binfmt.yml", (ROOT / "docs" / "non-obvious-behaviour.md").read_text())
 
     def test_both_includes_run_on_macos_only(self) -> None:
         tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
@@ -411,6 +416,9 @@ elif name == "colima" and args[0] == "ssh":
         if not os.path.exists(vm_file(command[1])):
             sys.exit("cat: " + command[1] + ": No such file or directory")
         print(open(vm_file(command[1])).read(), end="")
+    elif command == ["uname", "-m"]:
+        # aarch64 unless a test says otherwise, as the VM of an Apple silicon Mac is.
+        print(open(os.path.join(vm, "arch")).read().strip() if os.path.exists(os.path.join(vm, "arch")) else "aarch64")
     elif command[0] == "test" and command[1] == "-d":
         sys.exit(0 if os.path.isdir(vm_file(command[2])) else 1)
     elif command[0] == "sysctl" and command[1] == "-n":
@@ -1145,7 +1153,7 @@ class RoleTest(unittest.TestCase):
         result = self.run_node()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before):] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print |colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active|dpkg-query) )", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before):] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print |colima ssh --profile \S+ -- (cat|test|uname|sysctl -n|systemctl is-active|dpkg-query) )", call)], [])
         # The template runs as root to compare ownership; it is the only thing that does, and it changes nothing.
         self.assertEqual(self.system_calls(), [call for call in before if "launchctl bootstrap system" in call])
         self.assertTrue((self.stub / "sudo.log").read_text().startswith(sudo_before))
@@ -1262,7 +1270,7 @@ class RoleTest(unittest.TestCase):
         result = self.run_role(context=context, context_host=context_host)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
-        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print|colima ssh --profile \S+ -- (cat|test|sysctl -n|systemctl is-active|dpkg-query) )", call)], [])
+        self.assertEqual([call for call in self.calls()[len(before) :] if not re.match(r"\S+ (docker (info|ps|context inspect)|launchctl print|colima ssh --profile \S+ -- (cat|test|uname|sysctl -n|systemctl is-active|dpkg-query) )", call)], [])
         self.assertNotIn("bootstrap", " ".join(self.calls()[len(before) :]))
 
     def test_a_second_run_changes_nothing(self) -> None:
@@ -1508,6 +1516,90 @@ class RoleTest(unittest.TestCase):
         self.run_role(github_runner_cluster_runtime_autostart=False)
         self.assertEqual(self.vm_changes(), [])
         self.assertEqual([call for call in self.calls() if " colima " in call], [])
+
+    def i386_writes(self) -> list[str]:
+        """The commands run as root in the VM that write its qemu-i386 entry, in order."""
+        return [command for command in self.vm_calls() if I386_ENTRY in command]
+
+    def x86_vm(self, provision: list[dict[str, str]] | None = None, handler: str | None = "enabled") -> Path:
+        """An x86_64 VM whose qemu-i386 entry reads `handler` (none for no entry), and its profile's colima.yaml with `provision`."""
+        self.state("runtime-up")
+        (self.stub / "vm").mkdir(exist_ok=True)
+        (self.stub / "vm" / "arch").write_text("x86_64\n")
+        if handler is not None:
+            entry = self.vm_file(I386_ENTRY)
+            entry.parent.mkdir(parents=True, exist_ok=True)
+            entry.write_text(f"{handler}\ninterpreter /usr/bin/qemu-i386\nflags: POCF\n")
+        config = self.home / ".colima" / "default" / "colima.yaml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(yaml.safe_dump({"cpu": 8, "arch": "x86_64", "binfmt": True, "provision": provision}))
+        return config
+
+    def test_an_x86_vm_switches_the_i386_handler_off_now_and_after_every_start(self) -> None:
+        config = self.x86_vm()
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.i386_writes(), [f"sudo tee {I386_ENTRY}"])
+        self.assertEqual(self.vm_file(I386_ENTRY).read_text().strip(), "0")
+        settings = yaml.safe_load(config.read_text())
+        self.assertEqual(settings["provision"], [{"mode": "after-boot", "script": I386_OFF}])
+        # Only the provision list changes: Colima's binfmt setting stays on, so the foreign-architecture handler is kept.
+        self.assertEqual({key: value for key, value in settings.items() if key != "provision"}, {"cpu": 8, "arch": "x86_64", "binfmt": True})
+
+    def test_the_provision_script_switches_off_only_the_i386_entry_and_tolerates_its_absence(self) -> None:
+        self.assertEqual(I386_ENTRY, "/proc/sys/fs/binfmt_misc/qemu-i386")
+        self.assertEqual(I386_OFF, f"test ! -e {I386_ENTRY} || echo 0 | sudo tee {I386_ENTRY} > /dev/null")
+        for present in (True, False):
+            with self.subTest(present=present):
+                entry = self.work / f"entry-{present}"
+                if present:
+                    entry.write_text("enabled\n")
+                script = I386_OFF.replace(I386_ENTRY, str(entry)).replace("sudo ", "")
+                self.assertEqual(subprocess.run(["sh", "-c", script], check=False).returncode, 0)
+                self.assertEqual(entry.read_text().strip() if present else entry.exists(), "0" if present else False)
+
+    def test_a_second_run_on_an_x86_vm_changes_nothing(self) -> None:
+        config = self.x86_vm()
+        self.run_role(github_runner_cluster_runtime_autostart=False)
+        before, written = len(self.vm_changes()), config.read_text()
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recap(result)["changed"], 0, result.stdout)
+        self.assertEqual(self.vm_changes()[before:], [])
+        self.assertEqual(config.read_text(), written)
+
+    def test_an_x86_vm_keeps_the_provision_scripts_it_has(self) -> None:
+        own = {"mode": "ready", "script": "echo ready"}
+        config = self.x86_vm(provision=[own])
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(yaml.safe_load(config.read_text())["provision"], [own, {"mode": "after-boot", "script": I386_OFF}])
+
+    def test_an_x86_vm_with_the_handler_already_off_or_absent_is_not_written_to(self) -> None:
+        for handler in ("disabled", None):
+            with self.subTest(handler=handler):
+                shutil.rmtree(self.stub / "vm", ignore_errors=True)
+                self.x86_vm(provision=[{"mode": "after-boot", "script": I386_OFF}], handler=handler)
+                result = self.run_role(github_runner_cluster_runtime_autostart=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.i386_writes(), [])
+
+    def test_a_check_run_on_an_x86_vm_reports_the_handler_and_writes_nothing(self) -> None:
+        config = self.x86_vm()
+        written = config.read_text()
+        result = self.run_role("--check", github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"echo 0 > {I386_ENTRY} in the VM", result.stdout)
+        self.assertEqual(self.i386_writes(), [])
+        self.assertEqual(self.vm_file(I386_ENTRY).read_text().splitlines()[0], "enabled")
+        self.assertEqual(config.read_text(), written)
+
+    def test_an_aarch64_vm_keeps_its_i386_handler_and_its_profile(self) -> None:
+        self.state("runtime-up")
+        result = self.run_role(github_runner_cluster_runtime_autostart=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.i386_writes(), [])
+        self.assertFalse((self.home / ".colima").exists())
 
     def test_the_end_checks_pass_with_the_runtime_up_and_the_container_running(self) -> None:
         self.state("runtime-up")
