@@ -93,6 +93,18 @@ class PublishToolImagesTest(unittest.TestCase):
             if "runner_id" not in entry:
                 self.assertEqual([line for line in expression(build_args, entry).splitlines() if line.strip()], [], f"{entry} gets build arguments")
 
+    def test_a_revision_follows_the_version_in_the_tag(self) -> None:
+        dockerfile = (ROOT / "tool-images" / "rust" / "Dockerfile").read_text()
+        version = re.search(r"^ARG RUST_VERSION=(\S+)$", dockerfile, re.MULTILINE)
+        revision = re.search(r"^ARG IMAGE_REVISION=(\d+)$", dockerfile, re.MULTILINE)
+        assert version is not None and revision is not None
+        entry = next(entry for entry in self.build_entries if entry["name"] == "rust")
+        for job in ("build", "merge"):
+            self.assertEqual(version_of(self.workflow, job, entry), f"{version.group(1)}-r{revision.group(1)}")
+
+    def test_every_image_directory_is_published(self) -> None:
+        self.assertEqual({entry["name"] for entry in self.build_entries}, {path.parent.name for path in (ROOT / "tool-images").glob("*/Dockerfile")})
+
     def test_each_tag_downloads_only_its_own_digests(self) -> None:
         upload = step_with(self.workflow, "build", "uses", "actions/upload-artifact@v7")["with"]["name"]
         download = step_with(self.workflow, "merge", "uses", "actions/download-artifact@v8")["with"]["pattern"]

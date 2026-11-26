@@ -1,0 +1,12 @@
+# A crate small enough to build for every target quickly that still needs what a real one does: a C source compiled and linked for the target, and the parts of the standard library that link the platform's own libraries (threads and sockets).
+[package]
+name = "cross-check"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+cc = "=1.11.3"
+
+[workspace]
