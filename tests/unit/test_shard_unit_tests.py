@@ -1,18 +1,19 @@
-"""Tests for scripts/ci/shard_unit_tests.py: the work counted from a module's tests follows the processes they start, and the dealing puts every module in exactly one shard, the same way every time, with the heaviest shard within a bound of the mean."""
+"""Tests for scripts/ci/shard_unit_tests.py: a module weighs what a run measured it to take, the dealing puts every module in exactly one shard, the same way every time, with the heaviest shard within a bound of the mean, and the measurements are taken, carried between runs and read back."""
 
 from __future__ import annotations
 
 import contextlib
-import importlib
 import importlib.util
 import io
 import itertools
+import json
+import os
 import random
 import shutil
 import sys
 import tempfile
-import textwrap
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
@@ -31,20 +32,18 @@ def load_script() -> ModuleType:
 
 
 shard = load_script()
-START = shard.TASKS_PER_PROCESS_START
-NAMES = itertools.count()
 
 
-def heaviest_bound(work: dict[str, int], shards: int) -> float:
+def heaviest_bound(work: Mapping[str, float], shards: int) -> float:
     """Graham's bound on the heaviest of ``shards`` shards when each module goes to the lightest shard so far: the mean plus all but a shards-th part of the heaviest module."""
     return sum(work.values()) / shards + (1 - 1 / shards) * max(work.values())
 
 
-def loads(work: dict[str, int], dealt: list[list[str]]) -> list[int]:
+def loads(work: Mapping[str, float], dealt: list[list[str]]) -> list[float]:
     return [sum(work[name] for name in names) for names in dealt]
 
 
-def modules_went_to_the_lightest_shard(work: dict[str, int], dealt: list[list[str]]) -> list[str]:
+def modules_went_to_the_lightest_shard(work: Mapping[str, float], dealt: list[list[str]]) -> list[str]:
     """The shards that held more without their smallest module than another shard holds in all, which a module dealt to the lightest shard so far cannot leave behind: that shard was the lightest when the module went to it."""
     totals = loads(work, dealt)
     return [
@@ -95,283 +94,156 @@ class DealTest(unittest.TestCase):
             shard.deal(self.SKEWED, 0)
 
 
-class RepositoryDealTest(unittest.TestCase):
-    """The dealing of this repository's own test modules."""
+class WeightsTest(unittest.TestCase):
+    def test_a_measured_module_weighs_what_it_was_measured_to_take(self) -> None:
+        self.assertEqual(shard.weights(["test_a", "test_b"], {"test_a": 300.0, "test_b": 4.5}), {"test_a": 300.0, "test_b": 4.5})
 
-    work: dict[str, int]
+    def test_an_unmeasured_module_weighs_the_mean_of_the_measured_ones(self) -> None:
+        self.assertEqual(shard.weights(["test_a", "test_b", "test_new"], {"test_a": 30.0, "test_b": 10.0})["test_new"], 20.0)
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.work = shard.work_of(UNIT_TESTS)
+    def test_with_nothing_measured_every_module_weighs_the_same(self) -> None:
+        self.assertEqual(len(set(shard.weights(["test_a", "test_b", "test_c"], {}).values())), 1)
 
-    def test_the_work_covers_every_test_module_of_the_directory(self) -> None:
-        self.assertEqual(sorted(self.work), sorted(path.stem for path in UNIT_TESTS.glob("test_*.py")))
-
-    def test_every_module_does_at_least_the_work_of_the_process_that_runs_it(self) -> None:
-        self.assertEqual([name for name, amount in self.work.items() if amount < START], [])
-
-    def test_every_module_is_in_exactly_one_shard_whatever_the_number_of_shards(self) -> None:
-        for shards in range(1, 9):
-            dealt = shard.deal(self.work, shards)
-            self.assertEqual(sorted(itertools.chain.from_iterable(dealt)), sorted(self.work), f"{shards} shards")
-
-    def test_the_same_tree_is_dealt_the_same_way_again(self) -> None:
-        self.assertEqual(shard.deal(shard.work_of(UNIT_TESTS), 5), shard.deal(self.work, 5))
-
-    def test_the_heaviest_shard_is_within_the_list_scheduling_bound_of_the_mean(self) -> None:
-        for shards in range(1, 9):
-            dealt = shard.deal(self.work, shards)
-            self.assertLessEqual(max(loads(self.work, dealt)), heaviest_bound(self.work, shards), f"{shards} shards")
-
-    def test_every_module_went_to_the_shard_that_had_the_least_work_when_it_was_dealt(self) -> None:
-        for shards in range(2, 9):
-            self.assertEqual(modules_went_to_the_lightest_shard(self.work, shard.deal(self.work, shards)), [], f"{shards} shards")
-
-    def test_the_shards_work_differs_by_no_more_than_the_heaviest_module(self) -> None:
-        # The shard that ends heaviest took its last module while it was the lightest, so it exceeds the lightest by less than that module.
-        for shards in range(2, 9):
-            totals = loads(self.work, shard.deal(self.work, shards))
-            self.assertLessEqual(max(totals) - min(totals), max(self.work.values()), f"{shards} shards")
+    def test_a_measurement_of_a_module_that_is_gone_changes_nothing(self) -> None:
+        self.assertEqual(shard.weights(["test_a", "test_new"], {"test_a": 6.0, "test_gone": 900.0}), {"test_a": 6.0, "test_new": 6.0})
 
 
-class WorkTest(unittest.TestCase):
-    """The work counted from synthetic modules, each written into a repository of its own."""
+class DirectoryCase(unittest.TestCase):
+    """A directory of synthetic test modules and a scratch directory beside it."""
 
     def setUp(self) -> None:
-        self.repository = Path(tempfile.mkdtemp()).resolve()
-        self.addCleanup(shutil.rmtree, self.repository)
-        self.directory = self.repository / "tests" / "unit"
-        self.directory.mkdir(parents=True)
-        self.written: list[str] = []
-        sys.path.insert(0, str(self.directory))
-        self.addCleanup(sys.path.remove, str(self.directory))
-        self.addCleanup(self.forget)
+        self.work = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.work)
+        self.directory = self.work / "unit"
+        self.directory.mkdir()
 
-    def forget(self) -> None:
-        for name in self.written:
-            sys.modules.pop(name, None)
+    def write(self, name: str, body: str = "def test_it(self): pass") -> None:
+        (self.directory / f"{name}.py").write_text(f"import unittest\n\nclass T(unittest.TestCase):\n    {body}\n")
 
-    def write(self, source: str, name: str | None = None) -> str:
-        name = name or f"synthetic_{next(NAMES)}"
-        (self.directory / f"{name}.py").write_text(textwrap.dedent(source))
-        self.written.append(name)
-        importlib.invalidate_caches()
-        return name
+    def read(self, path: Path) -> dict[str, float]:
+        value: dict[str, float] = json.loads(path.read_text())
+        return value
 
-    def work(self, module: str) -> int:
-        return shard.module_work(shard.LaunchCounter(self.directory, self.repository), module)
-
-    def test_a_module_that_starts_nothing_costs_the_process_that_runs_it(self) -> None:
-        module = self.write(
-            """
-            import unittest
-
-            class Quiet(unittest.TestCase):
-                def test_one(self): self.assertTrue(True)
-                def test_two(self): self.assertTrue(True)
-            """
-        )
-        self.assertEqual(self.work(module), START)
-
-    def test_each_process_a_test_starts_costs_a_start_whichever_function_of_the_subprocess_module_starts_it(self) -> None:
-        module = self.write(
-            """
-            import subprocess
-            import unittest
-            from subprocess import run
-
-            class Starts(unittest.TestCase):
-                def test_run(self): subprocess.run(["true"])
-                def test_imported_name(self): run(["true"])
-                def test_popen(self): subprocess.Popen(["true"]).wait()
-                def test_output(self): subprocess.check_output(["true"])
-                def test_check(self): subprocess.check_call(["true"])
-                def test_call(self): subprocess.call(["true"])
-            """
-        )
-        self.assertEqual(self.work(module), START * (1 + 6))
-
-    def test_launches_through_helpers_base_classes_super_and_the_set_up_methods_are_reached(self) -> None:
-        support = self.write(
-            """
-            import subprocess
-            import unittest
-
-            def start():
-                subprocess.run(["true"])
-
-            class Base(unittest.TestCase):
-                @classmethod
-                def setUpClass(cls):
-                    start()
-
-                def setUp(self):
-                    start()
-
-                def tearDown(self):
-                    start()
-
-                def helper(self):
-                    self.inner()
-
-                def inner(self):
-                    start()
-            """
-        )
-        module = self.write(
-            f"""
-            import unittest
-
-            import {support}
-            from {support} import Base, start
-
-            class Child({support}.Base):
-                def setUp(self):
-                    super().setUp()
-                    start()
-
-                def test_a(self):
-                    self.helper()
-                    start()
-
-                def test_b(self):
-                    {support}.start()
-
-            class Sibling(Base):
-                def test_c(self): pass
-            """
-        )
-        # The module's own process; Child: setUpClass once; each of its two tests: both set-ups (Base's through super()), tearDown, and the body (test_a has two launches, test_b one); Sibling: setUpClass once, and for its one test setUp, tearDown and no body. The imported Base has no tests of its own beyond the TestCase machinery.
-        child = 1 + 2 * (2 + 1) + (2 + 1)
-        sibling = 1 + 2
-        self.assertEqual(self.work(module), START * (1 + child + sibling))
-
-    def test_a_launch_site_counts_once_however_many_times_a_loop_runs_it_and_a_conditional_counts_its_dearer_branch(self) -> None:
-        module = self.write(
-            """
-            import subprocess
-            import unittest
-
-            class Shapes(unittest.TestCase):
-                def test_loop(self):
-                    for _ in range(50):
-                        subprocess.run(["true"])
-
-                def test_branches(self):
-                    if self.id():
-                        subprocess.run(["true"])
-                    else:
-                        subprocess.run(["true"])
-                        subprocess.run(["true"])
-            """
-        )
-        self.assertEqual(self.work(module), START * (1 + 1 + 2))
-
-    def test_a_skipped_test_or_class_does_no_work_and_a_recursive_helper_counts_its_launch_once(self) -> None:
-        module = self.write(
-            """
-            import subprocess
-            import unittest
-
-            def again(depth):
-                subprocess.run(["true"])
-                if depth:
-                    again(depth - 1)
-
-            class Partly(unittest.TestCase):
-                @unittest.skip("not here")
-                def test_skipped(self): subprocess.run(["true"])
-
-                def test_recursive(self): again(3)
-
-            @unittest.skip("not here")
-            class Whole(unittest.TestCase):
-                def setUp(self): subprocess.run(["true"])
-                def test_a(self): subprocess.run(["true"])
-            """
-        )
-        self.assertEqual(self.work(module), START * (1 + 1))
-
-    def test_a_playbook_launch_costs_the_tasks_the_playbook_the_roles_and_the_task_files_they_include_reach(self) -> None:
-        roles = self.repository / "roles" / "demo" / "tasks"
-        roles.mkdir(parents=True)
-        (roles / "main.yml").write_text("- name: a\n  ansible.builtin.debug: {}\n- name: b\n  block:\n    - name: c\n      ansible.builtin.debug: {}\n")
-        (roles / "other.yml").write_text("- name: d\n  ansible.builtin.debug: {}\n- name: e\n  ansible.builtin.debug: {}\n")
-        (roles / "outer.yml").write_text("- name: f\n  ansible.builtin.include_tasks: other.yml\n- name: g\n  ansible.builtin.include_tasks: \"{{ name }}.yml\"\n")
-        (roles / "nested").mkdir()
-        (roles / "nested" / "inner.yml").write_text("- name: h\n  ansible.builtin.include_tasks: outer.yml\n")
-        # Tasks of main.yml: a, b and c (inside b's block), 3; of other.yml, 2; of outer.yml, its own 2 and the 2 of other.yml it includes by name (the include by a variable reaches nothing countable), 4; of nested/inner.yml, its own 1 and outer.yml's 4, found in the role's tasks directory, 5. The average of the four files, 14 / 4, rounds up to 4.
-        for name, include, reached in (
-            ("named", "name: exadev.demo.demo\n          tasks_from: other", 2),
-            ("nested", "name: exadev.demo.demo\n          tasks_from: nested/inner", 5),
-            ("variable", "name: exadev.demo.demo\n          tasks_from: \"{{ item }}\"", 4),
-            ("looped", "name: exadev.demo.demo\n          tasks_from: \"{{ item }}\"\n      loop: [main, outer]", 7),
-            ("whole", "name: exadev.demo.demo", 3),
-        ):
-            playbook = self.repository / "tests" / f"{name}.yml"
-            playbook.write_text(
-                "- hosts: all\n  tasks:\n    - name: own\n      ansible.builtin.debug: {}\n"
-                f"    - name: include\n      ansible.builtin.include_role:\n          {include}\n"
-            )
-            module = self.write(
-                f"""
-                import subprocess
-                import unittest
-                from pathlib import Path
-
-                ANSIBLE_PLAYBOOK = "ansible-playbook"
-                PLAY = Path(__file__).resolve().parents[1] / "{name}.yml"
-
-                class Runs(unittest.TestCase):
-                    def test_it(self):
-                        subprocess.run([ANSIBLE_PLAYBOOK, "-i", "inventory", str(PLAY)])
-                """
-            )
-            # The play's own two tasks, those the include reaches, and the start of the process; the module's own process.
-            self.assertEqual(self.work(module), START * 2 + 2 + reached, name)
-
-    def test_a_process_that_is_not_a_playbook_run_costs_its_start_alone(self) -> None:
-        playbook = self.repository / "tests" / "unrelated.yml"
-        playbook.write_text("- hosts: all\n  tasks:\n    - name: own\n      ansible.builtin.debug: {}\n")
-        module = self.write(
-            """
-            import subprocess
-            import unittest
-            from pathlib import Path
-
-            PLAY = Path(__file__).resolve().parents[1] / "unrelated.yml"
-
-            class Runs(unittest.TestCase):
-                def test_it(self):
-                    subprocess.run(["cat", str(PLAY)])
-            """
-        )
-        self.assertEqual(self.work(module), START * 2)
-
-    def test_a_module_that_cannot_be_imported_is_an_error_not_a_module_of_no_work(self) -> None:
-        module = self.write("import a_module_that_does_not_exist\n")
-        with self.assertRaises(RuntimeError):
-            self.work(module)
+    def command(self, *arguments: str) -> tuple[int, str]:
+        # The processes ``run`` starts write to the file descriptors, past sys.stdout; their output is kept out of this test's log, where a synthetic module's failure would read as a real one.
+        with open(self.work / "processes.log", "ab") as log, contextlib.redirect_stdout(io.StringIO()) as out:
+            kept = [os.dup(1), os.dup(2)]
+            try:
+                os.dup2(log.fileno(), 1)
+                os.dup2(log.fileno(), 2)
+                status = shard.main(list(arguments))
+            finally:
+                for descriptor, original in zip((1, 2), kept):
+                    os.dup2(original, descriptor)
+                    os.close(original)
+        return status, out.getvalue()
 
 
-class CommandLineTest(unittest.TestCase):
-    def test_a_shard_prints_the_paths_of_its_modules_and_the_shards_between_them_print_every_module(self) -> None:
-        directory = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, directory)
-        for name in ("test_one", "test_two", "test_three"):
-            (directory / f"{name}.py").write_text("import unittest\n\nclass T(unittest.TestCase):\n    def test_it(self): pass\n")
-        self.addCleanup(lambda: [sys.modules.pop(name, None) for name in ("test_one", "test_two", "test_three")])
-        self.addCleanup(lambda: sys.path.remove(str(directory.resolve())))
-        printed: list[str] = []
-        for index in range(2):
-            with contextlib.redirect_stdout(io.StringIO()) as out:
-                status = shard.main([str(index), "2", str(directory)])
-            self.assertEqual(status, 0)
-            printed.extend(out.getvalue().split())
-        self.assertEqual(sorted(printed), sorted(str(directory / f"{name}.py") for name in ("test_one", "test_two", "test_three")))
+class PlanTest(DirectoryCase):
+    # Measured seconds of modules whose tests look alike to anything but a clock: the heavy ones must not meet in one shard.
+    MEASURED = {"test_a": 700.0, "test_b": 520.0, "test_c": 420.0, "test_d": 380.0, "test_e": 40.0, "test_f": 30.0, "test_g": 20.0, "test_h": 10.0}
 
-    def test_a_shard_index_outside_the_shards_is_refused(self) -> None:
-        self.assertEqual(shard.main(["5", "5"]), 2)
+    def plan(self, shards: int, timings: dict[str, float]) -> list[list[str]]:
+        file = self.work / "timings.json"
+        file.write_text(json.dumps(timings))
+        status, out = self.command("plan", str(shards), str(file), "--directory", str(self.directory))
+        self.assertEqual(status, 0)
+        include = json.loads(out)["include"]
+        self.assertEqual([entry["shard"] for entry in include], list(range(shards)))
+        return [entry["modules"].split() for entry in include]
+
+    def test_the_shards_are_balanced_by_the_measured_durations(self) -> None:
+        for name in self.MEASURED:
+            self.write(name)
+        dealt = self.plan(4, self.MEASURED)
+        self.assertEqual(sorted(itertools.chain.from_iterable(dealt)), sorted(self.MEASURED))
+        self.assertEqual([sorted(self.MEASURED[name] for name in names)[-1] for names in dealt], [700.0, 520.0, 420.0, 380.0])
+        self.assertEqual(max(loads(self.MEASURED, dealt)), 700.0)
+
+    def test_every_module_is_planned_when_nothing_has_been_measured(self) -> None:
+        for name in self.MEASURED:
+            self.write(name)
+        dealt = self.plan(4, {})
+        self.assertEqual(sorted(itertools.chain.from_iterable(dealt)), sorted(self.MEASURED))
+        self.assertEqual({len(names) for names in dealt}, {2})
+
+    def test_fewer_modules_than_shards_is_an_error_not_an_empty_shard(self) -> None:
+        self.write("test_only")
+        file = self.work / "timings.json"
+        file.write_text("{}")
+        self.assertEqual(self.command("plan", "2", str(file), "--directory", str(self.directory))[0], 1)
+
+    def test_this_repositorys_modules_are_each_planned_once(self) -> None:
+        file = self.work / "timings.json"
+        file.write_text("{}")
+        status, out = self.command("plan", "5", str(file))
+        self.assertEqual(status, 0)
+        planned = [name for entry in json.loads(out)["include"] for name in entry["modules"].split()]
+        self.assertEqual(sorted(planned), sorted(path.stem for path in UNIT_TESTS.glob("test_*.py")))
+
+
+class RunTest(DirectoryCase):
+    def test_each_module_that_passes_is_recorded_with_the_time_it_took(self) -> None:
+        self.write("test_slow", "def test_it(self): __import__('time').sleep(0.5)")
+        self.write("test_quick")
+        output = self.work / "measured.json"
+        status, _ = self.command("run", str(output), "test_slow", "test_quick", "--directory", str(self.directory))
+        self.assertEqual(status, 0)
+        measured = self.read(output)
+        self.assertEqual(sorted(measured), ["test_quick", "test_slow"])
+        self.assertGreaterEqual(measured["test_slow"], 0.5)
+
+    def test_a_failing_module_fails_the_run_after_the_others_and_is_not_recorded(self) -> None:
+        self.write("test_fails", "def test_it(self): self.fail()")
+        self.write("test_passes")
+        output = self.work / "measured.json"
+        status, out = self.command("run", str(output), "test_fails", "test_passes", "--directory", str(self.directory))
+        self.assertEqual(status, 1)
+        self.assertEqual(sorted(self.read(output)), ["test_passes"])
+        self.assertIn("test_fails", out)
+
+    def test_what_has_been_measured_is_on_disk_before_the_next_module_runs(self) -> None:
+        # A shard that is cancelled part way still hands on what it measured.
+        output = self.work / "measured.json"
+        self.write("test_first")
+        self.write("test_second", f"def test_it(self): self.assertIn('test_first', open({str(output)!r}).read())")
+        self.assertEqual(self.command("run", str(output), "test_first", "test_second", "--directory", str(self.directory))[0], 0)
+
+    def test_a_module_that_does_not_exist_is_an_error(self) -> None:
+        self.assertEqual(self.command("run", str(self.work / "measured.json"), "test_absent", "--directory", str(self.directory))[0], 1)
+
+
+class MergeTest(DirectoryCase):
+    def test_new_measurements_replace_old_ones_and_modules_that_are_gone_are_dropped(self) -> None:
+        for name in ("test_kept", "test_changed", "test_added"):
+            self.write(name)
+        previous = self.work / "previous.json"
+        previous.write_text(json.dumps({"test_kept": 1.0, "test_changed": 2.0, "test_gone": 3.0}))
+        measured = self.work / "measured"
+        (measured / "shard-0").mkdir(parents=True)
+        (measured / "shard-1").mkdir()
+        (measured / "shard-0" / "measured.json").write_text(json.dumps({"test_changed": 20.0}))
+        (measured / "shard-1" / "measured.json").write_text(json.dumps({"test_added": 4.0}))
+        output = self.work / "merged.json"
+        self.assertEqual(self.command("merge", str(previous), str(measured), str(output), "--directory", str(self.directory))[0], 0)
+        self.assertEqual(self.read(output), {"test_added": 4.0, "test_changed": 20.0, "test_kept": 1.0})
+
+
+class LatestArtifactTest(unittest.TestCase):
+    @staticmethod
+    def artifact(identity: int, created: str, expired: bool = False, head: int = 1) -> dict[str, object]:
+        return {"id": identity, "created_at": created, "expired": expired, "workflow_run": {"repository_id": 1, "head_repository_id": head}}
+
+    def test_the_newest_artifact_that_has_not_expired_is_chosen(self) -> None:
+        artifacts = [self.artifact(1, "2000-01-01T00:00:00Z"), self.artifact(3, "2000-01-03T00:00:00Z", expired=True), self.artifact(2, "2000-01-02T00:00:00Z")]
+        self.assertEqual(shard.latest_artifact(artifacts), 2)
+
+    def test_an_artifact_uploaded_by_a_run_of_a_fork_is_never_chosen(self) -> None:
+        artifacts = [self.artifact(1, "2000-01-01T00:00:00Z"), self.artifact(2, "2000-01-02T00:00:00Z", head=7)]
+        self.assertEqual(shard.latest_artifact(artifacts), 1)
+
+    def test_there_may_be_none(self) -> None:
+        self.assertIsNone(shard.latest_artifact([]))
 
 
 if __name__ == "__main__":

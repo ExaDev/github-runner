@@ -144,17 +144,46 @@ jobs:
             ansible-playbook -i ../examples/three-server-tailscale/inventory.yml "${playbook}" --syntax-check
           done
 
-  unit-tests:
-    name: Unit tests (shard ${{ matrix.shard }})
+  unit-test-plan:
+    name: Unit test plan
     needs: verified
     if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
-    # Each module is run on its own by discovery, and scripts/ci/shard_unit_tests.py deals the modules out by the work counted from their tests: the tests that run Ansible playbooks cost a process each, so the playbook runs a module's tests reach, not its bytes, decide its time, and the suite no longer fits one job. The timeout is a guard against a hung test, set above the heaviest shard's run, never a budget the shards are fitted to.
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      # One job reads the timings and deals once, so every shard works from the same dealing. The number of shards is set here.
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHARDS: 5
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/shard_unit_tests.py fetch "${RUNNER_TEMP}/timings.json"
+          matrix=$(python3 scripts/ci/shard_unit_tests.py plan "$SHARDS" "${RUNNER_TEMP}/timings.json")
+          echo "$matrix"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: unit-timings-previous
+          path: ${{ runner.temp }}/timings.json
+          overwrite: true
+
+  unit-tests:
+    name: Unit tests (shard ${{ matrix.shard }})
+    needs: unit-test-plan
+    if: ${{ !cancelled() && needs.unit-test-plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    # Each module is run on its own by discovery, and unit-test-plan deals the modules out by how long earlier runs measured each to take (scripts/ci/shard_unit_tests.py), since the suite does not fit one job. The timeout is a guard against a hung test, set above the heaviest shard's run, never a budget the shards are fitted to.
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.unit-test-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
       - name: Install Ansible and fio
@@ -178,28 +207,50 @@ jobs:
           tar -xzf "${dir}/etcd.tar.gz" -C "$dir" --strip-components=1 "etcd-${ETCD_VERSION}-linux-amd64/etcd" "etcd-${ETCD_VERSION}-linux-amd64/etcdctl"
           echo "ETCD_BINARY=${dir}/etcd" >> "$GITHUB_ENV"
       - name: Unit-test the collection
-        # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record. The modules this shard runs are the ones scripts/ci/shard_unit_tests.py deals to it, imported from this checkout, so ansible must already be importable and ANSIBLE_PLAYBOOK set, as they are here.
+        # Ubuntu's ansible package puts ansible-core on the system Python the filter plugins import from. The runner image can carry another Ansible earlier on PATH, so the tests run with /usr/bin first and ANSIBLE_PLAYBOOK pointing at Ubuntu's, which makes every playbook a test runs use the same ansible-core as the filters it imports; both versions are printed for the record.
         env:
           SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ strategy.job-total }}
+          MODULES: ${{ matrix.modules }}
         run: |
           set -euo pipefail
           export PATH="/usr/bin:${PATH}" ANSIBLE_PLAYBOOK=/usr/bin/ansible-playbook
           ansible-playbook --version | head -n 1
           python3 -c 'import ansible.release; print("ansible-core", ansible.release.__version__)'
-          # An assignment, not a process substitution, so that a failed dealing stops the step instead of leaving a shard with no modules to pass.
-          shard_modules=$(python3 scripts/ci/shard_unit_tests.py "$SHARD" "$SHARDS")
-          mapfile -t modules <<< "$shard_modules"
-          echo "Shard ${SHARD} of ${SHARDS}: ${#modules[@]} module(s)"
-          # Every module runs whatever an earlier one did, so one failure never hides another's; the shard fails afterwards, naming each module that failed.
-          failed=()
-          for module in "${modules[@]}"; do
-            python3 -m unittest discover -s tests/unit -p "$(basename "$module")" -v || failed+=("$module")
-          done
-          if [ "${#failed[@]}" -gt 0 ]; then
-            echo "::error::Failed module(s): ${failed[*]}"
-            exit 1
-          fi
+          read -ra modules <<< "$MODULES"
+          echo "Shard ${SHARD}: ${#modules[@]} module(s)"
+          python3 scripts/ci/shard_unit_tests.py run "${RUNNER_TEMP}/measured-${SHARD}.json" "${modules[@]}"
+      # Also after a failed or cancelled run, which still measured the modules that passed.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: unit-measured-${{ matrix.shard }}
+          path: ${{ runner.temp }}/measured-${{ matrix.shard }}.json
+          overwrite: true
+          if-no-files-found: ignore
+
+  unit-test-timings:
+    name: Unit test timings
+    needs: [unit-test-plan, unit-tests]
+    if: ${{ always() && needs.unit-test-plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: unit-timings-previous
+          path: ${{ runner.temp }}/previous
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: unit-measured-*
+          path: ${{ runner.temp }}/measured
+      - run: python3 scripts/ci/shard_unit_tests.py merge "${RUNNER_TEMP}/previous/timings.json" "${RUNNER_TEMP}/measured" "${RUNNER_TEMP}/timings.json"
+      # What the next run's plan reads.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: unit-timings
+          path: ${{ runner.temp }}/timings.json
+          overwrite: true
 
   ansible-lint:
     name: ansible-lint
@@ -304,7 +355,7 @@ jobs:
 
   required-checks:
     name: Required Checks
-    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, unit-tests, ansible-lint, collection-build, commitlint, fleet-role-image]
+    needs: [shellcheck, actionlint, yamllint, hadolint, ansible-syntax-check, unit-test-plan, unit-tests, unit-test-timings, ansible-lint, collection-build, commitlint, fleet-role-image]
     # Always runs, even if a dependency failed or was skipped, so it can report that failure itself rather than being skipped - a required check that's silently absent blocks a PR indefinitely instead of failing it visibly.
     if: always()
     runs-on: ubuntu-latest
