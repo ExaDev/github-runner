@@ -1,3 +1,9 @@
+## [3.7.3](https://github.com/ExaDev/github-runner/compare/v3.7.2...v3.7.3) (2026-11-26)
+
+### Continuous Integration
+
+* deal unit test shards by measured module durations ([6efce14](https://github.com/ExaDev/github-runner/commit/6efce14b8677f02c1f9741d310dca21d72e2fcc3)), closes [#277](https://github.com/ExaDev/github-runner/issues/277)
+
 ## [3.7.2](https://github.com/ExaDev/github-runner/compare/v3.7.1...v3.7.2) (2026-11-26)
 
 ### Continuous Integration
