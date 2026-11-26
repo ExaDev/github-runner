@@ -1,3 +1,9 @@
+## [3.7.0](https://github.com/ExaDev/github-runner/compare/v3.6.2...v3.7.0) (2026-11-26)
+
+### Features
+
+* **tool-images:** add a Rust tool image with cross-compilation tools ([04418fe](https://github.com/ExaDev/github-runner/commit/04418fed25f335511c0cb057435160791edcd276)), closes [#273](https://github.com/ExaDev/github-runner/issues/273)
+
 ## [3.6.2](https://github.com/ExaDev/github-runner/compare/v3.6.1...v3.6.2) (2026-11-26)
 
 ### Bug Fixes
