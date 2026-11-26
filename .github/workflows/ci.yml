@@ -150,7 +150,7 @@ jobs:
     if: ${{ !cancelled() && needs.verified.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # Each module is run on its own by discovery, and scripts/ci/shard_unit_tests.py deals the modules out by the work counted from their tests: the tests that run Ansible playbooks cost a process each, so the playbook runs a module's tests reach, not its bytes, decide its time, and the suite no longer fits one job. The timeout is a guard against a hung test, set above the heaviest shard's run, never a budget the shards are fitted to.
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
