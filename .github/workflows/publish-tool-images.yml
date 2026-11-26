@@ -1,6 +1,6 @@
 name: Publish tool images
 
-# Builds the reference images in tool-images/ (the tool-cache and system-library capability images, see the ARC role README's Capabilities section, and the build runner image, the stock runner image with a C toolchain) for linux/amd64 and linux/arm64 and pushes them to this repository owner's GitHub Container Registry namespace, as ghcr.io/<owner>/github-runner-toolcache-<name>, ghcr.io/<owner>/github-runner-sysroot-<name> and ghcr.io/<owner>/github-runner-runner-<name>, each tagged with the version its Dockerfile pins (its ARG <TOOL>_VERSION default; for the build runner image, the runner version it extends). A version tag that already exists is left alone, so a published version never changes under anyone pinning it and a run publishes only the images whose pinned version is new. The job summary lists each pushed image by digest, the reference to pin in a capability or as a runner image. A build runner entry with a runner_id builds the same Dockerfile with RUNNER_UID and RUNNER_GID set to it and tags it <runner version>-uid<id>: the runner user at that id, for a fleet whose nodes give the stock id (1001) to an account of their own and reserve this one for the runner (tool-images/build/Dockerfile says why the id reaches the nodes). Each entry's digest artifacts are named with the architecture before the tag, so one tag's download pattern never matches another's artifacts.
+# Builds the reference images in tool-images/ (the tool-cache and system-library capability images, see the ARC role README's Capabilities section, and the build runner image, the stock runner image with a C toolchain) for linux/amd64 and linux/arm64 and pushes them to this repository owner's GitHub Container Registry namespace, as ghcr.io/<owner>/github-runner-toolcache-<name>, ghcr.io/<owner>/github-runner-sysroot-<name> and ghcr.io/<owner>/github-runner-runner-<name>, each tagged with the version its Dockerfile pins (its ARG <TOOL>_VERSION default, followed by -r<IMAGE_REVISION> where it declares one, as scripts/ci/tool_image_tag.sh prints it; for the build runner image, the runner version it extends). A version tag that already exists is left alone, so a published version never changes under anyone pinning it and a run publishes only the images whose pinned version is new. The job summary lists each pushed image by digest, the reference to pin in a capability or as a runner image. A build runner entry with a runner_id builds the same Dockerfile with RUNNER_UID and RUNNER_GID set to it and tags it <runner version>-uid<id>: the runner user at that id, for a fleet whose nodes give the stock id (1001) to an account of their own and reserve this one for the runner (tool-images/build/Dockerfile says why the id reaches the nodes). Each entry's digest artifacts are named with the architecture before the tag, so one tag's download pattern never matches another's artifacts.
 #
 # Runs only when started by hand or by pushing a tag named tool-images-<anything>; the release workflow does not build these images. Each architecture is built natively, on GitHub's amd64 and arm64 hosted runners, and pushed by digest, and a second job joins the two into one multi-architecture tag (https://docs.docker.com/build/ci/github-actions/multi-platform/), because compiling the system libraries under emulation is far slower than natively.
 
@@ -34,6 +34,7 @@ jobs:
           - {name: tflint, kind: toolcache}
           - {name: awscli, kind: toolcache}
           - {name: strace, kind: toolcache}
+          - {name: rust, kind: toolcache}
           - {name: openmpi, kind: sysroot}
           - {name: highs, kind: sysroot}
           - {name: libpq, kind: sysroot}
@@ -56,11 +57,7 @@ jobs:
           RUNNER_ID: ${{ matrix.image.runner_id }}
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
-          if [ -z "$version" ] || [ "$(wc -l <<<"$version")" != 1 ]; then
-            echo "tool-images/${NAME}/Dockerfile must pin exactly one ARG <TOOL>_VERSION" >&2
-            exit 1
-          fi
+          version="$(scripts/ci/tool_image_tag.sh "tool-images/${NAME}/Dockerfile")"
           echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
           echo "version=${version}${RUNNER_ID:+-uid${RUNNER_ID}}" >>"$GITHUB_OUTPUT"
 
@@ -136,6 +133,7 @@ jobs:
           - {name: tflint, kind: toolcache}
           - {name: awscli, kind: toolcache}
           - {name: strace, kind: toolcache}
+          - {name: rust, kind: toolcache}
           - {name: openmpi, kind: sysroot}
           - {name: highs, kind: sysroot}
           - {name: libpq, kind: sysroot}
@@ -155,7 +153,7 @@ jobs:
           RUNNER_ID: ${{ matrix.image.runner_id }}
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^ARG [A-Z_]*_VERSION=//p' "tool-images/${NAME}/Dockerfile")"
+          version="$(scripts/ci/tool_image_tag.sh "tool-images/${NAME}/Dockerfile")"
           echo "repository=ghcr.io/${OWNER,,}/github-runner-${KIND}-${NAME}" >>"$GITHUB_OUTPUT"
           echo "version=${version}${RUNNER_ID:+-uid${RUNNER_ID}}" >>"$GITHUB_OUTPUT"
 

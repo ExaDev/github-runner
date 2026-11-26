@@ -1,0 +1,76 @@
+name: Rust toolchain
+
+# Builds the Rust tool image (tool-images/rust) natively on amd64 and arm64 and proves it works (tests/rust_toolchain/run.sh): its tool cache is filled as the role's init container fills it, the role's own job-started hook puts the toolchain on PATH inside the reference build runner image, and a small crate with a C source is formatted, linted, tested, checked by cargo-deny and cross-compiled for every target the image carries, each executable then checked for its target (an Apple one loading no framework). A pull request that changes what the image builds without changing the tag it is published under fails. Only on changes that can affect it. Builds nothing it publishes.
+
+on:
+  pull_request:
+    paths:
+      - tool-images/rust/**
+      - tool-images/build/**
+      - tests/rust_toolchain/**
+      - tests/capabilities/render.yml
+      - roles/github_runner_arc/files/job-started.sh
+      - roles/github_runner_arc/tasks/render_scale_set_values.yml
+      - plugins/filter/arc.py
+      - scripts/ci/tool_image_tag.sh
+      - scripts/ci/check_tool_image_tag.sh
+      - .github/workflows/rust-toolchain.yml
+  workflow_dispatch:
+
+concurrency:
+  group: rust-toolchain-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Published tag follows the image
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Compare with the base branch's image
+        # The checkout is the pull request merged into its base, so the first parent is the base the change would land on.
+        run: |
+          set -euo pipefail
+          image=tool-images/rust
+          if [ -z "$(git ls-tree --name-only HEAD^1 -- "${image}/Dockerfile")" ]; then
+            echo "${image} is new: nothing is published under its tag yet"
+            exit 0
+          fi
+          mkdir -p "${RUNNER_TEMP}/base"
+          git archive HEAD^1 "$image" | tar -x -C "${RUNNER_TEMP}/base"
+          scripts/ci/check_tool_image_tag.sh "${RUNNER_TEMP}/base/${image}" "$image"
+
+  toolchain:
+    name: Every target builds (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - {arch: amd64, runner: ubuntu-latest}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Ansible
+        run: |
+          set -euo pipefail
+          if ! python3 -m venv "${RUNNER_TEMP}/venv" 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3-venv
+            python3 -m venv "${RUNNER_TEMP}/venv"
+          fi
+          "${RUNNER_TEMP}/venv/bin/pip" install --quiet --prefer-binary ansible-core pyyaml
+          echo "${RUNNER_TEMP}/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run the toolchain test
+        run: tests/rust_toolchain/run.sh
