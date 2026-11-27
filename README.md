@@ -66,6 +66,8 @@ The controller install stays shared: it watches all namespaces by default, so on
 
 The role must stay idempotent — every step uses `kubernetes.core.k8s` (server-side apply) or `helm upgrade --install` semantics, never a plain `create`, so reruns never fail on an already-existing resource. `bootstrap.sh` must stay a thin translation from `.env.bootstrap` to role variables: any deployment step added there instead of in the role reintroduces a second implementation that drifts.
 
+A workflow must not depend on anything this image adds that GitHub's own `ubuntu-24.04` image lacks: a job that needs such a tool or setting runs here and fails on a GitHub-hosted runner, so the workflow is no longer portable between the two. The image tracks GitHub's native image for the same OS and architecture, and a tool the native image has and this one lacks is a gap to close in the image (the native software list is the reference), never a reason for a workflow to assume a fleet-only extra. A guarded install step in the workflow is a labelled stopgap at most. The same holds for scale-set pod shape: a job's `runs-on` label may differ between the fleet and hosted runners, but its steps must not.
+
 `Dockerfile` must not set its own `ENTRYPOINT`/`CMD`, and must not touch the base image's `runner` user or working directory. The ARC Helm chart's pod template supplies `command: ["/home/runner/run.sh"]` itself; it only needs the toolchain layered on top.
 
 The k3s node's `docker-compose.yml` and `k3s/` build context live only in `roles/github_runner_cluster/files/`. Keep `github_runner_cluster_compose_project` stable on a running host: the node's named volumes are prefixed with it, so a new name starts a new, empty node.
