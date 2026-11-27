@@ -1,3 +1,9 @@
+## [3.9.1](https://github.com/ExaDev/github-runner/compare/v3.9.0...v3.9.1) (2026-11-27)
+
+### Documentation
+
+* say workflows must not rely on tools only this image has ([4b9bf8b](https://github.com/ExaDev/github-runner/commit/4b9bf8bd29d4ca8918a585ae6580e2a63b63eb36))
+
 ## [3.9.0](https://github.com/ExaDev/github-runner/compare/v3.8.0...v3.9.0) (2026-11-27)
 
 ### Features
