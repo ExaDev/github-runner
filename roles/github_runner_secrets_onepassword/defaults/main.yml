@@ -3,6 +3,9 @@
 github_runner_secrets_onepassword_vault: ""
 github_runner_secrets_onepassword_item: ""
 
+# The 1Password CLI the role runs on the control node. `op` is the default; scripts/op-over-ssh.sh runs the reads on the machine named in OP_SSH_HOST instead, so the unlock prompt shows where the person is sitting. A 1Password service account needs no change here: `op` reads OP_SERVICE_ACCOUNT_TOKEN from the environment on its own.
+github_runner_secrets_onepassword_op: op
+
 # The roles in this play whose secrets to resolve: cluster (github_runner_cluster) and/or arc (github_runner_arc). The playbook sets it to the roles it runs, so an ARC-only play needs no k3s-token field and a cluster-only play reads no org keys.
 github_runner_secrets_onepassword_consumers: [cluster, arc]
 

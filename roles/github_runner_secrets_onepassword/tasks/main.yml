@@ -55,7 +55,7 @@
     {% if github_runner_secrets_onepassword_cache_file.stat.exists %}
     secrets='{}'
     {% else %}
-    secrets=$(op item get '{{ github_runner_secrets_onepassword_item }}' --vault '{{ github_runner_secrets_onepassword_vault }}' --format json --reveal | jq -c '{
+    secrets=$({{ github_runner_secrets_onepassword_op }} item get '{{ github_runner_secrets_onepassword_item }}' --vault '{{ github_runner_secrets_onepassword_vault }}' --format json --reveal | jq -c '{
       k3s_token: ([.fields[] | select(.label=="k3s-token") | .value] | first // ""),
       ghcr_username: ([.fields[] | select(.label=="ghcr-username") | .value] | first // ""),
       ghcr_token: ([.fields[] | select(.label=="ghcr-token") | .value] | first // ""),
@@ -68,7 +68,7 @@
     {% endif %}
     org_keys='{}'
     {% for org in github_runner_secrets_onepassword_orgs_to_read %}
-    key_{{ loop.index }}=$(op read '{{ org.private_key_op_reference }}')
+    key_{{ loop.index }}=$({{ github_runner_secrets_onepassword_op }} read '{{ org.private_key_op_reference }}')
     org_keys=$(jq -n --argjson prev "$org_keys" --arg name '{{ org.private_key_op_reference }}' --arg key "$key_{{ loop.index }}" '$prev + {($name): $key}')
     {% endfor %}
     jq -n --argjson secrets "$secrets" --argjson org_keys "$org_keys" '$secrets + {org_private_keys: $org_keys}'
