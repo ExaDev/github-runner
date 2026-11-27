@@ -48,6 +48,16 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# yq (mikefarah, v4), which GitHub's ubuntu-24.04 image preinstalls, so a workflow that edits YAML with it runs unchanged here (issue 103). The release binary is checksum-verified per architecture.
+ARG YQ_VERSION=4.54.3
+ARG YQ_SHA256_AMD64=129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973
+ARG YQ_SHA256_ARM64=89f69310b61b68d1245065a1241d1fc843f7a36cd6103ffd77ad987613bd1b67
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64) sha256="$YQ_SHA256_AMD64" ;; arm64) sha256="$YQ_SHA256_ARM64" ;; *) echo "unsupported architecture: $arch" >&2; exit 1 ;; esac \
+    && curl -fsSL -o /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_${arch}" \
+    && echo "${sha256}  /usr/local/bin/yq" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/yq
+
 # The job-completed hook records each job's peak memory (see runner-hooks/job-completed.sh). It lives outside the runner user's home, owned by root, so a job cannot rewrite what runs at the end of the next one.
 COPY --chmod=0755 runner-hooks/job-completed.sh /usr/local/share/github-runner/hooks/job-completed.sh
 ENV ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/share/github-runner/hooks/job-completed.sh
