@@ -1,4 +1,4 @@
-"""Tests for scripts/op-over-ssh.sh: it forwards only read commands to the named machine, quoted, and refuses the rest. Runs tests/op_over_ssh/run.sh, which uses a stub ssh and contacts no machine."""
+"""Tests for roles/github_runner_secrets_onepassword/files/op-over-ssh.sh: it forwards only read commands to the named machine, quoted, and refuses the rest. Runs tests/op_over_ssh/run.sh, which uses a stub ssh and contacts no machine."""
 
 from __future__ import annotations
 

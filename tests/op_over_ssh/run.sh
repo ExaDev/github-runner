@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Checks scripts/op-over-ssh.sh with a stub `ssh` that records the destination and remote command it was given, so no machine is contacted.
+# Checks roles/github_runner_secrets_onepassword/files/op-over-ssh.sh with a stub `ssh` that records the destination and remote command it was given, so no machine is contacted.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-script="$here/../../scripts/op-over-ssh.sh"
+script="$here/../../roles/github_runner_secrets_onepassword/files/op-over-ssh.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

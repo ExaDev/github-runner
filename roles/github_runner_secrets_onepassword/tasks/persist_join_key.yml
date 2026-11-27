@@ -4,7 +4,7 @@
 - name: Persist the new join key to 1Password
   ansible.builtin.command:
     argv:
-      - "{{ github_runner_secrets_onepassword_op }}"
+      - op
       - item
       - edit
       - "{{ github_runner_secrets_onepassword_item }}"

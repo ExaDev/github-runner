@@ -3,8 +3,15 @@
 github_runner_secrets_onepassword_vault: ""
 github_runner_secrets_onepassword_item: ""
 
-# The 1Password CLI the role runs on the control node. `op` is the default; scripts/op-over-ssh.sh runs the reads on the machine named in OP_SSH_HOST instead, so the unlock prompt shows where the person is sitting. A 1Password service account needs no change here: `op` reads OP_SERVICE_ACCOUNT_TOKEN from the environment on its own.
-github_runner_secrets_onepassword_op: op
+# An ssh destination (a host name or alias) whose 1Password CLI is signed in through its desktop app, normally the machine the person is sitting at. When set, the reads run there over ssh through this role's files/op-over-ssh.sh, so the unlock prompt appears on that machine's screen instead of the control node's. Empty runs `op` on the control node. Only `op item get` and `op read` are forwarded, so the join-key write (`op item edit`) always runs on the control node and needs a session there, or a service account (`op` reads OP_SERVICE_ACCOUNT_TOKEN on its own).
+github_runner_secrets_onepassword_ssh_host: ""
+
+# The 1Password account (its URL, as `op account list` shows it) the remote `op` uses. Needed when that machine has several accounts, since a bare `op` then refuses. Used only with github_runner_secrets_onepassword_ssh_host.
+github_runner_secrets_onepassword_ssh_account: ""
+
+# The command the reads run and the environment it needs. Derived from the two settings above; not meant to be set.
+github_runner_secrets_onepassword_op: "{{ (role_path ~ '/files/op-over-ssh.sh') if github_runner_secrets_onepassword_ssh_host | length > 0 else 'op' }}"
+github_runner_secrets_onepassword_op_environment: "{{ {'OP_SSH_HOST': github_runner_secrets_onepassword_ssh_host, 'OP_ACCOUNT': github_runner_secrets_onepassword_ssh_account} if github_runner_secrets_onepassword_ssh_host | length > 0 else {} }}"
 
 # The roles in this play whose secrets to resolve: cluster (github_runner_cluster) and/or arc (github_runner_arc). The playbook sets it to the roles it runs, so an ARC-only play needs no k3s-token field and a cluster-only play reads no org keys.
 github_runner_secrets_onepassword_consumers: [cluster, arc]
