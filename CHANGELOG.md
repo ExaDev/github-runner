@@ -1,3 +1,13 @@
+## [3.9.0](https://github.com/ExaDev/github-runner/compare/v3.8.0...v3.9.0) (2026-11-27)
+
+### Features
+
+* **secrets:** read 1Password on another machine, or with a service account ([3015bc2](https://github.com/ExaDev/github-runner/commit/3015bc2c13c738373152be8dd5a0b25f3fb3851b))
+
+### Bug Fixes
+
+* **secrets:** pass OP_ACCOUNT to the remote op ([e51decd](https://github.com/ExaDev/github-runner/commit/e51decd3e49958fe2233d226e6d4e605668c3930))
+
 ## [3.8.0](https://github.com/ExaDev/github-runner/compare/v3.7.3...v3.8.0) (2026-11-27)
 
 ### Features
