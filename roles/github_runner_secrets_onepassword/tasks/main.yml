@@ -73,6 +73,7 @@
     {% endfor %}
     jq -n --argjson secrets "$secrets" --argjson org_keys "$org_keys" '$secrets + {org_private_keys: $org_keys}'
   delegate_to: localhost
+  environment: "{{ github_runner_secrets_onepassword_op_environment }}"
   changed_when: false
   no_log: true
   # Read-only; everything after it needs the secrets, including under --check.
