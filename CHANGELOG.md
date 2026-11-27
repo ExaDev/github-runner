@@ -1,3 +1,9 @@
+## [3.8.0](https://github.com/ExaDev/github-runner/compare/v3.7.3...v3.8.0) (2026-11-27)
+
+### Features
+
+* **image:** install yq, as GitHub's ubuntu-24.04 image does ([d67f905](https://github.com/ExaDev/github-runner/commit/d67f905095fdbd52f7519eada6bac782b756be14))
+
 ## [3.7.3](https://github.com/ExaDev/github-runner/compare/v3.7.2...v3.7.3) (2026-11-26)
 
 ### Continuous Integration
