@@ -1,3 +1,9 @@
+## [3.9.2](https://github.com/ExaDev/github-runner/compare/v3.9.1...v3.9.2) (2026-11-27)
+
+### Bug Fixes
+
+* **secrets:** ship the 1Password forwarder inside the role ([3c92fa2](https://github.com/ExaDev/github-runner/commit/3c92fa22567ab9b953a0dee053e9e2aa926e2987))
+
 ## [3.9.1](https://github.com/ExaDev/github-runner/compare/v3.9.0...v3.9.1) (2026-11-27)
 
 ### Documentation
