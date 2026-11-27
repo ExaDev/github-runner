@@ -42,6 +42,10 @@ for refused in "item edit x" "run -- env" "inject -i f" "signin" ""; do
   [ ! -e "$work/command" ] || fail "reached ssh: $refused"
 done
 
+# OP_ACCOUNT reaches the remote op, so a machine with several accounts does not refuse.
+OP_ACCOUNT=a.1password.com OP_SSH_HOST=air "$script" read x > /dev/null
+grep -q 'OP_ACCOUNT=a.1password.com op read x' "$work/command" || fail "account not passed: $(cat "$work/command")"
+
 # No machine named is an error, not a guess.
 if env -u OP_SSH_HOST "$script" read x 2> /dev/null; then fail "ran without OP_SSH_HOST"; fi
 
