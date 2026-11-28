@@ -12,11 +12,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        gcc-11 g++-11 make unzip python3-venv lsof tmux \
+        gcc-11 g++-11 make unzip python3-venv lsof tmux zstd \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 \
     && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100 \
     && update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-11 100 \
     && update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-11 100 \
+    && rm -rf /var/lib/apt/lists/*
+
+# The system packages Playwright's `install-deps chromium` installs for Ubuntu 24.04 (its fonts, Xvfb and the libraries Chromium links against), which GitHub's ubuntu-24.04 image has through its browsers, so an end-to-end job's `playwright install --with-deps` has nothing left to fetch. tests/runner_image/run.sh runs install-deps against the latest Playwright and fails when it would still install something, which is the signal to extend this list.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        xvfb fonts-noto-color-emoji fonts-unifont fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf xfonts-cyrillic xfonts-scalable \
+        libfontconfig1 libfreetype6 libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
+        libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Bun (JS runtime), installed system-wide. Explicit bash -c (the default RUN
