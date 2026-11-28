@@ -1,3 +1,14 @@
+## [3.10.0](https://github.com/ExaDev/github-runner/compare/v3.9.2...v3.10.0) (2026-11-28)
+
+### Features
+
+* **image:** install zstd and Chromium's system packages in the runner image ([adf9816](https://github.com/ExaDev/github-runner/commit/adf981615eced65690aede9c24879663db08d4ee))
+
+### Tests
+
+* **image:** check the runner image carries zstd, gh, yq and Chromium's system packages ([ec28848](https://github.com/ExaDev/github-runner/commit/ec288482849a6a40a03d7857e7b33750876fdbcb))
+* **image:** skip the musl Node.js builds when picking the runner's Node.js ([7e860ed](https://github.com/ExaDev/github-runner/commit/7e860ed8daf46c5bbd9cbe1d793f89ab34800289))
+
 ## [3.9.2](https://github.com/ExaDev/github-runner/compare/v3.9.1...v3.9.2) (2026-11-27)
 
 ### Bug Fixes
