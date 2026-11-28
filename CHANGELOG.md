@@ -1,3 +1,9 @@
+## [3.11.0](https://github.com/ExaDev/github-runner/compare/v3.10.0...v3.11.0) (2026-11-28)
+
+### Features
+
+* **build-image:** carry zstd, gh and Chromium's system packages ([3ab4033](https://github.com/ExaDev/github-runner/commit/3ab4033ad7700f3a46ac2648046c77fe3c935b19))
+
 ## [3.10.0](https://github.com/ExaDev/github-runner/compare/v3.9.2...v3.10.0) (2026-11-28)
 
 ### Features
