@@ -1,11 +1,12 @@
 name: Runner image
 
-# Builds the runner image (the Dockerfile at the repository root) natively on amd64 and arm64 and checks (tests/runner_image/run.sh) that it carries zstd, gh, yq and everything Playwright's `install-deps chromium` would install for Chromium, so the fleet's jobs skip those per-job installs. Only on changes that can affect it. Builds nothing it publishes.
+# Builds the runner images (the Dockerfile at the repository root and tool-images/build) natively on amd64 and arm64 and checks (tests/runner_image/run.sh) that it carry zstd, gh and everything Playwright's `install-deps chromium` would install for Chromium, so the fleet's jobs skip those per-job installs. Only on changes that can affect it. Builds nothing it publishes.
 
 on:
   pull_request:
     paths:
       - Dockerfile
+      - tool-images/build/**
       - runner-hooks/**
       - tests/runner_image/**
       - .github/workflows/runner-image.yml
