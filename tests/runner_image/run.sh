@@ -23,7 +23,7 @@ docker run --rm --user 0 --entrypoint bash "$image" -c '
   work="$(mktemp -d)"
   cd "$work"
   curl -fsSL "$tarball" | tar xz
-  node="$(ls -d /home/runner/externals/node*/bin/node | sort -V | tail -n 1)"
+  node="$(ls -d /home/runner/externals/node*/bin/node | grep -v _alpine | sort -V | tail -n 1)"
   dpkg-query -f "\${Package}\n" -W | sort >"$work/before"
   "$node" package/cli.js install-deps chromium >"$work/install.log" 2>&1 || { cat "$work/install.log" >&2; exit 1; }
   dpkg-query -f "\${Package}\n" -W | sort >"$work/after"
